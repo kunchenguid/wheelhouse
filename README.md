@@ -161,3 +161,30 @@ scripts/
   reconcile.py                 backstop: open new cards, close stale ones
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
+
+## Prior art & lineage
+
+This machine is an **IssueOps** system: GitHub Issues + Actions used as a human-in-the-loop control plane.
+It leans on an established pattern rather than inventing one, and credits the people who shaped it.
+
+- **IssueOps** - treat a GitHub issue as a structured request that Actions *parse*, *validate*, and *act* on - was popularized by **Nick Alteen** and GitHub.
+  The [`issue-ops`](https://github.com/issue-ops) org ships reusable Actions for it (`parser`, `validator`, `labeler`) and a [docs site](https://issue-ops.github.io/docs/); GitHub's own introduction is [*IssueOps: Automate CI/CD (and more!) with GitHub Issues and Actions*](https://github.blog/engineering/issueops-automate-ci-cd-and-more-with-github-issues-and-actions/).
+- **ChatOps ancestry.** IssueOps grew out of **ChatOps** - running ops from a shared, auditable conversation - a term coined by **Jesse Newland** at GitHub around 2013 ([talk](https://speakerdeck.com/jnewland/chatops-at-github)) and built around **Hubot**, GitHub's chat bot (2011).
+- Credit honestly: there is no single stamped "who coined IssueOps." Alteen and GitHub are the clear popularizers, and the term itself grew out of ChatOps.
+
+### Where this machine sits in the pattern
+
+Canonical IssueOps is *a human submits a form -> parse -> validate -> act*.
+Triage Hub is the **approval half** of that loop with an **automated front-end**: instead of you filling in a form, the scan/ingest workflows generate the decision cards, and you approve or deny them.
+State lives in GitHub exactly as IssueOps intends - an open issue is a pending decision, a closed one is consumed, and labels carry the state in between.
+
+### Lifecycle mapping
+
+Our labels line up conceptually with the IssueOps lifecycle vocabulary - *Parse -> Validate -> Submit -> Approve -> Deny*:
+
+- `needs-decision` - the card has been parsed and validated into the queue and is **awaiting your Approve / Deny**.
+- `processing` - **Submit / acting**: a handler is executing your call against the target repo.
+- `resolved` - **consumed**: the decision was carried out (merged, approved, or declined) and the card closed.
+- `blocked` - **held**: a `/hold`, or a card parked for you to handle manually.
+
+This is a correspondence to orient readers who already know the IssueOps vocabulary, **not** a rename - the labels in this repo are exactly those listed under [How it works](#how-it-works).
