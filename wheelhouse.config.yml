@@ -4,7 +4,7 @@
 #
 # Portability note: the OWNER is NOT set here. Every workflow derives the owner
 # from `github.repository_owner` at runtime, so this file works unchanged on any
-# account that forks or "Use this template"s the repo. List only repo *names*
+# account that forks the repo. List only repo *names*
 # (no "owner/" prefix) - they are resolved under your account/org.
 #
 # After editing this file and adding the FLEET_TOKEN secret, your Wheelhouse

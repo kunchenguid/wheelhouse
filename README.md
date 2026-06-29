@@ -7,7 +7,7 @@ Every issue in this repo is one pending decision about the repositories you main
 You answer by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card.
 No server, no database, no bot to host - just this repo and a couple of secrets.
 
-This repo is a **template**: fork it (or "Use this template"), edit one config file, add one secret, and you have your own Wheelhouse.
+Fork it, edit one config file, add one secret, and you have your own Wheelhouse.
 
 Changing the Wheelhouse codebase itself goes through [`CONTRIBUTING.md`](CONTRIBUTING.md).
 PRs to `main` must be raised by `git push no-mistakes`, which writes the signature checked by the **"PR must be raised via no-mistakes"** workflow.
@@ -35,9 +35,9 @@ Two optional LLM side-jobs (both off by default) bring Claude in: `nl_decisions`
 Follow these top to bottom.
 You only ever edit **one file** (`wheelhouse.config.yml`) and add **one secret** (`FLEET_TOKEN`).
 
-### 1. Fork or "Use this template"
+### 1. Fork it
 
-Click **Use this template** ▸ **Create a new repository** (or fork).
+Click **Fork** ▸ **Create a new fork** to copy this repo into your own account.
 Keeping it **public** makes your decisions world-readable - a transparency feature; see [Security notes](#security-notes).
 A **private** repo works too, in which case `FLEET_TOKEN` must also be able to read this repo's issues.
 

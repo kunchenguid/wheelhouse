@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# Local no-mistakes validation state (evidence/transcripts - never committed)
+.no-mistakes/
+
 # Local Wheelhouse scratch (scan/cards/item artifacts produced at runtime)
 scan.json
 cards.json
