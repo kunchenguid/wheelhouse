@@ -46,7 +46,7 @@ deep_review: false
 # the comment to an action ("merge it" -> merge), answers a question, or asks you
 # to clarify. The LLM only proposes a structured intent - the deterministic
 # executor still performs (and guards) any action. Inert until both are met.
-nl_decisions: false
+nl_decisions: true
 
 # Whether the scheduled backstop also opens decision cards for open *issues*
 # that have no linked PR (in addition to PRs that need your call). Phase-1
