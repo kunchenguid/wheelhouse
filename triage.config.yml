@@ -28,6 +28,44 @@ repos:
     merge_method: squash           # squash | merge | rebase (default: squash)
     #                              # used when you approve a "Merge it" decision
 
+  # All repos below share the same contribution gate: the `no-mistakes-required.yml`
+  # workflow runs a job named "PR must be raised via no-mistakes" on every PR to
+  # main, so that exact string is each one's compliance_check. test_check_patterns
+  # below are substrings of each repo's real CI test-job check names (verified
+  # against the live workflows and Actions run history). merge_method is omitted,
+  # so each defaults to squash.
+  - name: gnhf
+    # ci.yml runs a `build-and-test` matrix (ubuntu/macos/windows-latest).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  - name: firstmate
+    # ci.yml ("CI") runs Lint shell scripts / Behavior tests / Repo invariants;
+    # "Behavior tests" is the test suite (lint/invariants excluded, mirroring how
+    # no-mistakes excludes its format/vet "check" job).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["Behavior tests"]
+
+  - name: no-mistakes
+    # ci.yml runs `test` (matrix os) + `e2e` (and a format/vet `check` job we skip).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["test (", "e2e"]
+
+  - name: axi
+    # axi-sdk-js-ci.yml runs a `build-and-test` job (path-filtered to the JS SDK).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  - name: chrome-devtools-axi
+    # ci.yml runs a single `build-and-test` job.
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  - name: gh-axi
+    # ci.yml runs a single `build-and-test` job.
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
 # Optional GitHub login allowed to drive decisions, in addition to the repo
 # owner. Leave empty to use the repository owner (github.repository_owner).
 maintainer: ""
