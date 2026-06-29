@@ -1,9 +1,9 @@
 # Onboarding a source repo (the fast path)
 
-The scheduled `scan-backstop` already finds items in your fleet a few times a day with **no** changes to your other repos.
-This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up in your queue in real time instead of waiting for the next scan.
+The scheduled `scan-backstop` already finds and refreshes items in your fleet hourly with **no** changes to your other repos.
+This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up or refresh in your queue in real time instead of waiting for the next hourly scan.
 
-Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates (or updates) a card immediately; the backstop still reconciles everything later.
+Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed; the backstop still reconciles everything later.
 
 > You add these files to **your source repos**, not to Wheelhouse.
 > The hub only ever reads; it never pushes to your source repos except to execute a decision you made.
@@ -20,12 +20,17 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge   |
 | `title`          | no       | short title of the target                                          |
 | `author`         | no       | the PR/issue author's login                                        |
+| `comp`           | no       | compliance status shown on the card                               |
+| `tests`          | no       | test status shown on the card                                     |
 | `summary`        | no       | one-line situation summary                                         |
 | `recommendation` | no       | recommended action shown on the card                              |
 | `priority`       | no       | `high` / `med` / `low`                                             |
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`)      |
 
-The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` **updates** the existing card instead of creating a duplicate.
+The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
+If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`), the hub refreshes it in place.
+Title, summary, and recommendation updates ride along with a material refresh, but do not rewrite an existing card by themselves.
+Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
 
 > **Legacy event type.** Before the rename to Wheelhouse the event type was `triage-item`. `ingest.yml` still listens for both (`types: [wheelhouse-item, triage-item]`), so a source repo wired up before the rename keeps working - but new dispatchers should send `wheelhouse-item`.
 
@@ -98,6 +103,7 @@ You can exercise the whole path without touching a source repo:
 
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
 2. Fill in `repo`, `number`, and (recommended) `head_sha`.
-3. A decision card appears in the hub's issues. Tick a box to confirm the handler acts on the target.
+3. A decision card appears in the hub's issues; if one already exists, material changes refresh it in place.
+4. Tick a box to confirm the handler acts on the target.
 
 This is the quickest way to validate `FLEET_TOKEN` scope before wiring real dispatches.

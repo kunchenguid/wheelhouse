@@ -32,15 +32,25 @@ still appears where it's plain English, e.g. "triage the queue".)
   consumed. Labels are state (`needs-decision`, `processing`, `resolved`,
   `blocked`, `repo:*`, `kind:*`, `priority:*`). A hidden
   `<!-- wheelhouse-state: {...} -->` block in each card body carries
-  `{repo, number, kind, head_sha, options}`. `render_card.py` writes that marker,
-  but `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
+  `{repo, number, kind, head_sha, options}` plus the material fields
+  `{comp, tests, priority}` (the latter three added so a refresh can cheaply and
+  deterministically decide "did this target materially change?" - see "Card
+  refresh" in Sharp edges). `options` is also material for refresh comparison,
+  but is normalized as a sorted set so checkbox reordering alone does not
+  refresh the card. `render_card.py` writes that marker, but
+  `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
-  queue keeps working. The local lock/board/ledger from the original `triage.py`
+  queue keeps working. It also tolerates old `wheelhouse-state` cards that lack
+  the material fields: a missing field reads as "unknown", so such a card is seen
+  as changed exactly once and refreshes itself (backfilling the fields), then
+  no-ops. The local lock/board/ledger from the original `triage.py`
   are intentionally dropped (replaced by Actions
   `concurrency` + issues/labels/comments).
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
   (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
-  (scheduled scan -> reconcile), `deep-review` (phase 2, inert),
+  (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
+  now that cards refresh on material change; safe to run hourly because reconcile
+  is a full no-op when nothing changed), `deep-review` (phase 2, inert),
   `no-mistakes-required` (PR-to-`main` gate: the job `name:` MUST stay exactly
   `PR must be raised via no-mistakes` - it is the check name the fleet convention
   and this repo's own `wheelhouse.config.yml compliance_check` reference - and it
@@ -55,8 +65,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `parse` then `execute`, plus the natural-language `nl-eligible`/`nl-prompt`/
   `nl-route` that map an owner's free-text comment to a structured intent),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
-  create/close). `apply_decision`/`reconcile` import `wheelhouse_core` (and
-  `build_item` imports `render_card`) via `sys.path.insert(0, dirname(__file__))`.
+  create/**refresh**/close). `apply_decision`/`reconcile`/`render_card` import
+  `wheelhouse_core` (and `build_item` imports `render_card`) via
+  `sys.path.insert(0, dirname(__file__))`.
 - **Reusable actions (pinned to full SHAs).** `decision-handler` delegates two
   mechanical jobs to the `issue-ops` toolkit instead of hand-rolling them:
   `issue-ops/parser` renders the card's checkboxes as `{selected, unselected}`
@@ -81,6 +92,41 @@ still appears where it's plain English, e.g. "triage the queue".)
   `### Your decision` heading `render_card.py` emits. (Cards are still rendered by
   `render_card.py`, not this template; a hand-filed issue from it has no state
   block, so the handler treats it as a no-op.)
+- **Card refresh (an open card must reflect CURRENT target state).** Both the
+  event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) keep a
+  card current: when a target's MATERIAL state changes - `head_sha`, compliance
+  (`comp`), tests (`tests`), `kind`, `priority`, or checkbox `options` - the
+  card is re-rendered in place; title/summary/recommendation re-render naturally
+  and are NOT change triggers. Option comparisons use set equality; display
+  order remains the order provided in the card body/state. The shared pure
+  helpers live in `render_card.py`
+  (`material_changed`, `is_refreshable`, `plan_label_update`); `reconcile.py`
+  pre-checks them (using the card row it already listed) so the common
+  no-change case never hits the API, and `upsert_card` re-checks them before it
+  edits (defense in depth for the event path). Three rules are load-bearing and
+  must not be loosened:
+  - **Only refresh a pure `needs-decision` card.** A re-render resets the card's
+    checkboxes, so a card already `processing`/`resolved`/`blocked` is left
+    completely untouched - refreshing one would clobber an in-flight decision or
+    race the decision-handler. (`is_refreshable` is the guard; the lock set is
+    `NON_REFRESHABLE_LABELS`.) This is the chosen safe rule.
+  - **No-op when nothing material changed.** An unchanged card gets no body edit,
+    no label churn, and no comment - never rewrite a card just to put back an
+    identical body. The check is a cheap dict compare of the state block's
+    material fields, which is why those fields are carried in the state JSON.
+  - **Replace the managed labels, don't just add.** `upsert_card` removes
+    `repo:*`/`kind:*`/`priority:*`/`target:*` labels that no longer apply
+    (`plan_label_update`), so a changed priority/kind doesn't leave both the old
+    and new label stuck on the card. `needs-decision` and any human-added label
+    are never removed.
+  When `head_sha` changed the refresh also drops a short "target updated" card
+  comment so the owner sees a re-review is warranted rather than being silently
+  swapped underneath. All of this stays on the ambient `GH_TOKEN` (= default
+  `GITHUB_TOKEN`) like every other card write, so a refresh never re-triggers the
+  handler and never runs under `FLEET_TOKEN`. reconcile only ever refreshes from
+  scanned `items`, which exist solely for `ok:true` repos, so an `ok:false` repo
+  (state unknown) is never refreshed - the same invariant that bars closing its
+  cards.
 - Natural-language decisions are owner-comment-only and structured: the LLM
   returns `{mode: action|answer|clarify, action?, free_text?, answer?}` to
   `decision.json` and nothing else. `apply_decision.py nl-route` is the trust
@@ -147,8 +193,12 @@ repo's token):
 ## Validation
 
 No build step. Validate with `python -m py_compile scripts/*.py tests/*.py`, run
-the decision unit test (`python tests/test_decision.py` - mocks the LLM, no
-network), and YAML-parse `.github/workflows/*.yml` + `wheelhouse.config.yml` +
+the unit tests (`python tests/test_decision.py` - mocks the LLM, no network,
+`python tests/test_card_refresh.py` - the card-refresh change-detection /
+refreshability-guard / label-replace logic, pure functions, no network, and
+`python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
+no network), and
+YAML-parse `.github/workflows/*.yml` + `wheelhouse.config.yml` +
 `.github/ISSUE_TEMPLATE/*.yml` (run `actionlint` if available; fetch the binary
 via its `download-actionlint.bash` if not). The live LLM paths (deep-review,
 nl_decisions) can only be exercised end-to-end in CI with the flag on and the

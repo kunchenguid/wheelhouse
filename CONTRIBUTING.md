@@ -32,6 +32,8 @@ Before pushing, validate locally:
 ```
 python -m py_compile scripts/*.py tests/*.py
 python tests/test_decision.py
+python tests/test_card_refresh.py
+python tests/test_reconcile.py
 python - <<'PY'
 from pathlib import Path
 import yaml

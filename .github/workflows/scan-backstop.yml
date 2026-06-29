@@ -1,14 +1,18 @@
 name: scan-backstop
 
-# The safety net behind the event path. On a schedule (and on demand), scan the
-# whole fleet, open cards for anything new that needs a decision, and close
-# cards whose target is already merged/closed - so the queue self-heals even if
-# a dispatch was lost. Cron is best-effort; the event path (ingest) is the fast
-# path.
+# The primary keep-current path. On a schedule (and on demand), scan the whole
+# fleet, open cards for anything new that needs a decision, REFRESH an open
+# `needs-decision` card whose target materially changed, and close cards whose
+# target is merged/closed, plus pure pending cards whose open target no longer
+# needs a maintainer decision - so the queue reflects current state and
+# self-heals. The ingest event path still upserts on dispatch, but the hourly
+# reconcile is what keeps cards fresh; running it hourly is safe precisely
+# because reconcile refreshes only on a material change and is a full no-op
+# otherwise (see reconcile.py / render_card.upsert_card, AGENTS.md "Card refresh").
 
 on:
   schedule:
-    - cron: "17 */6 * * *" # ~4x/day, best-effort
+    - cron: "17 * * * *" # hourly, best-effort
   workflow_dispatch:
 
 permissions:
@@ -46,8 +50,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh issue list --state open --json number,body,labels,title --limit 300 > cards.json
 
-      # Reconcile (create new cards, close stale ones) in THIS repo - default
-      # token, so backstop activity never re-triggers the handler.
+      # Reconcile (create, refresh, close) in THIS repo - default token, so
+      # backstop activity never re-triggers the handler.
       - name: Reconcile the queue
         env:
           GH_TOKEN: ${{ github.token }}

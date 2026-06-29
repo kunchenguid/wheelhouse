@@ -1,7 +1,7 @@
 name: ingest
 
 # Fast path: a source repo (or a manual test) hands us an item that needs the
-# maintainer's decision, and we create/update a decision-card issue for it.
+# maintainer's decision, and we create or refresh a decision-card issue for it.
 #
 # Portability: the owner is github.repository_owner; the fleet + policy come from
 # wheelhouse.config.yml. Nothing here is account-specific.
@@ -47,7 +47,8 @@ permissions:
   contents: read
   issues: write
 
-# Serialize per target so a dispatch and a manual run can't double-create a card.
+# Serialize per target so a dispatch and a manual run can't double-create or
+# double-refresh a card.
 concurrency:
   group: wheelhouse-ingest-${{ github.event.client_payload.repo || github.event.inputs.repo }}-${{ github.event.client_payload.number || github.event.inputs.number }}
   cancel-in-progress: false
@@ -83,7 +84,7 @@ jobs:
           INPUT_OPTIONS: ${{ github.event.inputs.options }}
         run: python scripts/build_item.py item.json
 
-      - name: Create or update the decision card
+      - name: Create or refresh the decision card
         env:
           # Cards live in THIS repo: the default token is correct, and using it
           # keeps card activity from re-triggering the decision handler.

@@ -17,13 +17,13 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
 - **Labels carry state:** `needs-decision` (in the queue), `processing` (a handler is acting), `resolved`, `blocked`, plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
 - **Each issue body is a decision card:** a link to the target, the situation, an overlap note, a recommended action, and quick-decision checkboxes. A hidden HTML comment holds the machine-readable state.
-- **GitHub Actions are the handlers:** they create cards, execute your decisions, and reconcile the queue against live repo state.
+- **GitHub Actions are the handlers:** they create cards, refresh pending cards when their targets change, execute your decisions, and reconcile the queue against live repo state.
 
 ```
  source repos ──dispatch──▶ ingest ─────────┐
                                             ▼
  scheduled scan ──reconcile──▶  this repo's ISSUES  ◀── you tick / comment
- (backstop, self-heals)             (the queue)             │
+ (hourly keep-current path)         (the queue)             │
                                             └── decision-handler ──acts on──▶ your fleet repos
 ```
 
@@ -103,12 +103,12 @@ Two ways for items to enter the queue, and you can use either or both:
 
 - **Fast path (recommended):** add a small dispatch workflow to each source repo so events push items here in real time.
   Copy-paste instructions are in [`docs/ONBOARDING.md`](docs/ONBOARDING.md).
-- **Backstop only:** do nothing in the source repos and rely on the scheduled `scan-backstop` to find items a few times a day.
+- **Backstop only:** do nothing in the source repos and rely on the hourly `scan-backstop` to find items and keep pending cards current.
 
 ### 6. Verify
 
 1. In this repo, open the **Actions** tab ▸ **scan-backstop** ▸ **Run workflow**.
-2. Watch the run. Within a minute, decision-card issues should appear for anything in your fleet that needs your call.
+2. Watch the run. Within a minute, decision-card issues should appear or refresh for anything in your fleet that needs your call.
 3. Tick a checkbox on one card and confirm the action lands on the target repo and the card closes.
 
 If nothing appears, see [Troubleshooting](#troubleshooting).
@@ -133,8 +133,11 @@ You drive the queue three ways - whichever fits the decision:
   Claude only ever *maps* your comment to a structured choice; the deterministic handler performs any action, so nothing happens that a slash-command couldn't already do. Only your own comments are ever read (a stranger's are ignored). A comment that starts with `/` is always treated as a slash-command, never sent to Claude. If Claude can't form a useful result, it asks you to rephrase or use a slash-command.
 
 An item is **consumed** when the handler closes its card after acting; the card is labeled `resolved` (or `blocked` for a hold) for audit.
-If a PR's head moves after a card is created, a `/merge` (or a "merge it" comment) is safely refused with a note so you re-check before merging.
+While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
+A head move also leaves a "target updated" comment so you know to re-review the card.
+If you act before that refresh lands, a `/merge` (or a "merge it" comment) still refuses a stale head with a note.
 The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next scan.
+If an open target no longer needs a maintainer decision, its pure pending card is closed too.
 
 ## Security notes
 
@@ -158,7 +161,8 @@ The scheduled backstop also self-heals: if the underlying PR/issue gets merged o
   Almost always `FLEET_TOKEN` scope: it needs Contents + Issues + Pull requests (read & write) on the **target** repo. The card stays open with an error comment when an action fails.
   A `/merge` that's refused with a "head moved" note is working as intended - re-scan and decide again.
 - **Cron lag.**
-  Scheduled runs are best-effort and can be delayed by GitHub. For real-time items, wire the dispatch path from [`docs/ONBOARDING.md`](docs/ONBOARDING.md); the backstop is only the safety net.
+  The scheduled keep-current path runs hourly, but GitHub cron is best-effort and can be delayed.
+  For lower-latency items, wire the dispatch path from [`docs/ONBOARDING.md`](docs/ONBOARDING.md); dispatches nudge the same card-refresh logic immediately.
 - **A plain-English reply did nothing / I only get slash-commands.**
   `nl_decisions` is inert unless `nl_decisions: true` **and** `CLAUDE_CODE_OAUTH_TOKEN` is set; the handler logs `nl path inert (...)` showing which condition is missing. Comments from anyone but the owner (or configured `maintainer`) are ignored, and a comment that starts with `/` is always treated as a slash-command.
 - **Deep review does nothing.**
@@ -172,18 +176,20 @@ wheelhouse.config.yml          the one file you edit
 .github/ISSUE_TEMPLATE/
   wheelhouse-decision.yml      schema for the machine-rendered cards (lets issue-ops/parser read the checkboxes)
 .github/workflows/
-  ingest.yml                   repository_dispatch / manual -> create or update a decision card
+  ingest.yml                   repository_dispatch / manual -> create or refresh a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close the card
-  scan-backstop.yml            scheduled scan -> reconcile the queue against live repo state
+  scan-backstop.yml            hourly scan -> create, refresh, or close cards against live repo state
   deep-review.yml              (LLM side-job, inert) label -> Claude reviews the target -> comments back
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           GraphQL scan, classify, dedup/overlap, security-gated CI approval
-  render_card.py               build the decision card; create/update/close cards in this repo
+  render_card.py               build the decision card; create/refresh/close cards in this repo
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   build_item.py                normalize a dispatch payload into a card item
-  reconcile.py                 backstop: open new cards, close stale ones
+  reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
 tests/test_decision.py         offline unit test for the parse/route logic (mocks the LLM)
+tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
+tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
 
