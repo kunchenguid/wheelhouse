@@ -18,6 +18,12 @@ on:
 permissions:
   contents: read
   issues: write
+  # The non-consuming "Investigate" tick dispatches deep-review.yml via
+  # workflow_dispatch (a GITHUB_TOKEN-applied label would not raise the `labeled`
+  # webhook - the same recursion barrier that stops this handler re-triggering
+  # itself - whereas workflow_dispatch IS the documented exception). Dispatching a
+  # workflow needs `actions: write` on this repo's own token.
+  actions: write
 
 # Serialize all handling of one card so concurrent ticks/comments can't race.
 concurrency:
@@ -82,6 +88,37 @@ jobs:
           CHECKBOXES_NEW: ${{ steps.checkboxes-new.outputs.json }}
           CHECKBOXES_OLD: ${{ steps.checkboxes-old.outputs.json }}
         run: python scripts/apply_decision.py parse
+
+      # --- Investigate path (NON-CONSUMING) ----------------------------------
+      # The owner ticked "Investigate": trigger the code-grounded deep review and
+      # leave the card OPEN (unlike every consuming action). `parse` set the
+      # `investigate` output instead of `decision`, so the consuming execute/close
+      # steps below stay dormant. Here we (1) re-render the card with the box
+      # cleared - on the default GITHUB_TOKEN, so the edit never re-triggers this
+      # handler - so the owner can investigate again after new commits, and
+      # (2) dispatch the single investigation workflow (deep-review.yml). The
+      # checkbox path uses workflow_dispatch rather than applying the
+      # `needs-deep-review` label because a GITHUB_TOKEN label write would not
+      # raise the `labeled` webhook; the manual label path still works for humans.
+      # This is all this repo's own card data - no FLEET_TOKEN here.
+      - name: Investigate (trigger deep review, leave card open)
+        if: ${{ steps.gate.outputs.authorized == 'true' && steps.decide.outputs.investigate != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          OPT_KEY: ${{ steps.decide.outputs.investigate }}
+        run: |
+          set -uo pipefail
+          python scripts/apply_decision.py clear-checkbox > investigate_body.md
+          # Only rewrite the card if we produced a non-empty body (never wipe it).
+          if [ -s investigate_body.md ]; then
+            gh issue edit "$ISSUE" --body-file investigate_body.md || true
+          fi
+          if ! gh workflow run deep-review.yml -f issue="$ISSUE"; then
+            gh issue comment "$ISSUE" --body \
+              "Couldn't start the investigation (workflow dispatch failed). Apply the \`needs-deep-review\` label to run it manually." || true
+          fi
 
       # --- Natural-language path (opt-in) ------------------------------------
       # An owner comment that is NOT a slash-command. Gated on nl_decisions in

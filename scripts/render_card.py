@@ -24,16 +24,24 @@ from wheelhouse_core import parse_state_block  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment / decline carry text,
 # so they are slash-command-only (see apply_decision.py), not checkboxes.
+#
+# `investigate` is the odd one out: it is NON-CONSUMING. Ticking it triggers a
+# code-grounded deep review (deep-review.yml) and leaves the card open for the
+# owner's real decision; the handler clears the box so it can be re-triggered
+# after new commits (see apply_decision.py / decision-handler.yml). It is offered
+# on the kinds where deeper analysis helps (pr-review, issue-triage) but NOT on
+# ci-approval, which is a fast security gate, not a merit review.
 CHECKBOX_OPTIONS = {
-    "pr-review": ["merge", "close", "hold"],
+    "pr-review": ["merge", "close", "investigate", "hold"],
     "ci-approval": ["approve-ci", "close", "hold"],
-    "issue-triage": ["close", "hold"],
+    "issue-triage": ["close", "investigate", "hold"],
 }
 
 OPTION_LABELS = {
     "merge": "Merge it",
     "approve-ci": "Approve the CI run (security-gated)",
     "close": "Close / decline",
+    "investigate": "Investigate - deep code-grounded review (leaves this card open)",
     "hold": "Hold - I'll handle this manually",
 }
 

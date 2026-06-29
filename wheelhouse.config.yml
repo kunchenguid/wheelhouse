@@ -71,26 +71,28 @@ repos:
 # owner. Leave empty to use the repository owner (github.repository_owner).
 maintainer: ""
 
-# Phase-2 LLM side-job. Leave false to run the fully deterministic machine with
-# only FLEET_TOKEN. Set true AND add the CLAUDE_CODE_OAUTH_TOKEN secret (from
-# `claude setup-token`, a Claude subscription token - NOT an API key) to enable
-# `deep-review` (label `needs-deep-review` -> Claude reviews the target and
-# comments back). Inert until both conditions are met.
-deep_review: false
+# Code-grounded deep review is ALWAYS available (there is no enable flag). The
+# owner triggers it per card - tick the "Investigate" box or apply the
+# `needs-deep-review` label - and `deep-review.yml` checks out the target's code
+# read-only and posts a merit/triage verdict. The only thing it needs is the
+# CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`, a Claude
+# subscription token - NOT an API key); if that secret is absent the workflow
+# posts a one-line "needs token" note on the card instead of silently no-opping.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
-# secret (same Claude subscription token as deep_review) to let the decision
-# handler route a plain-English owner comment on a card through Claude: it MAPS
-# the comment to an action ("merge it" -> merge), answers a question, or asks you
-# to clarify. The LLM only proposes a structured intent - the deterministic
-# executor still performs (and guards) any action. Inert until both are met.
+# secret (a Claude subscription token from `claude setup-token` - NOT an API key)
+# to let the decision handler route a plain-English owner comment on a card
+# through Claude: it MAPS the comment to an action ("merge it" -> merge), answers
+# a question, or asks you to clarify. The LLM only proposes a structured intent -
+# the deterministic executor still performs (and guards) any action. Inert until
+# both the flag and the token are present.
 nl_decisions: true
 
 # Whether the scheduled backstop also opens decision cards for open *issues*
 # that have no linked PR (in addition to PRs that need your call). Phase-1
 # default is PRs only (high signal); flip to true once you want issue triage in
-# the queue, or rely on deep-review (phase 2) for issue triage.
+# the queue, or tick a card's "Investigate" box for a code-grounded read on it.
 card_issues: false
 
 # Auto-approve provably-safe fork-CI runs at scan time, so only risky or

@@ -20,7 +20,6 @@ Usage:
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
-  wheelhouse_core.py deep-review-enabled  print true/false: is deep_review on in config?
   wheelhouse_core.py nl-decisions-enabled print true/false: is nl_decisions on in config?
   wheelhouse_core.py state <field>        print one field of the state block in $ISSUE_BODY
   wheelhouse_core.py repos                list configured repos
@@ -122,7 +121,6 @@ def load_config():
     return {
         "repos": by_name,
         "maintainer": (cfg.get("maintainer") or "").strip(),
-        "deep_review": bool(cfg.get("deep_review", False)),
         "nl_decisions": bool(cfg.get("nl_decisions", False)),
         "card_issues": bool(cfg.get("card_issues", False)),
         # Security-relevant DEFAULT ON (opt-out): when the key is absent a fresh
@@ -1007,10 +1005,6 @@ def cmd_repos():
               % (name, rc.get("compliance_check"), rc.get("test_check_patterns")))
 
 
-def cmd_deep_review_enabled():
-    print("true" if load_config()["deep_review"] else "false")
-
-
 def cmd_nl_decisions_enabled():
     print("true" if load_config()["nl_decisions"] else "false")
 
@@ -1033,8 +1027,6 @@ def main():
         cmd_checks(sys.argv[2])
     elif cmd == "authorized":
         cmd_authorized()
-    elif cmd == "deep-review-enabled":
-        cmd_deep_review_enabled()
     elif cmd == "nl-decisions-enabled":
         cmd_nl_decisions_enabled()
     elif cmd == "state" and len(sys.argv) == 3:

@@ -13,6 +13,12 @@ Covers:
   * the natural-language structured-intent contract: an `action` result drives
     the deterministic executor, while `answer`/`clarify` only reply and leave
     the card open - i.e. `execute` runs ONLY for `action` mode;
+  * the NON-CONSUMING investigate routing: ticking investigate emits the
+    `investigate` output (not `decision`), so the card is NOT consumed; every
+    other action still sets `decision`; investigate is in the per-kind allow-set
+    for pr-review/issue-triage but NOT ci-approval, and is never offered to or
+    accepted from the natural-language intent-mapper; clear_checkbox un-ticks the
+    box for re-triggerability;
   * the trust boundary: an action outside the per-kind allowlist, or a
     malformed/empty LLM result, falls back to a clarify reply (no action);
   * the owner-scoped conversation history: maintainer + bot turns are kept in
@@ -67,6 +73,7 @@ def parser_json(*checked):
     labels = {
         "merge": "Merge it <!-- opt:merge -->",
         "close": "Close / decline <!-- opt:close -->",
+        "investigate": "Investigate - deep review <!-- opt:investigate -->",
         "hold": "Hold - I'll handle this manually <!-- opt:hold -->",
     }
     selected = [labels[k] for k in checked]
@@ -93,6 +100,125 @@ def test_checkbox_diff():
           ad.diff_checkbox("", "", OPTS) is None)
     check("checkbox: a key not in this card's options is ignored",
           ad.diff_checkbox(parser_json(), parser_json("merge"), ["close", "hold"]) is None)
+
+
+# --------------------------------------------------------------------------- #
+# investigate: NON-CONSUMING checkbox routing + allow-set + clear_checkbox
+# --------------------------------------------------------------------------- #
+def _parse_github_output(raw):
+    """Parse a $GITHUB_OUTPUT file (set_output's `k=v` and heredoc forms)."""
+    out, lines, i = {}, raw.split("\n"), 0
+    while i < len(lines):
+        line = lines[i]
+        if not line:
+            i += 1
+            continue
+        if line.endswith("<<__WHEELHOUSE_EOF__"):
+            name = line[: -len("<<__WHEELHOUSE_EOF__")]
+            i += 1
+            buf = []
+            while i < len(lines) and lines[i] != "__WHEELHOUSE_EOF__":
+                buf.append(lines[i])
+                i += 1
+            out[name] = "\n".join(buf)
+            i += 1
+        elif "=" in line:
+            k, v = line.split("=", 1)
+            out[k] = v
+            i += 1
+        else:
+            i += 1
+    return out
+
+
+def run_parse(env):
+    """Run ad.cmd_parse() with `env` overlaid and a temp $GITHUB_OUTPUT; return
+    the parsed outputs as a dict. Restores os.environ afterwards."""
+    keys = list(env) + ["GITHUB_OUTPUT"]
+    saved = {k: os.environ.get(k) for k in keys}
+    fd, outpath = tempfile.mkstemp(suffix=".out")
+    os.close(fd)
+    try:
+        os.environ.update(env)
+        os.environ["GITHUB_OUTPUT"] = outpath
+        ad.cmd_parse()
+        with open(outpath) as f:
+            raw = f.read()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        os.unlink(outpath)
+    return _parse_github_output(raw)
+
+
+# A pr-review card whose options include investigate (as render_card now emits).
+INV_CARD = ('<!-- wheelhouse-state: {"repo":"lavish-axi","number":42,'
+            '"kind":"pr-review","head_sha":"abc",'
+            '"options":["merge","close","investigate","hold"]} -->')
+
+
+def _tick(old, new):
+    return {"EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_BODY": INV_CARD,
+            "CHECKBOXES_OLD": parser_json(*old), "CHECKBOXES_NEW": parser_json(*new)}
+
+
+def test_investigate_is_non_consuming():
+    out = run_parse(_tick([], ["investigate"]))
+    check("investigate: emits the investigate output", out.get("investigate") == "investigate")
+    check("investigate: leaves decision EMPTY (does NOT consume the card)",
+          out.get("decision", "") == "")
+
+
+def test_consuming_actions_unchanged_by_investigate_routing():
+    out = run_parse(_tick([], ["merge"]))
+    check("consuming: merge still sets decision", out.get("decision") == "merge")
+    check("consuming: merge does NOT set investigate", out.get("investigate", "") == "")
+    check("consuming: merge carries the target", out.get("target_repo") == "lavish-axi"
+          and str(out.get("target_number")) == "42")
+    # A no-op tick (nothing newly ticked) sets neither.
+    none = run_parse(_tick(["merge"], ["merge"]))
+    check("consuming: no newly-ticked box -> no decision, no investigate",
+          none.get("decision", "") == "" and none.get("investigate", "") == "")
+
+
+def test_investigate_allow_set_and_nl_exclusion():
+    check("allow: investigate in pr-review", "investigate" in ad.ALLOWED["pr-review"])
+    check("allow: investigate in issue-triage", "investigate" in ad.ALLOWED["issue-triage"])
+    check("allow: investigate NOT in ci-approval (fast security gate)",
+          "investigate" not in ad.ALLOWED["ci-approval"])
+    check("allow: nl_allowed excludes investigate for every kind",
+          all("investigate" not in ad.nl_allowed(k)
+              for k in ("pr-review", "issue-triage", "ci-approval")))
+
+
+def test_nl_never_offers_or_accepts_investigate():
+    body = '<!-- wheelhouse-state: {"repo":"r","number":1,"kind":"pr-review"} -->'
+    prompt = ad.build_nl_prompt(body, "take a closer look at this", "(target)", "pr-review")
+    check("nl: investigate is never in the offered verb list", "investigate" not in prompt)
+    # Even a hallucinated investigate is downgraded to clarify (no decision).
+    r = ad.route_decision({"mode": "action", "action": "investigate"}, "pr-review", STATE)
+    check("nl: hallucinated investigate -> clarify, no decision",
+          r["decision"] == "" and r["mode"] == "clarify")
+
+
+def test_clear_checkbox():
+    body = ("### Your decision\n"
+            "- [x] Investigate - deep review <!-- opt:investigate -->\n"
+            "- [ ] Merge it <!-- opt:merge -->\n"
+            '<!-- wheelhouse-state: {"repo":"r","number":1} -->')
+    out = ad.clear_checkbox(body, "investigate")
+    check("clear: investigate box is un-ticked",
+          "- [ ] Investigate - deep review <!-- opt:investigate -->" in out)
+    check("clear: other boxes untouched", "- [ ] Merge it <!-- opt:merge -->" in out)
+    check("clear: state block preserved verbatim",
+          '<!-- wheelhouse-state: {"repo":"r","number":1} -->' in out)
+    check("clear: idempotent on an already-clear body", ad.clear_checkbox(out, "investigate") == out)
+    check("clear: an absent key leaves the body unchanged", ad.clear_checkbox(body, "nope") == body)
+    check("clear: empty body / key are safe",
+          ad.clear_checkbox("", "investigate") == "" and ad.clear_checkbox(body, "") == body)
 
 
 # --------------------------------------------------------------------------- #
@@ -267,6 +393,11 @@ def test_prompt_includes_history_section():
 def main():
     test_state_marker_back_compat()
     test_checkbox_diff()
+    test_investigate_is_non_consuming()
+    test_consuming_actions_unchanged_by_investigate_routing()
+    test_investigate_allow_set_and_nl_exclusion()
+    test_nl_never_offers_or_accepts_investigate()
+    test_clear_checkbox()
     test_action_mode_drives_execute()
     test_answer_and_clarify_do_not_execute()
     test_trust_boundary()

@@ -26,4 +26,5 @@ body:
         - label: Merge it
         - label: Approve the CI run (security-gated)
         - label: Close / decline
+        - label: Investigate - deep code-grounded review (leaves this card open)
         - label: Hold - I'll handle this manually

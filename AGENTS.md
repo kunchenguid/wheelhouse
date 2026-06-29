@@ -53,7 +53,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
   (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
   now that cards refresh on material change; safe to run hourly because reconcile
-  is a full no-op when nothing changed), `deep-review` (phase 2, inert),
+  is a full no-op when nothing changed), `deep-review` (ALWAYS-ON, code-grounded;
+  gated only on `CLAUDE_CODE_OAUTH_TOKEN` - no config flag),
   `no-mistakes-required` (PR-to-`main` gate: the job `name:` MUST stay exactly
   `PR must be raised via no-mistakes` - it is the check name the fleet convention
   and this repo's own `wheelhouse.config.yml compliance_check` reference - and it
@@ -66,9 +67,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   shared CI-safety verdict `ci_safety` / `repo_pr_target_posture` and scan-time
   auto-approve in `build_repo`, plus shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`),
-  `render_card.py` (render + card CRUD), `apply_decision.py` (deterministic
-  `parse` then `execute`, plus the natural-language `nl-eligible`/`nl-prompt`/
-  `nl-route` that map an owner's free-text comment to a structured intent),
+  `render_card.py` (render + card CRUD; `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
+  the per-kind checkboxes, including the non-consuming `investigate` box on
+  pr-review/issue-triage), `apply_decision.py` (deterministic `parse` then
+  `execute`; the NON-CONSUMING `investigate` routing + `clear-checkbox`; plus the
+  natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
+  free-text comment to a structured intent),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
   create/**refresh**/close). `apply_decision`/`reconcile`/`render_card` import
   `wheelhouse_core` (and `build_item` imports `render_card`) via
@@ -141,15 +145,39 @@ still appears where it's plain English, e.g. "triage the queue".)
   concurrency - applies unchanged). `answer`/`clarify` only post a card comment
   and leave the card open. The LLM is restricted to the `Write` tool and gets
   only this repo's token, never `FLEET_TOKEN` - it maps intent, it never acts.
-- Token discipline per step: scan/execute and the read-only target fetch for the
-  LLM (`deep-review` prepare, decision-handler `nl-fetch`) use `FLEET_TOKEN`; all
+- Token discipline per step: scan/execute and the read-only target reads for the
+  LLM (`deep-review` prepare + its target-code checkout, decision-handler
+  `nl-fetch`) use `FLEET_TOKEN`; all
   card writes - including every `issue-ops/labeler` step (its `github_token`
   defaults to `github.token`, passed explicitly here) - use `github.token`. The
   card's own comment thread is also this repo's data, so the NL `nl-comments`
   fetch uses `github.token`, NOT `FLEET_TOKEN`. Mixing them either breaks
   cross-repo acting or creates a re-trigger loop. The LLM step itself never gets
   `FLEET_TOKEN`; target content reaches it only as pre-fetched, delimited
-  untrusted data inside the prompt.
+  untrusted data inside the prompt, OR (for deep-review) as code already on disk
+  from a `persist-credentials: false` checkout, so NO token is left on disk for
+  the LLM to read.
+- **Investigate is a NON-CONSUMING checkbox (the one tick that doesn't close the
+  card).** It is offered on pr-review/issue-triage cards (NOT ci-approval, a fast
+  security gate). Ticking it must NEVER consume the card: `apply_decision.py
+  parse` routes `investigate` to a separate `investigate` output and leaves
+  `decision` empty, so the consuming execute/close steps stay dormant. The
+  handler's Investigate step then (1) re-renders the card with the box cleared
+  (`apply_decision.py clear-checkbox`, on `github.token` so the edit never
+  re-triggers the handler) so the owner can investigate again after new commits,
+  and (2) triggers the ONE investigation workflow (`deep-review.yml`). It triggers
+  it via `workflow_dispatch` - NOT by applying the `needs-deep-review` label -
+  because a `github.token`-applied label would not raise the `labeled` webhook
+  (the very recursion barrier that stops the handler re-triggering itself), and
+  using `FLEET_TOKEN` to label THIS repo's card would break token discipline and
+  portability (a public Wheelhouse's `FLEET_TOKEN` need not even have write access
+  here). `workflow_dispatch` via `github.token` IS the documented exception to
+  recursion-prevention, so it reliably fires; that is why decision-handler needs
+  `actions: write`. The manual `needs-deep-review` label path is unchanged (a
+  human applying it raises the `labeled` event normally). `investigate` is in the
+  per-kind `ALLOWED` set but is filtered out of the NL verb list/validation
+  (`nl_allowed`): an investigation is a deliberate click, not free-text intent, so
+  the NL path neither offers nor accepts it.
 - NL conversation memory is owner-scoped, and the scoping IS the security
   boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
   `github.token`) and `apply_decision.py assemble_history` renders it as a
@@ -220,19 +248,29 @@ still appears where it's plain English, e.g. "triage the queue".)
   dispatcher is updated. Same idea as the state-marker back-compat - rename the
   name, keep accepting the old one.
 
-## LLM side-jobs (both opt-in, both off by default)
+## LLM side-jobs
 
 Two independent LLM features share the same auth (a Claude **subscription** token
 from `claude setup-token` via `anthropics/claude-code-action` - NOT an Anthropic
 API key) and the same injection model (only owner-authored text is an
 instruction; target content is delimited untrusted data; the LLM gets only this
-repo's token):
+repo's token, never `FLEET_TOKEN`):
 
-- **`deep_review`** + `deep-review.yml`: label `needs-deep-review` -> Claude
-  posts a read-only merit/triage verdict. Inert unless `deep_review: true` AND
-  `CLAUDE_CODE_OAUTH_TOKEN` present.
+- **`deep-review.yml` - ALWAYS-ON, code-grounded (no enable flag).** Triggered by
+  ticking the **Investigate** box on a card or applying the `needs-deep-review`
+  label. It checks out the TARGET's code read-only (`FLEET_TOKEN`,
+  `persist-credentials: false`, the PR head for a review card / the default branch
+  for an issue card) and runs Claude restricted to `--allowedTools
+  Read,Grep,Glob,Write` over that checkout - so it traces real code paths, never
+  just the diff, and can NEVER execute the target's code (no Bash, no build/test).
+  Claude writes `verdict.md`; the workflow posts it as a card comment with
+  `github.token`. The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the
+  workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured
+  to run." note instead of silently no-opping. (Manual triggering means there is
+  no runaway-cost reason for a config flag, so the old `deep_review` flag was
+  removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.)
 - **`nl_decisions`** in `decision-handler.yml`: a plain-English owner comment is
-  mapped to a structured intent (see Sharp edges). Inert unless
+  mapped to a structured intent (see Sharp edges). Opt-in: inert unless
   `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN` present. Claude is restricted
   to the `Write` tool (`claude_args: --allowedTools Write`) - it writes
   `decision.json` and runs no commands. The prompt carries the card's prior
@@ -243,16 +281,22 @@ repo's token):
 ## Validation
 
 No build step. Validate with `python -m py_compile scripts/*.py tests/*.py`, run
-the unit tests (`python tests/test_decision.py` - mocks the LLM, no network,
+the unit tests (`python tests/test_decision.py` - mocks the LLM, no network, and
+now also the non-consuming investigate routing / allow-set / `clear_checkbox`,
 `python tests/test_card_refresh.py` - the card-refresh change-detection /
 refreshability-guard / label-replace logic, pure functions, no network,
 `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
-no network, and `python tests/test_ci_autoapprove.py` - the shared `ci_safety`
+no network, `python tests/test_ci_autoapprove.py` - the shared `ci_safety`
 verdict, `pull_request_target` posture detection, and the auto-approve-vs-card
-routing in `build_repo`, all with the network-touching helpers stubbed), and
+routing in `build_repo`, all with the network-touching helpers stubbed, and
+`python tests/test_deep_review.py` - the always-on/code-grounded deep-review +
+Investigate wiring: render options, the removed enable flag, the token-absent
+note, the `persist-credentials: false` checkout + read-only tool isolation, and
+the handler's `workflow_dispatch` trigger, all by inspecting the scripts/YAML, no
+network), and
 YAML-parse `.github/workflows/*.yml` + `wheelhouse.config.yml` +
 `.github/ISSUE_TEMPLATE/*.yml` (run `actionlint` if available; fetch the binary
 via its `download-actionlint.bash` if not). The live LLM paths (deep-review,
-nl_decisions) can only be exercised end-to-end in CI with the flag on and the
-token set. Secrets the maintainer must add: `FLEET_TOKEN` (always) and
-`CLAUDE_CODE_OAUTH_TOKEN` (deep_review and/or nl_decisions only).
+nl_decisions) can only be exercised end-to-end in CI with the token set (and, for
+nl_decisions, the flag on). Secrets the maintainer must add: `FLEET_TOKEN`
+(always) and `CLAUDE_CODE_OAUTH_TOKEN` (for deep-review and/or nl_decisions).
