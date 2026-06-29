@@ -117,11 +117,12 @@ def test_workflow_dispatch_gate_restricts_bot_reruns():
     doc = load_yaml(".github", "workflows", "deep-review.yml")
     gate = str(doc["jobs"]["deep-review"].get("if", ""))
     squashed = " ".join(gate.split())
+    dispatch_arm = squashed.split(") || ( github.event_name == 'issues'", 1)[0]
 
-    check("workflow: workflow_dispatch accepts the owner actor",
-          "github.actor == github.repository_owner" in gate)
-    check("workflow: workflow_dispatch accepts owner-triggered reruns",
-          "github.triggering_actor == github.repository_owner" in gate)
+    check("workflow: workflow_dispatch owner arm checks the triggering actor",
+          "github.triggering_actor == github.repository_owner" in dispatch_arm)
+    check("workflow: workflow_dispatch owner arm is not actor-only",
+          "github.actor == github.repository_owner" not in dispatch_arm)
     check("workflow: workflow_dispatch bot arm checks the triggering actor",
           "github.actor == 'github-actions[bot]'" in gate
           and "github.triggering_actor == 'github-actions[bot]'" in gate)
@@ -304,9 +305,21 @@ def test_handler_investigate_wiring():
 
     steps = steps_of(doc, "investigate-dispatch") if dispatch else []
     inv = next((s for s in steps if "investigate" in str(s.get("name", "")).lower()), None)
+    rerun_gate = next((s for s in steps if s.get("id") == "triggering-actor-gate"), None)
+    check("handler: investigate job rechecks the triggering actor",
+          rerun_gate is not None)
+    if rerun_gate:
+        check("handler: triggering actor check uses the canonical authorizer",
+              "python scripts/wheelhouse_core.py authorized" in str(rerun_gate.get("run", ""))
+              and "github.triggering_actor" in yaml.safe_dump(rerun_gate.get("env", {})))
     check("handler: an Investigate step exists", inv is not None)
     if inv:
         run = str(inv.get("run", ""))
+        step_if = str(inv.get("if", ""))
+        check("handler: investigate action requires the original authorized event",
+              "needs.handle.outputs.authorized == 'true'" in step_if)
+        check("handler: investigate action requires an authorized triggering actor",
+              "steps.triggering-actor-gate.outputs.authorized == 'true'" in step_if)
         check("handler: investigate clears the checkbox (re-triggerable)",
               "clear-checkbox" in run)
         check("handler: investigate clears the current card body",

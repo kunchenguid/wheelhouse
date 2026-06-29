@@ -321,7 +321,15 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
+      - id: triggering-actor-gate
+        env:
+          SENDER: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: echo "authorized=$(python scripts/wheelhouse_core.py authorized)" >> "$GITHUB_OUTPUT"
+
       - name: Investigate (trigger deep review, leave card open)
+        if: ${{ needs.handle.outputs.authorized == 'true' && steps.triggering-actor-gate.outputs.authorized == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
