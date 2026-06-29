@@ -24,7 +24,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   GITHUB_TOKEN-authored activity). The fork-CI / pwn-request HOLD (exit 4 in
   `approve_ci`) must never be removed: approving fork CI that changes
   `.github/workflows`, `.github/actions`, or `action.yml(.yaml)` is held for
-  manual review and fails closed.
+  manual review and fails closed. **Scan-time auto-approve is a STRICT SUBSET of
+  the manual gate**: it shares the one `ci_safety` verdict and approves only what
+  is provably safe (no risky files AND no `pull_request_target` posture, all reads
+  fail closed), so it can never auto-clear anything the manual path would HOLD.
 
 ## Architecture
 
@@ -59,7 +62,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   with bot authors skipped; Wheelhouse dogfoods on itself the same gate it enforces
   on the fleet, so contributions go through `git push no-mistakes` - see
   `CONTRIBUTING.md`).
-- **Scripts:** `wheelhouse_core.py` (scan/classify/dedup/security gate + shared utils
+- **Scripts:** `wheelhouse_core.py` (scan/classify/dedup/security gate + the
+  shared CI-safety verdict `ci_safety` / `repo_pr_target_posture` and scan-time
+  auto-approve in `build_repo`, plus shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`),
   `render_card.py` (render + card CRUD), `apply_decision.py` (deterministic
   `parse` then `execute`, plus the natural-language `nl-eligible`/`nl-prompt`/
@@ -163,6 +168,49 @@ still appears where it's plain English, e.g. "triage the queue".)
 - `wheelhouse_core.py scan` is resilient: a repo that fails to read is reported as a
   warning (`ok:false`) and skipped, and `reconcile.py` must never close cards for
   an `ok:false` repo (state unknown).
+- **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
+  shared `ci_safety(slug, pr, repo_posture)` verdict is the single security
+  definition; `approve_ci` uses it too, so the auto path is a STRICT SUBSET of the
+  manual gate. The verdict combines (a) **risky files** (`_risky_ci_files`: the
+  PR touches `.github/workflows`/`.github/actions`/`action.yml(.yaml)` - the
+  pwn-request HOLD, unchanged, fails closed) and (b) the per-repo
+  **`pull_request_target` posture** (`repo_pr_target_posture`: read the base
+  branch's `.github/workflows/*.yml|*.yaml` ONCE per repo - never per PR - and
+  see whether any workflow triggers on `pull_request_target`; fails closed if the
+  workflows can't be read/parsed). A `pull_request_target` workflow that ALSO
+  checks out the PR head (`_checks_out_pr_head`) is flagged LOUDLY as the exploit
+  pattern (best-effort - parses jobs/steps; note the YAML 1.1 gotcha where the
+  bare `on:` key parses as boolean `True`, handled in `_on_triggers`). In
+  `build_repo` (the `FLEET_TOKEN` scan context), for each `needs-ci-approval` PR:
+  if auto-approve is enabled AND the verdict is `safe` (no risky files, no
+  posture, no read error), call `approve_ci` and emit NO card (log a `::notice::`
+  to stderr - never stdout, which carries scan.json); otherwise emit the
+  `ci-approval` card exactly as before, carrying the safety warning. **Fail closed
+  everywhere**: an unsafe verdict, a `hold`/`error` from the approve, or an
+  approve that throws all fall back to a card - nothing is silently dropped.
+  Idempotent by construction: once approved the next scan sees CI running/results
+  (not `needs-ci-approval`), so it is not re-approved; a later push that adds a
+  workflow file or flips the posture routes the PR back to a card. The auto path
+  runs ONLY on the `ok:true` success path of `build_repo` (an `ok:false` repo
+  returns early), so an unknown-state repo is never auto-approved - the same
+  invariant that bars closing its cards. Token discipline holds: the approve is a
+  cross-repo write under `FLEET_TOKEN` (where scan already runs); the "no card"
+  path performs no card write at all, and cards are still written later by
+  `reconcile.py` under `GITHUB_TOKEN`. **Manual-path asymmetry:** risky files ->
+  HARD HOLD (exit 4), unchanged; a `pull_request_target` posture does NOT
+  hard-block the manual approve (`_approve_warning_suffix` only WARNS, because the
+  `pull_request_target` run fires automatically with secrets regardless of this
+  approval - blocking would only withhold the harmless read-only `pull_request`
+  run). **Honest caveat (document, don't overclaim):** the approval gate covers
+  the fork `pull_request` run; `pull_request_target` runs are NOT gated by it, so
+  the posture check is a "don't silently auto-clear + make me aware" signal plus
+  the loud exploit flag, not a direct block of that vector. **Config:**
+  `auto_approve_ci` defaults to **`true`** when absent (so a fresh fork gets the
+  noise reduction; set `false` to restore click-to-approve-everything), and a
+  per-repo `auto_approve_ci: false` on any `repos:` entry overrides the global
+  (`_auto_approve_enabled`). The warning is display-only (not a material refresh
+  field), since a ci-approval card's existence/refresh is already driven by the
+  PR's own head_sha/comp/tests.
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`
   also listens for the legacy `triage-item` (`types: [wheelhouse-item,
   triage-item]`). It is a cross-repo wire contract: source repos onboarded before
@@ -195,9 +243,11 @@ repo's token):
 No build step. Validate with `python -m py_compile scripts/*.py tests/*.py`, run
 the unit tests (`python tests/test_decision.py` - mocks the LLM, no network,
 `python tests/test_card_refresh.py` - the card-refresh change-detection /
-refreshability-guard / label-replace logic, pure functions, no network, and
+refreshability-guard / label-replace logic, pure functions, no network,
 `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
-no network), and
+no network, and `python tests/test_ci_autoapprove.py` - the shared `ci_safety`
+verdict, `pull_request_target` posture detection, and the auto-approve-vs-card
+routing in `build_repo`, all with the network-touching helpers stubbed), and
 YAML-parse `.github/workflows/*.yml` + `wheelhouse.config.yml` +
 `.github/ISSUE_TEMPLATE/*.yml` (run `actionlint` if available; fetch the binary
 via its `download-actionlint.bash` if not). The live LLM paths (deep-review,

@@ -205,6 +205,13 @@ def render(item):
     if item.get("summary"):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
+    # A security warning (e.g. a pull_request_target posture on a ci-approval
+    # card) is surfaced as a prominent callout so the maintainer decides with
+    # eyes open. Display-only - not part of the material refresh signature.
+    if item.get("warning"):
+        lines.append("> [!WARNING]")
+        lines.append("> %s" % item["warning"])
+        lines.append("")
     lines.append("### Recommended action")
     lines.append(item.get("recommendation", "Needs your call."))
     lines.append("")

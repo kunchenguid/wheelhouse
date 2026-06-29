@@ -91,3 +91,21 @@ nl_decisions: true
 # default is PRs only (high signal); flip to true once you want issue triage in
 # the queue, or rely on deep-review (phase 2) for issue triage.
 card_issues: false
+
+# Auto-approve provably-safe fork-CI runs at scan time, so only the genuinely
+# risky ones still raise an "approve CI" card for you. DEFAULT ON (this key is
+# absent -> treated as true), because the same security gate that holds risky
+# runs for the manual path is applied BEFORE auto-approving:
+#   * a PR that changes CI-execution files (.github/workflows, .github/actions,
+#     action.yml/.yaml) is NEVER auto-approved (the pwn-request HOLD), and
+#   * a repo whose base branch runs a `pull_request_target` workflow is never
+#     auto-cleared either - its CI-approval still raises a card (with a warning).
+# Everything uncertain fails closed to a card; nothing is silently approved.
+# Caveat: this gates the fork `pull_request` run only. A `pull_request_target`
+# workflow runs automatically with repo secrets and is NOT gated by any approval,
+# so the posture check is a "don't silently auto-clear + warn me" signal plus a
+# loud flag when such a workflow also checks out the PR head - not a block of
+# that vector. Set to false to opt out (every needs-ci-approval PR -> a card,
+# exactly as before). You can also override per repo with a `auto_approve_ci:
+# false` key on any entry under `repos:` above.
+auto_approve_ci: true
