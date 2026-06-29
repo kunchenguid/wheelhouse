@@ -242,6 +242,42 @@ def test_posture_unreadable_or_unparseable_file_fails_closed():
           p["pr_target"] is True and p["error"] is True)
 
 
+def test_posture_contents_listing_limit_fails_closed():
+    entries = [{"type": "file", "name": "wf%d.yml" % i,
+                "path": ".github/workflows/wf%d.yml" % i} for i in range(1000)]
+    save = core._gh_api_capture
+    core._gh_api_capture = lambda path: SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+    try:
+        paths, status = core._list_workflow_files("o/r")
+        p = core.repo_pr_target_posture("o/r")
+    finally:
+        core._gh_api_capture = save
+    check("posture: contents listing at API limit -> error", status == "error")
+    check("posture: contents listing at API limit -> no paths trusted", paths == [])
+    check("posture: contents listing at API limit -> fail closed",
+          p["pr_target"] is True and p["error"] is True)
+
+
+def test_posture_non_base64_workflow_file_fails_closed():
+    listing = [{"type": "file", "name": "ci.yml", "path": ".github/workflows/ci.yml"}]
+
+    def fake_capture(path):
+        if path.endswith("/contents/.github/workflows"):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(listing), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"encoding": "none", "content": ""}), stderr="")
+
+    save = core._gh_api_capture
+    core._gh_api_capture = fake_capture
+    try:
+        text = core._fetch_workflow_text("o/r", ".github/workflows/ci.yml")
+        p = core.repo_pr_target_posture("o/r")
+    finally:
+        core._gh_api_capture = save
+    check("posture: non-base64 workflow content -> unreadable", text is None)
+    check("posture: non-base64 workflow content -> fail closed",
+          p["pr_target"] is True and p["error"] is True)
+
+
 # --------------------------------------------------------------------------- #
 # build_repo routing: auto-approve vs card
 # --------------------------------------------------------------------------- #
@@ -302,8 +338,8 @@ def run_build_repo(pr_nodes, *, auto_approve_ci=True, repo_over=None, posture_va
             return verdict(slug, pr, repo_posture, changed_files)
         return SAFE_VERDICT if verdict is None else verdict
 
-    def fake_approve(owner, name, pr, posture=None):
-        calls["approve"].append((owner, name, pr, posture))
+    def fake_approve(owner, name, pr, posture=None, strict=False):
+        calls["approve"].append((owner, name, pr, posture, strict))
         if approve_raises:
             raise RuntimeError("approve boom")
         return approve_result
@@ -329,6 +365,8 @@ def test_safe_pr_is_auto_approved_no_card():
     check("route: safe PR is approved exactly once", len(calls["approve"]) == 1)
     check("route: approve received the per-repo posture",
           calls["approve"] and calls["approve"][0][3] == CLEAN_POSTURE)
+    check("route: auto approve runs in strict mode",
+          calls["approve"] and calls["approve"][0][4] is True)
     check("route: repo result still ok", result["ok"] is True)
 
 
@@ -455,7 +493,8 @@ def test_approve_exception_falls_back_to_card():
 
 
 def run_approve_ci(run_list_result, approval_results=None, run_details=None,
-                   pr_data=None, stub_safety=True, safety_verdict=None):
+                   pr_data=None, stub_safety=True, safety_verdict=None,
+                   posture=CLEAN_POSTURE, strict=False, repo_posture=None):
     approval_results = list(approval_results or [])
     run_details = run_details or {}
     calls = {"approved": [], "run_list": []}
@@ -487,15 +526,19 @@ def run_approve_ci(run_list_result, approval_results=None, run_details=None,
             return SimpleNamespace(returncode=0, stdout=json.dumps(detail), stderr="")
         raise AssertionError(cmd)
 
-    save = (core.subprocess.run, core.ci_safety)
+    def fake_posture(slug):
+        return CLEAN_POSTURE if repo_posture is None else repo_posture
+
+    save = (core.subprocess.run, core.ci_safety, core.repo_pr_target_posture)
     core.subprocess.run = fake_run
+    core.repo_pr_target_posture = fake_posture
     if stub_safety:
         core.ci_safety = lambda slug, pr, posture, changed_files=None: safety_verdict
     try:
-        status, message = core.approve_ci("o", "r", "1", posture=CLEAN_POSTURE)
+        status, message = core.approve_ci("o", "r", "1", posture=posture, strict=strict)
         return status, message, calls
     finally:
-        core.subprocess.run, core.ci_safety = save
+        core.subprocess.run, core.ci_safety, core.repo_pr_target_posture = save
 
 
 def test_approve_ci_run_list_failure_returns_error():
@@ -625,6 +668,41 @@ def test_approve_ci_non_default_base_warns_without_posture_read():
     check("approve_ci: non-default-base approval reaches matching run", calls["approved"] == ["101"])
 
 
+def test_approve_ci_strict_blocks_approval_time_pr_target_posture():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="")]
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+        approvals,
+        {"101": {"head_sha": "sha1", "pull_requests": [{"number": 1}]}},
+        stub_safety=False,
+        strict=True,
+        repo_posture={"pr_target": True, "exploit": False, "error": False})
+    check("approve_ci: strict pr_target posture -> error", status == "error")
+    check("approve_ci: strict pr_target posture approves nothing", calls["approved"] == [])
+    check("approve_ci: strict pr_target posture explains safety block",
+          "pull_request_target" in message)
+
+
+def test_approve_ci_strict_blocks_non_default_base():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="")]
+    pr_data = {"head": {"ref": "feature", "sha": "sha1"},
+               "base": {"ref": "release", "repo": {"default_branch": "main"}},
+               "changed_files": 0}
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+        approvals,
+        {"101": {"head_sha": "sha1", "pull_requests": [{"number": 1}]}},
+        pr_data=pr_data,
+        stub_safety=False,
+        strict=True)
+    check("approve_ci: strict non-default-base -> error", status == "error")
+    check("approve_ci: strict non-default-base approves nothing", calls["approved"] == [])
+    check("approve_ci: strict non-default-base explains safety block",
+          "release" in message and "main" in message)
+
+
 def test_opt_out_global_disables_auto_approve():
     result, items, calls = run_build_repo([needs_ci_pr()], auto_approve_ci=False)
     check("opt-out: safe PR STILL raises a card", len(items) == 1)
@@ -731,6 +809,8 @@ def main():
     test_posture_detects_pull_request_target()
     test_posture_detects_exploit_pattern()
     test_posture_unreadable_or_unparseable_file_fails_closed()
+    test_posture_contents_listing_limit_fails_closed()
+    test_posture_non_base64_workflow_file_fails_closed()
     test_safe_pr_is_auto_approved_no_card()
     test_risky_pr_raises_card_not_approved()
     test_pr_target_posture_raises_card_with_warning()
@@ -752,6 +832,8 @@ def main():
     test_approve_ci_no_matching_runs_returns_noop_without_approving()
     test_approve_ci_run_detail_failure_returns_error()
     test_approve_ci_non_default_base_warns_without_posture_read()
+    test_approve_ci_strict_blocks_approval_time_pr_target_posture()
+    test_approve_ci_strict_blocks_non_default_base()
     test_opt_out_global_disables_auto_approve()
     test_opt_out_card_still_carries_pr_target_warning()
     test_per_repo_override_disables_auto_approve()

@@ -354,7 +354,7 @@ def _auto_approve_or_card(owner, name, pr_number, posture, auto_enabled, changed
     verdict = ci_safety("%s/%s" % (owner, name), str(pr_number), posture, changed_files)
     if auto_enabled and verdict["safe"]:
         try:
-            status, message = approve_ci(owner, name, str(pr_number), posture=posture)
+            status, message = approve_ci(owner, name, str(pr_number), posture=posture, strict=True)
         except Exception as e:  # an approve that throws must fall back to a card
             status, message = ("error", "auto-approve raised: %s" % str(e)[:160])
         if status == "approved":
@@ -616,6 +616,8 @@ def _list_workflow_files(slug):
         return ([], "error")
     if not isinstance(entries, list):  # a file where a dir was expected
         return ([], "none")
+    if len(entries) >= 1000:
+        return ([], "error")
     paths = []
     for e in entries:
         if isinstance(e, dict) and e.get("type") == "file":
@@ -631,9 +633,12 @@ def _fetch_workflow_text(slug, path):
     if r.returncode != 0:
         return None
     try:
-        content = json.loads(r.stdout).get("content")
+        data = json.loads(r.stdout)
     except ValueError:
         return None
+    if not isinstance(data, dict) or data.get("encoding") != "base64":
+        return None
+    content = data.get("content")
     if content is None:
         return None
     try:
@@ -776,13 +781,14 @@ def _workflow_run_matches_pr(slug, run_id, pr, head_sha):
     return (True, "")
 
 
-def approve_ci(owner, repo, pr, posture=None):
+def approve_ci(owner, repo, pr, posture=None, strict=False):
     """Approve fork-PR workflow runs awaiting maintainer approval.
 
     `posture` (from `repo_pr_target_posture`) is passed by the scan-time auto path
     to avoid re-reading the repo's workflows; the manual path leaves it None and
     it is computed here. The security verdict is `ci_safety` - the SAME definition
-    the auto path uses.
+    the auto path uses. With `strict=True`, approval-time safety is re-read and
+    any non-safe verdict blocks approval.
 
     Returns (status, message). status in:
       approved - one or more runs approved
@@ -811,7 +817,7 @@ def approve_ci(owner, repo, pr, posture=None):
     base_posture = _non_default_base_posture(base_ref, default_branch)
     if base_posture is not None:
         posture = base_posture
-    elif posture is None:
+    elif strict or posture is None:
         posture = repo_pr_target_posture(slug)
     verdict = ci_safety(slug, pr, posture, changed_files)
 
@@ -825,6 +831,10 @@ def approve_ci(owner, repo, pr, posture=None):
                 % (pr, _display_list(verdict["risky_files"])))
 
     warn = _approve_warning_suffix(verdict)
+    if strict and not verdict["safe"]:
+        return ("error", "#%s (%s@%s): strict auto-approval blocked by approval-time "
+                "safety verdict: %s%s"
+                % (pr, head_ref, head_sha[:8], verdict.get("reason") or "not safe", warn))
 
     run_list_limit = 30
     lst = subprocess.run(
