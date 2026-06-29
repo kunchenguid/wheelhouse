@@ -40,7 +40,15 @@ still appears where it's plain English, e.g. "triage the queue".)
   `concurrency` + issues/labels/comments).
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
   (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
-  (scheduled scan -> reconcile), `deep-review` (phase 2, inert).
+  (scheduled scan -> reconcile), `deep-review` (phase 2, inert),
+  `no-mistakes-required` (PR-to-`main` gate: the job `name:` MUST stay exactly
+  `PR must be raised via no-mistakes` - it is the check name the fleet convention
+  and this repo's own `wheelhouse.config.yml compliance_check` reference - and it
+  passes only when the PR body carries the no-mistakes signature
+  `Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)`,
+  with bot authors skipped; Wheelhouse dogfoods on itself the same gate it enforces
+  on the fleet, so contributions go through `git push no-mistakes` - see
+  `CONTRIBUTING.md`).
 - **Scripts:** `wheelhouse_core.py` (scan/classify/dedup/security gate + shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`),
   `render_card.py` (render + card CRUD), `apply_decision.py` (deterministic
