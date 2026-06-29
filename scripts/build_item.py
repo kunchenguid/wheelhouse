@@ -9,6 +9,10 @@ normalized item.json that render_card.py can turn into a card.
 Expected fields (all but repo/number optional):
   repo, number, kind, head_sha, title, author, bucket, comp, tests,
   summary, recommendation, priority, options (list or comma string)
+
+When omitted, `options` defaults by kind via render_card.CHECKBOX_OPTIONS:
+pr-review and issue-triage include the non-consuming `investigate` checkbox;
+ci-approval does not.
 """
 import json
 import os

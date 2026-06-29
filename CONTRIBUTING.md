@@ -35,6 +35,7 @@ python tests/test_decision.py
 python tests/test_card_refresh.py
 python tests/test_reconcile.py
 python tests/test_ci_autoapprove.py
+python tests/test_deep_review.py
 python - <<'PY'
 from pathlib import Path
 import yaml
@@ -55,4 +56,4 @@ actionlint .github/workflows/*.yml
 ## Setting up the repository itself
 
 If you are forking Wheelhouse to run your own queue rather than changing this codebase, follow the numbered checklist in the [README](README.md#setup---a-numbered-checklist) instead.
-That covers the fleet config, the `FLEET_TOKEN` secret, and the optional LLM side-jobs.
+That covers the fleet config, the `FLEET_TOKEN` secret, and the Claude-powered features.

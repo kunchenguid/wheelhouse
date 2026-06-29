@@ -25,7 +25,11 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `summary`        | no       | one-line situation summary                                         |
 | `recommendation` | no       | recommended action shown on the card                              |
 | `priority`       | no       | `high` / `med` / `low`                                             |
-| `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`)      |
+| `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
+
+Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
+`investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
+If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
 If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`), the hub refreshes it in place.
@@ -104,6 +108,6 @@ You can exercise the whole path without touching a source repo:
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
 2. Fill in `repo`, `number`, and (recommended) `head_sha`.
 3. A decision card appears in the hub's issues; if one already exists, material changes refresh it in place.
-4. Tick a box to confirm the handler acts on the target.
+4. Tick a consuming decision box to confirm the handler acts on the target.
 
 This is the quickest way to validate `FLEET_TOKEN` scope before wiring real dispatches.

@@ -4,10 +4,10 @@
 
 A personal, always-on, cross-repo **"what needs my decision"** command center, built entirely on GitHub Issues + GitHub Actions.
 Every issue in this repo is one pending decision about the repositories you maintain - a PR worth merging, a fork-CI run worth approving, an issue worth triaging.
-You answer by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card.
+You make final decisions by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card.
 No server, no database, no bot to host - just this repo and a couple of secrets.
 
-Fork it, edit one config file, add one secret, and you have your own Wheelhouse.
+Fork it, edit one config file, add one required secret, and you have your own Wheelhouse.
 
 Changing the Wheelhouse codebase itself goes through [`CONTRIBUTING.md`](CONTRIBUTING.md).
 PRs to `main` must be raised by `git push no-mistakes`, which writes the signature checked by the **"PR must be raised via no-mistakes"** workflow.
@@ -33,7 +33,7 @@ Two Claude-powered features layer on top, both needing only a Claude subscriptio
 ## Setup - a numbered checklist
 
 Follow these top to bottom.
-You only ever edit **one file** (`wheelhouse.config.yml`) and add **one secret** (`FLEET_TOKEN`).
+You only ever edit **one file** (`wheelhouse.config.yml`) and add **one required secret** (`FLEET_TOKEN`).
 
 ### 1. Fork it
 
@@ -116,7 +116,7 @@ Two ways for items to enter the queue, and you can use either or both:
 
 1. In this repo, open the **Actions** tab ▸ **scan-backstop** ▸ **Run workflow**.
 2. Watch the run. Within a minute, decision-card issues should appear or refresh for anything in your fleet that needs your call.
-3. Tick a checkbox on one card and confirm the action lands on the target repo and the card closes.
+3. Tick a consuming decision checkbox on one card and confirm the action lands on the target repo and the card closes.
 
 If nothing appears, see [Troubleshooting](#troubleshooting).
 
@@ -124,7 +124,7 @@ If nothing appears, see [Troubleshooting](#troubleshooting).
 
 You drive the queue three ways - whichever fits the decision:
 
-- **Quick calls - tick a checkbox.** Each card offers the relevant boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*). Tick exactly one; the handler executes it and closes the card.
+- **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*). Tick exactly one; the handler executes it and closes the card.
 - **Want a deeper look first? - tick *Investigate*.** PR-review and issue-triage cards also offer an *Investigate - deep code-grounded review* box. It is the one tick that **does not consume the card**: it kicks off a code-grounded deep review (Claude checks out the target's code read-only and posts a merit/triage verdict as a comment) and leaves the card open with the box cleared, so you can investigate again after new commits and still make your real call afterwards. (CI-approval cards don't offer it - that's a fast security gate, not a merit review.) It needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)); without it the card just gets a one-line "needs token" note. Applying the `needs-deep-review` label by hand does the same thing.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR.
@@ -133,7 +133,7 @@ You drive the queue three ways - whichever fits the decision:
   - `/decline <reason>` - post your reason on the target, then close it.
   - `/hold` - park the card (labels it `blocked`, leaves it for you to handle manually).
   - `/comment <text>` - post your comment to the target and leave the card open.
-- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-enable-the-llm-side-jobs)), reply to a card in normal language and Claude maps what you meant onto the same actions above. It does one of three things:
+- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above. It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong". It runs that action on the target and closes the card, exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD).
   - **Answers** when you're asking - "why is this safe to merge?", "what's the risk here?". It reads the target (diff/issue) and replies on the card, and **leaves the card open** so you can keep the thread going.
   - **Asks you to confirm** when it's unsure - so an ambiguous comment gets a reply instead of silence.
