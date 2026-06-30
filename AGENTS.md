@@ -323,6 +323,8 @@ refreshability-guard / label-replace logic, pure functions, no network,
 `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
 no network, `python tests/test_ci_autoapprove.py` - the shared `ci_safety`
 verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed, and
+`python tests/test_author_filter.py` - queue author filtering across PR review,
+CI approval, and issue triage, no network, and
 `python tests/test_deep_review.py` - the always-on/code-grounded deep-review +
 Investigate wiring: render options, the removed enable flag, the token-absent
 note, the `persist-credentials: false` checkout + read-only tool isolation, the

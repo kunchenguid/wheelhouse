@@ -247,6 +247,7 @@ tests/test_decision.py         offline unit test for the parse/route logic (mock
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, and logging
+tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
