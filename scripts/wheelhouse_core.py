@@ -66,7 +66,7 @@ query($owner:String!, $name:String!) {
       totalCount
       nodes {
         number title isDraft updatedAt changedFiles isCrossRepository
-        author { login }
+        author { login __typename }
         headRefName headRefOid baseRefName
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
@@ -84,7 +84,7 @@ query($owner:String!, $name:String!) {
     }
     issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
-      nodes { number title updatedAt author{login} labels(first:20){nodes{name}} }
+      nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
     }
   }
 }
@@ -392,6 +392,36 @@ def _auto_approve_enabled(repo_cfg, global_default):
     return global_default if v is None else bool(v)
 
 
+def _author_login(author):
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("login") or "").strip()
+
+
+def _author_typename(author):
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("__typename") or "").strip()
+
+
+def _author_is_bot(author):
+    typename = _author_typename(author)
+    login = _author_login(author)
+    return typename == "Bot" or login.casefold().endswith("[bot]")
+
+
+def _author_excluded_from_queue(author, maintainer_logins):
+    """Return true only when authorship is known to be maintainer or bot.
+
+    Missing author metadata fails open so a real contributor is not silently
+    dropped from the maintainer's worklist.
+    """
+    if _author_is_bot(author):
+        return True
+    login = _author_login(author)
+    return bool(login and login.casefold() in maintainer_logins)
+
+
 def _display_list(values, limit=10):
     items = [str(v) for v in (values or [])]
     if len(items) <= limit:
@@ -543,10 +573,12 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
     prs = data["pullRequests"]["nodes"]
     issues = data["issues"]["nodes"]
     default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
+    maintainer_logins = {login.casefold() for login in maintainers()}
     all_names = set()
     enriched = []
     closing = {}  # issue -> [pr numbers]
     for pr in prs:
+        author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
@@ -558,7 +590,10 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
             {
                 "number": pr["number"],
                 "title": pr["title"],
-                "author": (pr.get("author") or {}).get("login", "?"),
+                "author": _author_login(author) or "?",
+                "author_excluded": _author_excluded_from_queue(
+                    author, maintainer_logins
+                ),
                 "comp": comp,
                 "tests": tests,
                 "ci": ci,
@@ -579,6 +614,8 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
 
     items = []
     for pr in enriched:
+        if pr["author_excluded"]:
+            continue
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
         kind = PR_KIND[pr["bucket"]]
@@ -652,6 +689,9 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
 
     if card_issues:
         for it in issues:
+            author = it.get("author") or {}
+            if _author_excluded_from_queue(author, maintainer_logins):
+                continue
             if it["number"] in addressed:
                 continue  # an open PR is already on it
             items.append(
@@ -661,7 +701,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
                     "kind": "issue-triage",
                     "head_sha": "",
                     "title": it["title"],
-                    "author": (it.get("author") or {}).get("login", "?"),
+                    "author": _author_login(author) or "?",
                     "bucket": "issue-triage",
                     "comp": "n/a",
                     "tests": "n/a",

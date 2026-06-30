@@ -204,6 +204,10 @@ still appears where it's plain English, e.g. "triage the queue".)
 - `wheelhouse_core.py scan` is resilient: a repo that fails to read is reported as a
   warning (`ok:false`) and skipped, and `reconcile.py` must never close cards for
   an `ok:false` repo (state unknown).
+- **Queue author filter.** Decision cards are for other people's work, so `build_repo` excludes PRs and issues authored by the canonical maintainer set (`wheelhouse_core.maintainers()` = repo owner plus optional configured `maintainer`) or by bots.
+  Bot detection uses the GraphQL `author.__typename == "Bot"` signal plus the `*[bot]` login suffix fallback.
+  Missing or unreadable author metadata fails open, so an unknown author can still raise a card rather than silently dropping a human contributor's work.
+  Skipped targets still remain in `open_pr_numbers` / `open_issue_numbers` but are absent from the `items` worklist, so `reconcile.py` consumes any existing pure `needs-decision` owner, maintainer, or bot card on the next successful scan.
 - **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
   shared `ci_safety(slug, pr, repo_posture)` verdict is the single security
   definition; `approve_ci` uses it too, so the auto path is a STRICT SUBSET of the
