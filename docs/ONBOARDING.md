@@ -101,7 +101,8 @@ jobs:
   Ingest dispatches create or refresh a card immediately; they do not run the scan-time `auto_approve_ci` path.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
   If the scan later verifies that no matching run is awaiting approval, it emits no worklist item and reconcile consumes any stale CI-approval card.
-  The `scan-backstop` logs emit one notice for each approved or no-pending run, or one `wheelhouse auto-approve carded ...` warning for each carded run, including the safety or uncertainty reason and any approval status/message.
+  The `scan-backstop` logs emit one notice for each approved or no-pending run, one `wheelhouse auto-approve carded ...` warning for each contributor run that becomes a card, or one `wheelhouse auto-approve suppressed-card ...` warning for each owner, maintainer, or bot run that cannot be approved and does not emit a card.
+  Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
 - **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger. (The hub also cards issues from the backstop when `card_issues: true`.)
