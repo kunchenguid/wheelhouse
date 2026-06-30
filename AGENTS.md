@@ -204,6 +204,14 @@ still appears where it's plain English, e.g. "triage the queue".)
 - `wheelhouse_core.py scan` is resilient: a repo that fails to read is reported as a
   warning (`ok:false`) and skipped, and `reconcile.py` must never close cards for
   an `ok:false` repo (state unknown).
+- **Queue author filter.**
+  Decision cards are for other people's work, so `build_repo` suppresses cards for PRs and issues authored by the canonical maintainer set (`wheelhouse_core.maintainers()` = repo owner plus optional configured `maintainer`) or by bots.
+  Bot detection uses the GraphQL `author.__typename == "Bot"` signal plus the `*[bot]` login suffix fallback.
+  Missing or unreadable author metadata fails open, so an unknown author can still raise a card rather than silently dropping a human contributor's work.
+  The author filter suppresses card emission only; for fork PRs in `needs-ci-approval`, the normal safety-gated auto-approve/noop path still runs first so safe owner, maintainer, and bot CI runs do not hang awaiting approval.
+  This deliberately bypasses the global or per-repo `auto_approve_ci: false` opt-out only for those author-excluded ci-approval PRs; contributor PRs still honor the opt-out and card as before.
+  Unsafe, uncertain, or failed owner, maintainer, and bot CI-approval targets still do not emit cards, but they keep the scan-log warning.
+  Skipped targets still remain in `open_pr_numbers` / `open_issue_numbers` but are absent from the `items` worklist, so `reconcile.py` consumes any existing pure `needs-decision` owner, maintainer, or bot card on the next successful scan.
 - **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
   shared `ci_safety(slug, pr, repo_posture)` verdict is the single security
   definition; `approve_ci` uses it too, so the auto path is a STRICT SUBSET of the
@@ -220,39 +228,49 @@ still appears where it's plain English, e.g. "triage the queue".)
   pattern (best-effort - parses jobs/steps; note the YAML 1.1 gotcha where the
   bare `on:` key parses as boolean `True`, handled in `_on_triggers`). In
   `build_repo` (the `FLEET_TOKEN` scan context), for each fork
-  `needs-ci-approval` PR: if auto-approve is enabled AND the verdict is `safe`
-  (no risky files, no posture, no read error), call `approve_ci`; `approved` and
-  verified `noop` both emit NO card (log a `::notice::` to stderr - never stdout,
-  which carries scan.json), while `hold`/`error`/throw fall back to a
-  `ci-approval` card carrying the safety warning. Otherwise emit the
-  `ci-approval` card exactly as before, carrying the safety warning. **Fail
-  closed everywhere**: an unsafe verdict, a `hold`/`error` from the approve, or
-  an approve that throws all fall back to a card - nothing is silently dropped.
+  `needs-ci-approval` PR: if the verdict is `safe` (no risky files, no posture,
+  no read error) and auto-approve is enabled or the author is excluded as
+  owner/maintainer/bot, call `approve_ci`; `approved` and verified `noop` both emit NO card
+  (log a `::notice::` to stderr - never stdout, which carries scan.json), while
+  `hold`/`error`/throw fall back to a `ci-approval` card carrying the safety
+  warning for contributor-authored PRs.
+  Otherwise emit the `ci-approval` card exactly as before for contributor-authored
+  PRs, carrying the safety warning.
+  **Fail closed everywhere**: an unsafe verdict, a `hold`/`error` from the approve,
+  or an approve that throws all fall back to a card for contributor-authored PRs;
+  owner, maintainer, and bot-authored PRs are not approved and instead log
+  `suppressed-card` with no decision card.
   `ci-approval` is fork-only: same-repo PRs with no CI signal route to
   `review-needed`, while unknown fork status fails safe by raising a manual
-  `ci-approval` card with no auto-approve attempt.
+  `ci-approval` card with no auto-approve attempt for contributor-authored PRs
+  and by logging `suppressed-card` for owner, maintainer, and bot-authored PRs.
   An `approve_ci` `noop` is a verified "nothing awaiting approval" state, so the
   scan emits no worklist item and reconcile consumes any stale card; if a real
-  pending run appears on a later scan, the normal create/approve/card path runs
-  again.
+  pending run appears on a later scan, the normal approve/card/suppressed-card
+  path runs again.
   Fork-originated `action_required` workflow runs are expected to have an empty `workflow_run.pull_requests` list, so `approve_ci` verifies that fork case with the already-filtered run's exact `head_sha` plus `head_branch`; non-empty `pull_requests` stays strict and must contain exactly the target PR.
   **Observability (every outcome is logged, never silent).** `_auto_approve_or_card`
   returns `(handled, card_note, log_note)` and `build_repo` emits exactly ONE
   stderr line per `needs-ci-approval` PR the auto path handles: a `::notice::`
   when approved or verified no-op, else a `::warning::wheelhouse auto-approve
-  carded <repo>#<pr>: <log_note>`. The `log_note` always carries the `ci_safety`
-  verdict `reason` and, when an approve was attempted, the `approve_ci` `status`
-  + `message` (e.g. `error: <gh stderr>`, `hold`), so a real approve failure that
-  used to be swallowed into the card body is now visible in the scan-step log -
-  the next `scan-backstop` run shows exactly why each safe-looking PR was not
-  approved. Unknown fork status is logged as a carded warning with its uncertainty
-  reason before safety is attempted. This is logging only: it never changes the
-  verdict, the approve/card decision, token usage, or fail-closed behavior, the
-  `card_note` going into `item["warning"]` is unchanged, and the line is gh
+  carded <repo>#<pr>: <log_note>` for contributor-authored PRs or
+  `::warning::wheelhouse auto-approve suppressed-card <repo>#<pr>: <log_note>`
+  for owner, maintainer, and bot-authored PRs.
+  The `log_note` always carries the `ci_safety` verdict `reason` and, when an approve was attempted, the
+  `approve_ci` `status` + `message` (e.g. `error: <gh stderr>`, `hold`), so a real
+  approve failure that used to be swallowed into the card body is now visible in
+  the scan-step log - the next `scan-backstop` run shows exactly why each
+  safe-looking PR was not approved. Unknown fork status is logged as a carded or
+  suppressed-card warning with its uncertainty reason before safety is attempted.
+  This is logging only: it never changes the verdict, the approve/card decision,
+  token usage, or fail-closed behavior, the `card_note` going into
+  `item["warning"]` for emitted cards is unchanged, and the line is gh
   stderr/status text, never a secret value.
   Idempotent by construction: once approved the next scan sees CI running/results
   (not `needs-ci-approval`), so it is not re-approved; a later push that adds a
-  workflow file or flips the posture routes the PR back to a card. The auto path
+  workflow file or flips the posture routes contributor-authored PRs back to a
+  card and owner, maintainer, or bot-authored PRs to `suppressed-card`.
+  The auto path
   runs ONLY on the `ok:true` success path of `build_repo` (an `ok:false` repo
   returns early), so an unknown-state repo is never auto-approved - the same
   invariant that bars closing its cards. Token discipline holds: the approve is a
@@ -316,6 +334,8 @@ refreshability-guard / label-replace logic, pure functions, no network,
 `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
 no network, `python tests/test_ci_autoapprove.py` - the shared `ci_safety`
 verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed, and
+`python tests/test_author_filter.py` - queue author filtering across PR review,
+CI approval, and issue triage, no network, and
 `python tests/test_deep_review.py` - the always-on/code-grounded deep-review +
 Investigate wiring: render options, the removed enable flag, the token-absent
 note, the `persist-credentials: false` checkout + read-only tool isolation, the

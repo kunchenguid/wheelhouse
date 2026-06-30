@@ -13,6 +13,8 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
   * closes any open card whose underlying PR/issue is no longer open, and closes
     pure pending cards whose open target no longer needs a maintainer decision -
     so the queue self-heals even if a dispatch was lost.
+    This also consumes old scan-built cards for owner/maintainer/bot-authored
+    targets after the author filter removes them from the current worklist.
 
 Both card operations run against THIS repo via the ambient GH_TOKEN, which the
 workflow sets to the default GITHUB_TOKEN (card activity must not re-trigger the

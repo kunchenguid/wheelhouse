@@ -4,8 +4,10 @@ name: scan-backstop
 # fleet, open cards for anything new that needs a decision, REFRESH an open
 # `needs-decision` card whose target materially changed, and close cards whose
 # target is merged/closed, plus pure pending cards whose open target no longer
-# needs a maintainer decision - so the queue reflects current state and
-# self-heals. The ingest event path still upserts on dispatch, but the hourly
+# needs a maintainer decision - including owner/maintainer/bot-authored targets
+# that the scan author filter now leaves out of the worklist - so the queue
+# reflects current state and self-heals. The ingest event path still upserts on
+# dispatch, but the hourly
 # reconcile is what keeps cards fresh; running it hourly is safe precisely
 # because reconcile refreshes only on a material change and is a full no-op
 # otherwise (see reconcile.py / render_card.upsert_card, AGENTS.md "Card refresh").

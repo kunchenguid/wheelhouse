@@ -68,7 +68,9 @@ repos:
     test_check_patterns: ["build-and-test"]
 
 # Optional GitHub login allowed to drive decisions, in addition to the repo
-# owner. Leave empty to use the repository owner (github.repository_owner).
+# owner. The scheduled scan also treats this login as "your work" and skips
+# cards for PRs/issues it authored. Leave empty to use only the repository owner
+# (github.repository_owner).
 maintainer: ""
 
 # Code-grounded deep review is ALWAYS available (there is no enable flag). Tick
@@ -91,26 +93,34 @@ maintainer: ""
 nl_decisions: true
 
 # Whether the scheduled backstop also opens decision cards for open *issues*
-# that have no linked PR (in addition to PRs that need your call). Phase-1
-# default is PRs only (high signal); flip to true once you want issue triage in
-# the queue, or tick a card's "Investigate" box for a code-grounded read on it.
+# that have no linked PR (in addition to PRs that need your call). Issues
+# authored by the repo owner, configured maintainer, or bots are skipped by the
+# scan. Phase-1 default is PRs only (high signal); flip to true once you want
+# contributor issue triage in the queue, or tick a card's "Investigate" box for
+# a code-grounded read on it.
 card_issues: false
 
 # Auto-approve provably-safe fork-CI runs at scan time, so only risky or
-# uncertain ones still raise an "approve CI" card for you. DEFAULT ON (this key is
-# absent -> treated as true), because the same security gate that holds risky
-# runs for the manual path is applied BEFORE auto-approving:
+# uncertain contributor-authored ones still raise an "approve CI" card for you.
+# Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop
+# path, but risky or uncertain cases log `suppressed-card` and emit no card.
+# DEFAULT ON (this key is absent -> treated as true), because the same security
+# gate that holds risky runs for the manual path is applied BEFORE
+# auto-approving:
 #   * a PR that changes CI-execution files (.github/workflows, .github/actions,
 #     action.yml/.yaml) is NEVER auto-approved (the pwn-request HOLD), and
 #   * a repo whose base branch runs a `pull_request_target` workflow is never
-#     auto-cleared either - its CI-approval still raises a card (with a warning).
+#     auto-cleared either - contributor PRs raise a card with a warning, while
+#     excluded-author PRs log `suppressed-card`.
 # Same-repo PRs with no CI signal route to normal review, not CI approval.
-# Unknown fork status fails closed to a manual CI-approval card.
+# Unknown fork status fails closed to a manual CI-approval card for contributors
+# or a `suppressed-card` warning for excluded authors.
 # If the approval call verifies no matching run is awaiting approval, scan emits
 # no card and reconcile consumes any stale CI-approval card.
-# Everything uncertain fails closed to a card. The scan-backstop log records one
-# notice or warning for every auto-approve path outcome, including no-pending
-# runs and approval failures that route back to a card.
+# Everything uncertain fails closed to a contributor card or excluded-author
+# `suppressed-card`. The scan-backstop log records one notice or warning for
+# every auto-approve path outcome, including no-pending runs, approval failures
+# that route back to a card, and suppressed-card cases.
 # The approval call also verifies each action_required workflow run against the
 # target PR: GitHub-populated pull_requests must name exactly that PR, and
 # fork-originated empty associations must match the PR head SHA plus head branch.
@@ -118,7 +128,8 @@ card_issues: false
 # workflow runs automatically with repo secrets and is NOT gated by any approval,
 # so the posture check is a "don't silently auto-clear + warn me" signal plus a
 # loud flag when such a workflow also checks out the PR head - not a block of
-# that vector. Set to false to opt out (every fork needs-ci-approval PR -> a
-# card, exactly as before). You can also override per repo with a `auto_approve_ci:
-# false` key on any entry under `repos:` above.
+# that vector. Set to false to opt out for contributor PRs (every contributor
+# fork needs-ci-approval PR -> a card, exactly as before). Excluded-author safe
+# fork PRs still run the safety-gated approve/noop path. You can also override
+# per repo with a `auto_approve_ci: false` key on any entry under `repos:` above.
 auto_approve_ci: true

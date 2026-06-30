@@ -4,10 +4,13 @@ Wheelhouse - deterministic brain (ported from the local OSS-triage machinery).
 
 Runs inside GitHub Actions. One GraphQL query per repo fetches every open
 PR/issue with compliance + test status, classifies each deterministically, and
-emits a worklist of items that need the maintainer's decision. Also carries the
+emits a worklist of items that need the maintainer's decision. The scan excludes
+known owner, configured maintainer, and bot authors from that worklist while
+failing open when author metadata is missing. Also carries the
 security-gated CI approval (the fork-CI / pwn-request HOLD) and the scan-time
-auto-approval of provably-safe fork-CI runs (so only risky or uncertain ones
-raise a card, and verified no-pending runs emit no stale card). The auto path
+auto-approval of provably-safe fork-CI runs (so only contributor-authored risky
+or uncertain ones raise a card, excluded-author failures log suppressed-card,
+and verified no-pending runs emit no stale card). The auto path
 logs exactly one stderr workflow-command line per CI-approval candidate it
 handles, so approvals, no-pending results, approve failures, and fail-closed
 verdicts are visible in the scan-backstop run log.
@@ -66,7 +69,7 @@ query($owner:String!, $name:String!) {
       totalCount
       nodes {
         number title isDraft updatedAt changedFiles isCrossRepository
-        author { login }
+        author { login __typename }
         headRefName headRefOid baseRefName
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
@@ -84,7 +87,7 @@ query($owner:String!, $name:String!) {
     }
     issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
-      nodes { number title updatedAt author{login} labels(first:20){nodes{name}} }
+      nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
     }
   }
 }
@@ -392,6 +395,36 @@ def _auto_approve_enabled(repo_cfg, global_default):
     return global_default if v is None else bool(v)
 
 
+def _author_login(author):
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("login") or "").strip()
+
+
+def _author_typename(author):
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("__typename") or "").strip()
+
+
+def _author_is_bot(author):
+    typename = _author_typename(author)
+    login = _author_login(author)
+    return typename == "Bot" or login.casefold().endswith("[bot]")
+
+
+def _author_excluded_from_queue(author, maintainer_logins):
+    """Return true only when authorship is known to be owner/maintainer or bot.
+
+    Missing author metadata fails open so a real contributor is not silently
+    dropped from the maintainer's worklist.
+    """
+    if _author_is_bot(author):
+        return True
+    login = _author_login(author)
+    return bool(login and login.casefold() in maintainer_logins)
+
+
 def _display_list(values, limit=10):
     items = [str(v) for v in (values or [])]
     if len(items) <= limit:
@@ -432,7 +465,7 @@ def _ci_safety_note(verdict):
         parts.append(
             "This PR targets base branch `%s`, but the repo default is `%s`. "
             "Wheelhouse only auto-checks `pull_request_target` posture on the "
-            "default branch, so it fails closed and raises a card for manual review."
+            "default branch, so it fails closed for manual review."
             % (base, default)
         )
     elif verdict.get("exploit"):
@@ -466,8 +499,8 @@ def _auto_approve_or_card(
       * handled=True  -> the run was auto-approved OR there is no pending run to
         approve; emit NO card. `card_note` is unused (None) and `log_note` is
         the audit line for the scan-step `::notice::`.
-      * handled=False -> raise a card; `card_note` is the safety warning to
-        surface on the card body (may be "", left EXACTLY as before), and
+      * handled=False -> return a card fallback; `card_note` is the safety warning
+        to surface on the card body (may be "", left EXACTLY as before), and
         `log_note` is the per-PR outcome line for the scan-step `::warning::`.
     `log_note` ALWAYS carries the `ci_safety` verdict `reason`, plus - when an
     approve was attempted - the `approve_ci` `status` + `message`. That is what
@@ -475,7 +508,7 @@ def _auto_approve_or_card(
     the scan log; it is a logging string only (gh stderr/status text, never a
     token) and does NOT change the card body.
     Fails CLOSED: any uncertainty (unsafe verdict, hold, approve error/exception)
-    routes to a card so nothing is ever silently lost."""
+    returns the caller-visible fallback outcome."""
     verdict = ci_safety("%s/%s" % (owner, name), str(pr_number), posture, changed_files)
     reason = verdict.get("reason", "")
     if auto_enabled and verdict["safe"]:
@@ -493,14 +526,14 @@ def _auto_approve_or_card(
                 None,
                 "verdict safe (%s); approve_ci noop: %s" % (reason, message),
             )
-        # hold / error -> fall through to a card (fail-closed), keeping the why.
+        # hold / error -> fall through to caller fallback (fail-closed), keeping the why.
         card_note = "auto-approve did not complete (%s: %s)" % (status, message)
         safety_note = _ci_safety_note(verdict)
         if safety_note:
             card_note += "; " + safety_note
         log_note = "verdict safe (%s); approve_ci %s: %s" % (reason, status, message)
         return (False, card_note, log_note)
-    # Auto-approve disabled, or an unsafe verdict -> card; no approve attempted.
+    # Auto-approve disabled, or an unsafe verdict -> caller fallback; no approve attempted.
     log_note = "verdict %s (%s); not auto-approved%s" % (
         "safe" if verdict["safe"] else "unsafe",
         reason,
@@ -512,14 +545,21 @@ def _auto_approve_or_card(
 def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
     """Scan one repo. Returns (repo_result, items).
 
+    Decision cards are for other people's work, so scan-built PR-review and
+    issue-triage items skip known owner/maintainer/bot authors. Missing author
+    metadata fails open.
+
     `auto_approve_ci` is the fleet-wide default (config `auto_approve_ci`, itself
     defaulting True); a repo may override it per-repo. Same-repo PRs with no CI
     signal route to normal review, not CI approval. Unknown fork status keeps a
-    manual CI-approval card with no auto-approve attempt. When enabled, a fork PR
+    manual CI-approval card with no auto-approve attempt for contributor-authored
+    PRs and logs a suppressed card for owner/maintainer/bot-authored PRs. When
+    enabled, or when the author is excluded from the decision queue, a fork PR
     whose `ci_safety` verdict is provably safe is approved here (in the
     FLEET_TOKEN scan context), or verified as having no pending run, and emits NO
-    card; everything risky/uncertain still becomes a card. Each handled
-    ci-approval PR also emits exactly one stderr notice/warning outcome line.
+    card; risky/uncertain contributor PRs still become cards while excluded-author
+    PRs only log suppressed-card warnings. Each handled ci-approval PR also emits
+    exactly one stderr notice/warning outcome line.
     This runs only on the ok:true success path below, so an ok:false repo (early
     return) is never auto-approved."""
     name = repo_cfg["name"]
@@ -543,10 +583,12 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
     prs = data["pullRequests"]["nodes"]
     issues = data["issues"]["nodes"]
     default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
+    maintainer_logins = {login.casefold() for login in maintainers()}
     all_names = set()
     enriched = []
     closing = {}  # issue -> [pr numbers]
     for pr in prs:
+        author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
@@ -558,7 +600,10 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
             {
                 "number": pr["number"],
                 "title": pr["title"],
-                "author": (pr.get("author") or {}).get("login", "?"),
+                "author": _author_login(author) or "?",
+                "author_excluded": _author_excluded_from_queue(
+                    author, maintainer_logins
+                ),
                 "comp": comp,
                 "tests": tests,
                 "ci": ci,
@@ -582,6 +627,9 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
         kind = PR_KIND[pr["bucket"]]
+        author_excluded = pr["author_excluded"]
+        if author_excluded and kind != "ci-approval":
+            continue
         overlap = _overlap_note(pr["number"], pr["closes"], closing, addressed)
         priority = "high" if overlap else PRIORITY.get(pr["bucket"], "low")
         summary = "compliance=%s tests=%s" % (pr["comp"], pr["tests"])
@@ -605,16 +653,24 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
 
         if kind == "ci-approval":
             if pr.get("cross_repo") is not True:
-                item["warning"] = (
+                card_note = (
                     "Wheelhouse could not determine whether this PR is from a "
                     "fork, so it is leaving fork-CI approval for manual review "
                     "instead of auto-approving or consuming the card."
                 )
                 print(
-                    "::warning::wheelhouse auto-approve carded %s#%s: "
-                    "fork status unknown; not auto-approved" % (name, pr["number"]),
+                    "::warning::wheelhouse auto-approve %s %s#%s: "
+                    "fork status unknown; not auto-approved"
+                    % (
+                        "suppressed-card" if author_excluded else "carded",
+                        name,
+                        pr["number"],
+                    ),
                     file=sys.stderr,
                 )
+                if author_excluded:
+                    continue
+                item["warning"] = card_note
                 items.append(item)
                 continue
             posture = _non_default_base_posture(pr.get("base_ref"), default_branch)
@@ -622,12 +678,13 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
                 if default_posture is None:
                     default_posture = repo_pr_target_posture(slug)
                 posture = default_posture
+            approve_enabled = auto_enabled or author_excluded
             handled, card_note, log_note = _auto_approve_or_card(
                 owner,
                 name,
                 pr["number"],
                 posture,
-                auto_enabled,
+                approve_enabled,
                 pr.get("changed_files"),
             )
             if handled:
@@ -637,14 +694,21 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
                     file=sys.stderr,
                 )
                 continue  # provably safe (or nothing to approve) -> NO card
-            # Carded: log exactly one per-PR outcome line so a silent approve
-            # failure (the inert-in-production failure mode) can never hide in the
-            # scan log again. The card body itself is unchanged.
+            # Log exactly one per-PR outcome line so a silent approve failure
+            # can never hide in the scan log. The card body itself is unchanged
+            # when one is emitted.
             print(
-                "::warning::wheelhouse auto-approve carded %s#%s: %s"
-                % (name, pr["number"], _workflow_command_text(log_note)),
+                "::warning::wheelhouse auto-approve %s %s#%s: %s"
+                % (
+                    "suppressed-card" if author_excluded else "carded",
+                    name,
+                    pr["number"],
+                    _workflow_command_text(log_note),
+                ),
                 file=sys.stderr,
             )
+            if author_excluded:
+                continue
             if card_note:  # surface the safety warning on the card body / response
                 item["warning"] = card_note
 
@@ -652,6 +716,9 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
 
     if card_issues:
         for it in issues:
+            author = it.get("author") or {}
+            if _author_excluded_from_queue(author, maintainer_logins):
+                continue
             if it["number"] in addressed:
                 continue  # an open PR is already on it
             items.append(
@@ -661,7 +728,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
                     "kind": "issue-triage",
                     "head_sha": "",
                     "title": it["title"],
-                    "author": (it.get("author") or {}).get("login", "?"),
+                    "author": _author_login(author) or "?",
                     "bucket": "issue-triage",
                     "comp": "n/a",
                     "tests": "n/a",
@@ -1334,8 +1401,8 @@ def maintainers():
     $OWNER / $GITHUB_REPOSITORY_OWNER) plus the optional configured `maintainer`.
 
     This is the SINGLE source of truth for "who is the maintainer" - the gate
-    (`authorized`) and the natural-language conversation-history filter both use
-    it, so trusted-author rules never drift apart."""
+    (`authorized`), the natural-language conversation-history filter, and the
+    scan author filter all use it, so trusted-author rules never drift apart."""
     owner = (
         os.environ.get("OWNER", "") or os.environ.get("GITHUB_REPOSITORY_OWNER", "")
     ).strip()

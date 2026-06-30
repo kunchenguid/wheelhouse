@@ -6,7 +6,8 @@ Run: python tests/test_ci_autoapprove.py   (needs PyYAML; no network)
 
 Wheelhouse auto-approves a fork PR's awaiting CI run when - and only when - the
 SAME security verdict the manual gate uses says it is provably safe, so the
-routine "approve CI" clicks disappear and only the risky ones still raise a card.
+routine "approve CI" clicks disappear and only risky contributor-authored ones
+still raise a card.
 These tests cover:
 
   * the shared verdict `ci_safety` - risky-file HOLD, pull_request_target
@@ -16,14 +17,15 @@ These tests cover:
     (`repo_pr_target_posture` + the pure `_on_triggers` / `_checks_out_pr_head`
     helpers), including the YAML 1.1 `on:`-parses-as-True gotcha and fail-closed
     read/parse errors;
-  * the auto-approve-vs-card routing in `build_repo`: a safe PR is approved and
-    raises NO card, a risky/posture/error PR still raises a card (with a
-    warning), an approve failure or exception falls back to a card, a verified
-    noop emits NO stale card, same-repo no-CI PRs route away from ci-approval,
-    and an ok:false repo is never auto-approved;
+  * the contributor auto-approve-vs-card routing in `build_repo`: a safe PR is
+    approved and raises NO card, a risky/posture/error PR still raises a card
+    (with a warning), an approve failure or exception falls back to a card, a
+    verified noop emits NO stale card, same-repo no-CI PRs route away from
+    ci-approval, and an ok:false repo is never auto-approved;
   * the scan-log observability contract: each auto-path CI-approval candidate
-    emits one notice when approved or one warning when carded, with the verdict
-    reason and any approve status/message;
+    emits one notice when approved or one warning when it falls back from the
+    contributor path to a card, with the verdict reason and any approve
+    status/message;
   * run-to-PR verification: same-repo runs use GitHub's populated
     `pull_requests` association, while fork runs with an empty association are
     bound by matching `head_sha` plus `head_branch`;
