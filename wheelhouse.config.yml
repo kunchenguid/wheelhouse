@@ -74,10 +74,11 @@ maintainer: ""
 # Code-grounded deep review is ALWAYS available (there is no enable flag). The
 # owner triggers it per card - tick the "Investigate" box or apply the
 # `needs-deep-review` label - and `deep-review.yml` checks out the target's code
-# read-only and posts a merit/triage verdict. The only thing it needs is the
-# CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`, a Claude
-# subscription token - NOT an API key); if that secret is absent the workflow
-# posts a one-line "needs token" note on the card instead of silently no-opping.
+# read-only, captures Claude's final response, and posts it as the merit/triage
+# verdict. The only thing it needs is the CLAUDE_CODE_OAUTH_TOKEN secret (from
+# `claude setup-token`, a Claude subscription token - NOT an API key); if that
+# secret is absent the workflow posts a one-line "needs token" note on the card
+# instead of silently no-opping.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
