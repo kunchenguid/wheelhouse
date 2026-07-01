@@ -73,7 +73,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `execute`; the NON-CONSUMING `investigate` routing + `clear-checkbox`; plus the
   natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
-  the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed answer
+  the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed LLM
   context),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
   create/**refresh**/close). `apply_decision` imports `wheelhouse_core` and

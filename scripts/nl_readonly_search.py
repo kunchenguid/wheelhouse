@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scoped read-only search helper for the nl_decisions Claude step.
+"""Scoped read-only search helper for Wheelhouse's Claude steps.
 
 The workflow installs this file as `wheelhouse-search` only when the optional
 READONLY_TOKEN secret is present. Claude can write a JSON request to

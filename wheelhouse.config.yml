@@ -77,19 +77,23 @@ maintainer: ""
 # the "Investigate" box, or have the repo owner apply the `needs-deep-review`
 # label or run `deep-review` with the card issue number. `deep-review.yml` checks
 # out the target's code read-only, captures Claude's final response, and posts it
-# as the merit/triage verdict. The only thing it needs is the
-# CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`, a Claude
-# subscription token - NOT an API key); if that secret is absent the workflow
-# posts a one-line "needs token" note on the card instead of silently no-opping.
+# as the merit/triage verdict. Its only required secret is
+# CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, a Claude subscription token
+# - NOT an API key); if that secret is absent the workflow posts a one-line
+# "needs token" note on the card instead of silently no-opping. The optional
+# READONLY_TOKEN secret enables scoped read-only search across the target repo
+# and configured fleet repos; without it deep review keeps the legacy no-shell,
+# Read/Grep/Glob-only behavior.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
 # secret (a Claude subscription token from `claude setup-token` - NOT an API key)
 # to let the decision handler route a plain-English owner comment on a card
 # through Claude: it MAPS the comment to an action ("merge it" -> merge), answers
-# a question, or asks you to clarify. The optional READONLY_TOKEN secret enables
-# read-only answer-mode search across the target repo and configured fleet repos.
-# Without it the Claude step keeps the legacy Write-only, no-shell behavior.
+# a question, or asks you to clarify. The optional READONLY_TOKEN secret also
+# enables read-only answer-mode search across the target repo and configured
+# fleet repos. Without it the Claude step keeps the legacy Write-only, no-shell
+# behavior.
 # The LLM only proposes a structured result - the deterministic executor still
 # performs (and guards) any action. Inert until both the flag and the Claude token
 # are present.
