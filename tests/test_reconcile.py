@@ -4,6 +4,7 @@ Unit-exercise reconcile routing with NO network.
 
 Run: python tests/test_reconcile.py
 """
+
 import io
 import json
 import os
@@ -11,7 +12,9 @@ import sys
 import tempfile
 from contextlib import redirect_stdout
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+)
 import reconcile  # noqa: E402
 
 _failures = []
@@ -27,9 +30,16 @@ def labels(*names):
     return [{"name": n} for n in names]
 
 
-def body_state(repo="wheelhouse", number=42, kind="pr-review",
-               head_sha="oldsha", comp="pass", tests="green", priority="med",
-               render_version=None):
+def body_state(
+    repo="wheelhouse",
+    number=42,
+    kind="pr-review",
+    head_sha="oldsha",
+    comp="pass",
+    tests="green",
+    priority="med",
+    render_version=None,
+):
     state = {
         "repo": repo,
         "number": number,
@@ -68,8 +78,7 @@ def work_item(**overrides):
 def run_reconcile(scan, cards, current_cards=None):
     calls = {"upsert": [], "close": []}
     current_by_number = {
-        c["number"]: c
-        for c in (cards if current_cards is None else current_cards)
+        c["number"]: c for c in (cards if current_cards is None else current_cards)
     }
 
     def fake_upsert(item, existing=None):
@@ -132,23 +141,53 @@ def card(labels_, kind="pr-review", render_version=None):
 def test_refresh_uses_known_card_when_target_label_missing():
     calls = run_reconcile(
         scan_payload(items=[work_item(priority="high")]),
-        [card(labels("needs-decision", "repo:wheelhouse", "kind:pr-review", "priority:med"))],
+        [
+            card(
+                labels(
+                    "needs-decision",
+                    "repo:wheelhouse",
+                    "kind:pr-review",
+                    "priority:med",
+                )
+            )
+        ],
     )
     check("reconcile: refresh called once", len(calls["upsert"]) == 1)
     existing = calls["upsert"][0]["existing"] if calls["upsert"] else None
-    check("reconcile: refresh receives known card row",
-          existing is not None and existing["number"] == 7)
-    check("reconcile: known row has missing target label",
-          existing is not None and all(label.get("name") != "target:wheelhouse-42"
-                                       for label in existing["labels"]))
+    check(
+        "reconcile: refresh receives known card row",
+        existing is not None and existing["number"] == 7,
+    )
+    check(
+        "reconcile: known row has missing target label",
+        existing is not None
+        and all(
+            label.get("name") != "target:wheelhouse-42" for label in existing["labels"]
+        ),
+    )
     check("reconcile: no close for refreshed worklist item", calls["close"] == [])
 
 
 def test_refresh_uses_current_labels_before_upsert():
-    snapshot = card(labels("needs-decision", "repo:wheelhouse", "kind:pr-review",
-                           "priority:med", "target:wheelhouse-42"))
-    current = card(labels("needs-decision", "processing", "repo:wheelhouse",
-                          "kind:pr-review", "priority:med", "target:wheelhouse-42"))
+    snapshot = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    current = card(
+        labels(
+            "needs-decision",
+            "processing",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
     calls = run_reconcile(
         scan_payload(items=[work_item(priority="high")]),
         [snapshot],
@@ -161,27 +200,53 @@ def test_refresh_uses_current_labels_before_upsert():
 def test_open_target_that_left_worklist_is_consumed():
     calls = run_reconcile(
         scan_payload(items=[]),
-        [card(labels("needs-decision", "repo:wheelhouse", "kind:pr-review",
-                     "priority:med", "target:wheelhouse-42"))],
+        [
+            card(
+                labels(
+                    "needs-decision",
+                    "repo:wheelhouse",
+                    "kind:pr-review",
+                    "priority:med",
+                    "target:wheelhouse-42",
+                )
+            )
+        ],
     )
     check("reconcile: no upsert for item outside worklist", calls["upsert"] == [])
-    check("reconcile: pure pending card outside worklist closed",
-          len(calls["close"]) == 1 and calls["close"][0]["number"] == 7)
-    check("reconcile: close message says no maintainer decision needed",
-          "no longer needs a maintainer decision" in calls["close"][0]["message"])
+    check(
+        "reconcile: pure pending card outside worklist closed",
+        len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
+    )
+    check(
+        "reconcile: close message says no maintainer decision needed",
+        "no longer needs a maintainer decision" in calls["close"][0]["message"],
+    )
 
 
 def test_ci_approval_card_with_no_pending_run_is_consumed():
     calls = run_reconcile(
         scan_payload(items=[]),
-        [card(labels("needs-decision", "repo:wheelhouse", "kind:ci-approval",
-                     "priority:med", "target:wheelhouse-42"),
-              kind="ci-approval")],
+        [
+            card(
+                labels(
+                    "needs-decision",
+                    "repo:wheelhouse",
+                    "kind:ci-approval",
+                    "priority:med",
+                    "target:wheelhouse-42",
+                ),
+                kind="ci-approval",
+            )
+        ],
     )
-    check("reconcile: stale ci-approval card is closed",
-          len(calls["close"]) == 1 and calls["close"][0]["number"] == 7)
-    check("reconcile: stale ci-approval close consumes the card",
-          "consuming this card" in calls["close"][0]["message"])
+    check(
+        "reconcile: stale ci-approval card is closed",
+        len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
+    )
+    check(
+        "reconcile: stale ci-approval close consumes the card",
+        "consuming this card" in calls["close"][0]["message"],
+    )
 
 
 def test_ci_approval_worklist_item_creates_fresh_card():
@@ -193,24 +258,45 @@ def test_ci_approval_worklist_item_creates_fresh_card():
         recommendation="Approve CI to get a test signal.",
     )
     calls = run_reconcile(scan_payload(items=[item]), [])
-    check("reconcile: returned ci-approval item creates a fresh card",
-          len(calls["upsert"]) == 1 and calls["upsert"][0]["existing"] is None)
-    check("reconcile: fresh card is ci-approval",
-          calls["upsert"] and calls["upsert"][0]["item"]["kind"] == "ci-approval")
+    check(
+        "reconcile: returned ci-approval item creates a fresh card",
+        len(calls["upsert"]) == 1 and calls["upsert"][0]["existing"] is None,
+    )
+    check(
+        "reconcile: fresh card is ci-approval",
+        calls["upsert"] and calls["upsert"][0]["item"]["kind"] == "ci-approval",
+    )
 
 
 def test_open_target_that_left_worklist_uses_current_labels_before_close():
-    snapshot = card(labels("needs-decision", "repo:wheelhouse", "kind:pr-review",
-                           "priority:med", "target:wheelhouse-42"))
-    current = card(labels("needs-decision", "processing", "repo:wheelhouse",
-                          "kind:pr-review", "priority:med", "target:wheelhouse-42"))
+    snapshot = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    current = card(
+        labels(
+            "needs-decision",
+            "processing",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
     calls = run_reconcile(
         scan_payload(items=[]),
         [snapshot],
         current_cards=[current],
     )
-    check("reconcile: processing current card outside worklist is not closed",
-          calls["close"] == [])
+    check(
+        "reconcile: processing current card outside worklist is not closed",
+        calls["close"] == [],
+    )
 
 
 def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
@@ -218,17 +304,26 @@ def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
     (stale) - the OR-trigger should still refresh it once."""
     matched_options = ["merge", "close", "hold"]
     stale_card = card(
-        labels("needs-decision", "repo:wheelhouse", "kind:pr-review", "priority:med",
-               "target:wheelhouse-42"),
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
     )
     calls = run_reconcile(
         scan_payload(items=[work_item(options=matched_options)]),
         [stale_card],
     )
-    check("reconcile: render-stale-only card refreshed once via OR-trigger",
-          len(calls["upsert"]) == 1)
-    check("reconcile: render-stale refresh receives known card row",
-          calls["upsert"] and calls["upsert"][0]["existing"]["number"] == 7)
+    check(
+        "reconcile: render-stale-only card refreshed once via OR-trigger",
+        len(calls["upsert"]) == 1,
+    )
+    check(
+        "reconcile: render-stale refresh receives known card row",
+        calls["upsert"] and calls["upsert"][0]["existing"]["number"] == 7,
+    )
 
 
 def test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile():
@@ -236,16 +331,23 @@ def test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile():
     already carries the current render_version - a full no-op."""
     matched_options = ["merge", "close", "hold"]
     fresh_card = card(
-        labels("needs-decision", "repo:wheelhouse", "kind:pr-review", "priority:med",
-               "target:wheelhouse-42"),
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
         render_version=reconcile.render_card.CARD_RENDER_VERSION,
     )
     calls = run_reconcile(
         scan_payload(items=[work_item(options=matched_options)]),
         [fresh_card],
     )
-    check("reconcile: no upsert when materially unchanged and render-fresh",
-          calls["upsert"] == [])
+    check(
+        "reconcile: no upsert when materially unchanged and render-fresh",
+        calls["upsert"] == [],
+    )
     check("reconcile: no close for a card still in the worklist", calls["close"] == [])
 
 
@@ -255,25 +357,43 @@ def test_render_stale_processing_card_is_not_refreshed_via_reconcile():
     render-stale."""
     matched_options = ["merge", "close", "hold"]
     stale_card = card(
-        labels("needs-decision", "processing", "repo:wheelhouse", "kind:pr-review",
-               "priority:med", "target:wheelhouse-42"),
+        labels(
+            "needs-decision",
+            "processing",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
     )
     calls = run_reconcile(
         scan_payload(items=[work_item(options=matched_options)]),
         [stale_card],
     )
-    check("reconcile: render-stale processing card is NOT refreshed",
-          calls["upsert"] == [])
+    check(
+        "reconcile: render-stale processing card is NOT refreshed",
+        calls["upsert"] == [],
+    )
 
 
 def test_open_target_without_needs_decision_is_left_alone():
     calls = run_reconcile(
         scan_payload(items=[]),
-        [card(labels("repo:wheelhouse", "kind:pr-review",
-                     "priority:med", "target:wheelhouse-42"))],
+        [
+            card(
+                labels(
+                    "repo:wheelhouse",
+                    "kind:pr-review",
+                    "priority:med",
+                    "target:wheelhouse-42",
+                )
+            )
+        ],
     )
     check("reconcile: card missing needs-decision is not closed", calls["close"] == [])
-    check("reconcile: card missing needs-decision is not upserted", calls["upsert"] == [])
+    check(
+        "reconcile: card missing needs-decision is not upserted", calls["upsert"] == []
+    )
 
 
 def main():

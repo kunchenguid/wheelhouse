@@ -15,6 +15,7 @@ CLI:
   render_card.py triage-apply --issue N --head-sha SHA --execution-file FILE    update the card from Claude output
   render_card.py triage-fail --issue N --head-sha SHA --message TEXT    write the auto-triage unavailable section
 """
+
 import argparse
 import json
 import os
@@ -236,8 +237,10 @@ def should_auto_triage(item, state, labels, has_token=True):
 def _label_names(labels):
     """Normalize a `gh ... --json labels` list (objects) or a plain string list
     into a set of label names."""
-    return {label if isinstance(label, str) else label.get("name", "")
-            for label in (labels or [])}
+    return {
+        label if isinstance(label, str) else label.get("name", "")
+        for label in (labels or [])
+    }
 
 
 def is_refreshable(labels):
@@ -294,7 +297,9 @@ def triage_section(triage=None, error=None):
     if triage:
         lines.append("- **Summary:** %s" % triage["summary"])
         lines.append("- **Product implications:** %s" % triage["product_implications"])
-        lines.append("- **Recommended next step:** %s" % triage["recommended_next_step"])
+        lines.append(
+            "- **Recommended next step:** %s" % triage["recommended_next_step"]
+        )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
         lines.append("_%s_" % note)
@@ -319,7 +324,13 @@ def _insert_triage_section(body, section):
         return without[:idx].rstrip() + "\n\n" + section + "\n" + without[idx:]
     state_idx = without.rfind("<!-- wheelhouse-state:")
     if state_idx >= 0:
-        return without[:state_idx].rstrip() + "\n\n" + section + "\n\n" + without[state_idx:]
+        return (
+            without[:state_idx].rstrip()
+            + "\n\n"
+            + section
+            + "\n\n"
+            + without[state_idx:]
+        )
     return without + "\n\n" + section
 
 
@@ -371,7 +382,11 @@ def _state_with_triage(state, head_sha, status, error=None):
 def body_with_triage_queued(body, item):
     state = parse_state_block(body)
     head_sha = item.get("head_sha", "") or ""
-    if not state or state.get("kind") != "pr-review" or state.get("head_sha") != head_sha:
+    if (
+        not state
+        or state.get("kind") != "pr-review"
+        or state.get("head_sha") != head_sha
+    ):
         return body
     clean = remove_triage_section(body)
     return _replace_state_block(clean, _state_with_triage(state, head_sha, "queued"))
@@ -379,13 +394,19 @@ def body_with_triage_queued(body, item):
 
 def body_with_triage_result(body, head_sha, triage=None, error=None):
     state = parse_state_block(body)
-    if not state or state.get("kind") != "pr-review" or state.get("head_sha") != head_sha:
+    if (
+        not state
+        or state.get("kind") != "pr-review"
+        or state.get("head_sha") != head_sha
+    ):
         return body
     normalized = normalize_triage(triage)
     status = "succeeded" if normalized else "error"
     section = triage_section(normalized, error or TRIAGE_UNAVAILABLE)
     updated = _insert_triage_section(body, section)
-    new_state = _state_with_triage(state, head_sha, status, None if normalized else error)
+    new_state = _state_with_triage(
+        state, head_sha, status, None if normalized else error
+    )
     return _replace_state_block(updated, new_state)
 
 
@@ -407,8 +428,7 @@ def render(item):
         "head_sha": item.get("head_sha", "") or "",
         "options": options,
     }
-    state.update({k: v for k, v in material_signature(item).items()
-                  if k != "options"})
+    state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
     if triage:
         state["triaged_sha"] = item.get("triaged_sha") or state["head_sha"]
@@ -418,7 +438,9 @@ def render(item):
     issue_title = "[%s#%d] %s" % (repo, number, short)
 
     lines = []
-    lines.append("## Decision needed - [%s#%d](%s)" % (repo, number, item.get("url", "")))
+    lines.append(
+        "## Decision needed - [%s#%d](%s)" % (repo, number, item.get("url", ""))
+    )
     lines.append("")
     # Keep the author visible without a GitHub @mention; cards are the owner's
     # private queue and must not notify target contributors.
@@ -449,21 +471,31 @@ def render(item):
     lines.append(item.get("recommendation", "Needs your call."))
     lines.append("")
     lines.append("### Your decision")
-    lines.append("Tick **one** box for a quick call, or reply with a slash-command "
-                 "(%s):" % SLASH_HINT.get(kind, "`/close`, `/hold`"))
+    lines.append(
+        "Tick **one** box for a quick call, or reply with a slash-command "
+        "(%s):" % SLASH_HINT.get(kind, "`/close`, `/hold`")
+    )
     lines.append("")
     for key in options:
         label = OPTION_LABELS.get(key, key)
         lines.append("- [ ] %s <!-- opt:%s -->" % (label, key))
     lines.append("")
-    lines.append("<sub>Only the repository owner can drive this decision - everyone "
-                 "else's edits and comments are ignored.</sub>")
+    lines.append(
+        "<sub>Only the repository owner can drive this decision - everyone "
+        "else's edits and comments are ignored.</sub>"
+    )
     lines.append("")
-    lines.append("<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":")))
+    lines.append(
+        "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
+    )
     body = "\n".join(lines)
 
-    return {"title": issue_title, "body": body, "labels": card_labels(item),
-            "marker": marker_label(item)}
+    return {
+        "title": issue_title,
+        "body": body,
+        "labels": card_labels(item),
+        "marker": marker_label(item),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -497,15 +529,29 @@ def find_card(marker):
     """Find the open card for this target. Returns {number, body, labels} (the
     full row, so the caller can diff state + labels without a second fetch), or
     None if no open card exists."""
-    r = _gh(["issue", "list", "--state", "open", "--label", marker,
-             "--json", "number,body,labels", "--limit", "5"])
+    r = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            marker,
+            "--json",
+            "number,body,labels",
+            "--limit",
+            "5",
+        ]
+    )
     arr = json.loads(r.stdout or "[]")
     return arr[0] if arr else None
 
 
 def get_card(number):
-    r = _gh(["issue", "view", str(number), "--json", "number,body,labels,state"],
-            check=False)
+    r = _gh(
+        ["issue", "view", str(number), "--json", "number,body,labels,state"],
+        check=False,
+    )
     if r.returncode != 0:
         return None
     return json.loads(r.stdout or "{}") or None
@@ -543,19 +589,21 @@ def mark_triage_queued(number, item, body):
 
 
 def dispatch_triage_workflow(number, item):
-    _gh([
-        "workflow",
-        "run",
-        "triage.yml",
-        "-f",
-        "issue=%s" % number,
-        "-f",
-        "repo=%s" % item["repo"],
-        "-f",
-        "number=%s" % item["number"],
-        "-f",
-        "head_sha=%s" % (item.get("head_sha") or ""),
-    ])
+    _gh(
+        [
+            "workflow",
+            "run",
+            "triage.yml",
+            "-f",
+            "issue=%s" % number,
+            "-f",
+            "repo=%s" % item["repo"],
+            "-f",
+            "number=%s" % item["number"],
+            "-f",
+            "head_sha=%s" % (item.get("head_sha") or ""),
+        ]
+    )
 
 
 def update_card_triage(number, head_sha, triage=None, error=None):
@@ -610,11 +658,23 @@ def _refresh_card(number, card, existing, item, old_state):
     old_sha = (old_state or {}).get("head_sha", "") or ""
     new_sha = item.get("head_sha", "") or ""
     if old_sha and new_sha and old_sha != new_sha:
-        _gh(["issue", "comment", str(number), "--body",
-             "Target updated: head moved from `%s` to `%s`. Re-rendered this card "
-             "with current state - a fresh review is warranted."
-             % (old_sha[:8], new_sha[:8])], check=False)
-    churn = " (+%d/-%d labels)" % (len(to_add), len(to_remove)) if (to_add or to_remove) else ""
+        _gh(
+            [
+                "issue",
+                "comment",
+                str(number),
+                "--body",
+                "Target updated: head moved from `%s` to `%s`. Re-rendered this card "
+                "with current state - a fresh review is warranted."
+                % (old_sha[:8], new_sha[:8]),
+            ],
+            check=False,
+        )
+    churn = (
+        " (+%d/-%d labels)" % (len(to_add), len(to_remove))
+        if (to_add or to_remove)
+        else ""
+    )
     print("refreshed card #%s for %s%s" % (number, card["marker"], churn))
     return number
 
@@ -641,8 +701,10 @@ def upsert_card(item, existing=None):
     if known_number:
         existing = get_card(known_number)
         if not existing or not issue_is_open(existing):
-            print("skip card #%s for %s: card no longer open"
-                  % (known_number, card["marker"]))
+            print(
+                "skip card #%s for %s: card no longer open"
+                % (known_number, card["marker"])
+            )
             return known_number
     else:
         existing = find_card(card["marker"])
@@ -651,8 +713,10 @@ def upsert_card(item, existing=None):
 
     number = existing["number"]
     if not is_refreshable(existing.get("labels")):
-        print("skip card #%s for %s: decision in flight (not pure needs-decision)"
-              % (number, card["marker"]))
+        print(
+            "skip card #%s for %s: decision in flight (not pure needs-decision)"
+            % (number, card["marker"])
+        )
         return number
     old_state = parse_state_block(existing.get("body", ""))
     if not material_changed(item, old_state) and not render_stale(old_state):
@@ -664,8 +728,18 @@ def upsert_card(item, existing=None):
 def close_card(number, message, label="resolved"):
     ensure_labels([label])
     _gh(["issue", "comment", str(number), "--body", message], check=False)
-    _gh(["issue", "edit", str(number), "--add-label", label,
-         "--remove-label", "needs-decision"], check=False)
+    _gh(
+        [
+            "issue",
+            "edit",
+            str(number),
+            "--add-label",
+            label,
+            "--remove-label",
+            "needs-decision",
+        ],
+        check=False,
+    )
     _gh(["issue", "close", str(number)], check=False)
 
 
@@ -731,7 +805,7 @@ def parse_triage_json(text):
         if start < 0 or end <= start:
             return None
         try:
-            data = json.loads(text[start:end + 1])
+            data = json.loads(text[start : end + 1])
         except (TypeError, ValueError):
             return None
     triage = normalize_triage(data)
@@ -816,7 +890,9 @@ def main():
                 print("auto triage skipped: card no longer open")
                 return
             state = parse_state_block(current.get("body", ""))
-            if not should_auto_triage(item, state, current.get("labels"), has_token=True):
+            if not should_auto_triage(
+                item, state, current.get("labels"), has_token=True
+            ):
                 print("auto triage skipped for card #%s" % current["number"])
                 return
             if mark_triage_queued(current["number"], item, current.get("body", "")):
@@ -824,8 +900,10 @@ def main():
                 print("queued auto triage for card #%s" % current["number"])
         except Exception as e:
             item = locals().get("item") or {}
-            print("::warning::failed to queue auto triage for %s#%s: %s"
-                  % (item.get("repo", "?"), item.get("number", "?"), str(e)[:160]))
+            print(
+                "::warning::failed to queue auto triage for %s#%s: %s"
+                % (item.get("repo", "?"), item.get("number", "?"), str(e)[:160])
+            )
 
 
 if __name__ == "__main__":
