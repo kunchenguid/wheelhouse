@@ -81,6 +81,19 @@ NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
 MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 
+# The version of the body `render()` currently produces. A card's stored
+# `render_version` behind this value is stale and gets exactly one re-render
+# (see `render_stale`) - the same missing-field-reads-as-behind backfill shape
+# already used for legacy material fields and for `triaged_sha`. A card
+# written before this field existed has none, which reads as version 0
+# (behind), so every pre-existing card refreshes exactly once and then
+# no-ops. Bump this whenever a future display-only change (copy, formatting,
+# the author line, etc.) should propagate to existing open cards. This is
+# NOT a material field: never add it to MATERIAL_FIELDS / material_signature
+# / _state_material, and it must never affect classify/decision-parsing/
+# merge-close-approve/fork-CI-safety/author-filtering/conflict-routing/triage.
+CARD_RENDER_VERSION = 1
+
 TRIAGE_FIELDS = ("summary", "product_implications", "recommended_next_step")
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
@@ -166,6 +179,16 @@ def material_changed(item, state):
     the card's stored state. A legacy card lacking the new fields counts as
     changed (one safe refresh). `state` is a parsed state block or None."""
     return material_signature(item) != _state_material(state)
+
+
+def render_stale(state):
+    """True when the card's stored `render_version` is behind the current
+    `CARD_RENDER_VERSION` - a non-material, one-time re-render trigger for
+    display-only fixes (e.g. dropping the author @mention) that have no
+    material-field trigger. A missing `render_version` (a card written before
+    this field existed) reads as version 0, so it is stale exactly once. Pure
+    and side-effect free, like `material_changed`."""
+    return (state or {}).get("render_version", 0) != CARD_RENDER_VERSION
 
 
 def triage_fresh(item, state):
@@ -378,6 +401,7 @@ def render(item):
     }
     state.update({k: v for k, v in material_signature(item).items()
                   if k != "options"})
+    state["render_version"] = CARD_RENDER_VERSION
     if triage:
         state["triaged_sha"] = item.get("triaged_sha") or state["head_sha"]
         state["triage_status"] = "succeeded"
@@ -594,8 +618,10 @@ def upsert_card(item, existing=None):
       * Only a pure `needs-decision` card is refreshed; a card already
         `processing`/`resolved`/`blocked` is left untouched (never rewrite a
         decision in flight - re-rendering the body would reset its checkboxes).
-      * A refresh runs only when a MATERIAL field changed; an unchanged card is a
-        full no-op (no body edit, no label churn, no comment).
+      * A refresh runs when a MATERIAL field changed OR the card's stored
+        `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
+        terminating re-render for display-only fixes); a card that is neither
+        is a full no-op (no body edit, no label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment.
@@ -621,7 +647,7 @@ def upsert_card(item, existing=None):
               % (number, card["marker"]))
         return number
     old_state = parse_state_block(existing.get("body", ""))
-    if not material_changed(item, old_state):
+    if not material_changed(item, old_state) and not render_stale(old_state):
         print("skip card #%s for %s: no material change" % (number, card["marker"]))
         return number
     return _refresh_card(number, card, existing, item, old_state)

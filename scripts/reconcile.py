@@ -139,15 +139,23 @@ def main():
                 triage_queued += 1
             continue
         # Card exists: refresh only a pure needs-decision card whose target
-        # materially changed. A card mid-decision (processing/resolved/blocked)
-        # or with no material change is left completely untouched (no edit, no
-        # comment). `upsert_card` re-checks both guards before it edits.
-        if render_card.is_refreshable(ex["labels"]) and render_card.material_changed(item, ex["state"]):
+        # materially changed OR whose stored render_version is behind current
+        # (a one-time, self-terminating re-render for display-only fixes, e.g.
+        # dropping the author @mention). A card mid-decision
+        # (processing/resolved/blocked) or with neither trigger is left
+        # completely untouched (no edit, no comment). `upsert_card` re-checks
+        # both guards before it edits.
+        if render_card.is_refreshable(ex["labels"]) and (
+            render_card.material_changed(item, ex["state"])
+            or render_card.render_stale(ex["state"])
+        ):
             try:
                 current = current_card(ex)
                 current_for_triage = current
                 if current is not None and render_card.is_refreshable(current["labels"]):
-                    if render_card.material_changed(item, current["state"]):
+                    still_stale = render_card.material_changed(item, current["state"]) or \
+                        render_card.render_stale(current["state"])
+                    if still_stale:
                         render_card.upsert_card(item, existing=current)
                         refreshed += 1
                         current_for_triage = current_card(current)

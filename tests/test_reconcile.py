@@ -28,7 +28,8 @@ def labels(*names):
 
 
 def body_state(repo="wheelhouse", number=42, kind="pr-review",
-               head_sha="oldsha", comp="pass", tests="green", priority="med"):
+               head_sha="oldsha", comp="pass", tests="green", priority="med",
+               render_version=None):
     state = {
         "repo": repo,
         "number": number,
@@ -39,6 +40,8 @@ def body_state(repo="wheelhouse", number=42, kind="pr-review",
         "tests": tests,
         "priority": priority,
     }
+    if render_version is not None:
+        state["render_version"] = render_version
     return "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
 
 
@@ -117,10 +120,10 @@ def scan_payload(items=None, open_pr_numbers=None, ok=True):
     }
 
 
-def card(labels_, kind="pr-review"):
+def card(labels_, kind="pr-review", render_version=None):
     return {
         "number": 7,
-        "body": body_state(kind=kind),
+        "body": body_state(kind=kind, render_version=render_version),
         "labels": labels_,
         "title": "[wheelhouse#42] Ready PR",
     }
@@ -210,6 +213,59 @@ def test_open_target_that_left_worklist_uses_current_labels_before_close():
           calls["close"] == [])
 
 
+def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
+    """No material field differs, but the card's render_version is missing
+    (stale) - the OR-trigger should still refresh it once."""
+    matched_options = ["merge", "close", "hold"]
+    stale_card = card(
+        labels("needs-decision", "repo:wheelhouse", "kind:pr-review", "priority:med",
+               "target:wheelhouse-42"),
+    )
+    calls = run_reconcile(
+        scan_payload(items=[work_item(options=matched_options)]),
+        [stale_card],
+    )
+    check("reconcile: render-stale-only card refreshed once via OR-trigger",
+          len(calls["upsert"]) == 1)
+    check("reconcile: render-stale refresh receives known card row",
+          calls["upsert"] and calls["upsert"][0]["existing"]["number"] == 7)
+
+
+def test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile():
+    """Neither trigger fires when the card is both materially unchanged AND
+    already carries the current render_version - a full no-op."""
+    matched_options = ["merge", "close", "hold"]
+    fresh_card = card(
+        labels("needs-decision", "repo:wheelhouse", "kind:pr-review", "priority:med",
+               "target:wheelhouse-42"),
+        render_version=reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    calls = run_reconcile(
+        scan_payload(items=[work_item(options=matched_options)]),
+        [fresh_card],
+    )
+    check("reconcile: no upsert when materially unchanged and render-fresh",
+          calls["upsert"] == [])
+    check("reconcile: no close for a card still in the worklist", calls["close"] == [])
+
+
+def test_render_stale_processing_card_is_not_refreshed_via_reconcile():
+    """The is_refreshable guard still gates the render-version trigger inside
+    reconcile: a processing card is never refreshed just because it is
+    render-stale."""
+    matched_options = ["merge", "close", "hold"]
+    stale_card = card(
+        labels("needs-decision", "processing", "repo:wheelhouse", "kind:pr-review",
+               "priority:med", "target:wheelhouse-42"),
+    )
+    calls = run_reconcile(
+        scan_payload(items=[work_item(options=matched_options)]),
+        [stale_card],
+    )
+    check("reconcile: render-stale processing card is NOT refreshed",
+          calls["upsert"] == [])
+
+
 def test_open_target_without_needs_decision_is_left_alone():
     calls = run_reconcile(
         scan_payload(items=[]),
@@ -227,6 +283,9 @@ def main():
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()
     test_open_target_that_left_worklist_uses_current_labels_before_close()
+    test_render_stale_only_pure_card_is_refreshed_via_reconcile()
+    test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile()
+    test_render_stale_processing_card_is_not_refreshed_via_reconcile()
     test_open_target_without_needs_decision_is_left_alone()
     print()
     if _failures:

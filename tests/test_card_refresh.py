@@ -166,6 +166,191 @@ def test_change_check_handles_missing_state():
 
 
 # --------------------------------------------------------------------------- #
+# render_version: a non-material, one-time re-render trigger for display-only
+# fixes (e.g. dropping the author @mention) that have no material trigger.
+# --------------------------------------------------------------------------- #
+def test_render_stamps_current_render_version():
+    st = state_of(item())
+    check("render: stamps current render_version",
+          st.get("render_version") == rc.CARD_RENDER_VERSION)
+
+
+def test_render_stale_true_when_missing_or_older():
+    check("render_stale: missing render_version -> stale",
+          rc.render_stale({"head_sha": "abc"}) is True)
+    check("render_stale: None state -> stale", rc.render_stale(None) is True)
+    check("render_stale: older render_version -> stale",
+          rc.render_stale({"render_version": rc.CARD_RENDER_VERSION - 1}) is True)
+
+
+def test_render_stale_false_when_current():
+    st = state_of(item())
+    check("render_stale: freshly rendered state -> NOT stale",
+          rc.render_stale(st) is False)
+
+
+def test_render_version_is_not_material():
+    it = item()
+    st = state_of(it)
+    stale_state = dict(st)
+    stale_state["render_version"] = 0
+    check("change: render_version-only difference -> NOT material",
+          rc.material_changed(it, stale_state) is False)
+    check("render_version not in MATERIAL_FIELDS",
+          "render_version" not in rc.MATERIAL_FIELDS)
+
+
+def test_upsert_refreshes_once_on_render_version_alone():
+    """A pure needs-decision card with a stale render_version but otherwise
+    unchanged material state refreshes exactly once, then no-ops (self-
+    terminating), and does NOT emit the 'Target updated' comment since
+    head_sha is unchanged."""
+    it = item()
+    fresh_body = rc.render(it)["body"]
+    stale_state = core.parse_state_block(fresh_body)
+    stale_state["render_version"] = 0
+    stale_body = rc._replace_state_block(fresh_body, stale_state)
+    existing = {
+        "number": 7,
+        "body": stale_body,
+        "labels": labels("needs-decision", "repo:lavish-axi", "kind:pr-review",
+                         "priority:med", "target:lavish-axi-42"),
+    }
+
+    calls = {"comments": []}
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-body"
+
+    rc._write_body = fake_write
+    rc._gh = lambda args, check=True: calls["comments"].append(args) if "comment" in args else None
+    rc.os.unlink = lambda path: None
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    try:
+        result = rc.upsert_card(it, existing=existing)
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+
+    check("upsert: render-stale-only card is refreshed once", result == 7)
+    new_state = core.parse_state_block(calls.get("body", ""))
+    check("upsert: refreshed body carries current render_version",
+          new_state is not None and new_state.get("render_version") == rc.CARD_RENDER_VERSION)
+    check("upsert: same-head render-version refresh emits NO 'Target updated' comment",
+          calls["comments"] == [])
+
+    # Self-terminating: refreshing again from the now-current body is a no-op.
+    calls2 = {"comments": []}
+    existing2 = dict(existing, body=calls["body"])
+    rc._gh = lambda args, check=True: calls2["comments"].append(args) if "comment" in args else None
+    rc.get_card = lambda number: existing2 if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    try:
+        result2 = rc.upsert_card(it, existing=existing2)
+    finally:
+        rc._gh = old_gh
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+    check("upsert: second call after refresh is a no-op", result2 == 7)
+    check("upsert: no-op emits no comment", calls2["comments"] == [])
+
+
+def test_render_version_refresh_preserves_triage_section():
+    """A render-version-only refresh is a same-head_sha cosmetic refresh, so it
+    must preserve an existing ### Triage section and its triaged_sha/status
+    cache exactly like a material same-head refresh does."""
+    it = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(it)["body"], it),
+        it["head_sha"],
+        triage={
+            "summary": "Still useful context.",
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - still safe.",
+        },
+    )
+    stale_state = core.parse_state_block(triaged)
+    stale_state["render_version"] = 0
+    stale_body = rc._replace_state_block(triaged, stale_state)
+    existing = {
+        "number": 7,
+        "body": stale_body,
+        "labels": labels("needs-decision", "repo:lavish-axi", "kind:pr-review",
+                         "priority:med", "target:lavish-axi-42"),
+    }
+
+    calls = {"comments": []}
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-body"
+
+    rc._write_body = fake_write
+    rc._gh = lambda args, check=True: calls["comments"].append(args) if "comment" in args else None
+    rc.os.unlink = lambda path: None
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    try:
+        rc.upsert_card(it, existing=existing)
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+
+    new_state = core.parse_state_block(calls.get("body", ""))
+    check("render-version refresh: triage section preserved",
+          "Still useful context." in calls.get("body", ""))
+    check("render-version refresh: triaged_sha preserved",
+          new_state is not None and new_state.get("triaged_sha") == it["head_sha"])
+    check("render-version refresh: no 'Target updated' comment",
+          calls["comments"] == [])
+
+
+def test_render_stale_alone_does_not_bypass_is_refreshable():
+    """The is_refreshable guard still gates the render-version trigger: a
+    processing/resolved/blocked card is never refreshed just because its
+    render_version is stale."""
+    it = item()
+    fresh_body = rc.render(it)["body"]
+    stale_state = core.parse_state_block(fresh_body)
+    stale_state["render_version"] = 0
+    stale_body = rc._replace_state_block(fresh_body, stale_state)
+    existing = {
+        "number": 7,
+        "body": stale_body,
+        "labels": labels("needs-decision", "processing", "repo:lavish-axi",
+                         "kind:pr-review", "priority:med", "target:lavish-axi-42"),
+    }
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    try:
+        result = rc.upsert_card(it, existing=existing)
+    finally:
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+    check("upsert: render-stale processing card is NOT refreshed", result == 7)
+
+
+# --------------------------------------------------------------------------- #
 # refreshability guard: never rewrite a card mid-decision
 # --------------------------------------------------------------------------- #
 def labels(*names):
@@ -458,6 +643,13 @@ def main():
     test_legacy_card_missing_new_fields_refreshes_once()
     test_legacy_triage_marker_still_parses_for_change_check()
     test_change_check_handles_missing_state()
+    test_render_stamps_current_render_version()
+    test_render_stale_true_when_missing_or_older()
+    test_render_stale_false_when_current()
+    test_render_version_is_not_material()
+    test_upsert_refreshes_once_on_render_version_alone()
+    test_render_version_refresh_preserves_triage_section()
+    test_render_stale_alone_does_not_bypass_is_refreshable()
     test_is_refreshable_pure_needs_decision()
     test_is_refreshable_blocks_mid_decision()
     test_is_refreshable_accepts_plain_strings()

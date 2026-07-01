@@ -43,7 +43,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   refresh the card. Automatic PR triage adds non-material cache fields such as
   `triaged_sha` and `triage_status`; those are deliberately outside
   `MATERIAL_FIELDS` so a triage result never changes classification or forces a
-  card refresh. `render_card.py` writes that marker, but
+  card refresh. The state block also carries `render_version`, another
+  non-material field alongside `triaged_sha`: it is a one-time re-render
+  trigger stamped by `render()` (see "Card refresh" in Sharp edges) that exists
+  purely so a display-only fix (e.g. the author `@mention` drop) propagates to
+  already-open cards; it is never a `MATERIAL_FIELDS` member and never
+  influences classification. `render_card.py` writes that marker, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
   queue keeps working. It also tolerates old `wheelhouse-state` cards that lack
@@ -122,9 +127,23 @@ still appears where it's plain English, e.g. "triage the queue".)
   (`comp`), tests (`tests`), `kind`, `priority`, or checkbox `options` - the
   card is re-rendered in place; title/summary/recommendation re-render naturally
   and are NOT change triggers. Option comparisons use set equality; display
-  order remains the order provided in the card body/state. The shared pure
-  helpers live in `render_card.py`
-  (`material_changed`, `is_refreshable`, `plan_label_update`); `reconcile.py`
+  order remains the order provided in the card body/state. A refresh ALSO fires
+  when the card's stored `render_version` is behind the current
+  `CARD_RENDER_VERSION` - a non-material, one-time, self-terminating trigger
+  (`render_stale`) for propagating a display-only fix (e.g. the author
+  `@mention` drop) to already-open cards that have no material trigger of their
+  own. A card missing `render_version` (written before this field existed)
+  reads as behind, so every pre-existing pure card refreshes exactly once and
+  then carries the current version (`render()` stamps it), so it no-ops on the
+  next scan - no churn loop. Bump `CARD_RENDER_VERSION` whenever a future
+  display-only change should propagate the same way. A render-version-only
+  refresh is a same-`head_sha` cosmetic refresh: it reuses the same
+  `_preserve_same_head_triage` path as a material same-head refresh (an
+  existing `### Triage` section and its `triaged_sha`/`triage_status` cache
+  survive untouched, no re-triage for that head), and it does NOT drop the
+  "target updated" comment (that stays gated strictly on `head_sha` actually
+  changing). The shared pure helpers live in `render_card.py`
+  (`material_changed`, `render_stale`, `is_refreshable`, `plan_label_update`); `reconcile.py`
   pre-checks them (using the card row it already listed) so the common
   no-change case never hits the API, and `upsert_card` re-checks them before it
   edits (defense in depth for the event path). Three rules are load-bearing and
@@ -133,11 +152,16 @@ still appears where it's plain English, e.g. "triage the queue".)
     checkboxes, so a card already `processing`/`resolved`/`blocked` is left
     completely untouched - refreshing one would clobber an in-flight decision or
     race the decision-handler. (`is_refreshable` is the guard; the lock set is
-    `NON_REFRESHABLE_LABELS`.) This is the chosen safe rule.
-  - **No-op when nothing material changed.** An unchanged card gets no body edit,
-    no label churn, and no comment - never rewrite a card just to put back an
-    identical body. The check is a cheap dict compare of the state block's
-    material fields, which is why those fields are carried in the state JSON.
+    `NON_REFRESHABLE_LABELS`.) This is the chosen safe rule, and it gates the
+    `render_version` trigger exactly the same way - a mid-decision card is
+    never refreshed just because it is render-stale.
+  - **No-op when neither trigger fires.** A card that is both materially
+    unchanged AND render-fresh gets no body edit, no label churn, and no
+    comment - never rewrite a card just to put back an identical body. The
+    material check is a cheap dict compare of the state block's material
+    fields, which is why those fields are carried in the state JSON; the
+    render-staleness check is the same kind of cheap compare against
+    `render_version`.
   - **Replace the managed labels, don't just add.** `upsert_card` removes
     `repo:*`/`kind:*`/`priority:*`/`target:*` labels that no longer apply
     (`plan_label_update`), so a changed priority/kind doesn't leave both the old
