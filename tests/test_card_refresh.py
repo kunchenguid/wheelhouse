@@ -59,6 +59,15 @@ def state_of(it):
 
 
 # --------------------------------------------------------------------------- #
+# author display: visible to owner, never a notifying @mention
+# --------------------------------------------------------------------------- #
+def test_render_shows_author_without_mention():
+    body = rc.render(item(author="chrishsu"))["body"]
+    check("render: author login visible", "by chrishsu" in body)
+    check("render: author not @-mentioned", "@chrishsu" not in body)
+
+
+# --------------------------------------------------------------------------- #
 # state block now carries the material fields and round-trips
 # --------------------------------------------------------------------------- #
 def test_state_block_carries_material_fields():
@@ -307,6 +316,7 @@ def test_plan_label_update_noop_when_identical():
 
 
 def main():
+    test_render_shows_author_without_mention()
     test_state_block_carries_material_fields()
     test_material_changed_round_trip_is_noop()
     test_each_material_field_triggers_a_change()

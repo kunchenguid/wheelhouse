@@ -200,7 +200,7 @@ def render(item):
     lines = []
     lines.append("## Decision needed - [%s#%d](%s)" % (repo, number, item.get("url", "")))
     lines.append("")
-    meta = "**%s** by @%s" % (KIND_LABEL.get(kind, kind), item.get("author", "?"))
+    meta = "**%s** by %s" % (KIND_LABEL.get(kind, kind), item.get("author", "?"))
     if item.get("bucket"):
         meta += " &middot; `%s`" % item["bucket"]
     lines.append(meta)
