@@ -181,12 +181,16 @@ def test_render_stale_true_when_missing_or_older():
     check("render_stale: None state -> stale", rc.render_stale(None) is True)
     check("render_stale: older render_version -> stale",
           rc.render_stale({"render_version": rc.CARD_RENDER_VERSION - 1}) is True)
+    check("render_stale: malformed render_version -> stale",
+          rc.render_stale({"render_version": "not-a-version"}) is True)
 
 
-def test_render_stale_false_when_current():
+def test_render_stale_false_when_current_or_newer():
     st = state_of(item())
     check("render_stale: freshly rendered state -> NOT stale",
           rc.render_stale(st) is False)
+    check("render_stale: newer render_version -> NOT stale",
+          rc.render_stale({"render_version": rc.CARD_RENDER_VERSION + 1}) is False)
 
 
 def test_render_version_is_not_material():
@@ -645,7 +649,7 @@ def main():
     test_change_check_handles_missing_state()
     test_render_stamps_current_render_version()
     test_render_stale_true_when_missing_or_older()
-    test_render_stale_false_when_current()
+    test_render_stale_false_when_current_or_newer()
     test_render_version_is_not_material()
     test_upsert_refreshes_once_on_render_version_alone()
     test_render_version_refresh_preserves_triage_section()

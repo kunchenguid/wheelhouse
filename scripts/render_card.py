@@ -188,7 +188,15 @@ def render_stale(state):
     material-field trigger. A missing `render_version` (a card written before
     this field existed) reads as version 0, so it is stale exactly once. Pure
     and side-effect free, like `material_changed`."""
-    return (state or {}).get("render_version", 0) != CARD_RENDER_VERSION
+    raw_version = (state or {}).get("render_version", 0)
+    if isinstance(raw_version, bool):
+        stored_version = 0
+    else:
+        try:
+            stored_version = int(raw_version)
+        except (TypeError, ValueError):
+            stored_version = 0
+    return stored_version < CARD_RENDER_VERSION
 
 
 def triage_fresh(item, state):
