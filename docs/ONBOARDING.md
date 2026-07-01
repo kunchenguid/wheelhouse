@@ -30,6 +30,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
 
 The `author` field is display data for dispatched cards.
+It is rendered as plain text (`by <login>`), not as a GitHub `@mention`, so a dispatched card does not notify the target author.
 The scan-built worklist has richer GitHub author metadata and skips PRs or issues from the repo owner, the configured maintainer, or bots; dispatch payloads are explicit card requests and are not filtered again by the hub.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.

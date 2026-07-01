@@ -91,9 +91,11 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 ## Sharp edges
 
-- Decision cards are machine-created. The target author is shown as plain text
-  (`by <login>`), never as a GitHub `@mention` - cards are the owner's private
-  queue and must not notify contributors. The card body's hidden state block and the
+- Decision cards are machine-created.
+  The target author is shown as plain text (`by <login>`), never as a GitHub
+  `@mention`.
+  Cards are the owner's private queue and must not notify contributors.
+  The card body's hidden state block and the
   per-checkbox `<!-- opt:KEY -->` markers are load-bearing - the handler diffs
   the `selected` lists `issue-ops/parser` returns for the new vs pre-edit body to
   find the newly-ticked option (the marker survives because the parser strips

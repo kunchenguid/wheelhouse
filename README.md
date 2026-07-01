@@ -18,7 +18,8 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
 - **Labels carry state:** `needs-decision` (in the queue), `processing` (a handler is acting), `resolved`, `blocked`, plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
-- **Each issue body is a decision card:** a link to the target, the situation, an overlap note, a recommended action, and quick-decision checkboxes. A hidden HTML comment holds the machine-readable state.
+- **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
+  A hidden HTML comment holds the machine-readable state.
 - **GitHub Actions are the handlers:** they create cards, refresh pending cards when their targets change, execute your decisions, and reconcile the queue against live repo state.
 
 ```
