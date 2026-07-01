@@ -345,6 +345,8 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     check("nudge: second scan posts no duplicate", calls2["posts"] == [])
     body = calls1["posts"][0]["body"] if calls1["posts"] else ""
     check("nudge: body names the rebase action", "rebase" in body and "resolve the conflict" in body)
+    check("nudge: body has no internal product name", "Wheelhouse" not in body)
+    check("nudge: body has no internal-state jargon", "maintainer queue" not in body and "resurface" not in body)
     check("nudge: body carries a head-specific marker", core._rebase_nudge_marker("sha42") in body)
     check("nudge: comment fetch uses pagination slurp", calls1["fetches"] and calls1["fetches"][0]["slurp"] is True)
     check("nudge: marker persists in stored comments", len(comments.get(42, [])) == 1)

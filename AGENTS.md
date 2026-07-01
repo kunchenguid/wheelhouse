@@ -370,6 +370,13 @@ data; the LLM never gets `FLEET_TOKEN`):
   Deep-review uses the same wrapper under the same optional `READONLY_TOKEN`
   trust model, but only for advisory verdict context.
 
+## Contributor-facing copy
+
+Messages Wheelhouse posts onto **target repos** (e.g. a rebase nudge on a contributor's PR) speak naturally, like a friendly maintainer bot.
+They must not name the product ("Wheelhouse") or use internal-state jargon ("maintainer queue", "resurface", bucket/kind names).
+
+Owner-facing decision cards and comments on **this repo's** issues are the private queue; those may keep the Wheelhouse name and internal vocabulary.
+
 ## Validation
 
 No build step.

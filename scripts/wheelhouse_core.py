@@ -498,13 +498,12 @@ def _rebase_nudge_body(repo, number, head_sha):
     marker = _rebase_nudge_marker(head_sha)
     short = str(head_sha or "").strip()[:8] or "current head"
     return (
-        "Thanks for the PR. Wheelhouse found that this branch currently has a "
-        "merge conflict with the base branch, so it is stepping out of the "
-        "maintainer queue for now.\n\n"
-        "Please rebase on or merge the base branch into your branch, resolve "
-        "the conflict, and push the result. Once GitHub reports the PR as "
-        "mergeable again, Wheelhouse will resurface it for maintainer review.\n\n"
-        "<sub>Conflict noted for %s#%s at `%s`.</sub>\n"
+        "Thanks for the PR! It looks like this branch has a merge conflict "
+        "with the base branch right now. When you get a chance, could you "
+        "rebase onto (or merge in) the latest base branch, resolve the "
+        "conflict, and push? Once GitHub shows the PR as mergeable again, "
+        "it'll be picked back up for review.\n\n"
+        "<sub>Noted for %s#%s at `%s`.</sub>\n"
         "%s"
         % (repo, number, short, marker)
     )
