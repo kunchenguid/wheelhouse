@@ -87,9 +87,12 @@ maintainer: ""
 # secret (a Claude subscription token from `claude setup-token` - NOT an API key)
 # to let the decision handler route a plain-English owner comment on a card
 # through Claude: it MAPS the comment to an action ("merge it" -> merge), answers
-# a question, or asks you to clarify. The LLM only proposes a structured intent -
-# the deterministic executor still performs (and guards) any action. Inert until
-# both the flag and the token are present.
+# a question, or asks you to clarify. The optional READONLY_TOKEN secret enables
+# read-only answer-mode search across the target repo and configured fleet repos.
+# Without it the Claude step keeps the legacy Write-only, no-shell behavior.
+# The LLM only proposes a structured result - the deterministic executor still
+# performs (and guards) any action. Inert until both the flag and the Claude token
+# are present.
 nl_decisions: true
 
 # Whether the scheduled backstop also opens decision cards for open *issues*

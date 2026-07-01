@@ -39,6 +39,8 @@ jobs:
       head_sha: ${{ steps.decide.outputs.head_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -46,6 +48,24 @@ jobs:
 
       - name: Install deps
         run: pip install --quiet pyyaml
+
+      - id: trusted-src
+        run: |
+          set -euo pipefail
+          trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
+          python_path="$(command -v python)"
+          gh_path="$(command -v gh)"
+          safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          rm -rf "$trusted"
+          mkdir -p "$trusted"
+          tar --exclude=.git -cf - . | tar -xf - -C "$trusted"
+          find "$trusted" -type f -exec chmod a-w {} +
+          find "$trusted" -type d -exec chmod a-w {} +
+          {
+            echo "path=$trusted"
+            echo "python=$python_path"
+            echo "safe_path=$safe_path"
+          } >> "$GITHUB_OUTPUT"
 
       # Owner-gate: only the repository owner (or the configured `maintainer`)
       # may drive a decision. Strangers' events become no-ops because every
@@ -96,7 +116,7 @@ jobs:
       # --- Natural-language path (opt-in) ------------------------------------
       # An owner comment that is NOT a slash-command. Gated on nl_decisions in
       # config AND the CLAUDE_CODE_OAUTH_TOKEN secret; inert otherwise. Claude
-      # only MAPS intent to a structured result - the deterministic steps below
+      # only MAPS intent or answers a question - the deterministic steps below
       # do any acting, so every guard still applies.
       - id: nl-gate
         if: ${{ steps.gate.outputs.authorized == 'true' && github.event_name == 'issue_comment' && steps.decide.outputs.decision == '' }}
@@ -173,6 +193,22 @@ jobs:
             --jq '.[] | {id: .id, login: .user.login, body: .body}' \
             > card_comments.json || : > card_comments.json
 
+      # Optional read-only model search. READONLY_TOKEN is a public-read token
+      # that may be safely handed to Claude for context gathering. If the secret
+      # is absent, the prompt and Claude tool list stay in the legacy no-search
+      # mode.
+      - id: nl-readonly
+        if: steps.nl-gate.outputs.proceed == 'true'
+        env:
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
+        run: |
+          echo "enabled=$HAS_READONLY_TOKEN" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
+            echo "nl readonly search enabled"
+          else
+            echo "nl readonly search disabled (READONLY_TOKEN absent)"
+          fi
+
       - id: nl-prompt
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
@@ -183,17 +219,45 @@ jobs:
           TARGET_FILE: target.txt
           COMMENTS_FILE: card_comments.json
           TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
+          READONLY_SEARCH_ENABLED: ${{ steps.nl-readonly.outputs.enabled }}
         run: python scripts/apply_decision.py nl-prompt
 
-      # Claude maps intent -> writes decision.json. It is restricted to the
-      # Write tool (no Bash/gh, cannot run commands) and gets only this repo's
-      # token, never FLEET_TOKEN. Auth is the Claude subscription token, NOT an
-      # API key.
+      - id: nl-search-tool
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
+          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
+        run: python scripts/nl_readonly_search.py install
+
+      # Claude maps intent -> writes decision.json. If READONLY_TOKEN exists,
+      # this branch may also run the scoped wheelhouse-search wrapper for answer
+      # context. The action's github_token input is READONLY_TOKEN here because
+      # claude-code-action also exposes that input to the Claude subprocess as
+      # GitHub CLI credentials. GH_TOKEN is READONLY_TOKEN, never FLEET_TOKEN,
+      # and any resulting output is treated by the prompt as UNTRUSTED DATA.
+      # Auth is the Claude subscription token, NOT an API key.
       #
       # NOTE: pin a specific release of this action when you turn nl_decisions on
       # (see deep-review.yml for the same convention).
+      - name: Claude interprets intent (read-only search)
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.READONLY_TOKEN }}
+          prompt: ${{ steps.nl-prompt.outputs.prompt }}
+          claude_args: |
+            --allowedTools "Write,Bash(wheelhouse-search)"
+            --max-turns 6
+
+      # Legacy no-search branch. This is the exact old tool posture: Write only,
+      # no shell, and no GH_TOKEN environment. It runs whenever READONLY_TOKEN is
+      # absent so the feature can ship before the optional secret exists.
       - name: Claude interprets intent
-        if: steps.nl-gate.outputs.proceed == 'true'
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled != 'true' }}
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -203,16 +267,64 @@ jobs:
             --allowedTools Write
             --max-turns 6
 
+      - id: nl-result
+        if: steps.nl-gate.outputs.proceed == 'true'
+        env:
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/wheelhouse-nl"
+          out_file="${out_dir}/decision.json"
+          mkdir -p "$out_dir"
+          : > "$out_file"
+          if [ -e decision.json ]; then
+            if [ -L decision.json ] || [ ! -f decision.json ]; then
+              echo "::error::Invalid decision.json produced by Claude"
+              exit 1
+            fi
+            size=$(wc -c < decision.json)
+            size=${size//[[:space:]]/}
+            if [ "$size" -gt 65536 ]; then
+              echo "::error::decision.json is too large"
+              exit 1
+            fi
+            cp decision.json "$out_file"
+          fi
+
       # Validate the LLM's structured result against the per-kind allowlist and
       # emit deterministic outputs. `decision` is non-empty ONLY for a valid
       # `action` mode - that is what makes the execute step below run.
       - id: route
         if: steps.nl-gate.outputs.proceed == 'true'
+        working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
-          DECISION_FILE: decision.json
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
-        run: python scripts/apply_decision.py nl-route
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            DECISION_FILE="$DECISION_FILE" \
+            ISSUE_BODY="$ISSUE_BODY" \
+            KIND="$KIND" \
+            "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
 
       # --- Act on the target (shared by every entry point) -------------------
       - name: Mark processing
@@ -229,7 +341,11 @@ jobs:
       # may also use FLEET_TOKEN, but only for read-only target context.
       - id: execute
         if: ${{ steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
           # Cross-repo actions require FLEET_TOKEN. Never the default token,
           # never printed.
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
@@ -240,7 +356,31 @@ jobs:
           TARGET_NUMBER: ${{ steps.decide.outputs.target_number || steps.route.outputs.target_number }}
           KIND: ${{ steps.decide.outputs.kind || steps.route.outputs.kind }}
           HEAD_SHA: ${{ steps.decide.outputs.head_sha || steps.route.outputs.head_sha }}
-        run: python scripts/apply_decision.py execute
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/wheelhouse-home"
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            HOME="${RUNNER_TEMP}/wheelhouse-home" \
+            GH_PROMPT_DISABLED=1 \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            GH_TOKEN="$GH_TOKEN" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            DECISION="$DECISION" \
+            FREE_TEXT="$FREE_TEXT" \
+            TARGET_REPO="$TARGET_REPO" \
+            TARGET_NUMBER="$TARGET_NUMBER" \
+            KIND="$KIND" \
+            HEAD_SHA="$HEAD_SHA" \
+            "$TRUSTED_PYTHON" scripts/apply_decision.py execute
 
       # --- Finalize the card (this repo, default token; never re-triggers) ----
       - name: Comment result on card
@@ -249,6 +389,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
           MESSAGE: ${{ steps.execute.outputs.result_message }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GH_PROMPT_DISABLED: "1"
         run: gh issue comment "$ISSUE" --body "${MESSAGE:-No actionable result.}" || true
 
       - name: Clear processing label
@@ -293,6 +439,12 @@ jobs:
         if: ${{ always() && steps.execute.outputs.terminal_state == 'resolved' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GH_PROMPT_DISABLED: "1"
         run: gh issue close "${{ github.event.issue.number }}" || true
 
       # --- NL answer / clarify: post the reply, leave the card OPEN ----------
@@ -302,6 +454,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
           REPLY: ${{ steps.route.outputs.answer }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GH_PROMPT_DISABLED: "1"
         run: gh issue comment "$ISSUE" --body "$REPLY" || true
 
   investigate-dispatch:

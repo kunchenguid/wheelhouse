@@ -24,7 +24,10 @@ Covers:
   * the owner-scoped conversation history: maintainer + bot turns are kept in
     chronological order, NON-OWNER comments are dropped entirely (the security
     invariant), and the triggering comment is excluded (it is the new
-    instruction, passed separately).
+    instruction, passed separately);
+  * the optional READONLY_TOKEN search prompt: when enabled it tells the LLM how
+    to use read-only gh for answer context, and when disabled the prompt
+    stays in the legacy no-shell/no-search mode.
 """
 import contextlib
 import io
@@ -429,6 +432,49 @@ def test_prompt_includes_history_section():
           "=== Conversation so far" not in without)
 
 
+def test_prompt_search_capability_is_gated():
+    body = '<!-- wheelhouse-state: {"repo":"target","number":1,"kind":"pr-review"} -->'
+
+    legacy = ad.build_nl_prompt(
+        body,
+        "did we already merge this elsewhere?",
+        "(target)",
+        "pr-review",
+        history="",
+        search_enabled=False,
+        search_repos=["owner/target", "owner/other"],
+    )
+    check("prompt: legacy mode keeps no-shell instruction",
+          "do not run any git or gh commands" in legacy)
+    check("prompt: legacy mode does NOT mention READONLY_TOKEN",
+          "READONLY_TOKEN" not in legacy)
+    check("prompt: legacy mode does NOT promise search",
+          "read-only search capability" not in legacy.lower()
+          and "owner/other" not in legacy)
+
+    enabled = ad.build_nl_prompt(
+        body,
+        "did we already merge this elsewhere?",
+        "(target)",
+        "pr-review",
+        history="",
+        search_enabled=True,
+        search_repos=["owner/target", "owner/other"],
+    )
+    check("prompt: search mode mentions READONLY_TOKEN",
+          "READONLY_TOKEN" in enabled)
+    check("prompt: search mode lists target and fleet repos",
+          "owner/target" in enabled and "owner/other" in enabled)
+    check("prompt: search mode treats shell results as untrusted data",
+          "UNTRUSTED DATA" in enabled and "shell output" in enabled)
+    check("prompt: search mode forbids write or act operations",
+          "must never attempt a write or act operation" in enabled)
+    check("prompt: search mode keeps deterministic acting boundary",
+          "deterministic acting path is unchanged" in enabled)
+    check("prompt: search mode no longer says to avoid gh commands",
+          "do not run any git or gh commands" not in enabled)
+
+
 def main():
     test_state_marker_back_compat()
     test_checkbox_diff()
@@ -447,6 +493,7 @@ def main():
     test_history_empty_and_blank_cases()
     test_load_comments_tolerant()
     test_prompt_includes_history_section()
+    test_prompt_search_capability_is_gated()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
