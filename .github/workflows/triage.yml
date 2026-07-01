@@ -236,7 +236,24 @@ jobs:
               --json title,body --jq '"# " + (.title // "") + "\n\n" + (.body // "")' || true
             echo
             echo "## Diff"
-            GH_TOKEN="$FLEET_TOKEN" gh pr diff "$NUMBER" -R "$SLUG" || echo "(could not fetch diff)"
+            diff_limit_bytes=120000
+            diff_raw="diff.raw"
+            set +e
+            GH_TOKEN="$FLEET_TOKEN" gh pr diff "$NUMBER" -R "$SLUG" \
+              | head -c "$((diff_limit_bytes + 1))" > "$diff_raw"
+            pipe_status=("${PIPESTATUS[@]}")
+            diff_status=${pipe_status[0]}
+            head_status=${pipe_status[1]}
+            diff_size="$(wc -c < "$diff_raw" | tr -d '[:space:]')"
+            set -e
+            if [ "$diff_size" -gt "$diff_limit_bytes" ]; then
+              head -c "$diff_limit_bytes" "$diff_raw"
+              printf '\n\n[diff truncated after %s bytes]\n' "$diff_limit_bytes"
+            elif { [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; } || [ "$head_status" -ne 0 ]; then
+              echo "(could not fetch diff)"
+            else
+              cat "$diff_raw"
+            fi
             echo "</target-content>"
           } > target.txt
 

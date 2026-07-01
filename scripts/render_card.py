@@ -295,6 +295,10 @@ def _preserve_same_head_triage(body, existing_body, item, old_state):
     head_sha = item.get("head_sha", "") or ""
     if not head_sha or (old_state or {}).get("head_sha") != head_sha:
         return body
+    old_kind = (old_state or {}).get("kind")
+    new_kind = item.get("kind", "pr-review")
+    if old_kind != "pr-review" or new_kind != "pr-review":
+        return body
 
     section = _existing_triage_section(existing_body)
     if section:

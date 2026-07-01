@@ -559,6 +559,16 @@ def test_triage_workflow_security_wiring():
             'grep -Fxq "$delimiter" prompt.txt' in run
             and 'echo "prompt<<$delimiter"' in run,
         )
+        check(
+            "workflow: target diff is capped before prompt output",
+            "diff_limit_bytes=120000" in run
+            and 'head -c "$((diff_limit_bytes + 1))"' in run
+            and "[diff truncated after %s bytes]" in run,
+        )
+        check(
+            "workflow: target diff is not captured unbounded",
+            'gh pr diff "$NUMBER" -R "$SLUG" || echo "(could not fetch diff)"' not in run,
+        )
 
     check("workflow: triage result handoff exists", preserve is not None)
     if preserve:

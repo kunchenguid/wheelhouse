@@ -367,6 +367,50 @@ def test_refresh_drops_triage_when_head_changes():
     check("refresh: new head state is current", state.get("head_sha") == "newhead999")
 
 
+def test_refresh_drops_triage_when_kind_changes():
+    old = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(old)["body"], old),
+        old["head_sha"],
+        triage={
+            "summary": "PR review context.",
+            "product_implications": "Only valid for PR review.",
+            "recommended_next_step": "merge - old kind.",
+        },
+    )
+    existing = {
+        "body": triaged,
+        "labels": labels("needs-decision", "repo:lavish-axi", "kind:pr-review",
+                         "priority:med", "target:lavish-axi-42"),
+    }
+    new = item(kind="ci-approval", options=["approve-ci", "close", "hold"])
+    card = rc.render(new)
+    calls = {}
+
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-body"
+
+    rc._write_body = fake_write
+    rc._gh = lambda args, check=True: None
+    rc.os.unlink = lambda path: None
+    try:
+        rc._refresh_card(7, card, existing, new, core.parse_state_block(triaged))
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+
+    state = core.parse_state_block(calls["body"])
+    check("refresh: same-head kind change drops triage section", "PR review context." not in calls["body"])
+    check("refresh: same-head kind change drops triaged_sha", "triaged_sha" not in state)
+    check("refresh: same-head kind change keeps new kind", state.get("kind") == "ci-approval")
+
+
 # --------------------------------------------------------------------------- #
 # label replace: stale managed labels removed, needs-decision + human kept
 # --------------------------------------------------------------------------- #
@@ -421,6 +465,7 @@ def main():
     test_upsert_parses_state_block_after_refetch()
     test_refresh_preserves_same_head_triage_cache_and_section()
     test_refresh_drops_triage_when_head_changes()
+    test_refresh_drops_triage_when_kind_changes()
     test_plan_label_update_replaces_stale_managed()
     test_plan_label_update_keeps_human_labels()
     test_plan_label_update_noop_when_identical()
