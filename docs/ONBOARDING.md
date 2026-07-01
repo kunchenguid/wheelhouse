@@ -5,6 +5,7 @@ This doc is the optional **fast path**: add a tiny dispatch workflow to a source
 
 Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
+The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 
 > You add these files to **your source repos**, not to Wheelhouse.
 > The hub only ever reads; it never pushes to your source repos except to execute a decision you made.
@@ -106,6 +107,8 @@ jobs:
 ### Notes
 
 - **Injection-safe by construction.** GitHub context values are passed through `env:` and read by `jq --arg`, never interpolated into the shell - a hostile PR title cannot break out.
+- **PR-review merge conflicts.** Ingest dispatches create cards from the payload; they do not read GraphQL `mergeable` or post rebase nudges.
+  The scheduled scan later treats `CONFLICTING` PRs as `needs-rebase`, posts any contributor nudge, and consumes stale pure pending cards.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
   Ingest dispatches create or refresh a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.

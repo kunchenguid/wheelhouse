@@ -13,7 +13,9 @@ contributor-authored risky or uncertain ones raise a card, excluded-author
 failures log suppressed-card, and verified no-pending runs emit no stale card).
 The auto path logs exactly one stderr workflow-command line per CI-approval
 candidate it handles, so approvals, no-pending results, approve failures, and
-fail-closed verdicts are visible in the scan-backstop run log.
+fail-closed verdicts are visible in the scan-backstop run log. Conflicted
+PR-review candidates leave the maintainer worklist as needs-rebase, with one
+contributor rebase nudge per head SHA.
 Approval verifies each awaiting run against the target PR: populated
 workflow_run.pull_requests must name that PR, while fork-originated empty
 associations must match the PR head SHA and branch.
@@ -24,8 +26,8 @@ replaces has been dropped: the local single-flight lock (-> Actions
 state), per-repo `owner` (-> derived from github.repository_owner).
 
 Usage:
-  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI and log outcomes
-  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI and log outcomes
+  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, and log outcomes
+  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI, nudge conflicted PR-review candidates, and log outcomes
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
@@ -320,6 +322,13 @@ def _with_mergeability(bucket, mergeable):
 
 
 def classify(draft, comp, tests, ci, cross_repo=True, mergeable=None):
+    """Return the PR routing bucket.
+
+    Only an authoritative GraphQL `mergeable=CONFLICTING` rewrites PR-review
+    buckets (`merge-ready` / `review-needed`) to waiting-on-contributor
+    `needs-rebase`. UNKNOWN or missing mergeability fails open, and fork
+    `needs-ci-approval` routing is independent of mergeability.
+    """
     if draft:
         return "draft"
     if not ci:

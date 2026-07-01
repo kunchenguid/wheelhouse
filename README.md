@@ -5,6 +5,7 @@
 A personal, always-on, cross-repo **"what needs my decision"** command center, built entirely on GitHub Issues + GitHub Actions.
 Every issue in this repo is one pending decision about the repositories you maintain - a PR worth merging, a fork-CI run worth approving, an issue worth triaging.
 The scheduled scan keeps the queue focused on other people's work: PRs and issues authored by the repo owner, the configured maintainer, or bots stay out of the scan-built worklist, while missing author metadata fails open.
+PR-review candidates that GitHub reports as merge-conflicted leave the maintainer worklist until the contributor rebases or merges the base branch and pushes a mergeable head.
 You make final decisions by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card.
 No server, no database, no bot to host - just this repo and a small set of secrets.
 
@@ -183,6 +184,8 @@ If you act before that refresh lands, a `/merge` (or a "merge it" comment) still
 The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next scan.
 If an open target no longer needs a maintainer decision, its pure pending card is closed too.
 That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after a successful scan.
+It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
+Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card.
 By default the scan also **auto-approves fork-CI runs it proves safe** (`auto_approve_ci`, on unless you opt out), so an *Approve the CI run* card now appears only for contributor fork PRs with risky or uncertain cases - a run that changes CI/action files, targets a non-default base branch, has unreadable safety state, hits an approval error, has unknown fork status, or whose repo has a `pull_request_target` workflow (see [Security notes](#security-notes)).
 Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop path, but risky or uncertain cases are logged with `suppressed-card` and do not emit decision cards.
 Same-repo PRs with no CI signal are routed to normal PR review, not CI approval.
@@ -196,6 +199,10 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Queue author filter.** The scheduled scan creates decision cards for other people's work.
   PRs and issues authored by the repo owner, the configured `maintainer`, or bots are excluded from the scan-built worklist; bot detection uses GitHub's author type plus the `[bot]` login suffix, and missing author metadata fails open so a real contributor is not silently dropped.
   The explicit dispatch fast path trusts what your source workflow sends, so filter there too if you want it to match the scan.
+- **Merge-conflict routing.** The scheduled scan treats only GitHub's authoritative GraphQL `mergeable: CONFLICTING` value as a merge conflict.
+  A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`; `UNKNOWN` or missing mergeability fails open and routes normally.
+  Contributor-authored conflicted PRs get one Wheelhouse rebase nudge per head SHA under `FLEET_TOKEN`, with a hidden marker in the PR comment to prevent duplicates.
+  Owner, maintainer, and bot-authored conflicted PRs are not nudged and do not emit decision cards.
 - **Token scope.** The default `GITHUB_TOKEN` only reaches this repo and is used for all card activity (so it can't recursively re-trigger the handler).
   Acting on your other repos uses `FLEET_TOKEN`, which is never printed and is only used in cross-repo scan, approval, execution, and read-only fetch steps.
   Scope it to just your fleet with Actions, Contents, Issues, and Pull requests read/write on the target repos.
@@ -242,12 +249,14 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Confirm the repo names in the config are correct (names only, no `owner/` prefix).
   Run `scan-backstop` manually and read the logs - a repo that can't be read is reported as a warning and skipped, not fatal.
   If the target is authored by the repo owner, the configured maintainer, or a bot, the scheduled scan intentionally leaves it out of the queue.
+  If an otherwise merge-ready or review-needed PR has a merge conflict, the scheduled scan intentionally leaves it out of the queue until the contributor pushes a mergeable head; contributor-authored PRs get a rebase nudge comment.
 - **Items look wrong (a non-compliant PR shows as merge-ready).**
   Your `compliance_check` / `test_check_patterns` don't match your actual check names.
   Run the `checks` helper (step 2) to see the real names, and the scan logs surface a config warning when a gate-like check is present but unconfigured.
 - **A decision didn't execute.**
   Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo. The card stays open with an error comment when an action fails.
   A `/merge` that's refused with a "head moved" note is working as intended - re-scan and decide again.
+  A `/merge` that fails with a merge-conflict message means the contributor must rebase or merge the base branch, resolve the conflict, and push before Wheelhouse can merge it.
 - **Approve-CI cards appear for PRs that look safe.**
   Open the latest `scan-backstop` run logs and search for `wheelhouse auto-approve carded` or `wheelhouse auto-approve suppressed-card`.
   The line names the repo and PR, includes the safety or uncertainty reason, and includes the `approve_ci` status/message when Wheelhouse tried to approve but had to fail closed.
@@ -286,7 +295,7 @@ wheelhouse.config.yml          the one file you edit
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
-  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, CI safety, auto-approval, and scan logs
+  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, CI safety, auto-approval, and scan logs
   render_card.py               build the decision card; create/refresh/close cards in this repo
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
@@ -296,6 +305,7 @@ tests/test_decision.py         offline unit test for the parse/route logic (mock
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
+tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, and logging
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring

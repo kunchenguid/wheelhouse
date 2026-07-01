@@ -5,10 +5,10 @@ name: scan-backstop
 # `needs-decision` card whose target materially changed, and close cards whose
 # target is merged/closed, plus pure pending cards whose open target no longer
 # needs a maintainer decision - including owner/maintainer/bot-authored targets
-# that the scan author filter now leaves out of the worklist - so the queue
-# reflects current state and self-heals. The ingest event path still upserts on
-# dispatch, but the hourly
-# reconcile is what keeps cards fresh; running it hourly is safe precisely
+# that the scan author filter leaves out and conflicted PR-review targets that
+# moved to needs-rebase - so the queue reflects current state and self-heals. The
+# ingest event path still upserts on dispatch, but the hourly reconcile is what
+# keeps cards fresh; running it hourly is safe precisely
 # because reconcile refreshes only on a material change and is a full no-op
 # otherwise (see reconcile.py / render_card.upsert_card, AGENTS.md "Card refresh").
 
@@ -39,8 +39,9 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
-      # Cross-repo scan reads fleet state and may approve provably-safe fork-CI
-      # runs, so this step requires FLEET_TOKEN with Actions write scope.
+      # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
+      # runs, and may post rebase nudges, so this step requires FLEET_TOKEN with
+      # Actions write scope.
       - name: Scan the fleet
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}

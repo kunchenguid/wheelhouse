@@ -34,6 +34,7 @@ python -m py_compile scripts/*.py tests/*.py
 python tests/test_decision.py
 python tests/test_card_refresh.py
 python tests/test_reconcile.py
+python tests/test_merge_conflict.py
 python tests/test_ci_autoapprove.py
 python tests/test_author_filter.py
 python tests/test_deep_review.py

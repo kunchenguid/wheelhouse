@@ -3,7 +3,8 @@ name: ingest
 # Fast path: a source repo (or a manual test) hands us an item that needs the
 # maintainer's decision, and we create or refresh a decision-card issue for it.
 # This path trusts the explicit dispatch payload; the scheduled scan's
-# owner/maintainer/bot author filter is not applied here.
+# owner/maintainer/bot author filter and merge-conflict needs-rebase routing are
+# not applied here.
 #
 # Portability: the owner is github.repository_owner; the fleet + policy come from
 # wheelhouse.config.yml. Nothing here is account-specific.

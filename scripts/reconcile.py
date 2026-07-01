@@ -14,7 +14,8 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
     pure pending cards whose open target no longer needs a maintainer decision -
     so the queue self-heals even if a dispatch was lost.
     This also consumes old scan-built cards for owner/maintainer/bot-authored
-    targets after the author filter removes them from the current worklist.
+    targets after the author filter removes them from the current worklist, and
+    for conflicted PR-review targets after the scan moves them to needs-rebase.
 
 Both card operations run against THIS repo via the ambient GH_TOKEN, which the
 workflow sets to the default GITHUB_TOKEN (card activity must not re-trigger the
@@ -124,8 +125,10 @@ def main():
                   % (ex["number"], item["repo"], item["number"], str(e)[:160]))
 
     # 2) Close cards whose target is no longer open, and pure pending cards whose
-    #    open target no longer appears in the current maintainer worklist. Skip
-    #    repos that failed to scan (ok:false) - we don't know their state.
+    #    open target no longer appears in the current maintainer worklist (for
+    #    example author-excluded targets or conflicted PRs now waiting on
+    #    contributor rebase). Skip repos that failed to scan (ok:false) - we don't
+    #    know their state.
     closed = 0
     for ex in cards_with_state:
         card_number = ex["number"]
