@@ -204,8 +204,16 @@ jobs:
           READONLY_SEARCH_ENABLED: ${{ steps.nl-readonly.outputs.enabled }}
         run: python scripts/apply_decision.py nl-prompt
 
+      - id: nl-search-tool
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
+          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
+        run: python scripts/nl_readonly_search.py install
+
       # Claude maps intent -> writes decision.json. If READONLY_TOKEN exists,
-      # this branch may also run read-only gh shell commands for answer
+      # this branch may also run the scoped wheelhouse-search wrapper for answer
       # context. The action's github_token input is READONLY_TOKEN here because
       # claude-code-action also exposes that input to the Claude subprocess as
       # GitHub CLI credentials. GH_TOKEN is READONLY_TOKEN, never FLEET_TOKEN,
@@ -224,7 +232,7 @@ jobs:
           github_token: ${{ secrets.READONLY_TOKEN }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
-            --allowedTools "Write,Bash(gh pr list *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue list *),Bash(gh issue view *),Bash(gh search issues *),Bash(gh search prs *),Bash(gh search code *),Bash(gh search repos *)"
+            --allowedTools "Write,Bash(wheelhouse-search)"
             --max-turns 6
 
       # Legacy no-search branch. This is the exact old tool posture: Write only,

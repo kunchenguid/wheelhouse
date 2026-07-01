@@ -12,6 +12,9 @@ import sys
 import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import nl_readonly_search as nls  # noqa: E402
+
 _failures = []
 
 
@@ -90,6 +93,43 @@ def test_readonly_gate_and_prompt_gating():
         )
 
 
+def test_search_wrapper_install_step():
+    steps = handle_steps()
+    install = step_by_id(steps, "nl-search-tool")
+    search = step_by_name(steps, "Claude interprets intent (read-only search)")
+
+    check("workflow: read-only search wrapper install step exists", install is not None)
+    if install:
+        env = install.get("env", {})
+        check(
+            "workflow: search wrapper receives owner scope",
+            env.get("GITHUB_REPOSITORY_OWNER") == "${{ github.repository_owner }}",
+        )
+        check(
+            "workflow: search wrapper receives target repo",
+            env.get("TARGET_REPO") == "${{ steps.nl-gate.outputs.repo }}",
+        )
+        check(
+            "workflow: search wrapper installs from trusted checkout",
+            str(install.get("run", "")).strip()
+            == "python scripts/nl_readonly_search.py install",
+        )
+        check(
+            "workflow: search wrapper runs only when readonly search is enabled",
+            "steps.nl-readonly.outputs.enabled == 'true'" in str(install.get("if", "")),
+        )
+
+    install_i = step_index(steps, lambda s: s.get("id") == "nl-search-tool")
+    search_i = step_index(
+        steps, lambda s: s.get("name") == "Claude interprets intent (read-only search)"
+    )
+    check(
+        "workflow: search wrapper installs before Claude can use it",
+        None not in (install_i, search_i) and install_i < search_i,
+    )
+    check("workflow: search Claude step still exists", search is not None)
+
+
 def test_claude_steps_split_legacy_vs_search():
     steps = handle_steps()
     llm_steps = claude_steps(steps)
@@ -149,21 +189,19 @@ def test_claude_steps_split_legacy_vs_search():
             "workflow: search step runs only when readonly search is enabled",
             "steps.nl-readonly.outputs.enabled == 'true'" in str(search.get("if", "")),
         )
-        for pattern in (
-            "Write",
-            "Bash(gh pr list *)",
-            "Bash(gh pr view *)",
-            "Bash(gh pr diff *)",
-            "Bash(gh issue list *)",
-            "Bash(gh issue view *)",
-            "Bash(gh search issues *)",
-            "Bash(gh search prs *)",
-            "Bash(gh search code *)",
-            "Bash(gh search repos *)",
-        ):
+        for pattern in ("Write", "Bash(wheelhouse-search)"):
             check("workflow: search step allows %s" % pattern, pattern in args)
         for forbidden in (
             "FLEET_TOKEN",
+            "Bash(gh",
+            "Bash(git",
+            "Bash(wheelhouse-search *)",
+            "gh pr list",
+            "gh pr view",
+            "gh pr diff",
+            "gh issue list",
+            "gh issue view",
+            "gh search",
             "gh pr merge",
             "gh issue close",
             "gh workflow run",
@@ -172,11 +210,77 @@ def test_claude_steps_split_legacy_vs_search():
             "git commit",
             "git grep",
             "git -C",
-            "Bash(git",
-            "Bash(gh search *)",
             "--open-files-in-pager",
         ):
             check("workflow: search step does not allow %s" % forbidden, forbidden not in args)
+
+
+def test_search_wrapper_repositories_are_owner_scoped():
+    cfg = {"repos": {"target": {}, "fleet": {}, "elsewhere/repo": {}}}
+    repos = nls.allowed_repos("owner", "target", cfg)
+    check(
+        "wrapper: allowed repos include only target and configured owner repos",
+        repos == ["owner/target", "owner/fleet"],
+    )
+
+
+def test_search_wrapper_rejects_out_of_scope_repo():
+    try:
+        nls.handle_request(
+            {"op": "pr_view", "repo": "other/repo", "number": 1},
+            ["owner/target"],
+            lambda args: "unexpected",
+        )
+    except ValueError as exc:
+        blocked = "allowed search scope" in str(exc)
+    else:
+        blocked = False
+    check("wrapper: out-of-scope repo is rejected", blocked)
+
+
+def test_search_wrapper_hardcodes_repo_flags():
+    calls = []
+
+    def fake(args):
+        calls.append(args)
+        return "ok"
+
+    out = nls.handle_request(
+        {"op": "search_prs", "query": "duplicate fix", "limit": 99},
+        ["owner/target", "owner/fleet"],
+        fake,
+    )
+    check("wrapper: search runs once per allowed repo", len(calls) == 2)
+    check(
+        "wrapper: search caps requested limit",
+        all(call[-1] == "50" for call in calls),
+    )
+    check(
+        "wrapper: search passes only allowed repo flags",
+        all(
+            "--repo" in call
+            and call[call.index("--repo") + 1] in {"owner/target", "owner/fleet"}
+            for call in calls
+        ),
+    )
+    check(
+        "wrapper: search output is grouped by repo",
+        "### owner/target" in out and "### owner/fleet" in out,
+    )
+
+
+def test_search_wrapper_rejects_query_scope_qualifiers():
+    try:
+        nls.handle_request(
+            {"op": "search_code", "query": "repo:other/repo duplicate fix"},
+            ["owner/target"],
+            lambda args: "unexpected",
+        )
+    except ValueError as exc:
+        blocked = "scope qualifiers" in str(exc)
+    else:
+        blocked = False
+    check("wrapper: query repo qualifiers are rejected", blocked)
 
 
 def test_claude_output_is_isolated_before_routing():
@@ -281,7 +385,12 @@ def test_route_and_execute_stay_deterministic():
 def main():
     test_handle_checkout_does_not_persist_default_token()
     test_readonly_gate_and_prompt_gating()
+    test_search_wrapper_install_step()
     test_claude_steps_split_legacy_vs_search()
+    test_search_wrapper_repositories_are_owner_scoped()
+    test_search_wrapper_rejects_out_of_scope_repo()
+    test_search_wrapper_hardcodes_repo_flags()
+    test_search_wrapper_rejects_query_scope_qualifiers()
     test_claude_output_is_isolated_before_routing()
     test_route_and_execute_stay_deterministic()
     print()
