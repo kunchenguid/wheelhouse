@@ -71,6 +71,7 @@ query($owner:String!, $name:String!) {
     defaultBranchRef { name }
     pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
+      pageInfo { hasNextPage endCursor }
       nodes {
         number title isDraft updatedAt changedFiles isCrossRepository mergeable
         author { login __typename }
@@ -78,7 +79,7 @@ query($owner:String!, $name:String!) {
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
         labels(first:20){ nodes{ name } }
-        closingIssuesReferences(first:10){ nodes{ number } }
+        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
           contexts(first:100){ nodes{
@@ -98,6 +99,34 @@ query($owner:String!, $name:String!) {
 }
 """
 
+PRS_PAGE_GQL = """
+query($owner:String!, $name:String!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title isDraft updatedAt changedFiles isCrossRepository mergeable
+        author { login __typename }
+        headRefName headRefOid baseRefName
+        headRepository { name owner { login } }
+        baseRepository { name owner { login } }
+        labels(first:20){ nodes{ name } }
+        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
+        commits(last:1){ nodes{ commit{ statusCheckRollup{
+          state
+          contexts(first:100){ nodes{
+            __typename
+            ... on CheckRun { name conclusion status }
+            ... on StatusContext { context state }
+          }}
+        }}}}
+      }
+    }
+  }
+}
+"""
+
 ISSUES_PAGE_GQL = """
 query($owner:String!, $name:String!, $after:String!) {
   repository(owner:$owner, name:$name) {
@@ -105,6 +134,20 @@ query($owner:String!, $name:String!, $after:String!) {
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
+    }
+  }
+}
+"""
+
+CLOSING_REFS_PAGE_GQL = """
+query($owner:String!, $name:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      closingIssuesReferences(first:100, after:$after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { number }
+      }
     }
   }
 }
@@ -200,6 +243,32 @@ def gh_graphql(owner, name):
     return data["data"]["repository"]
 
 
+def gh_graphql_pr_page(owner, name, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + PRS_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    return data["data"]["repository"]["pullRequests"]
+
+
 def gh_graphql_issue_page(owner, name, after):
     r = subprocess.run(
         [
@@ -226,6 +295,56 @@ def gh_graphql_issue_page(owner, name, after):
     return data["data"]["repository"]["issues"]
 
 
+def gh_graphql_closing_refs_page(owner, name, number, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + CLOSING_REFS_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-F",
+            "number=%s" % number,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    pr = data["data"]["repository"]["pullRequest"]
+    if not pr:
+        raise RuntimeError("pull request #%s not found" % number)
+    return pr["closingIssuesReferences"]
+
+
+def _page_open_prs(owner, name, first_page):
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return nodes, first_page.get("totalCount", len(nodes)) <= len(nodes)
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("PR pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_pr_page(owner, name, cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return nodes, page.get("totalCount", len(nodes)) <= len(nodes)
+    return nodes, True
+
+
 def _page_open_issues(owner, name, first_page):
     nodes = list(first_page.get("nodes") or [])
     page_info = first_page.get("pageInfo") or {}
@@ -243,6 +362,32 @@ def _page_open_issues(owner, name, first_page):
         if not page_info:
             return nodes, page.get("totalCount", len(nodes)) <= len(nodes)
     return nodes, True
+
+
+def _closing_issue_numbers(owner, name, pr):
+    first_page = pr.get("closingIssuesReferences") or {}
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return (
+            [i["number"] for i in nodes],
+            first_page.get("totalCount", len(nodes)) <= len(nodes),
+        )
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("closing issue pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_closing_refs_page(owner, name, pr["number"], cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return (
+                [i["number"] for i in nodes],
+                page.get("totalCount", len(nodes)) <= len(nodes),
+            )
+    return [i["number"] for i in nodes], True
 
 
 def _dedupe_numbered_nodes(nodes):
@@ -800,7 +945,21 @@ def build_repo(
             [],
         )
 
-    prs = data["pullRequests"]["nodes"]
+    pr_scan_warning = ""
+    try:
+        prs, pr_scan_complete = _page_open_prs(owner, name, data["pullRequests"])
+    except Exception as e:
+        prs = list(data["pullRequests"].get("nodes") or [])
+        pr_scan_complete = False
+        pr_scan_warning = "PR scan incomplete: %s" % str(e)[:160]
+    prs = _dedupe_numbered_nodes(prs)
+    pr_total = data["pullRequests"].get("totalCount", len(prs))
+    pr_truncated = (not pr_scan_complete) or pr_total > len(prs)
+    if pr_truncated and not pr_scan_warning:
+        pr_scan_warning = "PR scan incomplete: fetched %d of %d open PRs" % (
+            len(prs),
+            pr_total,
+        )
     issue_scan_warning = ""
     try:
         issues, issue_scan_complete = _page_open_issues(owner, name, data["issues"])
@@ -821,6 +980,8 @@ def build_repo(
     all_names = set()
     enriched = []
     closing = {}  # issue -> [pr numbers]
+    closing_scan_complete = True
+    closing_scan_warning = ""
     for pr in prs:
         author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
@@ -830,7 +991,24 @@ def build_repo(
             pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
         )
         author_excluded = _author_excluded_from_queue(author, maintainer_logins)
-        closes = [i["number"] for i in pr["closingIssuesReferences"]["nodes"]]
+        try:
+            closes, closes_complete = _closing_issue_numbers(owner, name, pr)
+        except Exception as e:
+            closes = [
+                i["number"]
+                for i in (pr.get("closingIssuesReferences") or {}).get("nodes", [])
+            ]
+            closes_complete = False
+            if not closing_scan_warning:
+                closing_scan_warning = (
+                    "PR closing issue scan incomplete: %s" % str(e)[:160]
+                )
+        if not closes_complete:
+            closing_scan_complete = False
+            if not closing_scan_warning:
+                closing_scan_warning = (
+                    "PR closing issue scan incomplete for #%s" % pr["number"]
+                )
         for i in closes:
             closing.setdefault(i, []).append(pr["number"])
         enriched.append(
@@ -956,39 +1134,45 @@ def build_repo(
         items.append(item)
 
     if card_issues:
-        for it in issues:
-            author = it.get("author") or {}
-            if _author_excluded_from_queue(author, maintainer_logins):
-                continue
-            if it["number"] in addressed:
-                continue  # an open PR is already on it
-            items.append(
-                {
-                    "repo": name,
-                    "number": it["number"],
-                    "kind": "issue-triage",
-                    "head_sha": "",
-                    # Issues have no head SHA, so auto-triage caches against
-                    # `updatedAt` instead - it advances on any edit or new
-                    # comment and is otherwise stable.
-                    "updated_at": it.get("updatedAt", "") or "",
-                    "title": it["title"],
-                    "author": _author_login(author) or "?",
-                    "bucket": "issue-triage",
-                    "comp": "n/a",
-                    "tests": "n/a",
-                    "url": "https://github.com/%s/issues/%d" % (slug, it["number"]),
-                    "summary": "open issue, no linked PR",
-                    "recommendation": _recommendation("issue-triage"),
-                    "priority": PRIORITY["issue-triage"],
-                    "auto_triage_issues": triage_issues_enabled,
-                }
-            )
+        if pr_truncated or not closing_scan_complete:
+            if not pr_scan_warning and not closing_scan_warning:
+                pr_scan_warning = "PR scan incomplete for issue triage"
+        else:
+            for it in issues:
+                author = it.get("author") or {}
+                if _author_excluded_from_queue(author, maintainer_logins):
+                    continue
+                if it["number"] in addressed:
+                    continue  # an open PR is already on it
+                items.append(
+                    {
+                        "repo": name,
+                        "number": it["number"],
+                        "kind": "issue-triage",
+                        "head_sha": "",
+                        # Issues have no head SHA, so auto-triage caches against
+                        # `updatedAt` instead - it advances on any edit or new
+                        # comment and is otherwise stable.
+                        "updated_at": it.get("updatedAt", "") or "",
+                        "title": it["title"],
+                        "author": _author_login(author) or "?",
+                        "bucket": "issue-triage",
+                        "comp": "n/a",
+                        "tests": "n/a",
+                        "url": "https://github.com/%s/issues/%d" % (slug, it["number"]),
+                        "summary": "open issue, no linked PR",
+                        "recommendation": _recommendation("issue-triage"),
+                        "priority": PRIORITY["issue-triage"],
+                        "auto_triage_issues": triage_issues_enabled,
+                    }
+                )
 
     warning = "; ".join(
         w
         for w in (
             config_warning(name, repo_cfg.get("compliance_check"), sorted(all_names)),
+            pr_scan_warning,
+            closing_scan_warning,
             issue_scan_warning,
         )
         if w
@@ -998,7 +1182,7 @@ def build_repo(
         "ok": True,
         "open_pr_numbers": [p["number"] for p in enriched],
         "open_issue_numbers": open_issue_numbers,
-        "truncated": data["pullRequests"]["totalCount"] > len(prs) or issue_truncated,
+        "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
     }
     return (result, items)

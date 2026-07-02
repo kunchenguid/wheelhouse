@@ -43,7 +43,15 @@ def green_rollup():
 MISSING = object()
 
 
-def pr_node(number, author=None, status_rollup=MISSING, cross_repo=False):
+def pr_node(
+    number,
+    author=None,
+    status_rollup=MISSING,
+    cross_repo=False,
+    closes=None,
+    closing_total=None,
+    closing_page_info=None,
+):
     if status_rollup is MISSING:
         status_rollup = green_rollup()
     node = {
@@ -60,9 +68,13 @@ def pr_node(number, author=None, status_rollup=MISSING, cross_repo=False):
         "headRepository": {"name": "demo-fork", "owner": {"login": "forker"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"nodes": []},
-        "closingIssuesReferences": {"nodes": []},
+        "closingIssuesReferences": {"nodes": [{"number": i} for i in (closes or [])]},
         "commits": {"nodes": [{"commit": {"statusCheckRollup": status_rollup}}]},
     }
+    if closing_total is not None:
+        node["closingIssuesReferences"]["totalCount"] = closing_total
+    if closing_page_info is not None:
+        node["closingIssuesReferences"]["pageInfo"] = closing_page_info
     if cross_repo is False:
         node["headRepository"] = {"name": "demo", "owner": {"login": "owner"}}
     elif cross_repo == "missing":
@@ -85,12 +97,18 @@ def issue_node(number, author=None):
     }
 
 
-def graphql_data(pr_nodes=None, issue_nodes=None):
+def graphql_data(pr_nodes=None, issue_nodes=None, pr_total=None, pr_page_info=None):
     pr_nodes = list(pr_nodes or [])
     issue_nodes = list(issue_nodes or [])
+    pull_requests = {
+        "totalCount": len(pr_nodes) if pr_total is None else pr_total,
+        "nodes": pr_nodes,
+    }
+    if pr_page_info is not None:
+        pull_requests["pageInfo"] = pr_page_info
     return {
         "defaultBranchRef": {"name": "main"},
-        "pullRequests": {"totalCount": len(pr_nodes), "nodes": pr_nodes},
+        "pullRequests": pull_requests,
         "issues": {"totalCount": len(issue_nodes), "nodes": issue_nodes},
     }
 
@@ -440,6 +458,218 @@ def test_issue_scan_pages_all_open_issues():
     check("issue-scan: completed pagination is not truncated", result["truncated"] is False)
 
 
+def test_issue_cards_skip_when_pr_scan_incomplete():
+    issue = issue_node(999, author=HUMAN)
+    first_prs = [pr_node(n, author=HUMAN) for n in range(1, 101)]
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
+
+    def fake_graphql(owner, name):
+        return graphql_data(first_prs, [issue], pr_total=101)
+
+    def fake_load_config():
+        return {
+            "repos": {"demo": repo_cfg},
+            "maintainer": "co-maintainer",
+            "nl_decisions": False,
+            "card_issues": True,
+            "auto_approve_ci": True,
+        }
+
+    save = (
+        core.gh_graphql,
+        core.load_config,
+        os.environ.get("OWNER"),
+        os.environ.get("GITHUB_REPOSITORY_OWNER"),
+    )
+    core.gh_graphql = fake_graphql
+    core.load_config = fake_load_config
+    os.environ["OWNER"] = "owner"
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
+    try:
+        result, items = core.build_repo("owner", repo_cfg, True)
+    finally:
+        (
+            core.gh_graphql,
+            core.load_config,
+            old_owner,
+            old_repo_owner,
+        ) = save
+        if old_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = old_owner
+        if old_repo_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_repo_owner
+    issue_cards = [it for it in items if it["kind"] == "issue-triage"]
+    check("issue-scan: incomplete PR scan suppresses issue cards", issue_cards == [])
+    check("issue-scan: incomplete PR scan is truncated", result["truncated"] is True)
+    check(
+        "issue-scan: incomplete PR scan reports warning",
+        "PR scan incomplete" in result["warning"],
+    )
+
+
+def test_issue_scan_pages_open_prs_for_addressed_filter():
+    first_prs = [pr_node(n, author=HUMAN) for n in range(1, 101)]
+    linked_pr = pr_node(101, author=HUMAN, closes=[999])
+    issue = issue_node(999, author=HUMAN)
+    first_data = graphql_data(
+        first_prs,
+        [issue],
+        pr_total=101,
+        pr_page_info={"hasNextPage": True, "endCursor": "pr-cursor-100"},
+    )
+    calls = {"pr_pages": []}
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
+
+    def fake_graphql(owner, name):
+        return first_data
+
+    def fake_pr_page(owner, name, after):
+        calls["pr_pages"].append(after)
+        return {
+            "totalCount": 101,
+            "nodes": [linked_pr],
+            "pageInfo": {"hasNextPage": False, "endCursor": "pr-cursor-101"},
+        }
+
+    def fake_load_config():
+        return {
+            "repos": {"demo": repo_cfg},
+            "maintainer": "co-maintainer",
+            "nl_decisions": False,
+            "card_issues": True,
+            "auto_approve_ci": True,
+        }
+
+    save = (
+        core.gh_graphql,
+        core.gh_graphql_pr_page,
+        core.load_config,
+        os.environ.get("OWNER"),
+        os.environ.get("GITHUB_REPOSITORY_OWNER"),
+    )
+    core.gh_graphql = fake_graphql
+    core.gh_graphql_pr_page = fake_pr_page
+    core.load_config = fake_load_config
+    os.environ["OWNER"] = "owner"
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
+    try:
+        result, items = core.build_repo("owner", repo_cfg, True)
+    finally:
+        (
+            core.gh_graphql,
+            core.gh_graphql_pr_page,
+            core.load_config,
+            old_owner,
+            old_repo_owner,
+        ) = save
+        if old_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = old_owner
+        if old_repo_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_repo_owner
+    issue_cards = [it for it in items if it["kind"] == "issue-triage"]
+    check("issue-scan: open PR next page requested", calls["pr_pages"] == ["pr-cursor-100"])
+    check("issue-scan: linked issue from PR page is not carded", issue_cards == [])
+    check(
+        "issue-scan: PR pagination completes open PR numbers",
+        result["open_pr_numbers"] == list(range(1, 102)),
+    )
+    check("issue-scan: completed PR pagination is not truncated", result["truncated"] is False)
+
+
+def test_issue_scan_pages_closing_references_for_addressed_filter():
+    pr = pr_node(
+        1,
+        author=HUMAN,
+        closes=range(1, 101),
+        closing_total=101,
+        closing_page_info={"hasNextPage": True, "endCursor": "closing-cursor-100"},
+    )
+    issue = issue_node(101, author=HUMAN)
+    calls = {"closing_pages": []}
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
+
+    def fake_graphql(owner, name):
+        return graphql_data([pr], [issue])
+
+    def fake_closing_page(owner, name, number, after):
+        calls["closing_pages"].append((number, after))
+        return {
+            "totalCount": 101,
+            "nodes": [{"number": 101}],
+            "pageInfo": {"hasNextPage": False, "endCursor": "closing-cursor-101"},
+        }
+
+    def fake_load_config():
+        return {
+            "repos": {"demo": repo_cfg},
+            "maintainer": "co-maintainer",
+            "nl_decisions": False,
+            "card_issues": True,
+            "auto_approve_ci": True,
+        }
+
+    save = (
+        core.gh_graphql,
+        core.gh_graphql_closing_refs_page,
+        core.load_config,
+        os.environ.get("OWNER"),
+        os.environ.get("GITHUB_REPOSITORY_OWNER"),
+    )
+    core.gh_graphql = fake_graphql
+    core.gh_graphql_closing_refs_page = fake_closing_page
+    core.load_config = fake_load_config
+    os.environ["OWNER"] = "owner"
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
+    try:
+        result, items = core.build_repo("owner", repo_cfg, True)
+    finally:
+        (
+            core.gh_graphql,
+            core.gh_graphql_closing_refs_page,
+            core.load_config,
+            old_owner,
+            old_repo_owner,
+        ) = save
+        if old_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = old_owner
+        if old_repo_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_repo_owner
+    issue_cards = [it for it in items if it["kind"] == "issue-triage"]
+    check(
+        "issue-scan: closing references next page requested",
+        calls["closing_pages"] == [(1, "closing-cursor-100")],
+    )
+    check("issue-scan: linked issue from closing page is not carded", issue_cards == [])
+    check(
+        "issue-scan: completed closing reference pagination is not truncated",
+        result["truncated"] is False,
+    )
+
+
 def main():
     test_pr_author_filter_skips_owner_maintainer_and_bots()
     test_ci_approval_author_filter_preserves_safe_auto_approve()
@@ -450,6 +680,9 @@ def main():
     test_ci_approval_author_filter_suppresses_unknown_fork_cards()
     test_issue_author_filter_matches_pr_filter()
     test_issue_scan_pages_all_open_issues()
+    test_issue_cards_skip_when_pr_scan_incomplete()
+    test_issue_scan_pages_open_prs_for_addressed_filter()
+    test_issue_scan_pages_closing_references_for_addressed_filter()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
