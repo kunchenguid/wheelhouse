@@ -146,7 +146,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   display-only change should propagate the same way. A render-version-only
   refresh is a same-revision cosmetic refresh (same `head_sha` for a pr-review
   card, same `updated_at` for an issue-triage card): it reuses the same
-  `_preserve_same_revision_triage` path as a material same-head refresh (an
+  `_preserve_same_revision_triage` path as a same-revision refresh (an
   existing `### Triage` section and its `triaged_sha`/`triage_status` cache
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
@@ -318,6 +318,13 @@ still appears where it's plain English, e.g. "triage the queue".)
 - `wheelhouse_core.py scan` is resilient: a repo that fails to read is reported as a
   warning (`ok:false`) and skipped, and `reconcile.py` must never close cards for
   an `ok:false` repo (state unknown).
+  Open PRs, open issues, and PR closing issue references are paginated.
+  If any of those pagination paths cannot complete, the repo result is marked
+  `truncated` and `reconcile.py` must not self-heal close existing cards for that
+  repo because state is incomplete.
+  If the PR list or closing-reference scan is incomplete, `build_repo` withholds
+  issue-triage cards for that repo because it cannot prove which issues are
+  already addressed by open PRs.
 - **Queue author filter.**
   Decision cards are for other people's work, so `build_repo` suppresses cards for PRs and issues authored by the canonical maintainer set (`wheelhouse_core.maintainers()` = repo owner plus optional configured `maintainer`) or by bots.
   Bot detection uses the GraphQL `author.__typename == "Bot"` signal plus the `*[bot]` login suffix fallback.
@@ -493,7 +500,7 @@ Run the unit tests:
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.
-- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, no network.
+- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates, and `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, all offline.
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, and the handler's immutable-input `workflow_dispatch` trigger, all by inspecting the scripts/YAML, no network.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.

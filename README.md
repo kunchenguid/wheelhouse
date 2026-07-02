@@ -142,7 +142,7 @@ To set it up:
    The pinned action resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`.
    Claude Code documentation says that on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
 2. Add it as an Actions secret named exactly `CLAUDE_CODE_OAUTH_TOKEN`.
-3. Optional: set `auto_triage: false` in `wheelhouse.config.yml` if you do not want automatic PR-card triage to spend Claude turns.
+3. Optional: set `auto_triage: false` and/or `auto_triage_issues: false` in `wheelhouse.config.yml` if you do not want automatic PR-card or issue-card triage to spend Claude turns.
 4. For the plain-English path, also set `nl_decisions: true` in `wheelhouse.config.yml`.
 5. Optional: to let auto triage, deep review, and plain-English answers search related PRs, issues, and code across the target repo and configured fleet repos, add an Actions secret named exactly `READONLY_TOKEN`.
    Scope it for public read only and give it no write permissions.
@@ -215,7 +215,8 @@ For PR-review cards, that new head also makes automatic triage stale; the next e
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
 Pure pending PR-review and issue-triage cards that were already open before auto triage existed have no `triaged_sha` cache yet, so they backfill once on the next eligible scan.
 If you act before that refresh lands, a `/merge` (or a "merge it" comment) still refuses a stale head with a note.
-The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next scan.
+The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next successful complete scan.
+If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards open because it cannot prove the target disappeared.
 If an open target no longer needs a maintainer decision, its pure pending card is closed too.
 That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after a successful scan.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
@@ -302,6 +303,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   A `suppressed-card` line means the PR author is the owner, configured maintainer, or a bot, so Wheelhouse kept the CI approval fail-closed but did not emit a decision card.
   If logs say the fork status is unknown, Wheelhouse could not prove this is a fork PR and left the decision manual.
   If logs say a run could not be verified, Wheelhouse refused because the `action_required` run detail did not bind cleanly to the PR head.
+- **Issue cards are missing, or a stale card did not close.**
+  Open the latest `scan-backstop` run logs and look for `scan incomplete`.
+  Wheelhouse paginates open PRs, open issues, PR closing references, and hub cards; if any repo page or closing-reference page cannot be read completely, it reports the warning, suppresses new issue-triage cards that might be duplicates of PR-addressed issues, and refuses to self-heal close existing cards for that repo until a complete scan succeeds.
 - **An Approve-CI card disappeared before I acted.**
   Search the latest `scan-backstop` logs for `approve_ci noop`.
   That means Wheelhouse verified no matching workflow run was still awaiting approval, emitted no worklist item, and let reconcile consume the stale card.
@@ -336,7 +340,7 @@ wheelhouse.config.yml          the one file you edit
   ingest.yml                   repository_dispatch / manual -> create or refresh a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close the card
   scan-backstop.yml            hourly scan -> create, refresh, or close cards against live repo state
-  triage.yml                   automatic lightweight PR-card triage -> read-only target pass -> workflow edits card context
+  triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> workflow edits card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/

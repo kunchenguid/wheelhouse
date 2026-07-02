@@ -204,11 +204,12 @@ def render_stale(state):
     return stored_version < CARD_RENDER_VERSION
 
 
-# Auto-triage caches against a per-kind revision: a PR's `head_sha` (no head
-# SHA exists for an issue), or an issue's `updatedAt` (advances on any edit or
-# new comment). Both are non-material - they gate the triage side job only,
-# never card refresh/classification. Each kind is gated by its OWN independent
-# config flag so turning one off never affects the other.
+# Auto-triage caches against a per-kind revision: a PR's `head_sha`, or an
+# issue's `updatedAt` (issues have no head SHA, and `updatedAt` advances on any
+# edit or new comment). For PRs, `head_sha` is also a material refresh field; for
+# issues, `updated_at` is deliberately non-material and gates only the triage side
+# job. Each kind is gated by its OWN independent config flag so turning one off
+# never affects the other.
 AUTO_TRIAGE_FLAG_BY_KIND = {
     "pr-review": "auto_triage",
     "issue-triage": "auto_triage_issues",
@@ -652,7 +653,7 @@ def _edit_issue_body(number, body):
 
 
 def mark_triage_queued(number, item, body):
-    """Cache an auto-triage attempt for this head before dispatching the LLM.
+    """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
     This is intentionally a hidden state update only. It bounds spend even if
     the asynchronous workflow fails before it can write a visible result.

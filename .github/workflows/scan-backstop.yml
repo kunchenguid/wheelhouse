@@ -3,8 +3,9 @@ name: scan-backstop
 # The primary keep-current path. On a schedule (and on demand), scan the whole
 # fleet, open cards for anything new that needs a decision, REFRESH an open
 # `needs-decision` card whose target materially changed or whose card render
-# version is stale, queue advisory auto triage for eligible PR-review cards whose
-# current head lacks a cache, and close cards whose target is merged/closed, plus
+# version is stale, queue advisory auto triage for eligible PR-review or
+# issue-triage cards whose current revision lacks a cache, and close cards whose
+# target is merged/closed, plus
 # pure pending cards whose open target no longer needs a maintainer decision -
 # including owner/maintainer/bot-authored targets that the scan author filter
 # leaves out and conflicted PR-review targets that moved to needs-rebase - so the

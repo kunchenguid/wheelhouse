@@ -2,8 +2,8 @@ name: ingest
 
 # Fast path: a source repo (or a manual test) hands us an item that needs the
 # maintainer's decision, and we create or refresh a decision-card issue for it.
-# For eligible PR-review cards, this also queues the advisory auto-triage
-# workflow after writing the per-head cache marker.
+# For eligible PR-review or issue-triage cards, this also queues the advisory
+# auto-triage workflow after writing the per-revision cache marker.
 # This path trusts the explicit dispatch payload; the scheduled scan's
 # owner/maintainer/bot author filter and merge-conflict needs-rebase routing are
 # not applied here.

@@ -10,8 +10,8 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
     state changed (head_sha/compliance/tests/kind/priority/options) - so the queue
     reflects current state, not just the snapshot taken when the card was first
     created - and leaves materially-unchanged cards completely untouched, and
-  * queues lightweight automatic PR triage for eligible pure pending pr-review
-    cards whose current head lacks a `triaged_sha` cache, and
+  * queues lightweight automatic triage for eligible pure pending pr-review or
+    issue-triage cards whose current revision lacks a `triaged_sha` cache, and
   * closes any open card whose underlying PR/issue is no longer open, and closes
     pure pending cards whose open target no longer needs a maintainer decision -
     so the queue self-heals even if a dispatch was lost.
@@ -65,10 +65,11 @@ def auto_triage_has_token():
 
 
 def maybe_queue_auto_triage(item, row, has_token):
-    """Queue lightweight advisory PR triage when this card head lacks a cache.
+    """Queue lightweight advisory triage when this card revision lacks a cache.
 
     The card is marked queued before dispatch so a failed workflow still counts
-    as this head's one attempt. Only pure needs-decision pr-review cards qualify.
+    as this revision's one attempt. Only pure needs-decision pr-review and
+    issue-triage cards qualify.
     """
     if not row:
         return False

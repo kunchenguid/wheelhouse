@@ -2,7 +2,7 @@
 """
 Wheelhouse - deterministic brain (ported from the local OSS-triage machinery).
 
-Runs inside GitHub Actions. One GraphQL query per repo fetches every open
+Runs inside GitHub Actions. A GraphQL query plus pagination fetches every open
 PR/issue with compliance + test status + mergeability, classifies each
 deterministically, and emits a worklist of items that need the maintainer's
 decision. The scan excludes known owner, configured maintainer, and bot authors
@@ -19,6 +19,9 @@ contributor rebase nudge per head SHA.
 Approval verifies each awaiting run against the target PR: populated
 workflow_run.pull_requests must name that PR, while fork-originated empty
 associations must match the PR head SHA and branch.
+Incomplete PR, issue, or closing-reference pagination is reported as a warning
+and marks the repo result as truncated, so reconcile will not self-heal close
+cards from an incomplete view of the repo.
 
 This is the GHA port of `data/triage/triage.py`. What the Actions model
 replaces has been dropped: the local single-flight lock (-> Actions
@@ -926,7 +929,10 @@ def build_repo(
     Conflicted PR-review candidates become `needs-rebase`: no decision card is
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
-    below, so an ok:false repo (early return) is never auto-approved or nudged."""
+    below, so an ok:false repo (early return) is never auto-approved or nudged.
+    Open PRs, open issues, and PR closing issue references are paginated; if the
+    PR or closing-reference scan is incomplete, issue-triage items are withheld
+    because Wheelhouse cannot prove which issues are already addressed by PRs."""
     name = repo_cfg["name"]
     slug = "%s/%s" % (owner, name)
     try:
