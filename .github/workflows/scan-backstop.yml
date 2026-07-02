@@ -3,8 +3,9 @@ name: scan-backstop
 # The primary keep-current path. On a schedule (and on demand), scan the whole
 # fleet, open cards for anything new that needs a decision, REFRESH an open
 # `needs-decision` card whose target materially changed or whose card render
-# version is stale, queue advisory auto triage for eligible PR-review cards whose
-# current head lacks a cache, and close cards whose target is merged/closed, plus
+# version is stale, queue advisory auto triage for eligible PR-review or
+# issue-triage cards whose current revision lacks a cache, and close cards whose
+# target is merged/closed, plus
 # pure pending cards whose open target no longer needs a maintainer decision -
 # including owner/maintainer/bot-authored targets that the scan author filter
 # leaves out and conflicted PR-review targets that moved to needs-rebase - so the
@@ -55,7 +56,11 @@ jobs:
       - name: List open cards
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh issue list --state open --json number,body,labels,title --limit 300 > cards.json
+        run: |
+          gh api --paginate --slurp \
+            "repos/{owner}/{repo}/issues?state=open&per_page=100" \
+            --jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
+            > cards.json
 
       # Reconcile (create, refresh, close) in THIS repo - default token, so
       # backstop activity never re-triggers the handler.

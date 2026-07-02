@@ -116,13 +116,22 @@ def run_reconcile(scan, cards, current_cards=None):
     return calls
 
 
-def scan_payload(items=None, open_pr_numbers=None, ok=True):
+def scan_payload(
+    items=None,
+    open_pr_numbers=None,
+    open_issue_numbers=None,
+    ok=True,
+    truncated=False,
+):
     return {
         "repos": {
             "wheelhouse": {
                 "ok": ok,
                 "open_pr_numbers": [42] if open_pr_numbers is None else open_pr_numbers,
-                "open_issue_numbers": [],
+                "open_issue_numbers": []
+                if open_issue_numbers is None
+                else open_issue_numbers,
+                "truncated": truncated,
             }
         },
         "items": [] if items is None else items,
@@ -396,6 +405,29 @@ def test_open_target_without_needs_decision_is_left_alone():
     )
 
 
+def test_truncated_repo_scan_does_not_self_heal_close_missing_issue():
+    issue_card = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:issue-triage",
+            "priority:low",
+            "target:wheelhouse-42",
+        ),
+        kind="issue-triage",
+    )
+    calls = run_reconcile(
+        scan_payload(
+            items=[],
+            open_pr_numbers=[],
+            open_issue_numbers=list(range(1, 101)),
+            truncated=True,
+        ),
+        [issue_card],
+    )
+    check("reconcile: truncated scan leaves possibly unseen issue card open", calls["close"] == [])
+
+
 def main():
     test_refresh_uses_known_card_when_target_label_missing()
     test_refresh_uses_current_labels_before_upsert()
@@ -407,6 +439,7 @@ def main():
     test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile()
     test_render_stale_processing_card_is_not_refreshed_via_reconcile()
     test_open_target_without_needs_decision_is_left_alone()
+    test_truncated_repo_scan_does_not_self_heal_close_missing_issue()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

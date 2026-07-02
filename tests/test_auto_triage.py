@@ -92,36 +92,60 @@ def item(**overrides):
     return base
 
 
+def item_issue(**overrides):
+    """A representative scanned issue-triage item. Issues have no head SHA, so
+    auto-triage caches against `updated_at` (the issue's GraphQL `updatedAt`)."""
+    base = {
+        "repo": "wheelhouse",
+        "number": 42,
+        "kind": "issue-triage",
+        "head_sha": "",
+        "updated_at": "2024-01-01T00:00:00Z",
+        "title": "Feature request: dark mode",
+        "author": "contributor",
+        "bucket": "issue-triage",
+        "comp": "n/a",
+        "tests": "n/a",
+        "url": "https://github.com/o/wheelhouse/issues/42",
+        "summary": "open issue, no linked PR",
+        "recommendation": "Triage - open issue with no linked PR yet.",
+        "priority": "low",
+    }
+    base.update(overrides)
+    return base
+
+
 def state_of(it):
     return core.parse_state_block(rc.render(it)["body"])
 
 
 def card_row(it=None, label_names=None, number=7):
     it = it or item()
+    kind = it.get("kind", "pr-review")
     if label_names is None:
         label_names = (
             "needs-decision",
             "repo:wheelhouse",
-            "kind:pr-review",
-            "priority:med",
+            "kind:%s" % kind,
+            "priority:%s" % it.get("priority", "med"),
             "target:wheelhouse-42",
         )
     return {
         "number": number,
         "body": rc.render(it)["body"],
         "labels": labels(*label_names),
-        "title": "[wheelhouse#42] Improve card context",
+        "title": rc.render(it)["title"],
         "state": "OPEN",
     }
 
 
-def scan_payload(items):
+def scan_payload(items, open_pr_numbers=(42,), open_issue_numbers=()):
     return {
         "repos": {
             "wheelhouse": {
                 "ok": True,
-                "open_pr_numbers": [42],
-                "open_issue_numbers": [],
+                "open_pr_numbers": list(open_pr_numbers),
+                "open_issue_numbers": list(open_issue_numbers),
             }
         },
         "items": items,
@@ -212,11 +236,39 @@ def test_auto_triage_config_default_and_overrides():
     )
 
 
+def test_auto_triage_issues_config_default_and_overrides():
+    check(
+        "config: auto_triage_issues default true helper",
+        core._auto_triage_issues_enabled({}, True) is True,
+    )
+    check(
+        "config: global false disables auto_triage_issues",
+        core._auto_triage_issues_enabled({}, False) is False,
+    )
+    check(
+        "config: per-repo false overrides global true (issues)",
+        core._auto_triage_issues_enabled({"auto_triage_issues": False}, True) is False,
+    )
+    check(
+        "config: per-repo true overrides global false (issues)",
+        core._auto_triage_issues_enabled({"auto_triage_issues": True}, False) is True,
+    )
+    check(
+        "config: auto_triage_issues per-repo value never consulted for auto_triage",
+        core._auto_triage_enabled({"auto_triage_issues": False}, True) is True,
+    )
+    check(
+        "config: auto_triage per-repo value never consulted for auto_triage_issues",
+        core._auto_triage_issues_enabled({"auto_triage": False}, True) is True,
+    )
+
+
 def test_build_item_carries_effective_auto_triage():
     old_load = build_item.load_config
     build_item.load_config = lambda: {
         "repos": {"wheelhouse": {"auto_triage": False}, "other": {}},
         "auto_triage": True,
+        "auto_triage_issues": True,
     }
     try:
         off = build_item.normalize({"repo": "wheelhouse", "number": 1})
@@ -235,6 +287,63 @@ def test_build_item_carries_effective_auto_triage():
     check(
         "build_item: payload true cannot override config false",
         payload_on_still_off["auto_triage"] is False,
+    )
+
+
+def test_build_item_carries_effective_auto_triage_issues():
+    old_load = build_item.load_config
+    build_item.load_config = lambda: {
+        "repos": {"wheelhouse": {"auto_triage_issues": False}, "other": {}},
+        "auto_triage": True,
+        "auto_triage_issues": True,
+    }
+    try:
+        off = build_item.normalize(
+            {"repo": "wheelhouse", "number": 1, "kind": "issue-triage"}
+        )
+        default_on = build_item.normalize(
+            {"repo": "other", "number": 2, "kind": "issue-triage"}
+        )
+        payload_off = build_item.normalize(
+            {
+                "repo": "other",
+                "number": 3,
+                "kind": "issue-triage",
+                "auto_triage_issues": "false",
+            }
+        )
+        payload_on_still_off = build_item.normalize(
+            {
+                "repo": "wheelhouse",
+                "number": 4,
+                "kind": "issue-triage",
+                "auto_triage_issues": "true",
+            }
+        )
+        # Independence: a repo that opts issue-triage out keeps pr-review on,
+        # and vice versa is exercised by test_build_item_carries_effective_auto_triage.
+        pr_still_on = build_item.normalize({"repo": "wheelhouse", "number": 5})
+    finally:
+        build_item.load_config = old_load
+    check(
+        "build_item: per-repo auto_triage_issues false carried",
+        off["auto_triage_issues"] is False,
+    )
+    check(
+        "build_item: global default true carried (issues)",
+        default_on["auto_triage_issues"] is True,
+    )
+    check(
+        "build_item: string false payload is false (issues)",
+        payload_off["auto_triage_issues"] is False,
+    )
+    check(
+        "build_item: payload true cannot override config false (issues)",
+        payload_on_still_off["auto_triage_issues"] is False,
+    )
+    check(
+        "build_item: repo's auto_triage_issues:false leaves auto_triage on (independence)",
+        pr_still_on["auto_triage"] is True,
     )
 
 
@@ -486,6 +595,400 @@ def test_reconcile_queues_after_head_refresh():
     )
 
 
+def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
+    triaged = item_issue(
+        triage={
+            "summary": "Requests @alice-facing dark mode support.",
+            "product_implications": "Routine feature ask from @bob.",
+            "recommended_next_step": "look closer - low effort, decent signal.",
+        }
+    )
+    body = rc.render(triaged)["body"]
+    state = core.parse_state_block(body)
+    check("render(issue): triage section exists", "### Triage" in body)
+    check("render(issue): triage strips @mentions", "@alice" not in body and "@bob" not in body)
+    check(
+        "render(issue): triage does not replace Recommended action",
+        "### Recommended action" in body,
+    )
+    check(
+        "state(issue): triaged_sha caches the current updated_at revision",
+        state.get("triaged_sha") == triaged["updated_at"],
+    )
+    check("state(issue): triage status is succeeded", state.get("triage_status") == "succeeded")
+    check("state(issue): state carries updated_at", state.get("updated_at") == triaged["updated_at"])
+    check(
+        "state(issue): updated_at is not a material field",
+        "updated_at" not in rc.MATERIAL_FIELDS,
+    )
+
+
+def test_body_helpers_queue_and_apply_result_for_issue():
+    it = item_issue()
+    body = rc.render(it)["body"]
+    queued = rc.body_with_triage_queued(body, it)
+    queued_state = core.parse_state_block(queued)
+    check(
+        "queue(issue): hidden triaged_sha is the updated_at revision",
+        queued_state.get("triaged_sha") == it["updated_at"],
+    )
+    check("queue(issue): hidden status is queued", queued_state.get("triage_status") == "queued")
+    check("queue(issue): no visible triage section yet", "### Triage" not in queued)
+
+    old = item_issue(updated_at="2024-01-01T00:00:00Z")
+    old_body = rc.body_with_triage_queued(rc.render(old)["body"], old)
+    advanced = item_issue(updated_at="2024-06-01T00:00:00Z")
+    requeued = rc.body_with_triage_queued(old_body, advanced)
+    requeued_state = core.parse_state_block(requeued)
+    check("queue(issue): advanced updated_at rewrites the card state", requeued != old_body)
+    check(
+        "queue(issue): state updated_at advances before dispatch",
+        requeued_state.get("updated_at") == advanced["updated_at"],
+    )
+    check(
+        "queue(issue): triaged_sha advances with updated_at",
+        requeued_state.get("triaged_sha") == advanced["updated_at"],
+    )
+    stale = item_issue(updated_at="2024-02-01T00:00:00Z")
+    rolled_back = rc.body_with_triage_queued(requeued, stale)
+    check("queue(issue): stale updated_at does not roll back", rolled_back == requeued)
+
+    legacy_state = core.parse_state_block(body)
+    legacy_state.pop("updated_at", None)
+    legacy_body = rc._replace_state_block(body, legacy_state)
+    legacy_queued = rc.body_with_triage_queued(legacy_body, advanced)
+    legacy_queued_state = core.parse_state_block(legacy_queued)
+    check("queue(issue): legacy card without updated_at can queue", legacy_queued != legacy_body)
+    check(
+        "queue(issue): legacy card backfills updated_at",
+        legacy_queued_state.get("updated_at") == advanced["updated_at"],
+    )
+
+    updated = rc.body_with_triage_result(
+        queued,
+        it["updated_at"],
+        triage={
+            "summary": "Wants a bulk export option.",
+            "product_implications": "Modest ask; a few users would benefit.",
+            "recommended_next_step": "discuss - worth a quick maintainer opinion.",
+        },
+    )
+    updated_state = core.parse_state_block(updated)
+    check("result(issue): visible triage section inserted", "### Triage" in updated)
+    check(
+        "result(issue): triage sits before recommended action",
+        updated.find("### Triage") < updated.find("### Recommended action"),
+    )
+    check("result(issue): status succeeded", updated_state.get("triage_status") == "succeeded")
+
+    # A stale revision (the issue moved on since queuing) must not be applied.
+    stale_result = rc.body_with_triage_result(
+        queued,
+        "2099-01-01T00:00:00Z",
+        triage={
+            "summary": "Stale.",
+            "product_implications": "Stale.",
+            "recommended_next_step": "discuss - stale.",
+        },
+    )
+    check("result(issue): mismatched revision is a no-op", stale_result == queued)
+
+
+def test_should_auto_triage_cache_and_gates_for_issue():
+    it = item_issue()
+    pure = labels("needs-decision", "kind:issue-triage")
+    fresh_state = dict(state_of(it), triaged_sha=it["updated_at"])
+    stale_state = dict(state_of(it), triaged_sha="2020-01-01T00:00:00Z")
+    check(
+        "cache(issue): missing triaged_sha needs triage",
+        rc.should_auto_triage(it, state_of(it), pure, has_token=True) is True,
+    )
+    check(
+        "cache(issue): matching triaged_sha (== updated_at) skips triage",
+        rc.should_auto_triage(it, fresh_state, pure, has_token=True) is False,
+    )
+    check(
+        "cache(issue): advanced updated_at with old triaged_sha needs triage",
+        rc.should_auto_triage(it, stale_state, pure, has_token=True) is True,
+    )
+    newer_state = dict(
+        state_of(item_issue(updated_at="2024-06-01T00:00:00Z")),
+        triaged_sha="2024-06-01T00:00:00Z",
+    )
+    check(
+        "cache(issue): older incoming updated_at skips triage",
+        rc.should_auto_triage(
+            item_issue(updated_at="2024-02-01T00:00:00Z"), newer_state, pure, True
+        )
+        is False,
+    )
+    check(
+        "gate(issue): token absent skips triage",
+        rc.should_auto_triage(it, state_of(it), pure, has_token=False) is False,
+    )
+    check(
+        "gate(issue): auto_triage_issues false skips triage",
+        rc.should_auto_triage(item_issue(auto_triage_issues=False), state_of(it), pure, True)
+        is False,
+    )
+    check(
+        "gate(issue): processing card skips triage",
+        rc.should_auto_triage(
+            it, state_of(it), labels("needs-decision", "processing"), True
+        )
+        is False,
+    )
+    check(
+        "gate(issue): missing updated_at skips triage",
+        rc.should_auto_triage(item_issue(updated_at=""), state_of(it), pure, True) is False,
+    )
+    check(
+        "independence: auto_triage=False on an issue item does not gate issue-triage",
+        rc.should_auto_triage(item_issue(auto_triage=False), state_of(it), pure, True) is True,
+    )
+    check(
+        "independence: auto_triage_issues=False on a pr-review item does not gate pr-review",
+        rc.should_auto_triage(
+            item(auto_triage_issues=False), state_of(item()), labels("needs-decision", "kind:pr-review"), True
+        )
+        is True,
+    )
+
+
+def test_reconcile_backfills_legacy_issue_card_without_material_change():
+    it = item_issue(auto_triage_issues=True)
+    calls = run_reconcile(
+        scan_payload([it], open_pr_numbers=(), open_issue_numbers=(42,)),
+        [card_row(it)],
+    )
+    check("reconcile(issue): unchanged legacy card is not refreshed", calls["upsert"] == [])
+    check("reconcile(issue): unchanged legacy card is marked queued", len(calls["mark"]) == 1)
+    check("reconcile(issue): unchanged legacy card dispatches triage", len(calls["dispatch"]) == 1)
+
+
+def test_reconcile_skips_when_fresh_token_absent_or_config_off_for_issue():
+    it = item_issue(auto_triage_issues=True)
+    fresh = card_row(it)
+    fresh["body"] = rc.body_with_triage_queued(fresh["body"], it)
+    payload = scan_payload([it], open_pr_numbers=(), open_issue_numbers=(42,))
+    fresh_calls = run_reconcile(payload, [fresh])
+    no_token_calls = run_reconcile(payload, [card_row(it)], token="false")
+    config_off_calls = run_reconcile(
+        scan_payload(
+            [item_issue(auto_triage_issues=False)],
+            open_pr_numbers=(),
+            open_issue_numbers=(42,),
+        ),
+        [card_row(it)],
+    )
+    check("reconcile(issue): fresh triaged_sha skips dispatch", fresh_calls["dispatch"] == [])
+    check("reconcile(issue): token absent skips dispatch", no_token_calls["dispatch"] == [])
+    check("reconcile(issue): config off skips dispatch", config_off_calls["dispatch"] == [])
+
+
+def test_reconcile_queues_after_issue_updated_at_advance():
+    """An issue's `updated_at` is non-material, so a new comment/edit does NOT
+    trigger a full card refresh (unlike a PR's `head_sha`) - but it still makes
+    the card eligible for exactly one fresh auto-triage attempt."""
+    old = item_issue(updated_at="2024-01-01T00:00:00Z", auto_triage_issues=True)
+    old_card = card_row(old)
+    old_card["body"] = rc.body_with_triage_queued(old_card["body"], old)
+    new = item_issue(updated_at="2024-06-01T00:00:00Z", auto_triage_issues=True)
+    calls = run_reconcile(
+        scan_payload([new], open_pr_numbers=(), open_issue_numbers=(42,)), [old_card]
+    )
+    check(
+        "reconcile(issue): updated_at advance alone does NOT refresh the card",
+        calls["upsert"] == [],
+    )
+    check(
+        "reconcile(issue): updated_at advance still queues one fresh triage",
+        len(calls["dispatch"]) == 1,
+    )
+    check(
+        "reconcile(issue): queued triage uses the new updated_at",
+        calls["dispatch"]
+        and calls["dispatch"][0]["item"]["updated_at"] == "2024-06-01T00:00:00Z",
+    )
+
+
+def test_auto_triage_toggles_are_independent_end_to_end():
+    """Disabling one kind's flag must never affect the other kind's dispatch.
+
+    Both cards already exist (matching the freshly scanned items exactly), so
+    this exercises the same no-material-change fallback path as the backfill
+    tests above rather than card creation."""
+    pr_it = item(auto_triage=False)
+    issue_it = item_issue(number=100, auto_triage_issues=True)
+    calls = run_reconcile(
+        scan_payload(
+            [pr_it, issue_it], open_pr_numbers=(42,), open_issue_numbers=(100,)
+        ),
+        [card_row(pr_it, number=7), card_row(issue_it, number=8)],
+    )
+    dispatched_kinds = {c["item"].get("kind") for c in calls["dispatch"]}
+    check(
+        "independence: pr-review disabled while issue-triage still dispatches",
+        dispatched_kinds == {"issue-triage"},
+    )
+
+    pr_it2 = item(auto_triage=True)
+    issue_it2 = item_issue(number=100, auto_triage_issues=False)
+    calls2 = run_reconcile(
+        scan_payload(
+            [pr_it2, issue_it2], open_pr_numbers=(42,), open_issue_numbers=(100,)
+        ),
+        [card_row(pr_it2, number=7), card_row(issue_it2, number=8)],
+    )
+    dispatched_kinds2 = {c["item"].get("kind") for c in calls2["dispatch"]}
+    check(
+        "independence: issue-triage disabled while pr-review still dispatches",
+        dispatched_kinds2 == {"pr-review"},
+    )
+
+
+def test_triage_workflow_issue_path_isolation():
+    doc = load_yaml(".github", "workflows", "triage.yml")
+    steps = doc["jobs"]["triage"]["steps"]
+    text = read(".github", "workflows", "triage.yml")
+    on_doc = doc.get(True) or doc.get("on")
+    inputs = on_doc["workflow_dispatch"]["inputs"]
+    resolve = step_by_id(steps, "resolve")
+    verify_head = step_by_id(steps, "verify_head")
+    prepare = step_by_id(steps, "prepare")
+    claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+
+    check("workflow: kind input exists and is required", inputs.get("kind", {}).get("required") is True)
+    check(
+        "workflow: head_sha input is optional (pr-review only)",
+        inputs.get("head_sha", {}).get("required") is False,
+    )
+    check(
+        "workflow: revision input is optional (issue-triage only)",
+        inputs.get("revision", {}).get("required") is False,
+    )
+    check(
+        "workflow: concurrency key includes both head_sha and revision",
+        "github.event.inputs.head_sha" in doc["concurrency"]["group"]
+        and "github.event.inputs.revision" in doc["concurrency"]["group"],
+    )
+
+    check("workflow: resolve gate exists", resolve is not None)
+    if resolve:
+        run = str(resolve.get("run", ""))
+        check(
+            "workflow: gate accepts both pr-review and issue-triage kinds",
+            "pr-review|issue-triage) ;;" in run,
+        )
+        check(
+            "workflow: invalid kind is rejected",
+            "invalid decision-card kind: $INPUT_KIND" in run,
+        )
+        check(
+            "workflow: pr-review validates head SHA and uses it as the revision",
+            'if [ "$INPUT_KIND" = "pr-review" ]; then' in run
+            and 'REVISION="$INPUT_HEAD_SHA"' in run,
+        )
+        check(
+            "workflow: issue-triage validates an ISO8601 updatedAt revision",
+            "REVISION=\"$INPUT_REVISION\"" in run
+            and r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" in run,
+        )
+        check(
+            "workflow: card kind must match the dispatch input kind",
+            'state.get("kind") != kind' in run,
+        )
+        check(
+            "workflow: revision freshness re-checked via render_card.state_revision",
+            "render_card.state_revision(state, kind) != revision" in run,
+        )
+        check(
+            "workflow: pr-review resolves the PR head ref",
+            'out.write("ref=refs/pull/%s/head\\n"' in run,
+        )
+        check(
+            "workflow: issue-triage resolves an empty ref (default branch)",
+            'out.write("ref=\\n")' in run and "default branch" in run,
+        )
+
+    check("workflow: verify_head step exists", verify_head is not None)
+    if verify_head:
+        check(
+            "workflow: verify_head only runs for pr-review (issue-triage has no head to verify)",
+            "steps.resolve.outputs.kind == 'pr-review'" in str(verify_head.get("if", "")),
+        )
+
+    checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
+    target_checkout = next(
+        (
+            s
+            for s in checkouts
+            if isinstance(s.get("with"), dict) and "repository" in s["with"]
+        ),
+        None,
+    )
+    check("workflow: target checkout exists", target_checkout is not None)
+    if target_checkout:
+        check(
+            "workflow: target checkout ref is kind-dependent (empty -> default branch for issues)",
+            target_checkout["with"].get("ref") == "${{ steps.resolve.outputs.ref }}",
+        )
+
+    check("workflow: prepare step exists", prepare is not None)
+    if prepare:
+        run = str(prepare.get("run", ""))
+        check(
+            "workflow: prepare fetches issue title/body/comments for issue-triage",
+            'gh issue view "$NUMBER" -R "$SLUG"' in run
+            and "## Comments" in run,
+        )
+        check(
+            "workflow: prepare fetches PR title/body/diff for pr-review",
+            'gh pr view "$NUMBER" -R "$SLUG"' in run and "## Diff" in run,
+        )
+        check(
+            "workflow: issue prompt marks it as an issue with no diff",
+            "This is an ISSUE, not a PR" in run,
+        )
+        check(
+            "workflow: issue prompt requests an issue-appropriate recommendation",
+            "look closer | discuss | decline" in run,
+        )
+        check(
+            "workflow: pr prompt keeps the merge-oriented recommendation",
+            "merge | look closer | discuss | decline" in run,
+        )
+
+    check(
+        "workflow: exactly two Claude branches total (search / no-search), not one per kind",
+        len(claude_steps) == 2,
+    )
+    for step in claude_steps:
+        dumped = yaml.safe_dump(step)
+        check("security(issue path): Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
+        check(
+            "security(issue path): allowed_bots stays narrow",
+            (step.get("with") or {}).get("allowed_bots") == "github-actions[bot]",
+        )
+        check(
+            "workflow(issue path): Claude action pin unchanged",
+            step.get("uses") == CLAUDE_ACTION_PIN,
+        )
+        check(
+            "workflow(issue path): Claude uses --model sonnet",
+            "--model sonnet" in str((step.get("with") or {}).get("claude_args", "")),
+        )
+
+    check(
+        "workflow: final card update passes --revision (kind-agnostic CLI arg)",
+        "--revision \"$REVISION\"" in text,
+    )
+    check(
+        "workflow: final card update no longer uses the old --head-sha flag name",
+        "--head-sha" not in text,
+    )
+
+
 def test_triage_workflow_security_wiring():
     doc = load_yaml(".github", "workflows", "triage.yml")
     steps = doc["jobs"]["triage"]["steps"]
@@ -710,11 +1213,25 @@ def test_triage_workflow_security_wiring():
 def test_scan_and_ingest_can_dispatch_with_default_token():
     scan = load_yaml(".github", "workflows", "scan-backstop.yml")
     ingest = load_yaml(".github", "workflows", "ingest.yml")
+    scan_text = read(".github", "workflows", "scan-backstop.yml")
+    list_cards = step_by_name(scan["jobs"]["reconcile"]["steps"], "List open cards")
+    list_cards_run = list_cards.get("run", "") if list_cards else ""
     check("scan-backstop: actions write permission for dispatch", scan["permissions"].get("actions") == "write")
     check("ingest: actions write permission for dispatch", ingest["permissions"].get("actions") == "write")
     check(
         "scan-backstop: token-present env gates reconcile dispatch",
-        "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN" in read(".github", "workflows", "scan-backstop.yml"),
+        "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN" in scan_text,
+    )
+    check(
+        "scan-backstop: open card listing paginates all pages",
+        list_cards is not None
+        and "gh api --paginate --slurp" in list_cards_run
+        and "per_page=100" in list_cards_run
+        and "--limit 300" not in list_cards_run,
+    )
+    check(
+        "scan-backstop: open card listing excludes pull requests",
+        'select(has("pull_request") | not)' in list_cards_run,
     )
     check(
         "ingest: queues auto triage only when gate says token exists",
@@ -726,17 +1243,27 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
 
 def main():
     test_auto_triage_config_default_and_overrides()
+    test_auto_triage_issues_config_default_and_overrides()
     test_build_item_carries_effective_auto_triage()
+    test_build_item_carries_effective_auto_triage_issues()
     test_render_triage_section_has_no_mentions_and_caches_sha()
+    test_render_issue_triage_section_has_no_mentions_and_caches_revision()
     test_recommended_next_step_is_conservative_when_unexpected()
     test_triage_requires_complete_structured_json()
     test_body_helpers_queue_and_apply_result()
+    test_body_helpers_queue_and_apply_result_for_issue()
     test_should_auto_triage_cache_and_gates()
+    test_should_auto_triage_cache_and_gates_for_issue()
     test_triage_queued_for_head_requires_matching_queued_attempt()
     test_reconcile_backfills_legacy_card_without_material_change()
+    test_reconcile_backfills_legacy_issue_card_without_material_change()
     test_reconcile_skips_when_fresh_token_absent_or_config_off()
+    test_reconcile_skips_when_fresh_token_absent_or_config_off_for_issue()
     test_queue_triage_command_warns_on_dispatch_failure()
     test_reconcile_queues_after_head_refresh()
+    test_reconcile_queues_after_issue_updated_at_advance()
+    test_auto_triage_toggles_are_independent_end_to_end()
+    test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()
     test_scan_and_ingest_can_dispatch_with_default_token()
     print()

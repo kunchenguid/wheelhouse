@@ -6,7 +6,8 @@ This doc is the optional **fast path**: add a tiny dispatch workflow to a source
 Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed or when Wheelhouse's internal card render version is stale; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
-For PR-review cards, ingest can also queue the automatic lightweight triage side job after the card is created or refreshed, using the same config and token gates as the scheduled scan.
+For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
+For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
 
 > You add these files to **your source repos**, not to Wheelhouse.
 > The hub only ever reads; it never pushes to your source repos except to execute a decision you made.
@@ -21,6 +22,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `number`         | yes      | the PR or issue number                                             |
 | `kind`           | no       | `pr-review` (default), `ci-approval`, or `issue-triage`            |
 | `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge   |
+| `updated_at`     | no       | the issue's `updatedAt` revision (issue-triage only) - recommended; enables automatic issue-card triage caching (issues have no head SHA) |
 | `title`          | no       | short title of the target                                          |
 | `author`         | no       | the PR/issue author's login                                        |
 | `comp`           | no       | compliance status shown on the card                               |
@@ -29,7 +31,8 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `recommendation` | no       | recommended action shown on the card                              |
 | `priority`       | no       | `high` / `med` / `low`                                             |
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
-| `auto_triage`    | no       | `false` opts this dispatched item out of automatic PR-card triage  |
+| `auto_triage`    | no       | `false` opts this dispatched pr-review item out of automatic PR-card triage |
+| `auto_triage_issues` | no   | `false` opts this dispatched issue-triage item out of automatic issue-card triage (independent of `auto_triage`) |
 
 The `author` field is display data for dispatched cards.
 It is rendered as plain text (`by <login>`), not as a GitHub `@mention`, so a dispatched card does not notify the target author.
@@ -38,6 +41,8 @@ The `auto_triage` field is an item-level opt-out only.
 Omit it to follow the hub's global and per-repo `auto_triage` config.
 Set it to `false` for high-volume or sensitive dispatched PR-review items that should not spend a Claude turn.
 It cannot force auto triage on when the hub or repo config disables it.
+`auto_triage_issues` is the INDEPENDENT equivalent for dispatched `issue-triage` items - same item-level-opt-out-only rule, own global/per-repo config, never affects `auto_triage` or vice versa.
+Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (the issue's `updatedAt`) so the hub can cache the triage attempt the same way it caches PR triage by `head_sha`; omit it and the item is simply never eligible for automatic issue triage.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
@@ -48,7 +53,7 @@ If the existing card is still a pure `needs-decision` card and a material field 
 The render-version trigger is internal and self-terminating; source repos do not send it.
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
-When auto triage is eligible, the hub writes `triaged_sha` for the current head before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA.
+When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.
 
 > **Legacy event type.** Before the rename to Wheelhouse the event type was `triage-item`. `ingest.yml` still listens for both (`types: [wheelhouse-item, triage-item]`), so a source repo wired up before the rename keeps working - but new dispatchers should send `wheelhouse-item`.
 
@@ -126,7 +131,8 @@ jobs:
   Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
-- **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger. (The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.)
+- **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want automatic issue-card triage caching.
+  The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.
 - **Third-party alternative.** If you prefer, `peter-evans/repository-dispatch` does the same dispatch as an action; the `gh api` form above keeps you dependency-free.
 
 ## Manual test (no source-repo changes)
@@ -134,7 +140,7 @@ jobs:
 You can exercise the whole path without touching a source repo:
 
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
-2. Fill in `repo`, `number`, and (recommended) `head_sha`.
+2. Fill in `repo`, `number`, and (recommended) `head_sha` for a PR-review card or `updated_at` for an issue-triage card.
 3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place.
 4. Tick a consuming decision box to confirm the handler acts on the target.
 

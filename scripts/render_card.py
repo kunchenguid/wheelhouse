@@ -12,8 +12,11 @@ CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
   render_card.py render --item-file item.json --out-dir DIR    debug: write title/body/labels
   render_card.py queue-triage --item-file item.json    mark triage queued and dispatch triage.yml when eligible
-  render_card.py triage-apply --issue N --head-sha SHA --execution-file FILE    update the card from Claude output
-  render_card.py triage-fail --issue N --head-sha SHA --message TEXT    write the auto-triage unavailable section
+  render_card.py triage-apply --issue N --revision REV --execution-file FILE    update the card from Claude output
+  render_card.py triage-fail --issue N --revision REV --message TEXT    write the auto-triage unavailable section
+
+REV is a PR's head SHA (pr-review) or an issue's `updatedAt` (issue-triage) -
+whichever revision the auto-triage cache is keyed on for that card's kind.
 """
 
 import argparse
@@ -23,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block  # noqa: E402
@@ -98,7 +102,7 @@ CARD_RENDER_VERSION = 1
 TRIAGE_FIELDS = ("summary", "product_implications", "recommended_next_step")
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
-TRIAGE_UNAVAILABLE = "Auto triage unavailable for this PR version."
+TRIAGE_UNAVAILABLE = "Auto triage unavailable for this version."
 
 _STATE_BLOCK_RE = re.compile(
     r"<!--\s*(?:wheelhouse|triage)-state:\s*(\{.*?\})\s*-->",
@@ -200,36 +204,94 @@ def render_stale(state):
     return stored_version < CARD_RENDER_VERSION
 
 
+# Auto-triage caches against a per-kind revision: a PR's `head_sha`, or an
+# issue's `updatedAt` (issues have no head SHA, and `updatedAt` advances on any
+# edit or new comment). For PRs, `head_sha` is also a material refresh field; for
+# issues, `updated_at` is deliberately non-material and gates only the triage side
+# job. Each kind is gated by its OWN independent config flag so turning one off
+# never affects the other.
+AUTO_TRIAGE_FLAG_BY_KIND = {
+    "pr-review": "auto_triage",
+    "issue-triage": "auto_triage_issues",
+}
+
+
+def _triage_revision(item):
+    """The freshness key auto-triage caches against for this item's kind."""
+    if item.get("kind") == "issue-triage":
+        return item.get("updated_at", "") or ""
+    return item.get("head_sha", "") or ""
+
+
+def state_revision(state, kind):
+    """The card's stored freshness key for `kind` (the counterpart of
+    `_triage_revision` read back off a parsed state block)."""
+    if kind == "issue-triage":
+        return (state or {}).get("updated_at", "") or ""
+    return (state or {}).get("head_sha", "") or ""
+
+
+def _parse_issue_revision(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _issue_revision_is_older(revision, state):
+    stored = state_revision(state, "issue-triage")
+    if not revision or not stored:
+        return False
+    incoming = _parse_issue_revision(revision)
+    current = _parse_issue_revision(stored)
+    return bool(incoming and current and incoming < current)
+
+
 def triage_fresh(item, state):
-    """True when the card has already attempted auto-triage for this PR head.
+    """True when the card has already attempted auto-triage for this item's
+    current revision (a PR's head SHA, or an issue's `updatedAt`).
 
     `triaged_sha` is a cost-control cache, not a material refresh field. It is
     written before the workflow dispatch so a failed or timed-out workflow does
-    not get re-run every hourly scan for the same head SHA.
+    not get re-run every hourly scan for the same revision.
     """
-    head_sha = item.get("head_sha", "") or ""
-    return bool(head_sha and (state or {}).get("triaged_sha") == head_sha)
+    revision = _triage_revision(item)
+    return bool(revision and (state or {}).get("triaged_sha") == revision)
 
 
-def triage_queued_for_head(state, head_sha):
+def triage_queued_for_head(state, revision):
     return bool(
-        head_sha
-        and (state or {}).get("triaged_sha") == head_sha
+        revision
+        and (state or {}).get("triaged_sha") == revision
         and (state or {}).get("triage_status") == "queued"
     )
 
 
 def should_auto_triage(item, state, labels, has_token=True):
-    """Whether this card should queue the lightweight automatic PR triage."""
+    """Whether this card should queue the lightweight automatic triage.
+
+    pr-review cards are gated by `auto_triage`; issue-triage cards are gated
+    by the INDEPENDENT `auto_triage_issues`. No other kind ever auto-triages."""
     if not has_token:
         return False
-    if item.get("kind", "pr-review") != "pr-review":
+    kind = item.get("kind", "pr-review")
+    flag = AUTO_TRIAGE_FLAG_BY_KIND.get(kind)
+    if flag is None:
         return False
-    if item.get("auto_triage", True) is False:
+    if item.get(flag, True) is False:
         return False
     if not is_refreshable(labels):
         return False
-    if not item.get("head_sha"):
+    revision = _triage_revision(item)
+    if not revision:
+        return False
+    if kind == "issue-triage" and _issue_revision_is_older(revision, state):
         return False
     return not triage_fresh(item, state)
 
@@ -344,13 +406,14 @@ def _replace_state_block(body, state):
     return (body or "").rstrip() + "\n\n" + marker
 
 
-def _preserve_same_head_triage(body, existing_body, item, old_state):
-    head_sha = item.get("head_sha", "") or ""
-    if not head_sha or (old_state or {}).get("head_sha") != head_sha:
+def _preserve_same_revision_triage(body, existing_body, item, old_state):
+    kind = item.get("kind", "pr-review")
+    if kind not in AUTO_TRIAGE_FLAG_BY_KIND:
         return body
-    old_kind = (old_state or {}).get("kind")
-    new_kind = item.get("kind", "pr-review")
-    if old_kind != "pr-review" or new_kind != "pr-review":
+    if (old_state or {}).get("kind") != kind:
+        return body
+    revision = _triage_revision(item)
+    if not revision or state_revision(old_state, kind) != revision:
         return body
 
     section = _existing_triage_section(existing_body)
@@ -368,9 +431,9 @@ def _preserve_same_head_triage(body, existing_body, item, old_state):
     return _replace_state_block(body, state) if changed else body
 
 
-def _state_with_triage(state, head_sha, status, error=None):
+def _state_with_triage(state, revision, status, error=None):
     new_state = dict(state or {})
-    new_state["triaged_sha"] = head_sha
+    new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
     if error:
         new_state["triage_error"] = _clean_triage_text(error, limit=220)
@@ -381,23 +444,30 @@ def _state_with_triage(state, head_sha, status, error=None):
 
 def body_with_triage_queued(body, item):
     state = parse_state_block(body)
-    head_sha = item.get("head_sha", "") or ""
-    if (
-        not state
-        or state.get("kind") != "pr-review"
-        or state.get("head_sha") != head_sha
-    ):
+    kind = item.get("kind", "pr-review")
+    revision = _triage_revision(item)
+    if not state or kind not in AUTO_TRIAGE_FLAG_BY_KIND or state.get("kind") != kind:
+        return body
+    if not revision:
+        return body
+    if kind == "issue-triage":
+        if _issue_revision_is_older(revision, state):
+            return body
+        state = dict(state)
+        state["updated_at"] = revision
+    elif state_revision(state, kind) != revision:
         return body
     clean = remove_triage_section(body)
-    return _replace_state_block(clean, _state_with_triage(state, head_sha, "queued"))
+    return _replace_state_block(clean, _state_with_triage(state, revision, "queued"))
 
 
-def body_with_triage_result(body, head_sha, triage=None, error=None):
+def body_with_triage_result(body, revision, triage=None, error=None):
     state = parse_state_block(body)
+    kind = (state or {}).get("kind") if state else None
     if (
         not state
-        or state.get("kind") != "pr-review"
-        or state.get("head_sha") != head_sha
+        or kind not in AUTO_TRIAGE_FLAG_BY_KIND
+        or state_revision(state, kind) != revision
     ):
         return body
     normalized = normalize_triage(triage)
@@ -405,7 +475,7 @@ def body_with_triage_result(body, head_sha, triage=None, error=None):
     section = triage_section(normalized, error or TRIAGE_UNAVAILABLE)
     updated = _insert_triage_section(body, section)
     new_state = _state_with_triage(
-        state, head_sha, status, None if normalized else error
+        state, revision, status, None if normalized else error
     )
     return _replace_state_block(updated, new_state)
 
@@ -417,21 +487,28 @@ def render(item):
     number = int(item["number"])
     title = (item.get("title") or "").strip() or "(no title)"
     options = card_options(item)
-    triage = normalize_triage(item.get("triage")) if kind == "pr-review" else None
+    triage = (
+        normalize_triage(item.get("triage"))
+        if kind in AUTO_TRIAGE_FLAG_BY_KIND
+        else None
+    )
 
     # The stored material set lets a refresh cheaply and deterministically decide
-    # "did this materially change?".
+    # "did this materially change?". `updated_at` is non-material (never added to
+    # MATERIAL_FIELDS) - it exists purely as the issue-triage auto-triage cache key,
+    # mirroring how `head_sha` doubles as the pr-review cache key.
     state = {
         "repo": repo,
         "number": number,
         "kind": kind,
         "head_sha": item.get("head_sha", "") or "",
+        "updated_at": item.get("updated_at", "") or "",
         "options": options,
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
     if triage:
-        state["triaged_sha"] = item.get("triaged_sha") or state["head_sha"]
+        state["triaged_sha"] = item.get("triaged_sha") or _triage_revision(item)
         state["triage_status"] = "succeeded"
 
     short = title if len(title) <= 70 else title[:67] + "..."
@@ -576,7 +653,7 @@ def _edit_issue_body(number, body):
 
 
 def mark_triage_queued(number, item, body):
-    """Cache an auto-triage attempt for this head before dispatching the LLM.
+    """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
     This is intentionally a hidden state update only. It bounds spend even if
     the asynchronous workflow fails before it can write a visible result.
@@ -589,29 +666,33 @@ def mark_triage_queued(number, item, body):
 
 
 def dispatch_triage_workflow(number, item):
-    _gh(
-        [
-            "workflow",
-            "run",
-            "triage.yml",
-            "-f",
-            "issue=%s" % number,
-            "-f",
-            "repo=%s" % item["repo"],
-            "-f",
-            "number=%s" % item["number"],
-            "-f",
-            "head_sha=%s" % (item.get("head_sha") or ""),
-        ]
-    )
+    kind = item.get("kind", "pr-review")
+    args = [
+        "workflow",
+        "run",
+        "triage.yml",
+        "-f",
+        "issue=%s" % number,
+        "-f",
+        "repo=%s" % item["repo"],
+        "-f",
+        "number=%s" % item["number"],
+        "-f",
+        "kind=%s" % kind,
+    ]
+    if kind == "issue-triage":
+        args += ["-f", "revision=%s" % (item.get("updated_at") or "")]
+    else:
+        args += ["-f", "head_sha=%s" % (item.get("head_sha") or "")]
+    _gh(args)
 
 
-def update_card_triage(number, head_sha, triage=None, error=None):
+def update_card_triage(number, revision, triage=None, error=None):
     card = get_card(number)
     if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
         return False
     body = card.get("body", "")
-    new_body = body_with_triage_result(body, head_sha, triage=triage, error=error)
+    new_body = body_with_triage_result(body, revision, triage=triage, error=error)
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
@@ -638,7 +719,7 @@ def _refresh_card(number, card, existing, item, old_state):
     re-review is warranted rather than being silently swapped underneath."""
     to_add, to_remove = plan_label_update(card["labels"], existing.get("labels"))
     card = dict(card)
-    card["body"] = _preserve_same_head_triage(
+    card["body"] = _preserve_same_revision_triage(
         card["body"],
         existing.get("body", ""),
         item,
@@ -835,12 +916,12 @@ def main():
 
     ta = sub.add_parser("triage-apply")
     ta.add_argument("--issue", required=True)
-    ta.add_argument("--head-sha", required=True)
+    ta.add_argument("--revision", required=True)
     ta.add_argument("--execution-file", required=True)
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
-    tf.add_argument("--head-sha", required=True)
+    tf.add_argument("--revision", required=True)
     tf.add_argument("--message", default=TRIAGE_UNAVAILABLE)
 
     qt = sub.add_parser("queue-triage")
@@ -868,16 +949,16 @@ def main():
         result_text = extract_claude_result(args.execution_file)
         triage = parse_triage_json(result_text)
         if triage:
-            if update_card_triage(args.issue, args.head_sha, triage=triage):
+            if update_card_triage(args.issue, args.revision, triage=triage):
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
         else:
             print("::warning::auto triage produced no valid structured result")
-            update_card_triage(args.issue, args.head_sha, error=TRIAGE_UNAVAILABLE)
+            update_card_triage(args.issue, args.revision, error=TRIAGE_UNAVAILABLE)
     elif args.cmd == "triage-fail":
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
-        update_card_triage(args.issue, args.head_sha, error=args.message)
+        update_card_triage(args.issue, args.revision, error=args.message)
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)

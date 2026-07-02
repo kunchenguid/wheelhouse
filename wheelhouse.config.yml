@@ -28,7 +28,8 @@ repos:
     merge_method: squash           # squash | merge | rebase (default: squash)
     #                              # used when you approve a "Merge it" decision
     # auto_approve_ci: false       # optional override of the global setting
-    # auto_triage: false           # optional per-repo opt-out for Claude spend
+    # auto_triage: false           # optional per-repo opt-out for Claude spend (pr-review)
+    # auto_triage_issues: false    # optional per-repo opt-out for Claude spend (issue-triage)
 
   # All repos below share the same contribution gate: the `no-mistakes-required.yml`
   # workflow runs a job named "PR must be raised via no-mistakes" on every PR to
@@ -80,7 +81,20 @@ maintainer: ""
 # The card gains a Summary, Product implications, and Recommended next step.
 # This never acts and never changes routing; it only gives owner-facing context.
 # Set false to opt out for token-spend control, or override per repo above.
+# Governs pr-review cards ONLY - see `auto_triage_issues` below for issue-triage.
 auto_triage: true
+
+# Automatic lightweight issue triage. DEFAULT ON when this key is absent, and
+# INDEPENDENT of `auto_triage` above - toggling one never affects the other.
+# When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision issue-triage
+# card gets one quick advisory triage per issue `updatedAt` revision (issues have
+# no head SHA, so a new comment or edit is what makes it eligible again).
+# It checks out the repo's default branch read-only for a little code context;
+# there is no diff to review. Same Summary / Product implications / Recommended
+# next step shape as PR auto triage; same advisory-only, never-acts guarantee.
+# Set false to opt out for token-spend control, or override per repo above with
+# `auto_triage_issues: false`.
+auto_triage_issues: true
 
 # Code-grounded deep review is ALWAYS available (there is no enable flag). Tick
 # the "Investigate" box, or have the repo owner apply the `needs-deep-review`
@@ -113,10 +127,10 @@ nl_decisions: true
 # Whether the scheduled backstop also opens decision cards for open *issues*
 # that have no linked PR (in addition to PRs that need your call). Issues
 # authored by the repo owner, configured maintainer, or bots are skipped by the
-# scan. Phase-1 default is PRs only (high signal); flip to true once you want
-# contributor issue triage in the queue, or tick a card's "Investigate" box for
-# a code-grounded read on it.
-card_issues: false
+# scan. On, so open issues surface as cards and get advisory auto-triage
+# (`auto_triage_issues` above); tick a card's "Investigate" box any time for a
+# deeper code-grounded read.
+card_issues: true
 
 # Auto-approve provably-safe fork-CI runs at scan time, so only risky or
 # uncertain contributor-authored ones still raise an "approve CI" card for you.

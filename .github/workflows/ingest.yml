@@ -2,8 +2,8 @@ name: ingest
 
 # Fast path: a source repo (or a manual test) hands us an item that needs the
 # maintainer's decision, and we create or refresh a decision-card issue for it.
-# For eligible PR-review cards, this also queues the advisory auto-triage
-# workflow after writing the per-head cache marker.
+# For eligible PR-review or issue-triage cards, this also queues the advisory
+# auto-triage workflow after writing the per-revision cache marker.
 # This path trusts the explicit dispatch payload; the scheduled scan's
 # owner/maintainer/bot author filter and merge-conflict needs-rebase routing are
 # not applied here.
@@ -31,6 +31,9 @@ on:
         default: pr-review
       head_sha:
         description: "PR head SHA (recommended for pr-review/ci-approval)"
+        required: false
+      updated_at:
+        description: "Issue updatedAt revision (recommended for issue-triage; enables auto-triage caching)"
         required: false
       title:
         description: "Short title of the target"
@@ -83,6 +86,7 @@ jobs:
           INPUT_NUMBER: ${{ github.event.inputs.number }}
           INPUT_KIND: ${{ github.event.inputs.kind }}
           INPUT_HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          INPUT_UPDATED_AT: ${{ github.event.inputs.updated_at }}
           INPUT_TITLE: ${{ github.event.inputs.title }}
           INPUT_SUMMARY: ${{ github.event.inputs.summary }}
           INPUT_RECOMMENDATION: ${{ github.event.inputs.recommendation }}

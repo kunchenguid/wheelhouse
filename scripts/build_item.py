@@ -7,15 +7,22 @@ The `ingest` workflow feeds this either a repository_dispatch client_payload
 normalized item.json that render_card.py can turn into a card.
 
 Expected fields (all but repo/number optional):
-  repo, number, kind, head_sha, title, author, bucket, comp, tests,
+  repo, number, kind, head_sha, updated_at, title, author, bucket, comp, tests,
   summary, recommendation, priority, options (list or comma string),
-  auto_triage (false as an item-level opt-out)
+  auto_triage (false as an item-level opt-out for pr-review),
+  auto_triage_issues (false as an item-level opt-out for issue-triage)
 
 When omitted, `options` defaults by kind via render_card.CHECKBOX_OPTIONS:
 pr-review and issue-triage include the non-consuming `investigate` checkbox;
 ci-approval does not.
 When omitted, `auto_triage` follows the global/per-repo config; a false payload
-value can only opt this item out.
+value can only opt this item out. `auto_triage_issues` is the INDEPENDENT
+equivalent for issue-triage items - it follows its own global/per-repo config
+and a false payload value can only opt that item out; it never affects
+`auto_triage` or vice versa. `updated_at` is the issue-triage auto-triage cache
+key (issues have no head SHA); omit it and this item is simply never eligible
+for automatic issue triage (fail-open, mirroring a pr-review item with no
+`head_sha`).
 """
 import json
 import os
@@ -23,7 +30,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from render_card import CHECKBOX_OPTIONS  # noqa: E402
-from wheelhouse_core import _auto_triage_enabled, load_config  # noqa: E402
+from wheelhouse_core import (  # noqa: E402
+    _auto_triage_enabled,
+    _auto_triage_issues_enabled,
+    load_config,
+)
 
 VALID_KINDS = {"pr-review", "ci-approval", "issue-triage"}
 
@@ -51,6 +62,7 @@ def from_payload():
         "number": os.environ.get("INPUT_NUMBER", ""),
         "kind": os.environ.get("INPUT_KIND", ""),
         "head_sha": os.environ.get("INPUT_HEAD_SHA", ""),
+        "updated_at": os.environ.get("INPUT_UPDATED_AT", ""),
         "title": os.environ.get("INPUT_TITLE", ""),
         "summary": os.environ.get("INPUT_SUMMARY", ""),
         "recommendation": os.environ.get("INPUT_RECOMMENDATION", ""),
@@ -85,20 +97,25 @@ def normalize(d):
                            if owner else "")
     try:
         cfg = load_config()
-        auto_triage = _auto_triage_enabled(
-            cfg["repos"].get(repo, {}),
-            cfg["auto_triage"],
+        repo_cfg = cfg["repos"].get(repo, {})
+        auto_triage = _auto_triage_enabled(repo_cfg, cfg["auto_triage"])
+        auto_triage_issues = _auto_triage_issues_enabled(
+            repo_cfg, cfg["auto_triage_issues"]
         )
     except SystemExit:
         auto_triage = True
+        auto_triage_issues = True
     if "auto_triage" in d and not boolish(d.get("auto_triage")):
         auto_triage = boolish(d.get("auto_triage"))
+    if "auto_triage_issues" in d and not boolish(d.get("auto_triage_issues")):
+        auto_triage_issues = boolish(d.get("auto_triage_issues"))
 
     return {
         "repo": repo,
         "number": number,
         "kind": kind,
         "head_sha": str(d.get("head_sha", "") or ""),
+        "updated_at": str(d.get("updated_at", "") or ""),
         "title": str(d.get("title", "") or "(no title)"),
         "author": str(d.get("author", "") or "?"),
         "bucket": str(d.get("bucket", "") or ""),
@@ -110,6 +127,7 @@ def normalize(d):
         "priority": str(d.get("priority", "") or "med"),
         "options": options,
         "auto_triage": auto_triage,
+        "auto_triage_issues": auto_triage_issues,
     }
 
 

@@ -2,7 +2,7 @@
 """
 Wheelhouse - deterministic brain (ported from the local OSS-triage machinery).
 
-Runs inside GitHub Actions. One GraphQL query per repo fetches every open
+Runs inside GitHub Actions. A GraphQL query plus pagination fetches every open
 PR/issue with compliance + test status + mergeability, classifies each
 deterministically, and emits a worklist of items that need the maintainer's
 decision. The scan excludes known owner, configured maintainer, and bot authors
@@ -19,6 +19,9 @@ contributor rebase nudge per head SHA.
 Approval verifies each awaiting run against the target PR: populated
 workflow_run.pull_requests must name that PR, while fork-originated empty
 associations must match the PR head SHA and branch.
+Incomplete PR, issue, or closing-reference pagination is reported as a warning
+and marks the repo result as truncated, so reconcile will not self-heal close
+cards from an incomplete view of the repo.
 
 This is the GHA port of `data/triage/triage.py`. What the Actions model
 replaces has been dropped: the local single-flight lock (-> Actions
@@ -32,7 +35,8 @@ Usage:
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
   wheelhouse_core.py nl-decisions-enabled print true/false: is nl_decisions on in config?
-  wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo
+  wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo (pr-review)
+  wheelhouse_core.py auto-triage-issues-enabled <repo> print true/false for one configured repo (issue-triage)
   wheelhouse_core.py state <field>        print one field of the state block in $ISSUE_BODY
   wheelhouse_core.py repos                list configured repos
 
@@ -70,6 +74,7 @@ query($owner:String!, $name:String!) {
     defaultBranchRef { name }
     pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
+      pageInfo { hasNextPage endCursor }
       nodes {
         number title isDraft updatedAt changedFiles isCrossRepository mergeable
         author { login __typename }
@@ -77,7 +82,7 @@ query($owner:String!, $name:String!) {
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
         labels(first:20){ nodes{ name } }
-        closingIssuesReferences(first:10){ nodes{ number } }
+        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
           contexts(first:100){ nodes{
@@ -90,7 +95,62 @@ query($owner:String!, $name:String!) {
     }
     issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
+      pageInfo { hasNextPage endCursor }
       nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
+    }
+  }
+}
+"""
+
+PRS_PAGE_GQL = """
+query($owner:String!, $name:String!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title isDraft updatedAt changedFiles isCrossRepository mergeable
+        author { login __typename }
+        headRefName headRefOid baseRefName
+        headRepository { name owner { login } }
+        baseRepository { name owner { login } }
+        labels(first:20){ nodes{ name } }
+        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
+        commits(last:1){ nodes{ commit{ statusCheckRollup{
+          state
+          contexts(first:100){ nodes{
+            __typename
+            ... on CheckRun { name conclusion status }
+            ... on StatusContext { context state }
+          }}
+        }}}}
+      }
+    }
+  }
+}
+"""
+
+ISSUES_PAGE_GQL = """
+query($owner:String!, $name:String!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
+    }
+  }
+}
+"""
+
+CLOSING_REFS_PAGE_GQL = """
+query($owner:String!, $name:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      closingIssuesReferences(first:100, after:$after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { number }
+      }
     }
   }
 }
@@ -146,6 +206,9 @@ def load_config():
         # Advisory LLM triage is DEFAULT ON when the Claude token exists. The
         # flag is only a spend-control opt-out; absence keeps fresh forks useful.
         "auto_triage": bool(cfg.get("auto_triage", True)),
+        # Same idea, but for issue-triage cards. Independent of `auto_triage`:
+        # either can be toggled off without affecting the other.
+        "auto_triage_issues": bool(cfg.get("auto_triage_issues", True)),
     }
 
 
@@ -181,6 +244,165 @@ def gh_graphql(owner, name):
     if data.get("errors"):
         raise RuntimeError(json.dumps(data["errors"]))
     return data["data"]["repository"]
+
+
+def gh_graphql_pr_page(owner, name, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + PRS_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    return data["data"]["repository"]["pullRequests"]
+
+
+def gh_graphql_issue_page(owner, name, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + ISSUES_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    return data["data"]["repository"]["issues"]
+
+
+def gh_graphql_closing_refs_page(owner, name, number, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + CLOSING_REFS_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-F",
+            "number=%s" % number,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    pr = data["data"]["repository"]["pullRequest"]
+    if not pr:
+        raise RuntimeError("pull request #%s not found" % number)
+    return pr["closingIssuesReferences"]
+
+
+def _page_open_prs(owner, name, first_page):
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return nodes, first_page.get("totalCount", len(nodes)) <= len(nodes)
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("PR pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_pr_page(owner, name, cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return nodes, page.get("totalCount", len(nodes)) <= len(nodes)
+    return nodes, True
+
+
+def _page_open_issues(owner, name, first_page):
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return nodes, first_page.get("totalCount", len(nodes)) <= len(nodes)
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("issue pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_issue_page(owner, name, cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return nodes, page.get("totalCount", len(nodes)) <= len(nodes)
+    return nodes, True
+
+
+def _closing_issue_numbers(owner, name, pr):
+    first_page = pr.get("closingIssuesReferences") or {}
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return (
+            [i["number"] for i in nodes],
+            first_page.get("totalCount", len(nodes)) <= len(nodes),
+        )
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("closing issue pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_closing_refs_page(owner, name, pr["number"], cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return (
+                [i["number"] for i in nodes],
+                page.get("totalCount", len(nodes)) <= len(nodes),
+            )
+    return [i["number"] for i in nodes], True
+
+
+def _dedupe_numbered_nodes(nodes):
+    seen = set()
+    out = []
+    for node in nodes:
+        number = node.get("number")
+        if number in seen:
+            continue
+        seen.add(number)
+        out.append(node)
+    return out
 
 
 def gh_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
@@ -429,9 +651,20 @@ def _auto_triage_enabled(repo_cfg, global_default):
     """Effective auto_triage for one repo, mirroring auto_approve_ci.
 
     Default ON keeps a fresh fork useful once CLAUDE_CODE_OAUTH_TOKEN is present;
-    the global or per-repo false value is a token-spend opt-out.
+    the global or per-repo false value is a token-spend opt-out. This governs
+    pr-review cards ONLY - see `_auto_triage_issues_enabled` for issue-triage.
     """
     v = repo_cfg.get("auto_triage")
+    return global_default if v is None else bool(v)
+
+
+def _auto_triage_issues_enabled(repo_cfg, global_default):
+    """Effective auto_triage_issues for one repo, mirroring _auto_triage_enabled.
+
+    Independent of `auto_triage`: this governs issue-triage cards ONLY, so
+    toggling either flag (globally or per-repo) never affects the other.
+    """
+    v = repo_cfg.get("auto_triage_issues")
     return global_default if v is None else bool(v)
 
 
@@ -665,7 +898,14 @@ def _auto_approve_or_card(
     return (False, _ci_safety_note(verdict), log_note)
 
 
-def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=True):
+def build_repo(
+    owner,
+    repo_cfg,
+    card_issues,
+    auto_approve_ci=True,
+    auto_triage=True,
+    auto_triage_issues=True,
+):
     """Scan one repo. Returns (repo_result, items).
 
     Decision cards are for other people's work, so scan-built PR-review and
@@ -674,7 +914,9 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
 
     `auto_approve_ci` is the fleet-wide default (config `auto_approve_ci`, itself
     defaulting True); a repo may override it per-repo. `auto_triage` mirrors that
-    model for the advisory Claude pass on pr-review cards. Same-repo PRs with no CI
+    model for the advisory Claude pass on pr-review cards, and `auto_triage_issues`
+    is the INDEPENDENT equivalent for issue-triage cards (its own global/per-repo
+    default, never affected by `auto_triage` or vice versa). Same-repo PRs with no CI
     signal route to normal review, not CI approval. Unknown fork status keeps a
     manual CI-approval card with no auto-approve attempt for contributor-authored
     PRs and logs a suppressed card for owner/maintainer/bot-authored PRs. When
@@ -687,7 +929,10 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
     Conflicted PR-review candidates become `needs-rebase`: no decision card is
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
-    below, so an ok:false repo (early return) is never auto-approved or nudged."""
+    below, so an ok:false repo (early return) is never auto-approved or nudged.
+    Open PRs, open issues, and PR closing issue references are paginated; if the
+    PR or closing-reference scan is incomplete, issue-triage items are withheld
+    because Wheelhouse cannot prove which issues are already addressed by PRs."""
     name = repo_cfg["name"]
     slug = "%s/%s" % (owner, name)
     try:
@@ -706,13 +951,43 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
             [],
         )
 
-    prs = data["pullRequests"]["nodes"]
-    issues = data["issues"]["nodes"]
+    pr_scan_warning = ""
+    try:
+        prs, pr_scan_complete = _page_open_prs(owner, name, data["pullRequests"])
+    except Exception as e:
+        prs = list(data["pullRequests"].get("nodes") or [])
+        pr_scan_complete = False
+        pr_scan_warning = "PR scan incomplete: %s" % str(e)[:160]
+    prs = _dedupe_numbered_nodes(prs)
+    pr_total = data["pullRequests"].get("totalCount", len(prs))
+    pr_truncated = (not pr_scan_complete) or pr_total > len(prs)
+    if pr_truncated and not pr_scan_warning:
+        pr_scan_warning = "PR scan incomplete: fetched %d of %d open PRs" % (
+            len(prs),
+            pr_total,
+        )
+    issue_scan_warning = ""
+    try:
+        issues, issue_scan_complete = _page_open_issues(owner, name, data["issues"])
+    except Exception as e:
+        issues = list(data["issues"].get("nodes") or [])
+        issue_scan_complete = False
+        issue_scan_warning = "issue scan incomplete: %s" % str(e)[:160]
+    issues = _dedupe_numbered_nodes(issues)
+    issue_total = data["issues"].get("totalCount", len(issues))
+    issue_truncated = (not issue_scan_complete) or issue_total > len(issues)
+    if issue_truncated and not issue_scan_warning:
+        issue_scan_warning = "issue scan incomplete: fetched %d of %d open issues" % (
+            len(issues),
+            issue_total,
+        )
     default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
     maintainer_logins = {login.casefold() for login in maintainers()}
     all_names = set()
     enriched = []
     closing = {}  # issue -> [pr numbers]
+    closing_scan_complete = True
+    closing_scan_warning = ""
     for pr in prs:
         author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
@@ -722,7 +997,24 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
             pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
         )
         author_excluded = _author_excluded_from_queue(author, maintainer_logins)
-        closes = [i["number"] for i in pr["closingIssuesReferences"]["nodes"]]
+        try:
+            closes, closes_complete = _closing_issue_numbers(owner, name, pr)
+        except Exception as e:
+            closes = [
+                i["number"]
+                for i in (pr.get("closingIssuesReferences") or {}).get("nodes", [])
+            ]
+            closes_complete = False
+            if not closing_scan_warning:
+                closing_scan_warning = (
+                    "PR closing issue scan incomplete: %s" % str(e)[:160]
+                )
+        if not closes_complete:
+            closing_scan_complete = False
+            if not closing_scan_warning:
+                closing_scan_warning = (
+                    "PR closing issue scan incomplete for #%s" % pr["number"]
+                )
         for i in closes:
             closing.setdefault(i, []).append(pr["number"])
         enriched.append(
@@ -750,6 +1042,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
 
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
+    triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
     default_posture = None
 
     items = []
@@ -847,38 +1140,55 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
         items.append(item)
 
     if card_issues:
-        for it in issues:
-            author = it.get("author") or {}
-            if _author_excluded_from_queue(author, maintainer_logins):
-                continue
-            if it["number"] in addressed:
-                continue  # an open PR is already on it
-            items.append(
-                {
-                    "repo": name,
-                    "number": it["number"],
-                    "kind": "issue-triage",
-                    "head_sha": "",
-                    "title": it["title"],
-                    "author": _author_login(author) or "?",
-                    "bucket": "issue-triage",
-                    "comp": "n/a",
-                    "tests": "n/a",
-                    "url": "https://github.com/%s/issues/%d" % (slug, it["number"]),
-                    "summary": "open issue, no linked PR",
-                    "recommendation": _recommendation("issue-triage"),
-                    "priority": PRIORITY["issue-triage"],
-                }
-            )
+        if pr_truncated or not closing_scan_complete:
+            if not pr_scan_warning and not closing_scan_warning:
+                pr_scan_warning = "PR scan incomplete for issue triage"
+        else:
+            for it in issues:
+                author = it.get("author") or {}
+                if _author_excluded_from_queue(author, maintainer_logins):
+                    continue
+                if it["number"] in addressed:
+                    continue  # an open PR is already on it
+                items.append(
+                    {
+                        "repo": name,
+                        "number": it["number"],
+                        "kind": "issue-triage",
+                        "head_sha": "",
+                        # Issues have no head SHA, so auto-triage caches against
+                        # `updatedAt` instead - it advances on any edit or new
+                        # comment and is otherwise stable.
+                        "updated_at": it.get("updatedAt", "") or "",
+                        "title": it["title"],
+                        "author": _author_login(author) or "?",
+                        "bucket": "issue-triage",
+                        "comp": "n/a",
+                        "tests": "n/a",
+                        "url": "https://github.com/%s/issues/%d" % (slug, it["number"]),
+                        "summary": "open issue, no linked PR",
+                        "recommendation": _recommendation("issue-triage"),
+                        "priority": PRIORITY["issue-triage"],
+                        "auto_triage_issues": triage_issues_enabled,
+                    }
+                )
 
-    warning = config_warning(name, repo_cfg.get("compliance_check"), sorted(all_names))
+    warning = "; ".join(
+        w
+        for w in (
+            config_warning(name, repo_cfg.get("compliance_check"), sorted(all_names)),
+            pr_scan_warning,
+            closing_scan_warning,
+            issue_scan_warning,
+        )
+        if w
+    )
     result = {
         "name": name,
         "ok": True,
         "open_pr_numbers": [p["number"] for p in enriched],
         "open_issue_numbers": open_issue_numbers,
-        "truncated": data["pullRequests"]["totalCount"] > len(prs)
-        or data["issues"]["totalCount"] > len(issues),
+        "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
     }
     return (result, items)
@@ -1476,6 +1786,7 @@ def cmd_scan(only_repo=None):
             cfg["card_issues"],
             cfg["auto_approve_ci"],
             cfg["auto_triage"],
+            cfg["auto_triage_issues"],
         )
         out_repos[name] = result
         items.extend(repo_items)
@@ -1488,6 +1799,7 @@ def cmd_scan(only_repo=None):
         "card_issues": cfg["card_issues"],
         "auto_approve_ci": cfg["auto_approve_ci"],
         "auto_triage": cfg["auto_triage"],
+        "auto_triage_issues": cfg["auto_triage_issues"],
         "repos": out_repos,
         "items": items,
     }
@@ -1581,6 +1893,17 @@ def cmd_auto_triage_enabled(repo):
     )
 
 
+def cmd_auto_triage_issues_enabled(repo):
+    cfg = load_config()
+    if repo not in cfg["repos"]:
+        sys.exit("unknown repo '%s'" % repo)
+    print(
+        "true"
+        if _auto_triage_issues_enabled(cfg["repos"][repo], cfg["auto_triage_issues"])
+        else "false"
+    )
+
+
 def cmd_state(field):
     """Print one field of the state block in $ISSUE_BODY (for the deep-review workflow)."""
     st = parse_state_block(os.environ.get("ISSUE_BODY", ""))
@@ -1603,6 +1926,8 @@ def main():
         cmd_nl_decisions_enabled()
     elif cmd == "auto-triage-enabled" and len(sys.argv) == 3:
         cmd_auto_triage_enabled(sys.argv[2])
+    elif cmd == "auto-triage-issues-enabled" and len(sys.argv) == 3:
+        cmd_auto_triage_issues_enabled(sys.argv[2])
     elif cmd == "state" and len(sys.argv) == 3:
         cmd_state(sys.argv[2])
     elif cmd == "repos":
