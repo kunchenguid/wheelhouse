@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Offline wiring checks for the natural-language decision agent's optional
-READONLY_TOKEN search capability. NO network, NO live LLM.
+READONLY_TOKEN search capability and scoped actor-check bypass.
+NO network, NO live LLM.
 
 Run: python tests/test_nl_decisions_search.py   (needs PyYAML)
 """

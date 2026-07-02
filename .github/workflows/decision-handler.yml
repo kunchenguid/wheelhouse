@@ -250,7 +250,7 @@ jobs:
       # sender (never '*') keeps this narrow: it does not let any other actor skip
       # the check, and it does not change what token the model can act with -
       # github_token/GH_TOKEN stay READONLY_TOKEN, so the model remains unable to
-      # write anywhere. See CLAUDE.md's nl_decisions section for the full model.
+      # write anywhere. See AGENTS.md's nl_decisions section for the full model.
       #
       # NOTE: keep this action pinned to the same reviewed release as deep-review.yml.
       - name: Claude interprets intent (read-only search)

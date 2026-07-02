@@ -282,6 +282,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   For auto triage and deep review, the no-`READONLY_TOKEN` branch is Read/Grep/Glob only, no shell, and no model `GH_TOKEN`.
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
   It cannot run arbitrary `gh` or `git` commands.
+  For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is re-validated against the per-kind allowlist before the deterministic handler acts, and the workflow preserves only `decision.json` before routing/executing from a read-only trusted source copy.
   For deep review, the trusted workflow posts the action-output verdict and no deterministic downstream step reads model-written files.
 - **Deep review is code-grounded but sandboxed.** To review the real code, deep review checks out the target repo into the runner using `FLEET_TOKEN` - but only for the clone, with `persist-credentials: false`, so **no token is ever written to disk**.
@@ -365,7 +366,7 @@ scripts/
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
 tests/test_decision.py         offline unit test for the parse/route logic (mocks the LLM), incl. investigate routing
-tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search wiring
+tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search and actor-check wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
