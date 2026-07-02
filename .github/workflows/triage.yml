@@ -364,6 +364,10 @@ jobs:
             echo "}"
             echo "Do not include Markdown fences or extra prose."
             echo "Do not mention contributors with @mentions."
+            echo "This card is posted in a DIFFERENT repository than the target -"
+            echo "the target is $SLUG. If you reference any issue or PR number,"
+            echo "write it fully qualified as $SLUG#N (never a bare #N), or it"
+            echo "will link to the wrong repository."
           } > prompt.txt
 
           delimiter="$(python -c 'import secrets; print("WHEELHOUSE_TRIAGE_PROMPT_" + secrets.token_hex(32))')"
@@ -463,6 +467,7 @@ jobs:
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
           GH_REPO: ${{ github.repository }}
           GH_PROMPT_DISABLED: "1"
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
           BASH_ENV: ""
           ENV: ""
@@ -482,6 +487,7 @@ jobs:
               GH_TOKEN="$GH_TOKEN" \
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
+              GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
@@ -495,6 +501,7 @@ jobs:
               GH_TOKEN="$GH_TOKEN" \
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
+              GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
                 --issue "$ISSUE" \
                 --revision "$REVISION" \

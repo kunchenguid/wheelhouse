@@ -1252,6 +1252,35 @@ def parse_state_block(body):
 
 
 # --------------------------------------------------------------------------- #
+# cross-repo reference qualification (shared util)
+# --------------------------------------------------------------------------- #
+# Decision cards live in THIS (cards) repo, but their target is a DIFFERENT
+# repo. A bare `#N` in model-generated free text that lands on a card would be
+# autolinked by GitHub to an issue/PR in the CARDS repo, not the target - a
+# wrong, misleading link. Every surface that renders/posts model free text
+# onto a card must rewrite bare refs to `owner/repo#N` via this function
+# before the text is displayed. `owner`/`repo` MUST come from deterministic
+# card state (`GITHUB_REPOSITORY_OWNER` + the card's `state["repo"]`), never
+# from the model's own output - the model only ever supplies `text`.
+#
+# Match a `#N` only where GitHub itself would autolink it as a same-repo
+# reference: at start-of-string, or preceded by a character that is not part
+# of an existing `owner/repo#`/`GH-`/word-adjacent-`#` pattern, and not
+# followed by another word character (so `#123abc` is left alone). This
+# leaves already-qualified `owner/repo#N`, full URLs, markdown-link URLs, and
+# incidental `#` uses (e.g. a URL fragment `page#123`) untouched.
+_ISSUE_REF_RE = re.compile(r"(?<![\w/#-])#(\d+)(?!\w)")
+
+
+def qualify_issue_refs(text, owner, repo):
+    """Rewrite bare `#N` GitHub-autolink references in `text` to fully
+    qualified `owner/repo#N`. Null/empty-safe and idempotent."""
+    if not text or not owner or not repo:
+        return text or ""
+    return _ISSUE_REF_RE.sub("%s/%s#\\1" % (owner, repo), text)
+
+
+# --------------------------------------------------------------------------- #
 # security-gated CI approval (ported exit-4 HOLD) + shared safety verdict
 # --------------------------------------------------------------------------- #
 # `ci_safety` is the ONE security definition. Both the scan-time auto-approve

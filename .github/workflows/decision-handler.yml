@@ -324,6 +324,7 @@ jobs:
           DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -340,6 +341,7 @@ jobs:
             DECISION_FILE="$DECISION_FILE" \
             ISSUE_BODY="$ISSUE_BODY" \
             KIND="$KIND" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
 
       # --- Act on the target (shared by every entry point) -------------------

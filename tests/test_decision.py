@@ -301,6 +301,34 @@ def test_answer_and_clarify_do_not_execute():
     check("clarify: question carried", "merge or close" in r["answer"])
 
 
+def test_answer_qualifies_cross_repo_refs_from_deterministic_state():
+    """The card lives in a different repo than STATE['repo'], so a bare `#N`
+    the model writes into `answer` must be qualified using STATE + owner -
+    never left bare (would autolink into the CARDS repo)."""
+    r = ad.route_decision(
+        {"mode": "answer", "answer": "Already handled in #41, see also x/y#2."},
+        "pr-review",
+        STATE,
+        owner="acme",
+    )
+    check("answer: bare ref qualified with STATE's target repo", "acme/lavish-axi#41" in r["answer"])
+    check("answer: already-qualified ref elsewhere untouched", "x/y#2" in r["answer"])
+
+    r_clarify = ad.route_decision(
+        {"mode": "clarify", "answer": "Did you mean #41 or #42?"},
+        "pr-review",
+        STATE,
+        owner="acme",
+    )
+    check(
+        "clarify: qualification also applies to clarify replies",
+        "acme/lavish-axi#41" in r_clarify["answer"] and "acme/lavish-axi#42" in r_clarify["answer"],
+    )
+
+    r_no_owner = route({"mode": "answer", "answer": "See #41."})
+    check("answer: no owner supplied -> bare ref left as-is", r_no_owner["answer"] == "See #41.")
+
+
 def test_trust_boundary():
     # An action the kind does not allow must NOT execute - downgraded to clarify.
     r = route({"mode": "action", "action": "merge"}, kind="issue-triage")
@@ -690,6 +718,7 @@ def main():
     test_clear_checkbox_reads_body_file()
     test_action_mode_drives_execute()
     test_answer_and_clarify_do_not_execute()
+    test_answer_qualifies_cross_repo_refs_from_deterministic_state()
     test_trust_boundary()
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()

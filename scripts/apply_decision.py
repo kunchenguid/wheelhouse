@@ -542,6 +542,7 @@ def build_nl_prompt(
     history="",
     search_enabled=False,
     search_repos=None,
+    target_slug="",
 ):
     """Assemble the intent-mapping prompt.
 
@@ -593,6 +594,13 @@ def build_nl_prompt(
         "  - For `decline`/`comment`, put the prose to post on the target in",
         "    `free_text`.",
     ]
+    if target_slug:
+        parts += [
+            "  - This card is posted in a DIFFERENT repository than the target",
+            "    (%s). If `answer` references any issue or PR number, write it" % target_slug,
+            "    fully qualified as %s#N (never a bare #N), or it will link to" % target_slug,
+            "    the wrong repository.",
+        ]
     if search_enabled:
         repos = list(search_repos or [])
         repo_lines = (
@@ -761,12 +769,12 @@ def cmd_nl_prompt():
         core.maintainers(),
         os.environ.get("TRIGGER_COMMENT_ID", ""),
     )
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    target_slug = "%s/%s" % (owner, state["repo"]) if owner and state.get("repo") else ""
     search_enabled = os.environ.get("READONLY_SEARCH_ENABLED", "") == "true"
     search_repos = []
     if search_enabled:
-        search_repos = search_repos_for_prompt(
-            os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(), state
-        )
+        search_repos = search_repos_for_prompt(owner, state)
     set_output(
         "prompt",
         build_nl_prompt(
@@ -777,6 +785,7 @@ def cmd_nl_prompt():
             history,
             search_enabled=search_enabled,
             search_repos=search_repos,
+            target_slug=target_slug,
         ),
     )
 
@@ -808,7 +817,7 @@ def _load_llm_result(path):
         return None
 
 
-def route_decision(result, kind, state):
+def route_decision(result, kind, state, owner=""):
     """Turn the LLM's structured result into deterministic outputs.
 
     This is the trust boundary: the LLM only proposes; here we validate the
@@ -819,26 +828,37 @@ def route_decision(result, kind, state):
 
     The allow-set here is `nl_allowed` (the NL subset), so a non-consuming
     meta-action like `investigate` is NOT a valid NL action - the LLM is never
-    offered it, and if it hallucinated one it would be downgraded to clarify."""
+    offered it, and if it hallucinated one it would be downgraded to clarify.
+
+    The card lives in a different repo than its target, so any bare `#N` the
+    model writes into `answer` is qualified to `owner/repo#N` before it is
+    returned - `owner` (caller-supplied, from `GITHUB_REPOSITORY_OWNER`) and
+    the target repo (`state["repo"]`, deterministic) drive that, never the
+    model's own text."""
     allowed = nl_allowed(kind)
     slash_hint = (
         "Reply with a slash-command (%s) or rephrase, and I'll act on it."
         % ", ".join("`/%s`" % v for v in sorted(allowed))
     )
+    target_repo = (state or {}).get("repo", "")
     out = {
         "mode": "clarify",
         "decision": "",
         "free_text": "",
         "answer": "",
-        "target_repo": (state or {}).get("repo", ""),
+        "target_repo": target_repo,
         "target_number": (state or {}).get("number", ""),
         "kind": kind,
         "head_sha": (state or {}).get("head_sha", ""),
     }
 
+    def finish():
+        out["answer"] = core.qualify_issue_refs(out["answer"], owner, target_repo)
+        return out
+
     if not isinstance(result, dict):
         out["answer"] = "I couldn't interpret that comment. " + slash_hint
-        return out
+        return finish()
 
     mode = str(result.get("mode", "")).strip().lower()
     free_text = str(result.get("free_text", "") or "").strip()
@@ -851,16 +871,16 @@ def route_decision(result, kind, state):
                 "I read that as wanting to %r, which isn't an option for this "
                 "%s card. %s" % (action or "(unspecified)", kind, slash_hint)
             )
-            return out
+            return finish()
         if action == "comment" and not free_text:
             out["answer"] = (
                 "What should I post on the target? Tell me the comment text."
             )
-            return out
+            return finish()
         if action == "decline" and not free_text:
             free_text = "Declining for now."
         out.update(mode="action", decision=action, free_text=free_text)
-        return out
+        return finish()
 
     if mode in ("answer", "clarify"):
         if not answer:
@@ -870,18 +890,19 @@ def route_decision(result, kind, state):
                 else "I don't have an answer for that."
             )
         out.update(mode=mode, answer=answer)
-        return out
+        return finish()
 
     # Unknown / missing mode -> ask the owner to confirm (fixes silent no-feedback).
     out["answer"] = "I couldn't interpret that comment. " + slash_hint
-    return out
+    return finish()
 
 
 def cmd_nl_route():
     state = core.parse_state_block(os.environ.get("ISSUE_BODY", "")) or {}
     kind = os.environ.get("KIND", "") or state.get("kind", "pr-review")
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     result = _load_llm_result(os.environ.get("DECISION_FILE", "decision.json"))
-    out = route_decision(result, kind, state)
+    out = route_decision(result, kind, state, owner=owner)
     for name in (
         "mode",
         "decision",

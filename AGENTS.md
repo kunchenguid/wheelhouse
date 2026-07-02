@@ -91,7 +91,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   shared CI-safety verdict `ci_safety` / `repo_pr_target_posture` and scan-time
   auto-approve in `build_repo`, plus shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`,
-  `auto-triage-enabled`, `auto-triage-issues-enabled`),
+  `auto-triage-enabled`, `auto-triage-issues-enabled`, `qualify_issue_refs`
+  (rewrites a bare GitHub-autolink `#N` in model text to `owner/repo#N` - see
+  "Cross-repo reference qualification" in Sharp edges)),
   `render_card.py` (render + card CRUD; `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
   the per-kind checkboxes, including the non-consuming `investigate` box on
   pr-review/issue-triage; automatic triage section rendering, `triaged_sha`
@@ -433,6 +435,43 @@ still appears where it's plain English, e.g. "triage the queue".)
   the rename still send `triage-item`, so the alias must stay until every source
   dispatcher is updated. Same idea as the state-marker back-compat - rename the
   name, keep accepting the old one.
+- **Cross-repo reference qualification.** A decision card lives in THIS
+  (cards) repo, but its target is a DIFFERENT repo. GitHub autolinks a bare
+  `#N` to an issue/PR in whichever repo the TEXT is posted in, so any
+  model-generated free text landing on a card must never contain a bare `#N`
+  meant for the target - it would silently mislink to the cards repo instead.
+  Every surface where model text is rendered/posted onto a card runs it
+  through the one shared, deterministic `wheelhouse_core.qualify_issue_refs(text,
+  owner, repo)` first, which rewrites a bare GitHub-autolink `#N` to
+  `owner/repo#N` (already-qualified `owner/repo#N`, full URLs, markdown-link
+  URLs, and non-reference `#` uses like `GH-123`/`#123abc`/`foo#N` are left
+  untouched; null-safe and idempotent). `owner` is always
+  `GITHUB_REPOSITORY_OWNER` and `repo` is always the TARGET repo name from the
+  card's deterministic state (`state["repo"]`) - NEVER derived from the
+  model's own output, so the model cannot redirect qualification by naming a
+  different repo in its text. The three surfaces: (1) auto-triage -
+  `render_card.py`'s `triage_section`/`body_with_triage_result` thread
+  `owner`+`state["repo"]` through before rendering the `### Triage` block (the
+  `triage-apply`/`triage-fail` CLI read `GITHUB_REPOSITORY_OWNER` and
+  `triage.yml`'s "Update the decision card" step passes it through its `env -i`
+  sandbox); (2) deep-review - the "Post the verdict on the card" step in
+  `deep-review.yml` imports `wheelhouse_core` in its trusted Python heredoc and
+  qualifies the extracted verdict with the `resolve` step's deterministic
+  `repo` output before `gh issue comment`; (3) NL answer/clarify -
+  `apply_decision.route_decision` (the same trust-boundary function that
+  validates the LLM's structured result) qualifies `out["answer"]` using the
+  card's `state["repo"]` and a caller-supplied `owner` before returning, so
+  `steps.route.outputs.answer` is already qualified by the time
+  decision-handler.yml's "Post NL reply" step posts it - `cmd_nl_route` reads
+  `GITHUB_REPOSITORY_OWNER` from env and the `route` step in
+  decision-handler.yml passes it through its own `env -i` sandbox. All three
+  prompts (`triage.yml`, `deep-review.yml`, and the NL prompt in
+  `apply_decision.build_nl_prompt`) also carry a defense-in-depth instruction
+  telling the model to write refs as `owner/repo#N`, never bare - but the
+  deterministic rewrite is the load-bearing guarantee, not the prompt. The
+  merge thank-you comment posted on the TARGET repo's own PR (see
+  "Contributor-facing copy") is deliberately OUT OF SCOPE - a bare `#N` there
+  is correct because that comment is posted in the target repo itself.
 
 ## LLM side-jobs
 
@@ -520,16 +559,17 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, and the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none).
-- `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, and unchanged `nl-route`/`execute` boundary.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), and that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text.
+- `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates, and `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, all offline.
-- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, and the handler's immutable-input `workflow_dispatch` trigger, all by inspecting the scripts/YAML, no network.
+- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline.
+- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
+- `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.

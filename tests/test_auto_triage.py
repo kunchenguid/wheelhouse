@@ -365,6 +365,75 @@ def test_render_triage_section_has_no_mentions_and_caches_sha():
     check("state: triage status is succeeded", state.get("triage_status") == "succeeded")
 
 
+def test_render_triage_section_qualifies_cross_repo_refs():
+    """The card lives in a different repo than the target, so bare `#N` refs
+    the model writes into triage text must be qualified to the TARGET's
+    owner/repo - never left bare (would autolink to the CARDS repo) and never
+    derived from the model's own text."""
+    triaged = item(
+        triage={
+            "summary": "Landed in #127 per the linked comment.",
+            "product_implications": "Already superseded by #128.",
+            "recommended_next_step": "decline - fixed by #127's hook rewrite.",
+        }
+    )
+    prior = os.environ.get("GITHUB_REPOSITORY_OWNER")
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "acme"
+    try:
+        body = rc.render(triaged)["body"]
+    finally:
+        if prior is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = prior
+    check("render: triage qualifies target repo refs", "acme/wheelhouse#127" in body)
+    check("render: triage qualifies every ref in the field", "acme/wheelhouse#128" in body)
+    check("render: no bare #127 survives", "acme/wheelhouse#127" in body and " #127" not in body)
+
+
+def test_triage_section_owner_repo_drive_qualification_not_model_text():
+    """Qualification uses the CALLER-supplied owner/repo (deterministic card
+    state), never anything the model itself might claim inside the text."""
+    triage = rc.normalize_triage(
+        {
+            "summary": "Duplicate of other/repo#9 and bare #9.",
+            "product_implications": "n/a.",
+            "recommended_next_step": "merge - trivial.",
+        }
+    )
+    section = rc.triage_section(triage, owner="acme", repo="wheelhouse")
+    check(
+        "triage_section: bare ref qualified with the TARGET slug",
+        "acme/wheelhouse#9" in section,
+    )
+    check(
+        "triage_section: already-qualified other-repo ref untouched",
+        "other/repo#9" in section,
+    )
+    # No owner/repo supplied -> no qualification attempted (safe no-op).
+    unqualified = rc.triage_section(triage)
+    check("triage_section: no owner/repo -> bare ref left as-is", "#9" in unqualified)
+
+
+def test_body_with_triage_result_threads_owner_to_target_slug():
+    it = item()
+    body = rc.render(it)["body"]
+    updated = rc.body_with_triage_result(
+        body,
+        it["head_sha"],
+        triage={
+            "summary": "See #7 for background.",
+            "product_implications": "Routine.",
+            "recommended_next_step": "merge - safe.",
+        },
+        owner="acme",
+    )
+    check(
+        "body_with_triage_result: qualifies with the card's own target repo",
+        "acme/%s#7" % it["repo"] in updated,
+    )
+
+
 def test_recommended_next_step_is_conservative_when_unexpected():
     triage = rc.normalize_triage(
         {
@@ -1189,6 +1258,19 @@ def test_triage_workflow_security_wiring():
             and "scripts/render_card.py triage-fail" in run,
         )
         check("workflow: final card update never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
+        check(
+            "workflow: final card update carries GITHUB_REPOSITORY_OWNER for ref qualification",
+            env.get("GITHUB_REPOSITORY_OWNER") == "${{ github.repository_owner }}",
+        )
+        check(
+            "workflow: env -i passes GITHUB_REPOSITORY_OWNER to both triage subcommands",
+            run.count('GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER"') == 2,
+        )
+
+    check(
+        "workflow: triage prompt instructs the model to fully qualify cross-repo refs",
+        "fully qualified as $SLUG#N" in text and "never a bare #N" in text,
+    )
 
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
     preserve_i = step_index(steps, lambda s: s.get("id") == "triage-result")

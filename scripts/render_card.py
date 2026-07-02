@@ -29,7 +29,7 @@ import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from wheelhouse_core import parse_state_block  # noqa: E402
+from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment / decline carry text,
 # so they are slash-command-only (see apply_decision.py), not checkboxes.
@@ -354,13 +354,24 @@ def normalize_triage(data):
     return triage
 
 
-def triage_section(triage=None, error=None):
+def triage_section(triage=None, error=None, owner="", repo=""):
+    """Render the visible `### Triage` block. `owner`+`repo` (the TARGET slug
+    from deterministic card state, never from the model) qualify any bare
+    `#N` cross-repo reference in the model's triage text so it does not
+    autolink to this CARDS repo instead of the target."""
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
-        lines.append("- **Summary:** %s" % triage["summary"])
-        lines.append("- **Product implications:** %s" % triage["product_implications"])
         lines.append(
-            "- **Recommended next step:** %s" % triage["recommended_next_step"]
+            "- **Summary:** %s"
+            % qualify_issue_refs(triage["summary"], owner, repo)
+        )
+        lines.append(
+            "- **Product implications:** %s"
+            % qualify_issue_refs(triage["product_implications"], owner, repo)
+        )
+        lines.append(
+            "- **Recommended next step:** %s"
+            % qualify_issue_refs(triage["recommended_next_step"], owner, repo)
         )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
@@ -461,7 +472,7 @@ def body_with_triage_queued(body, item):
     return _replace_state_block(clean, _state_with_triage(state, revision, "queued"))
 
 
-def body_with_triage_result(body, revision, triage=None, error=None):
+def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
     state = parse_state_block(body)
     kind = (state or {}).get("kind") if state else None
     if (
@@ -472,7 +483,9 @@ def body_with_triage_result(body, revision, triage=None, error=None):
         return body
     normalized = normalize_triage(triage)
     status = "succeeded" if normalized else "error"
-    section = triage_section(normalized, error or TRIAGE_UNAVAILABLE)
+    section = triage_section(
+        normalized, error or TRIAGE_UNAVAILABLE, owner=owner, repo=state.get("repo", "")
+    )
     updated = _insert_triage_section(body, section)
     new_state = _state_with_triage(
         state, revision, status, None if normalized else error
@@ -542,7 +555,8 @@ def render(item):
         lines.append("> %s" % item["warning"])
         lines.append("")
     if triage:
-        lines.append(triage_section(triage))
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        lines.append(triage_section(triage, owner=owner, repo=repo))
         lines.append("")
     lines.append("### Recommended action")
     lines.append(item.get("recommendation", "Needs your call."))
@@ -687,12 +701,14 @@ def dispatch_triage_workflow(number, item):
     _gh(args)
 
 
-def update_card_triage(number, revision, triage=None, error=None):
+def update_card_triage(number, revision, triage=None, error=None, owner=""):
     card = get_card(number)
     if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
         return False
     body = card.get("body", "")
-    new_body = body_with_triage_result(body, revision, triage=triage, error=error)
+    new_body = body_with_triage_result(
+        body, revision, triage=triage, error=error, owner=owner
+    )
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
@@ -946,19 +962,23 @@ def main():
             f.write(card["marker"])
         print(card["title"])
     elif args.cmd == "triage-apply":
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         result_text = extract_claude_result(args.execution_file)
         triage = parse_triage_json(result_text)
         if triage:
-            if update_card_triage(args.issue, args.revision, triage=triage):
+            if update_card_triage(args.issue, args.revision, triage=triage, owner=owner):
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
         else:
             print("::warning::auto triage produced no valid structured result")
-            update_card_triage(args.issue, args.revision, error=TRIAGE_UNAVAILABLE)
+            update_card_triage(
+                args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
+            )
     elif args.cmd == "triage-fail":
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
-        update_card_triage(args.issue, args.revision, error=args.message)
+        update_card_triage(args.issue, args.revision, error=args.message, owner=owner)
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)

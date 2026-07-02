@@ -16,6 +16,7 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import apply_decision as ad  # noqa: E402
 import nl_readonly_search as nls  # noqa: E402
 
 CLAUDE_ACTION_PIN = (
@@ -588,6 +589,15 @@ def test_route_and_execute_stay_deterministic():
             "workflow: nl-route does not receive READONLY_TOKEN or FLEET_TOKEN",
             "READONLY_TOKEN" not in dumped and "FLEET_TOKEN" not in dumped,
         )
+        env = route.get("env", {})
+        check(
+            "workflow: nl-route carries GITHUB_REPOSITORY_OWNER for ref qualification",
+            env.get("GITHUB_REPOSITORY_OWNER") == "${{ github.repository_owner }}",
+        )
+        check(
+            "workflow: env -i passes GITHUB_REPOSITORY_OWNER through to nl-route",
+            'GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER"' in run,
+        )
 
     check("workflow: execute step still exists", execute is not None)
     if execute:
@@ -608,6 +618,65 @@ def test_route_and_execute_stay_deterministic():
         )
 
 
+def test_nl_prompt_instructs_fully_qualified_refs():
+    prompt_with_slug = ad.build_nl_prompt(
+        "card body", "merge it", "target content", "pr-review", target_slug="acme/repo"
+    )
+    check(
+        "prompt: instructs the model to qualify cross-repo refs with the target slug",
+        "acme/repo#N" in prompt_with_slug and "never a bare #N" in prompt_with_slug,
+    )
+    prompt_without_slug = ad.build_nl_prompt(
+        "card body", "merge it", "target content", "pr-review"
+    )
+    check(
+        "prompt: omits the qualification rule when no target slug is known",
+        "never a bare #N" not in prompt_without_slug,
+    )
+
+
+def test_nl_route_qualifies_answer_with_deterministic_state_not_model_text():
+    state = {"repo": "no-mistakes", "number": 137, "kind": "pr-review"}
+    out = ad.route_decision(
+        {"mode": "answer", "answer": "Already covered by #127, see also acme/other#9."},
+        "pr-review",
+        state,
+        owner="kunchenguid",
+    )
+    check(
+        "route: bare ref qualified using the deterministic target slug",
+        "kunchenguid/no-mistakes#127" in out["answer"],
+    )
+    check(
+        "route: already-qualified ref from elsewhere is left untouched",
+        "acme/other#9" in out["answer"],
+    )
+
+    # The model cannot smuggle in its own repo/owner - only `state["repo"]` and
+    # the caller-supplied `owner` drive qualification, never the answer text.
+    spoofed = ad.route_decision(
+        {
+            "mode": "answer",
+            "answer": "See other/evil#1 - I mean, target this at #1 too.",
+        },
+        "pr-review",
+        state,
+        owner="kunchenguid",
+    )
+    check(
+        "route: model-claimed repo in the text does not redirect qualification",
+        "kunchenguid/no-mistakes#1 too." in spoofed["answer"],
+    )
+
+    unqualified = ad.route_decision(
+        {"mode": "answer", "answer": "See #127."}, "pr-review", state
+    )
+    check(
+        "route: no owner supplied -> bare ref left as-is (safe no-op)",
+        unqualified["answer"] == "See #127.",
+    )
+
+
 def main():
     test_handle_checkout_does_not_persist_default_token()
     test_readonly_gate_and_prompt_gating()
@@ -621,6 +690,8 @@ def main():
     test_search_wrapper_installs_non_writable_tool()
     test_claude_output_is_isolated_before_routing()
     test_route_and_execute_stay_deterministic()
+    test_nl_prompt_instructs_fully_qualified_refs()
+    test_nl_route_qualifies_answer_with_deterministic_state_not_model_text()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
