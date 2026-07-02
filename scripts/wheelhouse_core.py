@@ -91,6 +91,19 @@ query($owner:String!, $name:String!) {
     }
     issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
+    }
+  }
+}
+"""
+
+ISSUES_PAGE_GQL = """
+query($owner:String!, $name:String!, $after:String!) {
+  repository(owner:$owner, name:$name) {
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
       nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
     }
   }
@@ -185,6 +198,63 @@ def gh_graphql(owner, name):
     if data.get("errors"):
         raise RuntimeError(json.dumps(data["errors"]))
     return data["data"]["repository"]
+
+
+def gh_graphql_issue_page(owner, name, after):
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + ISSUES_PAGE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-f",
+            "after=" + after,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    return data["data"]["repository"]["issues"]
+
+
+def _page_open_issues(owner, name, first_page):
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo") or {}
+    if not page_info:
+        return nodes, first_page.get("totalCount", len(nodes)) <= len(nodes)
+    seen_cursors = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("issue pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_issue_page(owner, name, cursor)
+        nodes.extend(page.get("nodes") or [])
+        page_info = page.get("pageInfo") or {}
+        if not page_info:
+            return nodes, page.get("totalCount", len(nodes)) <= len(nodes)
+    return nodes, True
+
+
+def _dedupe_numbered_nodes(nodes):
+    seen = set()
+    out = []
+    for node in nodes:
+        number = node.get("number")
+        if number in seen:
+            continue
+        seen.add(number)
+        out.append(node)
+    return out
 
 
 def gh_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
@@ -731,7 +801,21 @@ def build_repo(
         )
 
     prs = data["pullRequests"]["nodes"]
-    issues = data["issues"]["nodes"]
+    issue_scan_warning = ""
+    try:
+        issues, issue_scan_complete = _page_open_issues(owner, name, data["issues"])
+    except Exception as e:
+        issues = list(data["issues"].get("nodes") or [])
+        issue_scan_complete = False
+        issue_scan_warning = "issue scan incomplete: %s" % str(e)[:160]
+    issues = _dedupe_numbered_nodes(issues)
+    issue_total = data["issues"].get("totalCount", len(issues))
+    issue_truncated = (not issue_scan_complete) or issue_total > len(issues)
+    if issue_truncated and not issue_scan_warning:
+        issue_scan_warning = "issue scan incomplete: fetched %d of %d open issues" % (
+            len(issues),
+            issue_total,
+        )
     default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
     maintainer_logins = {login.casefold() for login in maintainers()}
     all_names = set()
@@ -901,14 +985,20 @@ def build_repo(
                 }
             )
 
-    warning = config_warning(name, repo_cfg.get("compliance_check"), sorted(all_names))
+    warning = "; ".join(
+        w
+        for w in (
+            config_warning(name, repo_cfg.get("compliance_check"), sorted(all_names)),
+            issue_scan_warning,
+        )
+        if w
+    )
     result = {
         "name": name,
         "ok": True,
         "open_pr_numbers": [p["number"] for p in enriched],
         "open_issue_numbers": open_issue_numbers,
-        "truncated": data["pullRequests"]["totalCount"] > len(prs)
-        or data["issues"]["totalCount"] > len(issues),
+        "truncated": data["pullRequests"]["totalCount"] > len(prs) or issue_truncated,
         "warning": warning,
     }
     return (result, items)

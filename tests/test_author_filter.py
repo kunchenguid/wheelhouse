@@ -367,6 +367,79 @@ def test_issue_author_filter_matches_pr_filter():
     )
 
 
+def test_issue_scan_pages_all_open_issues():
+    first = [issue_node(n, author=HUMAN) for n in range(1, 101)]
+    second = [issue_node(n, author=HUMAN) for n in range(101, 106)]
+    first_data = graphql_data([], first)
+    first_data["issues"]["totalCount"] = 105
+    first_data["issues"]["pageInfo"] = {
+        "hasNextPage": True,
+        "endCursor": "cursor-100",
+    }
+    calls = {"pages": []}
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
+
+    def fake_graphql(owner, name):
+        return first_data
+
+    def fake_issue_page(owner, name, after):
+        calls["pages"].append(after)
+        return {
+            "totalCount": 105,
+            "nodes": second,
+            "pageInfo": {"hasNextPage": False, "endCursor": "cursor-105"},
+        }
+
+    def fake_load_config():
+        return {
+            "repos": {"demo": repo_cfg},
+            "maintainer": "co-maintainer",
+            "nl_decisions": False,
+            "card_issues": True,
+            "auto_approve_ci": True,
+        }
+
+    save = (
+        core.gh_graphql,
+        core.gh_graphql_issue_page,
+        core.load_config,
+        os.environ.get("OWNER"),
+        os.environ.get("GITHUB_REPOSITORY_OWNER"),
+    )
+    core.gh_graphql = fake_graphql
+    core.gh_graphql_issue_page = fake_issue_page
+    core.load_config = fake_load_config
+    os.environ["OWNER"] = "owner"
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
+    try:
+        result, items = core.build_repo("owner", repo_cfg, True)
+    finally:
+        (
+            core.gh_graphql,
+            core.gh_graphql_issue_page,
+            core.load_config,
+            old_owner,
+            old_repo_owner,
+        ) = save
+        if old_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = old_owner
+        if old_repo_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_repo_owner
+    numbers = [it["number"] for it in items if it["kind"] == "issue-triage"]
+    check("issue-scan: next page requested", calls["pages"] == ["cursor-100"])
+    check("issue-scan: cards include issues beyond first page", numbers == list(range(1, 106)))
+    check("issue-scan: open issue numbers are complete", result["open_issue_numbers"] == list(range(1, 106)))
+    check("issue-scan: completed pagination is not truncated", result["truncated"] is False)
+
+
 def main():
     test_pr_author_filter_skips_owner_maintainer_and_bots()
     test_ci_approval_author_filter_preserves_safe_auto_approve()
@@ -376,6 +449,7 @@ def main():
     test_ci_approval_author_filter_suppresses_unsafe_cards_without_approve()
     test_ci_approval_author_filter_suppresses_unknown_fork_cards()
     test_issue_author_filter_matches_pr_filter()
+    test_issue_scan_pages_all_open_issues()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
