@@ -40,6 +40,7 @@ python tests/test_author_filter.py
 python tests/test_auto_triage.py
 python tests/test_deep_review.py
 python tests/test_nl_decisions_search.py
+python tests/test_workflow_lint.py
 python - <<'PY'
 from pathlib import Path
 import yaml

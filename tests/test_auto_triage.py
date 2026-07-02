@@ -1230,6 +1230,10 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
         and "--limit 300" not in list_cards_run,
     )
     check(
+        "scan-backstop: open card listing fails closed on pipeline errors",
+        list_cards is not None and "set -euo pipefail" in list_cards_run,
+    )
+    check(
         "scan-backstop: open card listing excludes pull requests",
         'select(has("pull_request") | not)' in list_cards_run,
     )

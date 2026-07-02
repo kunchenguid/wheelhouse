@@ -68,7 +68,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   run hourly because reconcile is a full no-op when neither trigger fires, and
   queues automatic PR or issue triage when the
   current revision (a PR's `head_sha`, or an issue's `updatedAt`) lacks a fresh
-  `triaged_sha` cache), `triage` (automatic,
+  `triaged_sha` cache; its "List open cards" step lists THIS repo's open cards via
+  `gh api --paginate --slurp "repos/{owner}/{repo}/issues?..." | jq '...'` -
+  `gh api --slurp` and `--jq` are mutually exclusive in the installed `gh` CLI, so
+  the `--paginate --slurp` result (an array of per-page arrays) is piped into a
+  standalone `jq` instead of passing `--jq` to `gh api` itself;
+  `tests/test_workflow_lint.py` guards against this combination reappearing in
+  any workflow), `triage` (automatic,
   lightweight, advisory PR-card OR issue-card context; pr-review is gated on
   `auto_triage`, issue-triage on the INDEPENDENT `auto_triage_issues`, both also
   requiring `CLAUDE_CODE_OAUTH_TOKEN`; cached once per revision), `deep-review` (ALWAYS-ON, code-grounded;
@@ -511,6 +517,7 @@ Run the unit tests:
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates, and `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, all offline.
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, and the handler's immutable-input `workflow_dispatch` trigger, all by inspecting the scripts/YAML, no network.
+- `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.

@@ -373,6 +373,7 @@ tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-a
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, dispatch, and workflow isolation
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring
+tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
 
