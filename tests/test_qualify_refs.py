@@ -89,6 +89,52 @@ def test_urls_and_markdown_links_untouched():
     )
 
 
+def test_markdown_code_untouched():
+    check(
+        "a bare ref inside an inline code span is untouched",
+        core.qualify_issue_refs("use `#127` as the sample", "acme", "repo")
+        == "use `#127` as the sample",
+    )
+    check(
+        "a CSS color inside an inline code span is untouched",
+        core.qualify_issue_refs("color is `#123456`", "acme", "repo")
+        == "color is `#123456`",
+    )
+    check(
+        "bare refs after inline code spans are still qualified",
+        core.qualify_issue_refs("use `#127` then see #128", "acme", "repo")
+        == "use `#127` then see acme/repo#128",
+    )
+    check(
+        "bare refs inside double-backtick code spans are untouched",
+        core.qualify_issue_refs("use ``#127`` here", "acme", "repo")
+        == "use ``#127`` here",
+    )
+    fenced = "before #1\n```\n#127\n```\nafter #128"
+    check(
+        "bare refs inside fenced code blocks are untouched",
+        core.qualify_issue_refs(fenced, "acme", "repo")
+        == "before acme/repo#1\n```\n#127\n```\nafter acme/repo#128",
+    )
+    fenced_with_info = "```css\n.issue { color: #123456; }\n```\nthen #128"
+    check(
+        "bare refs inside fenced code blocks with info strings are untouched",
+        core.qualify_issue_refs(fenced_with_info, "acme", "repo")
+        == "```css\n.issue { color: #123456; }\n```\nthen acme/repo#128",
+    )
+    tilde_fenced = "~~~text\n#127\n~~~\nand #128"
+    check(
+        "bare refs inside tilde fenced code blocks are untouched",
+        core.qualify_issue_refs(tilde_fenced, "acme", "repo")
+        == "~~~text\n#127\n~~~\nand acme/repo#128",
+    )
+    unclosed_fence = "```\n#127\nstill code"
+    check(
+        "unclosed fenced code blocks are protected through end of text",
+        core.qualify_issue_refs(unclosed_fence, "acme", "repo") == unclosed_fence,
+    )
+
+
 def test_non_reference_hash_uses_untouched():
     check(
         "GH-123 style refs (no bare #) are untouched",
@@ -130,6 +176,8 @@ def test_idempotent():
         "see https://github.com/o/r/issues/127",
         "[link](url#127)",
         "[details](#127)",
+        "use `#127` then #128",
+        "```\n#127\n```\n#128",
         "GH-123 unrelated",
         "#123abc not a ref",
         "#127 and #128 both",
@@ -162,6 +210,7 @@ def main():
     test_multiple_refs_in_one_string()
     test_already_qualified_refs_untouched()
     test_urls_and_markdown_links_untouched()
+    test_markdown_code_untouched()
     test_non_reference_hash_uses_untouched()
     test_empty_and_none_safe()
     test_idempotent()

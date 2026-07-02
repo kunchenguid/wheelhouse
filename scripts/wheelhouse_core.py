@@ -1268,7 +1268,8 @@ def parse_state_block(body):
 # of an existing `owner/repo#`/`GH-`/word-adjacent-`#` pattern, and not
 # followed by another word character (so `#123abc` is left alone). This
 # leaves already-qualified `owner/repo#N`, full URLs, markdown-link destination
-# URLs, and incidental `#` uses (e.g. a URL fragment `page#123`) untouched.
+# URLs, Markdown code, and incidental `#` uses (e.g. a URL fragment
+# `page#123`) untouched.
 _ISSUE_REF_RE = re.compile(r"(?<![\w/#-])#(\d+)(?!\w)")
 
 
@@ -1304,13 +1305,95 @@ def _markdown_link_destination_spans(text):
             i = marker + 2
 
 
+def _markdown_code_span_spans(text):
+    spans = []
+    i = 0
+    while i < len(text):
+        if text[i] != "`":
+            i += 1
+            continue
+        start = i
+        while i < len(text) and text[i] == "`":
+            i += 1
+        ticks = i - start
+        needle = "`" * ticks
+        close = text.find(needle, i)
+        while close >= 0:
+            before = close > 0 and text[close - 1] == "`"
+            after = close + ticks < len(text) and text[close + ticks] == "`"
+            if not before and not after:
+                spans.append((start, close + ticks))
+                i = close + ticks
+                break
+            close = text.find(needle, close + 1)
+        else:
+            i = start + ticks
+    return spans
+
+
+def _markdown_fenced_code_spans(text):
+    spans = []
+    fence = None
+    pos = 0
+    while pos < len(text):
+        newline = text.find("\n", pos)
+        if newline < 0:
+            line_end = len(text)
+        else:
+            line_end = newline + 1
+        line = text[pos:line_end].rstrip("\r\n")
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if indent <= 3 and stripped:
+            char = stripped[0]
+            if fence:
+                fence_char, fence_len, fence_start = fence
+                if char == fence_char:
+                    run = 0
+                    while run < len(stripped) and stripped[run] == fence_char:
+                        run += 1
+                    if run >= fence_len and not stripped[run:].strip():
+                        spans.append((fence_start, line_end))
+                        fence = None
+            elif char in ("`", "~"):
+                run = 0
+                while run < len(stripped) and stripped[run] == char:
+                    run += 1
+                if run >= 3 and not (char == "`" and "`" in stripped[run:]):
+                    fence = (char, run, pos)
+        pos = line_end
+    if fence:
+        spans.append((fence[2], len(text)))
+    return spans
+
+
+def _merge_spans(spans):
+    merged = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _markdown_protected_spans(text):
+    return _merge_spans(
+        _markdown_link_destination_spans(text)
+        + _markdown_code_span_spans(text)
+        + _markdown_fenced_code_spans(text)
+    )
+
+
 def qualify_issue_refs(text, owner, repo):
     """Rewrite bare `#N` GitHub-autolink references in `text` to fully
     qualified `owner/repo#N`. Null/empty-safe and idempotent."""
     if not text or not owner or not repo:
         return text or ""
     repl = "%s/%s#\\1" % (owner, repo)
-    spans = _markdown_link_destination_spans(text)
+    spans = _markdown_protected_spans(text)
     if not spans:
         return _ISSUE_REF_RE.sub(repl, text)
     qualified = []

@@ -118,6 +118,24 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
+      - id: trusted-src
+        run: |
+          set -euo pipefail
+          trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
+          python_path="$(command -v python)"
+          gh_path="$(command -v gh)"
+          safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          rm -rf "$trusted"
+          mkdir -p "$trusted"
+          tar --exclude=.git -cf - . | tar -xf - -C "$trusted"
+          find "$trusted" -type f -exec chmod a-w {} +
+          find "$trusted" -type d -exec chmod a-w {} +
+          {
+            echo "path=$trusted"
+            echo "python=$python_path"
+            echo "safe_path=$safe_path"
+          } >> "$GITHUB_OUTPUT"
+
       # Resolve the target card's issue number (label event vs workflow_dispatch).
       # No token needed - it is read straight off the event - so it is available
       # even on the token-absent path below.
@@ -433,6 +451,7 @@ jobs:
       # If no usable verdict exists, self-explain and fail the run.
       - name: Post the verdict on the card
         if: ${{ always() && steps.gate.outputs.enabled == 'true' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.target.outputs.issue }}
@@ -441,9 +460,36 @@ jobs:
           EXECUTION_FILE: ${{ steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
           TARGET_REPO: ${{ steps.resolve.outputs.repo }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: "1"
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
         run: |
           set -euo pipefail
-          python - <<'PY'
+          mkdir -p "$TRUSTED_HOME"
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            HOME="$TRUSTED_HOME" \
+            GH_TOKEN="$GH_TOKEN" \
+            GH_REPO="$GH_REPO" \
+            GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
+            ISSUE="$ISSUE" \
+            HEAD_OK="${HEAD_OK:-}" \
+            HEAD_VERDICT="${HEAD_VERDICT:-}" \
+            EXECUTION_FILE="${EXECUTION_FILE:-}" \
+            TARGET_REPO="$TARGET_REPO" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            "$TRUSTED_PYTHON" - <<'PY'
           import json
           import os
           import subprocess
