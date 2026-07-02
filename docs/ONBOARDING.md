@@ -51,6 +51,7 @@ If you override `options`, include `investigate` only on `pr-review` or `issue-t
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
 If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`) or its stored card render version is stale, the hub refreshes it in place.
 The render-version trigger is internal and self-terminating; source repos do not send it.
+A stale render version can also apply internal card-body repairs, such as qualifying bare target refs preserved in older cached `Triage` sections.
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.

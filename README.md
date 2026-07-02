@@ -228,6 +228,7 @@ You drive the queue three ways - whichever fits the decision:
 An item is **consumed** when the handler closes its card after acting; the card is labeled `resolved` (or `blocked` for a hold) for audit.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
+The current render-version sweep also repairs older cached `Triage` sections by qualifying bare target `#N` refs before preserving them.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
@@ -292,6 +293,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Cross-repo refs in LLM card text.** Auto triage summaries, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards while referring to a different target repo.
   Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
   The model cannot redirect that slug by naming a repo in its output, and the deterministic rewrite is the guarantee even though the prompts also ask for fully-qualified refs.
+  The render-version sweep also re-applies that rewrite to preserved cached `Triage` sections in card bodies; it does not rewrite already-posted card comments.
 - **Deep review is code-grounded but sandboxed.** To review the real code, deep review checks out the target repo into the runner using `FLEET_TOKEN` - but only for the clone, with `persist-credentials: false`, so **no token is ever written to disk**.
   The Claude step that follows never gets `FLEET_TOKEN`.
   Without `READONLY_TOKEN`, it gets this repo's token and is restricted to **read-only** tools (`Read`/`Grep`/`Glob`) with **no shell**.
@@ -374,7 +376,7 @@ scripts/
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
 tests/test_decision.py         offline unit test for parse/route logic, investigate routing, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
-tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
+tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, and render-version triage ref repair
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, and logging

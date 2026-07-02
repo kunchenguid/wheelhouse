@@ -97,7 +97,10 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # NOT a material field: never add it to MATERIAL_FIELDS / material_signature
 # / _state_material, and it must never affect classify/decision-parsing/
 # merge-close-approve/fork-CI-safety/author-filtering/conflict-routing/triage.
-CARD_RENDER_VERSION = 1
+# Bumped 1 -> 2 to retroactively re-qualify already-cached `### Triage`
+# sections (bare `#N` -> `owner/repo#N`) via `_preserve_same_revision_triage`,
+# mirroring how version 0 -> 1 propagated the author `@mention` drop.
+CARD_RENDER_VERSION = 2
 
 TRIAGE_FIELDS = ("summary", "product_implications", "recommended_next_step")
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
@@ -189,8 +192,9 @@ def material_changed(item, state):
 def render_stale(state):
     """True when the card's stored `render_version` is behind the current
     `CARD_RENDER_VERSION` - a non-material, one-time re-render trigger for
-    display-only fixes (e.g. dropping the author @mention) that have no
-    material-field trigger. A missing `render_version` (a card written before
+    display-only or card-body repair fixes (e.g. dropping the author @mention
+    or re-qualifying cached triage refs) that have no material-field trigger.
+    A missing `render_version` (a card written before
     this field existed) reads as version 0, so it is stale exactly once. Pure
     and side-effect free, like `material_changed`."""
     raw_version = (state or {}).get("render_version", 0)
@@ -417,7 +421,15 @@ def _replace_state_block(body, state):
     return (body or "").rstrip() + "\n\n" + marker
 
 
-def _preserve_same_revision_triage(body, existing_body, item, old_state):
+def _preserve_same_revision_triage(body, existing_body, item, old_state, owner=""):
+    """Lift the existing `### Triage` section onto a same-revision refresh
+    without spending a new triage attempt.
+
+    Before reinserting it, re-qualify any bare `#N` cross-repo ref it carries.
+    `owner` is always `GITHUB_REPOSITORY_OWNER`; the target repo name comes from
+    the card's deterministic `old_state["repo"]` (falling back to the item),
+    never from the cached triage text itself - same trust rule as fresh triage
+    rendering."""
     kind = item.get("kind", "pr-review")
     if kind not in AUTO_TRIAGE_FLAG_BY_KIND:
         return body
@@ -429,6 +441,8 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state):
 
     section = _existing_triage_section(existing_body)
     if section:
+        repo = (old_state or {}).get("repo") or item.get("repo", "")
+        section = qualify_issue_refs(section, owner, repo)
         body = _insert_triage_section(body, section)
 
     state = parse_state_block(body)
@@ -735,11 +749,13 @@ def _refresh_card(number, card, existing, item, old_state):
     re-review is warranted rather than being silently swapped underneath."""
     to_add, to_remove = plan_label_update(card["labels"], existing.get("labels"))
     card = dict(card)
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     card["body"] = _preserve_same_revision_triage(
         card["body"],
         existing.get("body", ""),
         item,
         old_state,
+        owner=owner,
     )
     body_path = _write_body(card["body"])
     try:
@@ -785,8 +801,9 @@ def upsert_card(item, existing=None):
         decision in flight - re-rendering the body would reset its checkboxes).
       * A refresh runs when a MATERIAL field changed OR the card's stored
         `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
-        terminating re-render for display-only fixes); a card that is neither
-        is a full no-op (no body edit, no label churn, no comment).
+        terminating re-render for display-only fixes and card-body repairs like
+        cached triage ref qualification); a card that is neither is a full
+        no-op (no body edit, no label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment.

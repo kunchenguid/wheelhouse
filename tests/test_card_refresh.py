@@ -426,6 +426,215 @@ def test_render_version_refresh_preserves_triage_section():
     )
 
 
+def test_render_version_refresh_qualifies_stale_triage_refs():
+    """Retroactive fix (see AGENTS.md): a render-version-behind card carries a
+    triage section cached before cross-repo qualification existed. The next
+    refresh must re-qualify its bare `#N` refs and stamp the current
+    render_version, both from GITHUB_REPOSITORY_OWNER + the card's own
+    deterministic state repo - never from the model text."""
+    it = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(it)["body"], it),
+        it["head_sha"],
+        triage={
+            "summary": "Landed in #127 already.",
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - fixed by #127.",
+        },
+    )
+    stale_state = core.parse_state_block(triaged)
+    stale_state["render_version"] = 1
+    stale_body = rc._replace_state_block(triaged, stale_state)
+    existing = {
+        "number": 7,
+        "body": stale_body,
+        "labels": labels(
+            "needs-decision",
+            "repo:lavish-axi",
+            "kind:pr-review",
+            "priority:med",
+            "target:lavish-axi-42",
+        ),
+    }
+
+    calls = {"comments": []}
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+    old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-body"
+
+    rc._write_body = fake_write
+    rc._gh = (
+        lambda args, check=True: calls["comments"].append(args)
+        if "comment" in args
+        else None
+    )
+    rc.os.unlink = lambda path: None
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
+    try:
+        rc.upsert_card(it, existing=existing)
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+        if old_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
+
+    body = calls.get("body", "")
+    new_state = core.parse_state_block(body)
+    check(
+        "render-version refresh: stale bare ref qualified",
+        "kunchenguid/lavish-axi#127" in body,
+    )
+    check(
+        "render-version refresh: no bare #127 remains",
+        "Landed in #127 already." not in body,
+    )
+    check(
+        "render-version refresh: stamped current render_version",
+        new_state is not None and new_state.get("render_version") == rc.CARD_RENDER_VERSION,
+    )
+    check(
+        "render-version refresh: triaged_sha still preserved",
+        new_state is not None and new_state.get("triaged_sha") == it["head_sha"],
+    )
+
+
+def test_render_version_current_and_qualified_triage_is_noop():
+    """A card already at the current render_version, whose triage section is
+    already qualified, must not be re-edited (idempotent - no churn loop)."""
+    it = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(it)["body"], it),
+        it["head_sha"],
+        triage={
+            "summary": "Landed in kunchenguid/lavish-axi#127 already.",
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - fixed by kunchenguid/lavish-axi#127.",
+        },
+    )
+    current_state = core.parse_state_block(triaged)
+    check(
+        "no-op fixture: render_version already current",
+        current_state.get("render_version") == rc.CARD_RENDER_VERSION,
+    )
+    existing = {
+        "number": 7,
+        "body": triaged,
+        "labels": labels(
+            "needs-decision",
+            "repo:lavish-axi",
+            "kind:pr-review",
+            "priority:med",
+            "target:lavish-axi-42",
+        ),
+    }
+    calls = {"refresh": 0}
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+    old_refresh = rc._refresh_card
+    old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    rc._refresh_card = lambda *args: calls.__setitem__("refresh", calls["refresh"] + 1)
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
+    try:
+        result = rc.upsert_card(it, existing=existing)
+    finally:
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+        rc._refresh_card = old_refresh
+        if old_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
+    check("render-version v2 + qualified triage: no-op result", result == 7)
+    check("render-version v2 + qualified triage: no refresh", calls["refresh"] == 0)
+
+
+def test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched():
+    """Direct test of `_preserve_same_revision_triage`: only a genuine bare
+    `#N` autolink gets qualified. Already-qualified refs, full URLs, markdown
+    link destinations, and non-reference `#` uses are left exactly as-is."""
+    it = item()
+    mixed = (
+        "Bare #127. Already-qualified: see owner/other#5 for context. "
+        "URL: see https://github.com/o/r/issues/127. "
+        "Markdown link: [details](url#127). Not a ref: GH-123."
+    )
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(it)["body"], it),
+        it["head_sha"],
+        triage={
+            "summary": mixed,
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - still safe.",
+        },
+    )
+    old_state = core.parse_state_block(triaged)
+    fresh_body = rc.render(it)["body"]
+    result = rc._preserve_same_revision_triage(
+        fresh_body, triaged, it, old_state, owner="kunchenguid"
+    )
+    check("preserve: bare ref qualified", "kunchenguid/lavish-axi#127." in result)
+    check(
+        "preserve: already-qualified ref untouched",
+        "owner/other#5" in result,
+    )
+    check(
+        "preserve: URL untouched",
+        "https://github.com/o/r/issues/127" in result,
+    )
+    check(
+        "preserve: markdown link destination untouched",
+        "[details](url#127)" in result,
+    )
+    check("preserve: non-ref GH-123 untouched", "GH-123" in result)
+
+
+def test_preserve_triage_uses_state_repo_not_item_repo():
+    """`owner`/`repo` for the retroactive qualification come from the card's
+    deterministic `old_state["repo"]`, never from the item or model text -
+    same trust rule as fresh triage rendering."""
+    it = item(repo="attacker-controlled")
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(item())["body"], item()),
+        item()["head_sha"],
+        triage={
+            "summary": "See #127 for details.",
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - still safe.",
+        },
+    )
+    old_state = core.parse_state_block(triaged)
+    check("fixture: old_state repo is lavish-axi", old_state.get("repo") == "lavish-axi")
+    fresh_body = rc.render(it)["body"]
+    result = rc._preserve_same_revision_triage(
+        fresh_body, triaged, it, old_state, owner="kunchenguid"
+    )
+    check(
+        "preserve: qualification uses state repo, not item repo",
+        "kunchenguid/lavish-axi#127" in result,
+    )
+    check(
+        "preserve: item's own repo never used for qualification",
+        "attacker-controlled#127" not in result
+        and "kunchenguid/attacker-controlled#127" not in result,
+    )
+
+
 def test_render_stale_alone_does_not_bypass_is_refreshable():
     """The is_refreshable guard still gates the render-version trigger: a
     processing/resolved/blocked card is never refreshed just because its
@@ -867,6 +1076,10 @@ def main():
     test_render_version_is_not_material()
     test_upsert_refreshes_once_on_render_version_alone()
     test_render_version_refresh_preserves_triage_section()
+    test_render_version_refresh_qualifies_stale_triage_refs()
+    test_render_version_current_and_qualified_triage_is_noop()
+    test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched()
+    test_preserve_triage_uses_state_repo_not_item_repo()
     test_render_stale_alone_does_not_bypass_is_refreshable()
     test_is_refreshable_pure_needs_decision()
     test_is_refreshable_blocks_mid_decision()

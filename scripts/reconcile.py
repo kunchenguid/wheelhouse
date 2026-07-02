@@ -151,8 +151,9 @@ def main():
             continue
         # Card exists: refresh only a pure needs-decision card whose target
         # materially changed OR whose stored render_version is behind current
-        # (a one-time, self-terminating re-render for display-only fixes, e.g.
-        # dropping the author @mention). A card mid-decision
+        # (a one-time, self-terminating re-render for display/card-body fixes,
+        # e.g. dropping the author @mention or re-qualifying cached triage refs).
+        # A card mid-decision
         # (processing/resolved/blocked) or with neither trigger is left
         # completely untouched (no edit, no comment). `upsert_card` re-checks
         # both guards before it edits.
