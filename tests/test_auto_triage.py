@@ -164,6 +164,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         number = (existing or {}).get("number", 7)
         refreshed = card_row(it, number=number)
         current_by_number[number] = refreshed
+        return number
 
     def fake_close(number, message, label="resolved"):
         calls["close"].append({"number": number, "message": message, "label": label})
@@ -597,6 +598,118 @@ def test_reconcile_skips_when_fresh_token_absent_or_config_off():
     check("reconcile: fresh triaged_sha skips dispatch", fresh_calls["dispatch"] == [])
     check("reconcile: token absent skips dispatch", no_token_calls["dispatch"] == [])
     check("reconcile: config off skips dispatch", config_off_calls["dispatch"] == [])
+
+
+def test_reconcile_queues_triage_for_newly_created_card_without_find_card():
+    """A freshly-created card's first triage attempt must be queued in the
+    same reconcile pass, even though find_card's label-filtered `gh issue
+    list` is not read-after-write consistent right after `gh issue create`.
+    Simulate that consistency gap by making find_card unusable; reconcile
+    must instead read the new card back BY NUMBER (current_card/get_card)."""
+    it = item(auto_triage=True)
+
+    def fail_find_card(marker):
+        raise AssertionError("find_card must not be used for a just-created card")
+
+    old_find = reconcile.render_card.find_card
+    reconcile.render_card.find_card = fail_find_card
+    try:
+        calls = run_reconcile(scan_payload([it]), [])
+    finally:
+        reconcile.render_card.find_card = old_find
+    check("reconcile: new card is created", len(calls["upsert"]) == 1)
+    check(
+        "reconcile: new card queues triage in the same pass without find_card",
+        len(calls["dispatch"]) == 1,
+    )
+    check(
+        "reconcile: new-card triage targets the number upsert_card returned",
+        bool(calls["dispatch"]) and calls["dispatch"][0]["number"] == 7,
+    )
+
+
+def test_reconcile_new_card_triage_is_idempotent_on_next_pass():
+    """Once a newly-created card's revision is cached as queued, a later
+    reconcile pass over the same revision must not dispatch a second time."""
+    it = item(auto_triage=True)
+    first_calls = run_reconcile(scan_payload([it]), [])
+    check("reconcile: first pass creates the card", len(first_calls["upsert"]) == 1)
+    check("reconcile: first pass queues triage once", len(first_calls["dispatch"]) == 1)
+
+    queued_card = card_row(it, number=7)
+    queued_card["body"] = rc.body_with_triage_queued(queued_card["body"], it)
+    second_calls = run_reconcile(scan_payload([it]), [queued_card])
+    check(
+        "reconcile: idempotence - already-queued revision is not re-dispatched",
+        second_calls["dispatch"] == [],
+    )
+
+
+def test_queue_triage_cli_uses_known_issue_number_without_find_card():
+    """The ingest fast path threads the number `upsert` just created/refreshed
+    into `queue-triage --issue N`, so it must read the card back by number and
+    never depend on find_card's racy label-filtered listing."""
+    it = item(auto_triage=True)
+    current = card_row(it)
+
+    def fail_find(marker):
+        raise AssertionError("find_card must not be used when --issue is supplied")
+
+    def fake_get(number):
+        return current if int(number) == current["number"] else None
+
+    def fake_mark(number, queued_item, body):
+        current["body"] = rc.body_with_triage_queued(body, queued_item)
+        return True
+
+    dispatched = []
+
+    def fake_dispatch(number, queued_item):
+        dispatched.append(number)
+
+    old = (
+        sys.argv[:],
+        rc.find_card,
+        rc.get_card,
+        rc.mark_triage_queued,
+        rc.dispatch_triage_workflow,
+    )
+    rc.find_card = fail_find
+    rc.get_card = fake_get
+    rc.mark_triage_queued = fake_mark
+    rc.dispatch_triage_workflow = fake_dispatch
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            item_path = os.path.join(d, "item.json")
+            with open(item_path, "w") as f:
+                json.dump(it, f)
+            sys.argv = [
+                "render_card.py",
+                "queue-triage",
+                "--item-file",
+                item_path,
+                "--issue",
+                str(current["number"]),
+            ]
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc.main()
+            out = buf.getvalue()
+    finally:
+        (
+            sys.argv,
+            rc.find_card,
+            rc.get_card,
+            rc.mark_triage_queued,
+            rc.dispatch_triage_workflow,
+        ) = old
+
+    check(
+        "queue cli: dispatches using the supplied issue number, not find_card",
+        dispatched == [current["number"]],
+    )
+    check("queue cli: queued cache was written", "triage_status" in current["body"])
+    check("queue cli: does not report a skip", "auto triage skipped" not in out)
 
 
 def test_queue_triage_command_warns_on_dispatch_failure():
@@ -1345,6 +1458,9 @@ def main():
     test_reconcile_backfills_legacy_issue_card_without_material_change()
     test_reconcile_skips_when_fresh_token_absent_or_config_off()
     test_reconcile_skips_when_fresh_token_absent_or_config_off_for_issue()
+    test_reconcile_queues_triage_for_newly_created_card_without_find_card()
+    test_reconcile_new_card_triage_is_idempotent_on_next_pass()
+    test_queue_triage_cli_uses_known_issue_number_without_find_card()
     test_queue_triage_command_warns_on_dispatch_failure()
     test_reconcile_queues_after_head_refresh()
     test_reconcile_queues_after_issue_updated_at_advance()

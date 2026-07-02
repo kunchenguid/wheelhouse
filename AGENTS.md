@@ -234,6 +234,20 @@ still appears where it's plain English, e.g. "triage the queue".)
   `triage_status=queued`; this intentionally spends at most one Claude attempt
   per revision even if the asynchronous workflow errors, times out, or cannot
   parse a result.
+  **A just-created card must be read back BY NUMBER, never via
+  `find_card`'s label-filtered `gh issue list`.** That listing is not
+  read-after-write consistent immediately after `gh issue create`, so reading
+  it back milliseconds later can silently miss the card and skip queuing its
+  first auto-triage attempt (only a later scan's pre-existing-card backfill
+  path would then catch it). `_create_card`/`upsert_card` therefore always
+  return an int issue number (never a URL), and `reconcile.py`'s new-card
+  branch reads the fresh card via `current_card({"number": n})` -> `get_card`,
+  which IS consistent. The ingest fast path mirrors this: the `upsert` CLI
+  writes the created/refreshed number to `$GITHUB_OUTPUT` (`issue=N`), and
+  `ingest.yml`'s "Queue auto triage" step passes it as `queue-triage --issue
+  N`, so that path also reads by number; `queue-triage` keeps the `find_card`
+  lookup only as a fallback when no number is supplied (back-compat for a
+  manual invocation).
   `triaged_sha`, `updated_at`, and the visible `### Triage` section are
   non-material: they must never affect `classify`, `material_changed`,
   decision parsing, merge execution, fork-CI approval, author filtering, or

@@ -94,7 +94,8 @@ jobs:
           INPUT_OPTIONS: ${{ github.event.inputs.options }}
         run: python scripts/build_item.py item.json
 
-      - name: Create or refresh the decision card
+      - id: upsert
+        name: Create or refresh the decision card
         env:
           # Cards live in THIS repo: the default token is correct, and using it
           # keeps card activity from re-triggering the decision handler.
@@ -111,4 +112,8 @@ jobs:
         if: steps.auto-triage-gate.outputs.has_token == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/render_card.py queue-triage --item-file item.json
+        # --issue threads the number `upsert` just created/refreshed, so this
+        # reads the card back by number (read-after-write consistent) instead
+        # of relying on find_card's label-filtered listing, which can race a
+        # just-created issue. Falls back to find_card if the output is empty.
+        run: python scripts/render_card.py queue-triage --item-file item.json --issue "${{ steps.upsert.outputs.issue }}"

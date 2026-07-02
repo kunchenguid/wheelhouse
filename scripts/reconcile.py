@@ -137,10 +137,16 @@ def main():
         current_for_triage = None
         if ex is None:
             try:
-                render_card.upsert_card(item)
+                # Read the fresh card back BY NUMBER (current_card ->
+                # get_card), never via find_card's label-filtered listing:
+                # that listing is not read-after-write consistent right after
+                # `gh issue create`, so it would silently miss the card just
+                # created and skip queuing its first auto-triage attempt.
+                number = render_card.upsert_card(item)
                 created += 1
-                found = render_card.find_card(render_card.marker_label(item))
-                current_for_triage = current_card(found) if found else None
+                current_for_triage = (
+                    current_card({"number": number}) if number else None
+                )
             except Exception as e:  # one bad item must not abort the whole pass
                 print(
                     "::warning::failed to create card for %s#%s: %s"
