@@ -541,24 +541,27 @@ def test_render_version_current_and_qualified_triage_is_noop():
             "target:lavish-axi-42",
         ),
     }
-    calls = {}
+    calls = {"refresh": 0}
     old_get_card = rc.get_card
     old_ensure = rc.ensure_labels
+    old_refresh = rc._refresh_card
     old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
     rc.get_card = lambda number: existing if int(number) == 7 else None
     rc.ensure_labels = lambda labels_: None
+    rc._refresh_card = lambda *args: calls.__setitem__("refresh", calls["refresh"] + 1)
     os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
     try:
         result = rc.upsert_card(it, existing=existing)
     finally:
         rc.get_card = old_get_card
         rc.ensure_labels = old_ensure
+        rc._refresh_card = old_refresh
         if old_owner is None:
             os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
         else:
             os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
     check("render-version v2 + qualified triage: no-op result", result == 7)
-    check("render-version v2 + qualified triage: no body write", "body" not in calls)
+    check("render-version v2 + qualified triage: no refresh", calls["refresh"] == 0)
 
 
 def test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched():
