@@ -130,10 +130,12 @@ NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 # fork-CI-safety/author-filtering/conflict-routing. `HOLD_LABEL` is a display/
 # filtering label kept in sync with it (added by `card_labels` whenever
 # `render()` is called with `held=True`), never read back as the source of
-# truth - `state["held"]` is. A refresh preserves whatever held-ness the card
-# already has (`upsert_card` reads `old_state.get("held")`); only
-# `update_card_triage` ever flips a card from held to published.
+# truth - `state["held"]` is. A refresh preserves held-ness only while the
+# refreshed item still qualifies for auto triage; otherwise it renders the card
+# actionable in the same refresh. `update_card_triage` publishes held cards when
+# an auto-triage attempt completes.
 HOLD_LABEL = "pending-triage"
+SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
@@ -395,14 +397,13 @@ def is_refreshable(labels):
 
 
 def plan_label_update(desired, current):
-    """Plan a true label replace of the wheelhouse-managed namespaces. Returns
-    (to_add, to_remove): managed labels that no longer apply are removed;
-    `needs-decision` and any non-managed (human-added) label are never removed."""
+    """Plan a true label replace of Wheelhouse-owned labels."""
     current_names = _label_names(current)
     desired_set = set(desired)
     managed_now = {n for n in current_names if n.startswith(MANAGED_LABEL_PREFIXES)}
+    synced_now = current_names.intersection(SYNCED_EXACT_LABELS)
     to_add = [label for label in desired if label not in current_names]
-    to_remove = sorted(managed_now - desired_set)
+    to_remove = sorted((managed_now | synced_now) - desired_set)
     return to_add, to_remove
 
 
@@ -643,9 +644,7 @@ def render(item, held=False):
 
     `held=True` renders the placeholder "Held cards" form (see the module-
     level comment above `HOLD_LABEL`): the state block carries `held: true`
-    and the "Your decision" section has no checkboxes. Only a brand-new card
-    decides to be held (`should_hold`); a refresh preserves whatever held-ness
-    the existing card already has (see `upsert_card`)."""
+    and the "Your decision" section has no checkboxes."""
     kind = item.get("kind", "pr-review")
     repo = item["repo"]
     number = int(item["number"])
@@ -1025,9 +1024,8 @@ def upsert_card(item, existing=None, has_token=False):
     `has_token` gates whether a BRAND-NEW eligible card is created HELD (see
     "Held cards" above / `should_hold`) - pass the same
     `CLAUDE_CODE_OAUTH_TOKEN`-presence signal used to gate whether auto triage
-    is queued at all (`auto_triage_has_token()`). It is unused when refreshing
-    an existing card: a refresh always preserves whatever held-ness the card
-    already has (read from its own stored state), never decides it anew.
+    is queued at all (`auto_triage_has_token()`). On refresh, a currently-held
+    card stays held only if the refreshed item still passes `should_hold`.
 
     Refresh rules (see AGENTS.md "Card refresh"):
       * Only a pure `needs-decision` card is refreshed; a card already
@@ -1040,9 +1038,9 @@ def upsert_card(item, existing=None, has_token=False):
         no-op (no body edit, no label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
-        also drops a short "target updated" comment. A held card stays held
-        (its placeholder is simply re-rendered with the fresh material state)
-        - only `update_card_triage` ever publishes a held card.
+        also drops a short "target updated" comment. A held card whose refreshed
+        item no longer qualifies for auto triage is rendered actionable in that
+        same refresh.
 
     Always returns an int issue number (new or existing), or None if a
     brand-new card's number could not be parsed from `gh issue create`'s
@@ -1077,7 +1075,8 @@ def upsert_card(item, existing=None, has_token=False):
     if not material_changed(item, old_state) and not render_stale(old_state):
         print("skip card #%s for %s: no material change" % (number, marker))
         return number
-    card = render(item, held=bool((old_state or {}).get("held")))
+    held = bool((old_state or {}).get("held")) and should_hold(item, has_token)
+    card = render(item, held=held)
     ensure_labels(card["labels"])
     return _refresh_card(number, card, existing, item, old_state)
 

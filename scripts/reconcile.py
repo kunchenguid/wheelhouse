@@ -210,7 +210,9 @@ def main():
                         item, current["state"]
                     ) or render_card.render_stale(current["state"])
                     if still_stale:
-                        render_card.upsert_card(item, existing=current)
+                        render_card.upsert_card(
+                            item, existing=current, has_token=has_triage_token
+                        )
                         refreshed += 1
                         current_for_triage = current_card(current)
             except Exception as e:

@@ -2221,7 +2221,7 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
         )
 
 
-def test_upsert_card_refresh_preserves_held_state():
+def test_upsert_card_refresh_preserves_held_when_still_eligible():
     for kind, base, changed in (
         ("pr-review", item(auto_triage=True, head_sha="oldsha"), item(auto_triage=True, head_sha="newsha999")),
         (
@@ -2251,7 +2251,7 @@ def test_upsert_card_refresh_preserves_held_state():
 
         rc._refresh_card = fake_refresh
         try:
-            result = rc.upsert_card(changed, existing=existing)
+            result = rc.upsert_card(changed, existing=existing, has_token=True)
         finally:
             rc.get_card, rc._refresh_card, rc.ensure_labels = (
                 old_get_card,
@@ -2267,6 +2267,203 @@ def test_upsert_card_refresh_preserves_held_state():
             "refresh(%s): refreshed held body still has no checkboxes" % kind,
             "<!-- opt:" not in captured["card"]["body"],
         )
+
+
+def _capture_upsert_refresh(base_item, changed_item, has_token):
+    held_card = rc.render(base_item, held=True)
+    existing = {
+        "number": 7,
+        "body": held_card["body"],
+        "labels": labels(*held_card["labels"]),
+        "state": "OPEN",
+    }
+    calls = {"gh_calls": []}
+    old = (rc.get_card, rc.ensure_labels, rc._write_body, rc._gh)
+
+    def fake_write(body):
+        calls["body"] = body
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(body)
+            return f.name
+
+    def fake_gh(args, check=True):
+        calls["gh_calls"].append(args)
+        return None
+
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    rc._write_body = fake_write
+    rc._gh = fake_gh
+    try:
+        calls["result"] = rc.upsert_card(
+            changed_item, existing=existing, has_token=has_token
+        )
+    finally:
+        rc.get_card, rc.ensure_labels, rc._write_body, rc._gh = old
+    return calls
+
+
+def _run_reconcile_real_upsert_refresh(base_item, changed_item, token="true"):
+    held = rc.render(base_item, held=True)
+    row = {
+        "number": 7,
+        "body": held["body"],
+        "labels": labels(*held["labels"]),
+        "title": held["title"],
+        "state": "OPEN",
+    }
+    current_by_number = {7: dict(row)}
+    calls = {"gh_calls": []}
+    old = (
+        sys.argv[:],
+        reconcile.render_card.get_card,
+        reconcile.render_card.ensure_labels,
+        reconcile.render_card._write_body,
+        reconcile.render_card._gh,
+        os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"),
+    )
+
+    def fake_get(number):
+        return current_by_number.get(int(number))
+
+    def fake_write(body):
+        calls["body"] = body
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(body)
+            return f.name
+
+    def fake_gh(args, check=True):
+        calls["gh_calls"].append(args)
+        if args[:3] == ["issue", "edit", "7"]:
+            current = current_by_number[7]
+            current["body"] = calls["body"]
+            names = {label["name"] for label in current.get("labels", [])}
+            i = 0
+            while i < len(args):
+                if args[i] == "--add-label":
+                    names.add(args[i + 1])
+                    i += 2
+                elif args[i] == "--remove-label":
+                    names.discard(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            current["labels"] = labels(*sorted(names))
+        return None
+
+    reconcile.render_card.get_card = fake_get
+    reconcile.render_card.ensure_labels = lambda labels_: None
+    reconcile.render_card._write_body = fake_write
+    reconcile.render_card._gh = fake_gh
+    os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = token
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            scan_path = os.path.join(d, "scan.json")
+            cards_path = os.path.join(d, "cards.json")
+            with open(scan_path, "w") as f:
+                json.dump(scan_payload([changed_item]), f)
+            with open(cards_path, "w") as f:
+                json.dump([row], f)
+            sys.argv = ["reconcile.py", scan_path, cards_path]
+            with redirect_stdout(io.StringIO()):
+                reconcile.main()
+    finally:
+        (
+            sys.argv,
+            reconcile.render_card.get_card,
+            reconcile.render_card.ensure_labels,
+            reconcile.render_card._write_body,
+            reconcile.render_card._gh,
+            old_token,
+        ) = old
+        if old_token is None:
+            os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = old_token
+    calls["card"] = current_by_number[7]
+    return calls
+
+
+def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
+    scenarios = [
+        (
+            "kind changed to ci-approval",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(kind="ci-approval", auto_triage=True, head_sha="newsha999"),
+            True,
+        ),
+        (
+            "pr auto-triage config disabled",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(auto_triage=False, head_sha="newsha999"),
+            True,
+        ),
+        (
+            "issue auto-triage config disabled",
+            item_issue(auto_triage_issues=True, priority="low"),
+            item_issue(auto_triage_issues=False, priority="high"),
+            True,
+        ),
+        (
+            "token absent",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(auto_triage=True, head_sha="newsha999"),
+            False,
+        ),
+    ]
+    for label, base_item, changed_item, has_token in scenarios:
+        calls = _capture_upsert_refresh(base_item, changed_item, has_token)
+        body = calls.get("body", "")
+        state = core.parse_state_block(body)
+        edit = calls["gh_calls"][0] if calls["gh_calls"] else []
+        check("refresh publish(%s): card refreshed" % label, calls["result"] == 7)
+        check("refresh publish(%s): held state cleared" % label, "held" not in state)
+        check(
+            "refresh publish(%s): decision checkboxes restored" % label,
+            "<!-- opt:" in body,
+        )
+        check(
+            "refresh publish(%s): no triage section added" % label,
+            rc.TRIAGE_START not in body,
+        )
+        check(
+            "refresh publish(%s): pending label removed" % label,
+            "--remove-label" in edit and rc.HOLD_LABEL in edit,
+        )
+
+
+def test_reconcile_refresh_preserves_held_when_still_eligible():
+    old = item(head_sha="oldsha", auto_triage=True)
+    new = item(head_sha="newsha999", auto_triage=True)
+    calls = _run_reconcile_real_upsert_refresh(old, new, token="true")
+    body = calls["card"]["body"]
+    state = core.parse_state_block(body)
+    label_names = {label["name"] for label in calls["card"]["labels"]}
+    check("reconcile: still-eligible held card stays held", state.get("held") is True)
+    check("reconcile: still-eligible held card stays inert", "<!-- opt:" not in body)
+    check(
+        "reconcile: still-eligible held card keeps pending label",
+        rc.HOLD_LABEL in label_names,
+    )
+
+
+def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
+    old = item(head_sha="oldsha", auto_triage=True)
+    new = item(head_sha="newsha999", auto_triage=False)
+    calls = _run_reconcile_real_upsert_refresh(old, new, token="true")
+    body = calls["card"]["body"]
+    state = core.parse_state_block(body)
+    label_names = {label["name"] for label in calls["card"]["labels"]}
+    check("reconcile: ineligible held card clears held", "held" not in state)
+    check("reconcile: ineligible held card restores checkboxes", "<!-- opt:" in body)
+    check(
+        "reconcile: ineligible held card removes pending label",
+        rc.HOLD_LABEL not in label_names,
+    )
+    check(
+        "reconcile: ineligible held card has no triage section",
+        rc.TRIAGE_START not in body,
+    )
 
 
 def test_upsert_card_held_no_churn_when_unchanged():
@@ -2551,7 +2748,10 @@ def main():
     test_should_hold_gates()
     test_render_held_card_placeholder_and_labels()
     test_upsert_card_creates_held_only_when_triage_would_be_queued()
-    test_upsert_card_refresh_preserves_held_state()
+    test_upsert_card_refresh_preserves_held_when_still_eligible()
+    test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off()
+    test_reconcile_refresh_preserves_held_when_still_eligible()
+    test_reconcile_refresh_publishes_held_when_hold_gate_turns_off()
     test_upsert_card_held_no_churn_when_unchanged()
     test_update_card_triage_publishes_held_card_on_success()
     test_update_card_triage_publishes_held_card_on_failure_fail_open()
