@@ -159,6 +159,27 @@ def run_parse(env):
     return _parse_github_output(raw)
 
 
+def run_execute(env):
+    keys = list(env) + ["GITHUB_OUTPUT"]
+    saved = {k: os.environ.get(k) for k in keys}
+    fd, outpath = tempfile.mkstemp(suffix=".out")
+    os.close(fd)
+    try:
+        os.environ.update(env)
+        os.environ["GITHUB_OUTPUT"] = outpath
+        ad.cmd_execute()
+        with open(outpath) as f:
+            raw = f.read()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        os.unlink(outpath)
+    return _parse_github_output(raw)
+
+
 # A pr-review card whose options include investigate (as render_card now emits).
 INV_CARD = ('<!-- wheelhouse-state: {"repo":"lavish-axi","number":42,'
             '"kind":"pr-review","head_sha":"abc",'
@@ -659,7 +680,7 @@ def test_do_request_changes_posts_review():
     fake, calls = fake_gh_rest(open_pr())
     with patch_core(gh_rest=fake):
         message, terminal = ad.do_request_changes(
-            "owner-login", "target-repo", 5, "please add a regression test"
+            "owner-login", "target-repo", 5, "abc123", "please add a regression test"
         )
     check("request-changes: leaves the card open (non-consuming, like comment)",
           terminal == "none")
@@ -676,7 +697,7 @@ def test_do_request_changes_refuses_self_review():
     fake, calls = fake_gh_rest(open_pr(login="owner-login"))
     with patch_core(gh_rest=fake):
         message, terminal = ad.do_request_changes(
-            "owner-login", "target-repo", 5, "please add a regression test"
+            "owner-login", "target-repo", 5, "abc123", "please add a regression test"
         )
     check("request-changes: refuses a self-review with a clear error",
           terminal == "error" and "own PR" in message)
@@ -687,10 +708,29 @@ def test_do_request_changes_surfaces_api_error():
     fake, calls = fake_gh_rest(open_pr(), comment_error="422 Unprocessable Entity")
     with patch_core(gh_rest=fake):
         message, terminal = ad.do_request_changes(
-            "owner-login", "target-repo", 5, "please add a regression test"
+            "owner-login", "target-repo", 5, "abc123", "please add a regression test"
         )
     check("request-changes: API failure surfaces as an error", terminal == "error")
     check("request-changes: error message carries the API detail", "422" in message)
+
+
+def test_cmd_execute_request_changes_blocks_stale_head():
+    fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
+    with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
+        out = run_execute({
+            "DECISION": "request-changes",
+            "FREE_TEXT": "please add a regression test",
+            "TARGET_REPO": "target-repo",
+            "TARGET_NUMBER": "5",
+            "HEAD_SHA": "oldsha",
+        })
+    check("request-changes: stale head blocks through cmd_execute",
+          out["terminal_state"] == "blocked")
+    check("request-changes: stale head message names the moved head",
+          "head moved" in out["result_message"]
+          and "oldsha" in out["result_message"]
+          and "newsha" in out["result_message"])
+    check("request-changes: stale head does not POST a review", posts(calls) == [])
 
 
 # --------------------------------------------------------------------------- #
@@ -897,6 +937,7 @@ def main():
     test_do_request_changes_posts_review()
     test_do_request_changes_refuses_self_review()
     test_do_request_changes_surfaces_api_error()
+    test_cmd_execute_request_changes_blocks_stale_head()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()
     test_history_empty_and_blank_cases()

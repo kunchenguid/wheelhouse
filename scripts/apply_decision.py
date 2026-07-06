@@ -423,6 +423,16 @@ def _thank_contributor(owner, repo, number, pr):
         )
 
 
+def _stale_pr_head_result(repo, number, expected, current, action):
+    if expected and current and current != expected:
+        return (
+            "HOLD: %s#%s head moved since this card (was %s, now %s). Re-scan before %s."
+            % (repo, number, expected[:8], current[:8], action),
+            "blocked",
+        )
+    return None
+
+
 def do_merge(owner, repo, number, head_sha):
     slug = "%s/%s" % (owner, repo)
     pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -438,12 +448,9 @@ def do_merge(owner, repo, number, head_sha):
             "resolved",
         )
     current = (pr.get("head") or {}).get("sha", "")
-    if head_sha and current and current != head_sha:
-        return (
-            "HOLD: %s#%s head moved since this card (was %s, now %s). Re-scan before merging."
-            % (repo, number, head_sha[:8], current[:8]),
-            "blocked",
-        )
+    stale = _stale_pr_head_result(repo, number, head_sha, current, "merging")
+    if stale:
+        return stale
     method = _merge_method(repo)
     try:
         core.gh_rest(
@@ -496,7 +503,7 @@ def do_comment(owner, repo, number, text):
     return ("Posted your comment on %s#%s." % (repo, number), "none")
 
 
-def do_request_changes(owner, repo, number, text):
+def do_request_changes(owner, repo, number, head_sha, text):
     """Submit a GitHub 'changes requested' review on the target PR and leave
     the card open (non-consuming, same terminal shape as do_comment).
 
@@ -510,6 +517,10 @@ def do_request_changes(owner, repo, number, text):
     slug = "%s/%s" % (owner, repo)
     try:
         pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
+        current = (pr.get("head") or {}).get("sha", "")
+        stale = _stale_pr_head_result(repo, number, head_sha, current, "requesting changes")
+        if stale:
+            return stale
         author = str(((pr or {}).get("user") or {}).get("login") or "")
         if author and author.casefold() == owner.casefold():
             return (
@@ -560,7 +571,7 @@ def cmd_execute():
     elif decision == "comment":
         message, terminal = do_comment(owner, repo, number, free_text)
     elif decision == "request-changes":
-        message, terminal = do_request_changes(owner, repo, number, free_text)
+        message, terminal = do_request_changes(owner, repo, number, head_sha, free_text)
     elif decision == "hold":
         message, terminal = (
             "Held %s#%s - parked for manual handling." % (repo, number),
