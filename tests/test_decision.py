@@ -760,7 +760,7 @@ def test_cmd_execute_request_changes_requires_text():
     check("request-changes: missing free_text does not call GitHub", calls == [])
 
 
-def test_cmd_execute_request_changes_blocks_stale_head():
+def test_cmd_execute_request_changes_keeps_stale_head_refreshable():
     fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
     with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
         out = run_execute({
@@ -770,12 +770,14 @@ def test_cmd_execute_request_changes_blocks_stale_head():
             "TARGET_NUMBER": "5",
             "HEAD_SHA": "oldsha",
         })
-    check("request-changes: stale head blocks through cmd_execute",
-          out["terminal_state"] == "blocked")
+    check("request-changes: stale head stays open for refresh through cmd_execute",
+          out["terminal_state"] == "none" and out["success"] == "true")
     check("request-changes: stale head message names the moved head",
           "head moved" in out["result_message"]
           and "oldsha" in out["result_message"]
-          and "newsha" in out["result_message"])
+          and "newsha" in out["result_message"]
+          and "will refresh" in out["result_message"]
+          and "Re-scan" not in out["result_message"])
     check("request-changes: stale head does not POST a review", posts(calls) == [])
 
 
@@ -986,7 +988,7 @@ def main():
     test_do_request_changes_surfaces_api_error()
     test_do_request_changes_requires_text()
     test_cmd_execute_request_changes_requires_text()
-    test_cmd_execute_request_changes_blocks_stale_head()
+    test_cmd_execute_request_changes_keeps_stale_head_refreshable()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()
     test_history_empty_and_blank_cases()

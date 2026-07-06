@@ -523,9 +523,14 @@ def do_request_changes(owner, repo, number, head_sha, text):
     try:
         pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
         current = (pr.get("head") or {}).get("sha", "")
-        stale = _stale_pr_head_result(repo, number, head_sha, current, "requesting changes")
-        if stale:
-            return stale
+        if head_sha and current and current != head_sha:
+            return (
+                "PR %s#%s head moved since this card (was %s, now %s). "
+                "This card will refresh to the new code; re-review and request "
+                "changes again if still needed."
+                % (repo, number, head_sha[:8], current[:8]),
+                "none",
+            )
         author = str(((pr or {}).get("user") or {}).get("login") or "")
         if author and author.casefold() == owner.casefold():
             return (
