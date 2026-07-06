@@ -204,6 +204,36 @@ def test_investigate_allow_set_and_nl_exclusion():
               for k in ("pr-review", "issue-triage", "ci-approval")))
 
 
+# --------------------------------------------------------------------------- #
+# request-changes: slash-command only, pr-review only, NL-selectable (unlike
+# investigate, which is checkbox-only and NL-excluded)
+# --------------------------------------------------------------------------- #
+def test_request_changes_allow_set_and_nl_selectable():
+    check("allow: request-changes in pr-review",
+          "request-changes" in ad.ALLOWED["pr-review"])
+    check("allow: request-changes NOT in ci-approval",
+          "request-changes" not in ad.ALLOWED["ci-approval"])
+    check("allow: request-changes NOT in issue-triage",
+          "request-changes" not in ad.ALLOWED["issue-triage"])
+    check("allow: request-changes IS NL-selectable (unlike investigate)",
+          "request-changes" in ad.nl_allowed("pr-review"))
+
+
+def test_request_changes_slash_parse():
+    allowed = ad.ALLOWED["pr-review"]
+    check("slash: /request-changes <text> parses to the action + text",
+          ad.parse_slash("/request-changes please add a test", allowed)
+          == ("request-changes", "please add a test"))
+    check("slash: /request_changes underscore alias parses too",
+          ad.parse_slash("/request_changes please add a test", allowed)
+          == ("request-changes", "please add a test"))
+    check("slash: /request-changes with no text -> nothing to post",
+          ad.parse_slash("/request-changes", allowed) == (None, ""))
+    check("slash: /request-changes not offered for issue-triage",
+          ad.parse_slash("/request-changes some text", ad.ALLOWED["issue-triage"])
+          == (None, ""))
+
+
 # A HELD pr-review card (render_card.py "Held cards"): its placeholder body
 # has no checkbox lines, but `held` in the state block is the authoritative,
 # defense-in-depth signal cmd_parse/cmd_nl_eligible check directly.
@@ -405,6 +435,25 @@ def test_trust_boundary():
               r["decision"] == "" and r["mode"] == "clarify" and bool(r["answer"]))
 
 
+def test_request_changes_route_decision():
+    r = route({"mode": "action", "action": "request-changes", "free_text": "please add tests"})
+    check("route: request-changes sets decision (this is what runs execute)",
+          r["decision"] == "request-changes")
+    check("route: request-changes keeps free_text", r["free_text"] == "please add tests")
+    check("route: request-changes target carried from state block",
+          r["target_repo"] == "lavish-axi" and str(r["target_number"]) == "42")
+
+    r = route({"mode": "action", "action": "request-changes"})
+    check("route: request-changes without text -> clarify (nothing to post)",
+          r["decision"] == "" and r["mode"] == "clarify"
+          and "changes" in r["answer"].lower())
+
+    # Disallowed for kinds other than pr-review - downgraded to clarify.
+    r = route({"mode": "action", "action": "request-changes"}, kind="issue-triage")
+    check("route: request-changes not allowed for issue-triage -> clarify",
+          r["decision"] == "" and r["mode"] == "clarify")
+
+
 def test_load_llm_result_tolerant():
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "decision.json")
@@ -601,6 +650,50 @@ def test_thank_on_merge_custom_message_and_per_repo_precedence():
 
 
 # --------------------------------------------------------------------------- #
+# request-changes execution: POST .../reviews with event=REQUEST_CHANGES,
+# a defensive self-review guard, and API-error surfacing. `fake_gh_rest`'s
+# POST branch (`comment_error`) doubles as the review-post error path here -
+# it only cares about the HTTP method, not the endpoint.
+# --------------------------------------------------------------------------- #
+def test_do_request_changes_posts_review():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(gh_rest=fake):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "please add a regression test"
+        )
+    check("request-changes: leaves the card open (non-consuming, like comment)",
+          terminal == "none")
+    p = posts(calls)
+    check("request-changes: exactly one review POST", len(p) == 1)
+    check("request-changes: posts to the target PR's reviews endpoint",
+          p and p[0]["path"] == "/repos/owner-login/target-repo/pulls/5/reviews")
+    check("request-changes: event is REQUEST_CHANGES with the free text as body",
+          p and (p[0]["fields"] or {}).get("event") == "REQUEST_CHANGES"
+          and (p[0]["fields"] or {}).get("body") == "please add a regression test")
+
+
+def test_do_request_changes_refuses_self_review():
+    fake, calls = fake_gh_rest(open_pr(login="owner-login"))
+    with patch_core(gh_rest=fake):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "please add a regression test"
+        )
+    check("request-changes: refuses a self-review with a clear error",
+          terminal == "error" and "own PR" in message)
+    check("request-changes: no review POST attempted for self-review", posts(calls) == [])
+
+
+def test_do_request_changes_surfaces_api_error():
+    fake, calls = fake_gh_rest(open_pr(), comment_error="422 Unprocessable Entity")
+    with patch_core(gh_rest=fake):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "please add a regression test"
+        )
+    check("request-changes: API failure surfaces as an error", terminal == "error")
+    check("request-changes: error message carries the API detail", "422" in message)
+
+
+# --------------------------------------------------------------------------- #
 # conversation history: owner-scoped, chronological, triggering-comment-excluded
 # --------------------------------------------------------------------------- #
 BOT = ad.BOT_LOGIN          # the workflow bot - the assistant's prior turns
@@ -762,12 +855,28 @@ def test_prompt_search_capability_is_gated():
           "do not run any git or gh commands" not in enabled)
 
 
+def test_prompt_offers_request_changes_guidance_for_pr_review_only():
+    body = '<!-- wheelhouse-state: {"repo":"target","number":1,"kind":"pr-review"} -->'
+    pr_prompt = ad.build_nl_prompt(body, "needs a rebase", "(target)", "pr-review")
+    check("prompt: pr-review lists request-changes as an allowed verb",
+          "request-changes" in pr_prompt)
+    check("prompt: pr-review carries the request-changes judgment guidance",
+          "blocking revision request" in pr_prompt and "changes requested" in pr_prompt)
+
+    issue_body = '<!-- wheelhouse-state: {"repo":"target","number":1,"kind":"issue-triage"} -->'
+    issue_prompt = ad.build_nl_prompt(issue_body, "needs more info", "(target)", "issue-triage")
+    check("prompt: issue-triage does not offer request-changes",
+          "request-changes" not in issue_prompt)
+
+
 def main():
     test_state_marker_back_compat()
     test_checkbox_diff()
     test_investigate_is_non_consuming()
     test_consuming_actions_unchanged_by_investigate_routing()
     test_investigate_allow_set_and_nl_exclusion()
+    test_request_changes_allow_set_and_nl_selectable()
+    test_request_changes_slash_parse()
     test_held_card_is_inert_to_decision_handler()
     test_nl_never_offers_or_accepts_investigate()
     test_clear_checkbox()
@@ -776,6 +885,7 @@ def main():
     test_answer_and_clarify_do_not_execute()
     test_answer_qualifies_cross_repo_refs_from_deterministic_state()
     test_trust_boundary()
+    test_request_changes_route_decision()
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()
     test_thank_on_merge_disabled_globally()
@@ -784,6 +894,9 @@ def main():
     test_thank_on_merge_best_effort_survives_comment_failure()
     test_thank_on_merge_skips_owner_maintainer_bot_and_blank_author()
     test_thank_on_merge_custom_message_and_per_repo_precedence()
+    test_do_request_changes_posts_review()
+    test_do_request_changes_refuses_self_review()
+    test_do_request_changes_surfaces_api_error()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()
     test_history_empty_and_blank_cases()
@@ -791,6 +904,7 @@ def main():
     test_prompt_includes_history_section()
     test_prompt_omits_advisory_auto_triage_from_trusted_card()
     test_prompt_search_capability_is_gated()
+    test_prompt_offers_request_changes_guidance_for_pr_review_only()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

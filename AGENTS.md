@@ -403,6 +403,41 @@ still appears where it's plain English, e.g. "triage the queue".)
   per-kind `ALLOWED` set but is filtered out of the NL verb list/validation
   (`nl_allowed`): an investigation is a deliberate click, not free-text intent, so
   the NL path neither offers nor accepts it.
+- **`/request-changes <text>` is a pr-review-only, slash-command-only,
+  NON-CONSUMING action - unlike `investigate`, it IS NL-selectable.** It submits
+  a GitHub `REQUEST_CHANGES` PR review (`POST
+  /repos/{owner}/{repo}/pulls/{number}/reviews` with `{"body": text, "event":
+  "REQUEST_CHANGES"}`) via `apply_decision.do_request_changes`, executed on the
+  same `execute`-step `FLEET_TOKEN` wiring `do_merge`/`do_comment` already use -
+  no new secret, no new token scope, no new workflow step. It is slash-only
+  (like `comment`/`decline`) because the GitHub issue-form checkboxes can't
+  carry free text, so it is NOT a `CHECKBOX_OPTIONS` entry in `render_card.py` -
+  only a `SLASH` table entry in `apply_decision.py` and a `SLASH_HINT` mention.
+  It is CONSUMING in the sense that it goes through the normal
+  `decision`/`cmd_execute` path (unlike `investigate`, which is routed apart via
+  `NON_CONSUMING_ACTIONS`), but its terminal state is `"none"` - the same
+  leave-the-card-open shape as `do_comment` - so it never closes the card.
+  Because it is a normal text-bearing verb (not a meta-action like
+  `investigate`), it is deliberately NOT added to `NL_EXCLUDED_ACTIONS`: it IS
+  in `nl_allowed("pr-review")`, so the natural-language intent-mapper can choose
+  it on its own judgment, with prompt guidance (`VERB_HELP["request-changes"]`
+  in `apply_decision.build_nl_prompt`) telling it to prefer `request-changes`
+  over `comment` for a blocking revision request, and over `close`/`decline`
+  when the PR is salvageable and should be revised rather than rejected.
+  `route_decision` requires non-empty `free_text` for `request-changes` (like
+  `comment`), downgrading to `clarify` if the model omits it. Defensive-only
+  additions (not new guards): `do_request_changes` checks the PR author against
+  `owner` before calling the API and returns a clear error instead of a raw 422
+  (GitHub rejects self-review) - belt-and-suspenders, since the queue author
+  filter already excludes owner/maintainer/bot-authored PRs from ever getting a
+  card; and repeated `/request-changes` calls simply post another GitHub review
+  each time (allowed by the API) rather than any dismiss/supersede logic - by
+  design, "one review per push cycle" is a documented convention, not enforced
+  code. Security note: unlike a plain comment, a "changes requested" review can
+  put the target PR into a merge-blocked state under branch-protection
+  required-reviews - a real (if reversible) effect on the target repo, so this
+  is the one action added to the NL-selectable set since `investigate` was
+  excluded from it.
 - NL conversation memory is owner-scoped, and the scoping IS the security
   boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
   `github.token`) and `apply_decision.py assemble_history` renders it as a
@@ -660,7 +695,7 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, and surfaces a raw API failure as an `"error"` terminal state.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped `render_version=2` on the next refresh, a card already at `render_version=2` with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.

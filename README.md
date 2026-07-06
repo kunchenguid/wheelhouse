@@ -217,10 +217,14 @@ You drive the queue three ways - whichever fits the decision:
   - `/decline <reason>` - post your reason on the target, then close it.
   - `/hold` - park the card (labels it `blocked`, leaves it for you to handle manually).
   - `/comment <text>` - post your comment to the target and leave the card open.
+  - `/request-changes <text>` (pr-review only) - submit a GitHub "changes requested" review on the target PR with your text as the review body, and leave the card open so the contributor can push again.
+    Reuses the same `FLEET_TOKEN` scope as `/merge`/`/comment` (no new secret).
+    Security note: a "changes requested" review can put the target PR into a merge-blocked state under branch-protection required-reviews - a slightly larger effect on the target repo than the comment-only path.
+    It is a normal card review, not a card decision: submitting more than one just posts another GitHub review (allowed by the API, but noisy), so treat it as one review per push cycle rather than something you repeat.
 - **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
-  - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong".
-    It runs that action on the target and closes the card, exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD).
+  - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
+    It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card for a terminal decision like merge/close/decline, or leaving it open for a non-terminal one like comment/request-changes.
   - **Answers** when you're asking - "why is this safe to merge?", "what's the risk here?".
     It reads the target (diff/issue) and replies on the card, and **leaves the card open** so you can keep the thread going.
     If `READONLY_TOKEN` is configured, answer mode can also use read-only search across the target repo and configured fleet repos for related, duplicate, or superseding work.
@@ -275,6 +279,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Acting on your other repos uses `FLEET_TOKEN`, which is never printed and is only used in cross-repo scan, approval, execution, and read-only fetch steps.
   Scope it to just your fleet with Actions, Contents, Issues, and Pull requests read/write on the target repos.
   The optional `READONLY_TOKEN` is used only by search-enabled Claude steps, only when present, and should have public read scope with no write permissions.
+- **`request-changes` reuses `FLEET_TOKEN`, no new scope.** `/request-changes <text>` (pr-review only) submits a GitHub "changes requested" review on the target PR through the same `execute`-step `FLEET_TOKEN` wiring `/merge`/`/comment` already use - no new secret, no new token scope.
+  It is deterministic, owner-gated, and non-consuming exactly like `/comment`, and it is also selectable by the natural-language intent-mapper (unlike `investigate`, which is checkbox-only).
+  A "changes requested" review is a slightly larger effect on the target repo than a plain comment: under branch-protection required-reviews, it can put the target PR into a merge-blocked state until it is dismissed or a new review clears it.
 - **Auto triage is advisory and cached, for PRs and issues alike.** Automatic triage edits only this repo's decision card with the default token, after the scan or ingest path has marked `triaged_sha` for the current revision (a PR's head SHA, or an issue's `updatedAt` - issues have no head SHA).
   That marker is the spend-control cache: an unchanged revision is not re-triaged, even if the lightweight workflow errors or times out.
   A brand-new card that is eligible for that attempt is created under an additional `pending-triage` label with no decision checkboxes.

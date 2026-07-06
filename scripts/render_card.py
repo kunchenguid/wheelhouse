@@ -42,8 +42,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 
-# Quick-decision (checkbox) option keys per kind. Comment / decline carry text,
-# so they are slash-command-only (see apply_decision.py), not checkboxes.
+# Quick-decision (checkbox) option keys per kind. Comment / decline /
+# request-changes carry text, so they are slash-command-only (see
+# apply_decision.py), not checkboxes.
 #
 # `investigate` is the odd one out: it is NON-CONSUMING. Ticking it triggers a
 # code-grounded deep review (deep-review.yml) and leaves the card open for the
@@ -66,7 +67,10 @@ OPTION_LABELS = {
 }
 
 SLASH_HINT = {
-    "pr-review": "`/merge`, `/close`, `/decline <reason>`, `/hold`, `/comment <text>`",
+    "pr-review": (
+        "`/merge`, `/close`, `/decline <reason>`, `/hold`, `/comment <text>`, "
+        "`/request-changes <text>`"
+    ),
     "ci-approval": "`/approve-ci`, `/close`, `/decline <reason>`, `/hold`, `/comment <text>`",
     "issue-triage": "`/close`, `/decline <reason>`, `/hold`, `/comment <text>`",
 }
