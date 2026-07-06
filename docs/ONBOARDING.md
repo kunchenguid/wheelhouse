@@ -23,7 +23,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `repo`           | yes      | the source repo **name** (no owner), e.g. `my-service`             |
 | `number`         | yes      | the PR or issue number                                             |
 | `kind`           | no       | `pr-review` (default), `ci-approval`, or `issue-triage`            |
-| `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge   |
+| `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge or request-changes action |
 | `updated_at`     | no       | the issue's `updatedAt` revision (issue-triage only) - recommended; enables automatic issue-card triage caching (issues have no head SHA) |
 | `title`          | no       | short title of the target                                          |
 | `author`         | no       | the PR/issue author's login                                        |
@@ -49,6 +49,7 @@ Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
 If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
+Text-bearing slash commands are not checkbox options: `/comment <text>`, `/decline <reason>`, and the pr-review-only `/request-changes <text>` stay available from the card's slash-command hint instead.
 A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.

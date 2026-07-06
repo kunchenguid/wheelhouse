@@ -120,8 +120,9 @@ auto_triage_issues: true
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
 # secret (a Claude subscription token from `claude setup-token` - NOT an API key)
 # to let the decision handler route a plain-English owner comment on a card
-# through Claude: it MAPS the comment to an action ("merge it" -> merge), answers
-# a question, or asks you to clarify. The optional READONLY_TOKEN secret also
+# through Claude: it MAPS the comment to an action ("merge it" -> merge,
+# "request changes" -> request-changes on a PR-review card), answers a
+# question, or asks you to clarify. The optional READONLY_TOKEN secret also
 # enables read-only answer-mode search across the target repo and configured
 # fleet repos. Without it the Claude step keeps the legacy Write-only, no-shell
 # behavior.

@@ -23,6 +23,8 @@ body:
       # by exact heading text. The options below are the full union across card
       # kinds; the parser reads the ACTUAL ticked lines from the card body, so
       # this list is only for schema validity, not for matching.
+      # Text-bearing actions like comment, decline, and request-changes are
+      # slash-command-only and intentionally absent from these checkbox options.
       label: Your decision
       options:
         - label: Merge it

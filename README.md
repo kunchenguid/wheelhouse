@@ -6,7 +6,7 @@ A personal, always-on, cross-repo **"what needs my decision"** command center, b
 Every issue in this repo is one pending decision about the repositories you maintain - a PR worth merging, a fork-CI run worth approving, an issue worth triaging.
 The scheduled scan keeps the queue focused on other people's work: PRs and issues authored by the repo owner, the configured maintainer, or bots stay out of the scan-built worklist, while missing author metadata fails open.
 PR-review candidates that GitHub reports as merge-conflicted leave the maintainer worklist until the contributor rebases or merges the base branch and pushes a mergeable head.
-You make final decisions by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card.
+You make final decisions by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card when the action is terminal.
 No server, no database, no bot to host - just this repo and a small set of secrets.
 
 Fork it, edit one config file, add one required secret, and you have your own Wheelhouse.
@@ -217,10 +217,10 @@ You drive the queue three ways - whichever fits the decision:
   - `/decline <reason>` - post your reason on the target, then close it.
   - `/hold` - park the card (labels it `blocked`, leaves it for you to handle manually).
   - `/comment <text>` - post your comment to the target and leave the card open.
-  - `/request-changes <text>` (pr-review only) - submit a GitHub "changes requested" review on the target PR with your text as the review body, and leave the card open so the contributor can push again.
+  - `/request-changes <text>` (pr-review only; `/request_changes <text>` also works) - submit a GitHub "changes requested" review on the target PR with your text as the review body, and leave the card open so the contributor can push again.
     Reuses the same `FLEET_TOKEN` scope as `/merge`/`/comment` (no new secret).
     Security note: a "changes requested" review can put the target PR into a merge-blocked state under branch-protection required-reviews - a slightly larger effect on the target repo than the comment-only path.
-    It is a normal card review, not a card decision: submitting more than one just posts another GitHub review (allowed by the API, but noisy), so treat it as one review per push cycle rather than something you repeat.
+    It is a GitHub PR review, not a terminal card decision: submitting more than one just posts another GitHub review (allowed by the API, but noisy), so treat it as one review per push cycle rather than something you repeat.
 - **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
@@ -243,7 +243,7 @@ For refresh, auto-triage, and self-healing, a "pure pending" card means it has `
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
-The current render-version sweep also repairs older cached `Triage` sections by qualifying bare target `#N` refs before preserving them.
+The current render-version sweep publishes the PR-review `/request-changes <text>` slash hint on already-open cards and also preserves the earlier cached `Triage` repair that qualifies bare target `#N` refs.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
@@ -251,7 +251,7 @@ An eligible card created by scan-backstop or ingest is also queued in that same 
 If that newly created card is eligible for auto triage, it starts as `pending-triage`; `triage-apply`, `triage-fail`, dispatch-failure handling, or the recovery step publishes it and removes `pending-triage`.
 If auto-triage eligibility turns off while a held card is refreshed, the refresh publishes the normal checkboxes without adding a synthetic triage section.
 Pure pending PR-review and issue-triage cards that were already open before auto triage existed have no `triaged_sha` cache yet, so they backfill once on the next eligible scan.
-If you act before that refresh lands, a `/merge` (or a "merge it" comment) still refuses a stale head with a note.
+If you act before that refresh lands, a `/merge` (or a "merge it" comment) and `/request-changes` still refuse a stale head with a note.
 The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next successful complete scan.
 If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards open because it cannot prove the target disappeared.
 If an open target no longer needs a maintainer decision, its pure pending card is closed too.
@@ -280,7 +280,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Scope it to just your fleet with Actions, Contents, Issues, and Pull requests read/write on the target repos.
   The optional `READONLY_TOKEN` is used only by search-enabled Claude steps, only when present, and should have public read scope with no write permissions.
 - **`request-changes` reuses `FLEET_TOKEN`, no new scope.** `/request-changes <text>` (pr-review only) submits a GitHub "changes requested" review on the target PR through the same `execute`-step `FLEET_TOKEN` wiring `/merge`/`/comment` already use - no new secret, no new token scope.
-  It is deterministic, owner-gated, and non-consuming exactly like `/comment`, and it is also selectable by the natural-language intent-mapper (unlike `investigate`, which is checkbox-only).
+  It is deterministic, owner-gated, and non-terminal exactly like `/comment`, and it is also selectable by the natural-language intent-mapper (unlike `investigate`, which is checkbox-only).
   A "changes requested" review is a slightly larger effect on the target repo than a plain comment: under branch-protection required-reviews, it can put the target PR into a merge-blocked state until it is dismissed or a new review clears it.
 - **Auto triage is advisory and cached, for PRs and issues alike.** Automatic triage edits only this repo's decision card with the default token, after the scan or ingest path has marked `triaged_sha` for the current revision (a PR's head SHA, or an issue's `updatedAt` - issues have no head SHA).
   That marker is the spend-control cache: an unchanged revision is not re-triaged, even if the lightweight workflow errors or times out.
@@ -343,7 +343,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Run the `checks` helper (step 2) to see the real names, and the scan logs surface a config warning when a gate-like check is present but unconfigured.
 - **A decision didn't execute.**
   Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo. The card stays open with an error comment when an action fails.
-  A `/merge` that's refused with a "head moved" note is working as intended - re-scan and decide again.
+  A `/merge` or `/request-changes` that's refused with a "head moved" note is working as intended - re-scan and decide again.
   A `/merge` that fails with a merge-conflict message means the contributor must rebase or merge the base branch, resolve the conflict, and push before Wheelhouse can merge it.
 - **Approve-CI cards appear for PRs that look safe.**
   Open the latest `scan-backstop` run logs and search for `wheelhouse auto-approve carded` or `wheelhouse auto-approve suppressed-card`.
@@ -393,7 +393,7 @@ wheelhouse.config.yml          the one file you edit
   wheelhouse-decision.yml      schema for machine-rendered card decisions (held cards intentionally render no checkboxes)
 .github/workflows/
   ingest.yml                   repository_dispatch / manual -> create or refresh a decision card
-  decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close the card
+  decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
   scan-backstop.yml            hourly scan -> create, refresh, or close cards against live repo state
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow posts Claude's verdict
@@ -405,7 +405,7 @@ scripts/
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
-tests/test_decision.py         offline unit test for parse/route logic, investigate routing, and NL answer ref qualification
+tests/test_decision.py         offline unit test for parse/route logic, investigate routing, request-changes routing/execution, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, and render-version triage ref repair
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing

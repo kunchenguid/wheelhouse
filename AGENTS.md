@@ -64,7 +64,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   are intentionally dropped (replaced by Actions
   `concurrency` + issues/labels/comments).
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
-  (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
+  (tick/slash/**plain-English** -> act on target -> consume terminal cards or
+  leave non-terminal cards open), `scan-backstop`
   (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a
   held-card publish trigger; safe to run hourly because reconcile is a full
@@ -102,8 +103,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
   automatic triage section rendering, `triaged_sha` cache updates, and trusted
   triage-result card edits that publish held cards), `apply_decision.py` (deterministic `parse` then
-  `execute`; the NON-CONSUMING `investigate` routing + `clear-checkbox`; plus the
-  natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
+  `execute`; slash-only text actions including `comment`, `decline`, and
+  pr-review-only `request-changes`; the NON-CONSUMING `investigate` routing +
+  `clear-checkbox`; plus the natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
   the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed LLM
   context),
@@ -176,8 +178,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   the item's repo), NEVER the model's own text. This is the same one-time,
   self-terminating propagation shape as the earlier author `@mention` drop:
   every pre-existing card refreshes once, gets its cached triage refs
-  qualified and its `render_version` stamped to `2`, and the next scan is a
-  full no-op.
+  qualified and its `render_version` stamped with the current version, and the
+  next scan is a full no-op.
   The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
   `#N` so qualifying the whole section string leaves them intact.
   The shared pure helpers live in `render_card.py`
@@ -406,7 +408,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   (`nl_allowed`): an investigation is a deliberate click, not free-text intent, so
   the NL path neither offers nor accepts it.
 - **`/request-changes <text>` is a pr-review-only, slash-command-only,
-  NON-CONSUMING action - unlike `investigate`, it IS NL-selectable.** It submits
+  non-terminal action - unlike `investigate`, it IS NL-selectable.** The
+  `/request_changes <text>` alias is accepted too. It submits
   a GitHub `REQUEST_CHANGES` PR review (`POST
   /repos/{owner}/{repo}/pulls/{number}/reviews` with `{"body": text, "event":
   "REQUEST_CHANGES"}`) via `apply_decision.do_request_changes`, executed on the
@@ -414,11 +417,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   no new secret, no new token scope, no new workflow step. It is slash-only
   (like `comment`/`decline`) because the GitHub issue-form checkboxes can't
   carry free text, so it is NOT a `CHECKBOX_OPTIONS` entry in `render_card.py` -
-  only a `SLASH` table entry in `apply_decision.py` and a `SLASH_HINT` mention.
-  It is CONSUMING in the sense that it goes through the normal
+  only `SLASH` table entries in `apply_decision.py` and a `SLASH_HINT` mention.
+  It is routed through the normal
   `decision`/`cmd_execute` path (unlike `investigate`, which is routed apart via
   `NON_CONSUMING_ACTIONS`), but its terminal state is `"none"` - the same
   leave-the-card-open shape as `do_comment` - so it never closes the card.
+  Like `merge`, it re-checks the PR head SHA from the card state before posting
+  the review and blocks if the head moved.
   Because it is a normal text-bearing verb (not a meta-action like
   `investigate`), it is deliberately NOT added to `NL_EXCLUDED_ACTIONS`: it IS
   in `nl_allowed("pr-review")`, so the natural-language intent-mapper can choose

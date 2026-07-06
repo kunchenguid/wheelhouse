@@ -14,7 +14,9 @@ Expected fields (all but repo/number optional):
 
 When omitted, `options` defaults by kind via render_card.CHECKBOX_OPTIONS:
 pr-review and issue-triage include the non-consuming `investigate` checkbox;
-ci-approval does not.
+ci-approval does not. Text-bearing slash commands (`comment`, `decline`, and
+pr-review-only `request-changes`) are not checkbox options and should not be
+sent in `options`.
 When omitted, `auto_triage` follows the global/per-repo config; a false payload
 value can only opt this item out. `auto_triage_issues` is the INDEPENDENT
 equivalent for issue-triage items - it follows its own global/per-repo config

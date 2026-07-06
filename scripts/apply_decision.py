@@ -51,12 +51,12 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
                `clarify` modes just post a card comment and leave the card open.
 
 Security: the caller owner-gates the whole job; only owner-authored text ever
-reaches this script (and the LLM). Merge re-checks the PR head SHA against the
-card's state block and refuses if the PR moved. approve-ci routes through the
-shared CI safety verdict: CI/action-file changes hard-hold, while non-default
-bases and `pull_request_target` posture add warnings, and each awaiting workflow
-run is bound to the PR by strict pull_requests association or fork fallback
-head SHA plus branch matching. The LLM never receives FLEET_TOKEN. Without
+reaches this script (and the LLM). Merge and request-changes re-check the PR
+head SHA against the card's state block and refuse if the PR moved. approve-ci
+routes through the shared CI safety verdict: CI/action-file changes hard-hold,
+while non-default bases and `pull_request_target` posture add warnings, and each
+awaiting workflow run is bound to the PR by strict pull_requests association or
+fork fallback head SHA plus branch matching. The LLM never receives FLEET_TOKEN. Without
 READONLY_TOKEN it never runs shell commands; with READONLY_TOKEN it may run
 the read-only search wrapper for answer context only, and can still only return the
 structured result that this deterministic code acts on.
@@ -79,11 +79,11 @@ _AUTO_TRIAGE_SECTION_RE = re.compile(
 
 # Actions allowed per kind. Checkbox options are a subset of these; comment /
 # decline / request-changes are text-bearing and slash-only (a GitHub issue-form
-# checkbox can't carry free text). request-changes is CONSUMING like merge/close
-# in the sense it goes through the normal `decision` output/cmd_execute path
-# (unlike investigate below), but its terminal state ("none", see do_request_changes)
-# leaves the card open, same as comment - it is a normal, non-terminal, reversible
-# action and is NL-selectable (it is not in NL_EXCLUDED_ACTIONS).
+# checkbox can't carry free text). request-changes goes through the normal
+# `decision` output/cmd_execute path (unlike investigate below), but its terminal
+# state ("none", see do_request_changes) leaves the card open, same as comment -
+# it is a normal, non-terminal, reversible action and is NL-selectable (it is not
+# in NL_EXCLUDED_ACTIONS).
 #
 # `investigate` is a NON-CONSUMING action (it triggers a code-grounded deep
 # review and leaves the card open - see cmd_parse). It is a valid action for the

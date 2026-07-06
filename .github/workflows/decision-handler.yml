@@ -1,14 +1,16 @@
 name: decision-handler
 
-# The heart: the maintainer drives a decision card. Consuming decisions execute
-# on the TARGET repo, then consume the card. Three ways to drive a card:
+# The heart: the maintainer drives a decision card. Terminal decisions execute
+# on the TARGET repo, then consume the card; non-terminal actions like
+# `/comment` and `/request-changes` execute on the target and leave it open.
+# Three ways to drive a card:
 #   * tick a checkbox            (issues.edited  - read via issue-ops/parser)
 #   * reply with a slash-command (issue_comment.created)
 #   * reply in plain English     (issue_comment.created - mapped by Claude, opt-in)
 # The `Investigate` checkbox is the deliberate exception: it dispatches
 # deep-review.yml, clears the box, and leaves the card open.
-# Owner-gated, serialized per issue. Whatever the entry point, any consuming
-# action on the target runs through the one deterministic `execute` step
+# Owner-gated, serialized per issue. Whatever the entry point, any target action
+# runs through the one deterministic `execute` step
 # (FLEET_TOKEN) so every guard - per-kind allowlist, head-SHA re-check,
 # fork-CI HOLD - always applies.
 
