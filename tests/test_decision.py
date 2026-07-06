@@ -255,6 +255,24 @@ def test_request_changes_slash_parse():
           == (None, ""))
 
 
+def test_text_required_label_parse_is_ignored():
+    allowed = ad.ALLOWED["pr-review"]
+    check("label: request-changes needs text, so label alone is ignored",
+          ad.parse_label("decision:request-changes", allowed) is None)
+    check("label: comment needs text, so label alone is ignored",
+          ad.parse_label("decision:comment", allowed) is None)
+    check("label: decline can still use its default reason",
+          ad.parse_label("decision:decline", allowed) == "decline")
+    out = run_parse({
+        "EVENT_NAME": "issues",
+        "EVENT_ACTION": "labeled",
+        "ISSUE_BODY": INV_CARD,
+        "LABEL_NAME": "decision:request-changes",
+    })
+    check("label: cmd_parse emits no decision for request-changes without text",
+          out.get("decision", "") == "")
+
+
 # A HELD pr-review card (render_card.py "Held cards"): its placeholder body
 # has no checkbox lines, but `held` in the state block is the authoritative,
 # defense-in-depth signal cmd_parse/cmd_nl_eligible check directly.
@@ -714,6 +732,34 @@ def test_do_request_changes_surfaces_api_error():
     check("request-changes: error message carries the API detail", "422" in message)
 
 
+def test_do_request_changes_requires_text():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(gh_rest=fake):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "abc123", ""
+        )
+    check("request-changes: no review text is rejected",
+          terminal == "error" and "without review text" in message)
+    check("request-changes: blank text does not even fetch the PR", calls == [])
+
+
+def test_cmd_execute_request_changes_requires_text():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
+        out = run_execute({
+            "DECISION": "request-changes",
+            "FREE_TEXT": "",
+            "TARGET_REPO": "target-repo",
+            "TARGET_NUMBER": "5",
+            "HEAD_SHA": "abc123",
+        })
+    check("request-changes: cmd_execute rejects missing free_text",
+          out["terminal_state"] == "error"
+          and out["success"] == "false"
+          and "No text provided" in out["result_message"])
+    check("request-changes: missing free_text does not call GitHub", calls == [])
+
+
 def test_cmd_execute_request_changes_blocks_stale_head():
     fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
     with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
@@ -917,6 +963,7 @@ def main():
     test_investigate_allow_set_and_nl_exclusion()
     test_request_changes_allow_set_and_nl_selectable()
     test_request_changes_slash_parse()
+    test_text_required_label_parse_is_ignored()
     test_held_card_is_inert_to_decision_handler()
     test_nl_never_offers_or_accepts_investigate()
     test_clear_checkbox()
@@ -937,6 +984,8 @@ def main():
     test_do_request_changes_posts_review()
     test_do_request_changes_refuses_self_review()
     test_do_request_changes_surfaces_api_error()
+    test_do_request_changes_requires_text()
+    test_cmd_execute_request_changes_requires_text()
     test_cmd_execute_request_changes_blocks_stale_head()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()

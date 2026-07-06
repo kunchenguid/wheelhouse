@@ -111,6 +111,7 @@ ALLOWED = {
 # the NL verb list AND the NL allow-check (see nl_allowed).
 NON_CONSUMING_ACTIONS = frozenset({"investigate"})
 NL_EXCLUDED_ACTIONS = frozenset({"investigate"})
+TEXT_REQUIRED_ACTIONS = frozenset({"comment", "request-changes"})
 
 
 def nl_allowed(kind):
@@ -189,11 +190,10 @@ def parse_slash(comment, allowed):
     rest = parts[1].strip() if len(parts) > 1 else ""
     if action not in allowed:
         return (None, "")
-    if action in ("comment", "decline", "request-changes") and not rest:
-        if action == "decline":
-            rest = "Declining for now."
-        else:
-            return (None, "")  # nothing to post
+    if action in TEXT_REQUIRED_ACTIONS and not rest:
+        return (None, "")  # nothing to post
+    if action == "decline" and not rest:
+        rest = "Declining for now."
     return (action, rest)
 
 
@@ -275,7 +275,7 @@ def clear_checkbox(body, key):
 def parse_label(label_name, allowed):
     if label_name and label_name.startswith("decision:"):
         key = label_name.split(":", 1)[1].strip()
-        if key in allowed:
+        if key in allowed and key not in TEXT_REQUIRED_ACTIONS:
             return key
     return None
 
@@ -514,6 +514,11 @@ def do_request_changes(owner, repo, number, head_sha, text):
     submitted per call - repeated `/request-changes` posts another GitHub
     review each time (allowed by the API but noisy), so this is a "one review
     per push cycle" convention, not enforced dismissal/superseding logic."""
+    if not str(text or "").strip():
+        return (
+            "Can't request changes on %s#%s without review text." % (repo, number),
+            "error",
+        )
     slug = "%s/%s" % (owner, repo)
     try:
         pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -555,6 +560,14 @@ def cmd_execute():
     if not decision or not repo or not number:
         set_output("result_message", "No actionable decision.")
         set_output("terminal_state", "none")
+        set_output("success", "false")
+        return
+    if decision in TEXT_REQUIRED_ACTIONS and not free_text.strip():
+        set_output(
+            "result_message",
+            "No text provided for %s - no action taken." % decision,
+        )
+        set_output("terminal_state", "error")
         set_output("success", "false")
         return
 

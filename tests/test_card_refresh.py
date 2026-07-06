@@ -563,8 +563,8 @@ def test_render_version_current_and_qualified_triage_is_noop():
             os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
         else:
             os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
-    check("render-version v2 + qualified triage: no-op result", result == 7)
-    check("render-version v2 + qualified triage: no refresh", calls["refresh"] == 0)
+    check("render-version current + qualified triage: no-op result", result == 7)
+    check("render-version current + qualified triage: no refresh", calls["refresh"] == 0)
 
 
 def test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched():

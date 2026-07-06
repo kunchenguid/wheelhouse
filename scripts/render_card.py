@@ -159,8 +159,9 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # merge-close-approve/fork-CI-safety/author-filtering/conflict-routing/triage.
 # Bumped 1 -> 2 to retroactively re-qualify already-cached `### Triage`
 # sections (bare `#N` -> `owner/repo#N`) via `_preserve_same_revision_triage`,
-# mirroring how version 0 -> 1 propagated the author `@mention` drop.
-CARD_RENDER_VERSION = 2
+# mirroring how version 0 -> 1 propagated the author `@mention` drop. Bumped
+# 2 -> 3 to publish the `/request-changes <text>` PR-review slash hint.
+CARD_RENDER_VERSION = 3
 
 TRIAGE_FIELDS = ("summary", "product_implications", "recommended_next_step")
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
