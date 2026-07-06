@@ -204,7 +204,24 @@ def card_labels(item, held=False):
 
 def card_options(item):
     kind = item.get("kind", "pr-review")
-    return item.get("options") or CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+    return checkbox_options(kind, item.get("options"))
+
+
+def checkbox_options(kind, options):
+    defaults = CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+    if isinstance(options, str):
+        raw = [options]
+    else:
+        raw = list(options or [])
+    allowed = set(defaults)
+    cleaned = []
+    seen = set()
+    for option in raw:
+        key = str(option).strip()
+        if key in allowed and key not in seen:
+            cleaned.append(key)
+            seen.add(key)
+    return cleaned or list(defaults)
 
 
 def normalized_options(options):
@@ -615,6 +632,7 @@ _DECISION_SECTION_RE = re.compile(
 
 
 def _decision_lines(kind, options):
+    options = checkbox_options(kind, options)
     lines = [
         "### Your decision",
         "",
@@ -948,9 +966,10 @@ def update_card_triage(number, revision, triage=None, error=None, owner=""):
     if held:
         if state_revision(state, kind) != revision:
             return False
-        options = state.get("options") or CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+        options = checkbox_options(kind, state.get("options"))
         body = _publish_decision_section(body, kind, options)
         state = dict(state)
+        state["options"] = options
         state.pop("held", None)
         body = _replace_state_block(body, state)
         remove_labels.append(HOLD_LABEL)

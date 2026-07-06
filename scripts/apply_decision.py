@@ -112,12 +112,17 @@ ALLOWED = {
 NON_CONSUMING_ACTIONS = frozenset({"investigate"})
 NL_EXCLUDED_ACTIONS = frozenset({"investigate"})
 TEXT_REQUIRED_ACTIONS = frozenset({"comment", "request-changes"})
+SLASH_ONLY_ACTIONS = frozenset({"comment", "decline", "request-changes"})
 
 
 def nl_allowed(kind):
     """The actions offered to / accepted from the NL intent-mapper for `kind`:
     the per-kind allow-set minus the checkbox-only meta-actions."""
     return ALLOWED.get(kind, set()) - NL_EXCLUDED_ACTIONS
+
+
+def checkbox_allowed(kind):
+    return ALLOWED.get(kind, set()) - SLASH_ONLY_ACTIONS
 
 
 SLASH = {
@@ -308,7 +313,7 @@ def cmd_parse():
         decision = diff_checkbox(
             os.environ.get("CHECKBOXES_OLD", ""),
             os.environ.get("CHECKBOXES_NEW", ""),
-            options,
+            [o for o in options if o in checkbox_allowed(kind)],
         )
     elif event == "issues" and action == "labeled":
         decision = parse_label(os.environ.get("LABEL_NAME", ""), allowed)

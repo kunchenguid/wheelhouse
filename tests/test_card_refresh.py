@@ -144,7 +144,7 @@ def test_options_set_change_triggers_but_reorder_does_not():
     )
     check(
         "change: option added -> changed",
-        rc.material_changed(item(options=["merge", "close", "hold", "approve-ci"]), st)
+        rc.material_changed(item(options=["merge", "close", "hold", "investigate"]), st)
         is True,
     )
     check(
@@ -159,6 +159,31 @@ def test_render_preserves_options_order_in_state_block():
         "state: options order stays as provided",
         st.get("options") == ["hold", "merge", "close"],
     )
+
+
+def test_render_filters_non_checkbox_custom_options():
+    it = item(
+        options=[
+            "request-changes",
+            "merge",
+            "comment",
+            "decline",
+            "bogus",
+            "merge",
+            "hold",
+        ]
+    )
+    card = rc.render(it)
+    st = core.parse_state_block(card["body"])
+    check(
+        "state: custom options keep only checkbox actions",
+        st.get("options") == ["merge", "hold"],
+    )
+    check("render: request-changes checkbox omitted", "opt:request-changes" not in card["body"])
+    check("render: comment checkbox omitted", "opt:comment" not in card["body"])
+    check("render: decline checkbox omitted", "opt:decline" not in card["body"])
+    check("render: unknown checkbox omitted", "opt:bogus" not in card["body"])
+    check("render: valid checkbox remains", "opt:merge" in card["body"])
 
 
 def test_non_material_change_is_not_a_trigger():
@@ -1071,6 +1096,7 @@ def main():
     test_each_material_field_triggers_a_change()
     test_options_set_change_triggers_but_reorder_does_not()
     test_render_preserves_options_order_in_state_block()
+    test_render_filters_non_checkbox_custom_options()
     test_non_material_change_is_not_a_trigger()
     test_legacy_card_missing_new_fields_refreshes_once()
     test_legacy_triage_marker_still_parses_for_change_check()

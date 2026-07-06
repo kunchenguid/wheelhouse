@@ -80,6 +80,10 @@ def parser_json(*checked):
         "close": "Close / decline <!-- opt:close -->",
         "investigate": "Investigate - deep review <!-- opt:investigate -->",
         "hold": "Hold - I'll handle this manually <!-- opt:hold -->",
+        "comment": "comment <!-- opt:comment -->",
+        "decline": "decline <!-- opt:decline -->",
+        "request-changes": "request-changes <!-- opt:request-changes -->",
+        "approve-ci": "approve-ci <!-- opt:approve-ci -->",
     }
     selected = [labels[k] for k in checked]
     unselected = [labels[k] for k in labels if k not in checked]
@@ -238,6 +242,29 @@ def test_request_changes_allow_set_and_nl_selectable():
           "request-changes" not in ad.ALLOWED["issue-triage"])
     check("allow: request-changes IS NL-selectable (unlike investigate)",
           "request-changes" in ad.nl_allowed("pr-review"))
+
+
+def test_slash_only_actions_are_not_checkbox_decisions():
+    body = ('<!-- wheelhouse-state: {"repo":"lavish-axi","number":42,'
+            '"kind":"pr-review","head_sha":"abc",'
+            '"options":["merge","comment","decline","request-changes","approve-ci"]} -->')
+    for key in ("comment", "decline", "request-changes", "approve-ci"):
+        out = run_parse({
+            "EVENT_NAME": "issues",
+            "EVENT_ACTION": "edited",
+            "ISSUE_BODY": body,
+            "CHECKBOXES_OLD": parser_json(),
+            "CHECKBOXES_NEW": parser_json(key),
+        })
+        check("checkbox: %s custom option is ignored" % key, out.get("decision", "") == "")
+    out = run_parse({
+        "EVENT_NAME": "issues",
+        "EVENT_ACTION": "edited",
+        "ISSUE_BODY": body,
+        "CHECKBOXES_OLD": parser_json(),
+        "CHECKBOXES_NEW": parser_json("merge"),
+    })
+    check("checkbox: valid custom option still works", out.get("decision") == "merge")
 
 
 def test_request_changes_slash_parse():
@@ -964,6 +991,7 @@ def main():
     test_consuming_actions_unchanged_by_investigate_routing()
     test_investigate_allow_set_and_nl_exclusion()
     test_request_changes_allow_set_and_nl_selectable()
+    test_slash_only_actions_are_not_checkbox_decisions()
     test_request_changes_slash_parse()
     test_text_required_label_parse_is_ignored()
     test_held_card_is_inert_to_decision_handler()

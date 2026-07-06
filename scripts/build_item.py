@@ -33,7 +33,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_card import CHECKBOX_OPTIONS  # noqa: E402
+from render_card import CHECKBOX_OPTIONS, checkbox_options  # noqa: E402
 from wheelhouse_core import (  # noqa: E402
     _auto_triage_enabled,
     _auto_triage_issues_enabled,
@@ -94,6 +94,8 @@ def normalize(d):
         options = [o.strip() for o in options.split(",") if o.strip()]
     if not options:
         options = CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+    else:
+        options = checkbox_options(kind, options)
 
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     path = "pull" if kind in ("pr-review", "ci-approval") else "issues"
