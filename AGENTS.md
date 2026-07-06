@@ -422,8 +422,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `decision`/`cmd_execute` path (unlike `investigate`, which is routed apart via
   `NON_CONSUMING_ACTIONS`), but its terminal state is `"none"` - the same
   leave-the-card-open shape as `do_comment` - so it never closes the card.
-  Like `merge`, it re-checks the PR head SHA from the card state before posting
-  the review and blocks if the head moved.
+  Like `merge`, it re-checks the PR head SHA from the card state before posting the review; if the head moved, no review is posted and the card stays pending so the next scan can refresh it to the current head.
   Because it is a normal text-bearing verb (not a meta-action like
   `investigate`), it is deliberately NOT added to `NL_EXCLUDED_ACTIONS`: it IS
   in `nl_allowed("pr-review")`, so the natural-language intent-mapper can choose
