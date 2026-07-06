@@ -118,7 +118,7 @@ jobs:
         run: python scripts/apply_decision.py parse
 
       # --- Natural-language path (opt-in) ------------------------------------
-      # An owner comment that is NOT a slash-command and not on a held
+      # An owner/maintainer comment that is NOT a slash-command and not on a held
       # `pending-triage` card. Gated on nl_decisions in config AND the
       # CLAUDE_CODE_OAUTH_TOKEN secret; inert otherwise. Claude only MAPS
       # intent or answers a question - the deterministic steps below do any
@@ -183,7 +183,7 @@ jobs:
       # token - NOT FLEET_TOKEN - so Claude has continuity across follow-up
       # questions. apply_decision.py's assemble_history keeps ONLY the
       # maintainer's and the bot's own turns (the trusted conversation) and drops
-      # everyone else, so no non-owner comment can reach the prompt. The thread
+      # everyone else, so no unauthorized comment can reach the prompt. The thread
       # already contains the triggering comment; it is excluded there by id.
       - id: nl-comments
         if: steps.nl-gate.outputs.proceed == 'true'

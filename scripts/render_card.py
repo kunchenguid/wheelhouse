@@ -42,9 +42,11 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 
-# Quick-decision (checkbox) option keys per kind. Comment / decline /
-# request-changes carry text, so they are slash-command-only (see
-# apply_decision.py), not checkboxes.
+# Quick-decision (checkbox) option keys per kind. Comment, decline, and
+# request-changes are intentionally not checkboxes because issue-form checkboxes
+# cannot carry free text. Comment and request-changes require slash-command text;
+# decline can carry a slash-command reason or fall back to its default label
+# reason (see apply_decision.py).
 #
 # `investigate` is the odd one out: it is NON-CONSUMING. Ticking it triggers a
 # code-grounded deep review (deep-review.yml) and leaves the card open for the
@@ -131,7 +133,7 @@ NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 #
 # `held` is carried as a non-material key in the state block (like
 # `triaged_sha`/`triage_status`): it is never in `MATERIAL_FIELDS` and never
-# affects classify/material_changed/decision-parsing/merge-close-approve/
+# affects classify/material_changed/decision-parsing/target-execution/
 # fork-CI-safety/author-filtering/conflict-routing. `HOLD_LABEL` is a display/
 # filtering label kept in sync with it (added by `card_labels` whenever
 # `render()` is called with `held=True`), never read back as the source of
@@ -156,7 +158,7 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # the author line, etc.) should propagate to existing open cards. This is
 # NOT a material field: never add it to MATERIAL_FIELDS / material_signature
 # / _state_material, and it must never affect classify/decision-parsing/
-# merge-close-approve/fork-CI-safety/author-filtering/conflict-routing/triage.
+# target-execution/fork-CI-safety/author-filtering/conflict-routing/triage.
 # Bumped 1 -> 2 to retroactively re-qualify already-cached `### Triage`
 # sections (bare `#N` -> `owner/repo#N`) via `_preserve_same_revision_triage`,
 # mirroring how version 0 -> 1 propagated the author `@mention` drop. Bumped

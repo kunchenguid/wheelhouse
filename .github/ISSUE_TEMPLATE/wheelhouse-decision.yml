@@ -23,8 +23,10 @@ body:
       # by exact heading text. The options below are the full union across card
       # kinds; the parser reads the ACTUAL ticked lines from the card body, so
       # this list is only for schema validity, not for matching.
-      # Text-bearing actions like comment, decline, and request-changes are
-      # slash-command-only and intentionally absent from these checkbox options.
+      # Non-checkbox actions like comment, decline, and request-changes are
+      # intentionally absent from these checkbox options.
+      # comment and request-changes require slash-command text; decline can
+      # carry a slash-command reason or fall back to its default label reason.
       label: Your decision
       options:
         - label: Merge it

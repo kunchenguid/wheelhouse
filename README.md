@@ -6,7 +6,7 @@ A personal, always-on, cross-repo **"what needs my decision"** command center, b
 Every issue in this repo is one pending decision about the repositories you maintain - a PR worth merging, a fork-CI run worth approving, an issue worth triaging.
 The scheduled scan keeps the queue focused on other people's work: PRs and issues authored by the repo owner, the configured maintainer, or bots stay out of the scan-built worklist, while missing author metadata fails open.
 PR-review candidates that GitHub reports as merge-conflicted leave the maintainer worklist until the contributor rebases or merges the base branch and pushes a mergeable head.
-You make final decisions by ticking a checkbox or replying in plain English; a workflow executes your call on the real repo and closes the card when the action is terminal.
+You drive cards by ticking a checkbox, replying with a slash-command, or replying in plain English; a workflow executes your call on the real repo and closes the card when the action is terminal.
 No server, no database, no bot to host - just this repo and a small set of secrets.
 
 Fork it, edit one config file, add one required secret, and you have your own Wheelhouse.
@@ -234,7 +234,7 @@ You drive the queue three ways - whichever fits the decision:
   Claude only ever returns structured JSON: an action, an answer, or a clarification request.
   The deterministic handler performs any action, so nothing happens that a slash-command couldn't already do.
   Search output, if any, is evidence only and never an instruction or authorization.
-  Only your own comments are ever read (a stranger's are ignored).
+  Only comments from the repository owner or configured maintainer are ever read (a stranger's are ignored).
   A comment that starts with `/` is always treated as a slash-command, never sent to Claude.
   If Claude can't form a useful result, it asks you to rephrase or use a slash-command.
 
@@ -271,6 +271,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Queue author filter.** The scheduled scan creates decision cards for other people's work.
   PRs and issues authored by the repo owner, the configured `maintainer`, or bots are excluded from the scan-built worklist; bot detection uses GitHub's author type plus the `[bot]` login suffix, and missing author metadata fails open so a real contributor is not silently dropped.
   The explicit dispatch fast path trusts what your source workflow sends, so filter there too if you want it to match the scan.
+  If an explicit dispatch creates a PR-review card for your own PR, `/request-changes` refuses to submit the review because GitHub rejects self-review.
 - **Merge-conflict routing.** The scheduled scan treats only GitHub's authoritative GraphQL `mergeable: CONFLICTING` value as a merge conflict.
   A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`; `UNKNOWN` or missing mergeability fails open and routes normally.
   Contributor-authored conflicted PRs get one friendly rebase nudge per head SHA under `FLEET_TOKEN`, with a hidden marker in the PR comment to prevent duplicates.
@@ -345,6 +346,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo. The card stays open with an error comment when an action fails.
   A `/merge` refused with a "head moved" note is working as intended - the PR changed after the card was rendered, so re-scan before merging.
   A `/request-changes` refused for a moved head leaves the card pending; the next scan refreshes it to the new code automatically, then you can re-review and request changes again if needed.
+  A `/request-changes` refused because it is your own PR is also working as intended - GitHub does not allow self-review, and scan-built queues normally filter those PRs out.
   A `/merge` that fails with a merge-conflict message means the contributor must rebase or merge the base branch, resolve the conflict, and push before Wheelhouse can merge it.
 - **Approve-CI cards appear for PRs that look safe.**
   Open the latest `scan-backstop` run logs and search for `wheelhouse auto-approve carded` or `wheelhouse auto-approve suppressed-card`.

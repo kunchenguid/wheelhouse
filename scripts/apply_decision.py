@@ -28,13 +28,13 @@ Phases, run as separate workflow steps so each uses the right token:
 
 Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
 
-  nl-eligible  Print true/false: is this an owner comment that should be routed
-               to the LLM intent-mapper? (a decision card AND not held AND not
-               a slash-command).
+  nl-eligible  Print true/false: is this owner/maintainer comment eligible for
+               the LLM intent-mapper? (a decision card AND not held AND not a
+               slash-command).
 
   nl-prompt    Build the LLM prompt: the deterministic card context + the
-               owner's comment (trusted instructions) plus the target content as
-               clearly-delimited UNTRUSTED data. Writes `prompt` to
+               owner/maintainer's comment (trusted instructions) plus the target
+               content as clearly-delimited UNTRUSTED data. Writes `prompt` to
                $GITHUB_OUTPUT. The card's advisory auto-triage section is omitted
                from trusted context. The card's
                prior comment thread is folded in as owner-scoped conversation
@@ -50,16 +50,17 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
                the SAME `execute` above (inheriting every guard). `answer`/
                `clarify` modes just post a card comment and leave the card open.
 
-Security: the caller owner-gates the whole job; only owner-authored text ever
-reaches this script (and the LLM). Merge and request-changes re-check the PR
-head SHA against the card's state block and refuse if the PR moved. approve-ci
-routes through the shared CI safety verdict: CI/action-file changes hard-hold,
-while non-default bases and `pull_request_target` posture add warnings, and each
-awaiting workflow run is bound to the PR by strict pull_requests association or
-fork fallback head SHA plus branch matching. The LLM never receives FLEET_TOKEN. Without
-READONLY_TOKEN it never runs shell commands; with READONLY_TOKEN it may run
-the read-only search wrapper for answer context only, and can still only return the
-structured result that this deterministic code acts on.
+Security: the caller owner/maintainer-gates the whole job; only
+owner/maintainer-authored text ever reaches this script (and the LLM). Merge and
+request-changes re-check the PR head SHA against the card's state block and
+refuse if the PR moved. approve-ci routes through the shared CI safety verdict:
+CI/action-file changes hard-hold, while non-default bases and
+`pull_request_target` posture add warnings, and each awaiting workflow run is
+bound to the PR by strict pull_requests association or fork fallback head SHA
+plus branch matching. The LLM never receives FLEET_TOKEN. Without READONLY_TOKEN
+it never runs shell commands; with READONLY_TOKEN it may run the read-only search
+wrapper for answer context only, and can still only return the structured result
+that this deterministic code acts on.
 """
 
 import json
@@ -77,13 +78,15 @@ _AUTO_TRIAGE_SECTION_RE = re.compile(
     re.S,
 )
 
-# Actions allowed per kind. Checkbox options are a subset of these; comment /
-# decline / request-changes are text-bearing and slash-only (a GitHub issue-form
-# checkbox can't carry free text). request-changes goes through the normal
-# `decision` output/cmd_execute path (unlike investigate below), but its terminal
-# state ("none", see do_request_changes) leaves the card open, same as comment -
-# it is a normal, non-terminal, reversible action and is NL-selectable (it is not
-# in NL_EXCLUDED_ACTIONS).
+# Actions allowed per kind. Checkbox options are a subset of these; comment,
+# decline, and request-changes are not checkbox options because GitHub issue-form
+# checkboxes cannot carry free text. comment and request-changes require
+# slash-command text, while decline can also be driven by a decision label with
+# its default reason. request-changes goes through the normal `decision`
+# output/cmd_execute path (unlike investigate below), but its terminal state
+# ("none", see do_request_changes) leaves the card open, same as comment - it is
+# a normal, non-terminal, reversible action and is NL-selectable (it is not in
+# NL_EXCLUDED_ACTIONS).
 #
 # `investigate` is a NON-CONSUMING action (it triggers a code-grounded deep
 # review and leaves the card open - see cmd_parse). It is a valid action for the
@@ -623,12 +626,13 @@ def is_slash_comment(comment):
 
 
 def cmd_nl_eligible():
-    """Print true/false: should this owner comment be routed to the LLM?
+    """Print true/false: should this owner/maintainer comment be routed to the
+    LLM?
 
     Eligible iff the issue is a decision card, it is not still HELD pending
     its first auto-triage attempt (render_card.py "Held cards"), AND the
-    comment is free-form text (not a slash-command). The owner-gate, the
-    nl_decisions flag and the token presence are checked by the workflow;
+    comment is free-form text (not a slash-command). The owner/maintainer gate,
+    the nl_decisions flag and the token presence are checked by the workflow;
     this only classifies the comment."""
     body = os.environ.get("ISSUE_BODY", "")
     comment = os.environ.get("COMMENT_BODY", "")
@@ -843,13 +847,13 @@ def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
     """Render the card's prior thread as an owner-scoped "Conversation so far".
 
     SECURITY - this is the trust boundary for the new context. The invariant
-    "only owner-authored text is an instruction to the LLM" must hold, so the
-    ONLY comments that become conversation are:
+    "only owner/maintainer-authored text is an instruction to the LLM" must hold,
+    so the ONLY comments that become conversation are:
       * the maintainer's (login in `trusted_logins` - the SAME set the gate uses,
         i.e. the repo owner plus the optional configured `maintainer`), and
       * the assistant's own prior replies (the workflow bot `bot_login`).
     Every other author - a random contributor, a third-party bot - is dropped
-    entirely so non-owner text can NEVER enter the trusted instruction context.
+    entirely so unauthorized text can NEVER enter the trusted instruction context.
     The current triggering comment is excluded too (it is passed separately as
     the new instruction). `comments` is the chronological raw list; the rendered
     string is "" when there is no prior trusted turn."""
@@ -862,7 +866,7 @@ def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
             continue  # the new instruction, passed separately - never duplicated
         login = str(c.get("login") or "")
         if login not in trusted:
-            continue  # non-owner / other-bot text never becomes conversation
+            continue  # unauthorized / other-bot text never becomes conversation
         body = str(c.get("body") or "").strip()
         if not body:
             continue

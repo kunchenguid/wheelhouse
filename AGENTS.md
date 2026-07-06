@@ -103,7 +103,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
   automatic triage section rendering, `triaged_sha` cache updates, and trusted
   triage-result card edits that publish held cards), `apply_decision.py` (deterministic `parse` then
-  `execute`; slash-only text actions including `comment`, `decline`, and
+  `execute`; non-checkbox actions including `comment`, `decline`, and
   pr-review-only `request-changes`; the NON-CONSUMING `investigate` routing +
   `clear-checkbox`; plus the natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
@@ -265,7 +265,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   manual invocation).
   `triaged_sha`, `updated_at`, and the visible `### Triage` section are
   non-material: they must never affect `classify`, `material_changed`,
-  decision parsing, merge execution, fork-CI approval, author filtering, or
+  decision parsing, target execution, fork-CI approval, author filtering, or
   conflict routing.
   For a pr-review card, `head_sha` IS material, so a head move both refreshes
   the card and makes the fresh head eligible for one new triage attempt in the
@@ -295,7 +295,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   cmd_parse`/`cmd_nl_eligible` also short-circuit on the state block's
   `held` flag as defense in depth. `held` is a non-material state key (like
   `triaged_sha`) - never in `MATERIAL_FIELDS`, never affecting
-  classify/material_changed/decision-parsing/merge-close-approve/
+  classify/material_changed/decision-parsing/target-execution/
   fork-CI-safety/author-filtering/conflict-routing.
   A held card is **published** - real checkboxes appear, `pending-triage` is
   removed - the moment its own auto-triage ATTEMPT completes, in the SAME
@@ -337,7 +337,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `render_card.py`; in that narrow case it clears the queued triage cache for
   the exact raw-input revision instead, so a future scan can retry rather than
   leaving the held card permanently hidden.
-- Natural-language decisions are owner-comment-only and structured: the LLM
+- Natural-language decisions accept only owner/maintainer comments and are structured: the LLM
   returns `{mode: action|answer|clarify, action?, free_text?, answer?}` to
   `decision.json` and nothing else. `apply_decision.py nl-route` is the trust
   boundary - it validates `action` against the per-kind allowlist and only then
@@ -415,9 +415,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   "REQUEST_CHANGES"}`) via `apply_decision.do_request_changes`, executed on the
   same `execute`-step `FLEET_TOKEN` wiring `do_merge`/`do_comment` already use -
   no new secret, no new token scope, no new workflow step. It is slash-only
-  (like `comment`/`decline`) because the GitHub issue-form checkboxes can't
-  carry free text, so it is NOT a `CHECKBOX_OPTIONS` entry in `render_card.py` -
-  only `SLASH` table entries in `apply_decision.py` and a `SLASH_HINT` mention.
+  (like `comment`; `decline` is also omitted from checkboxes so a slash command
+  can carry a custom reason) because GitHub issue-form checkboxes can't carry
+  free text, so it is NOT a `CHECKBOX_OPTIONS` entry in `render_card.py` - only
+  `SLASH` table entries in `apply_decision.py` and a `SLASH_HINT` mention.
   It is routed through the normal
   `decision`/`cmd_execute` path (unlike `investigate`, which is routed apart via
   `NON_CONSUMING_ACTIONS`), but its terminal state is `"none"` - the same
@@ -452,7 +453,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   prior turns) survive. The maintainer set is exactly `wheelhouse_core.maintainers()`
   (repo owner + optional configured `maintainer`) - the SAME notion the
   `gate`/`authorized` path uses; do not invent a second rule. Every other author
-  (a contributor, a third-party bot) is dropped ENTIRELY so non-owner text can
+  (a contributor, a third-party bot) is dropped ENTIRELY so unauthorized text can
   never enter the LLM's instruction context. The triggering comment is excluded
   from history by id (`github.event.comment.id`) because it is still passed
   separately as the single new instruction; the history is context only. None of
@@ -651,7 +652,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   If no usable output is present, the workflow posts "Deep review ran but produced no verdict (see the workflow run logs)." and fails the run.
   The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of silently no-opping.
   Manual triggering means there is no runaway-cost reason for a config flag, so the old `deep_review` flag was removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.
-- **`nl_decisions`** in `decision-handler.yml`: a plain-English owner comment is
+- **`nl_decisions`** in `decision-handler.yml`: a plain-English owner/maintainer comment is
   mapped to a structured result (see Sharp edges).
   Opt-in: inert unless `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN`
   present.

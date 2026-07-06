@@ -119,7 +119,7 @@ auto_triage_issues: true
 # Natural-language decisions. Leave false to keep the queue fully deterministic
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
 # secret (a Claude subscription token from `claude setup-token` - NOT an API key)
-# to let the decision handler route a plain-English owner comment on a card
+# to let the decision handler route a plain-English owner/maintainer comment on a card
 # through Claude: it MAPS the comment to an action ("merge it" -> merge,
 # "request changes" -> request-changes on a PR-review card), answers a
 # question, or asks you to clarify. The optional READONLY_TOKEN secret also

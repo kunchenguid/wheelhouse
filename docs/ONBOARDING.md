@@ -39,6 +39,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 The `author` field is display data for dispatched cards.
 It is rendered as plain text (`by <login>`), not as a GitHub `@mention`, so a dispatched card does not notify the target author.
 The scan-built worklist has richer GitHub author metadata and skips PRs or issues from the repo owner, the configured maintainer, or bots; dispatch payloads are explicit card requests and are not filtered again by the hub.
+If your source workflow dispatches your own PR as a `pr-review` card, `/request-changes` will refuse to submit a review because GitHub rejects self-review.
 The `auto_triage` field is an item-level opt-out only.
 Omit it to follow the hub's global and per-repo `auto_triage` config.
 Set it to `false` for high-volume or sensitive dispatched PR-review items that should not spend a Claude turn.
@@ -49,7 +50,7 @@ Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
 If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
-Text-bearing slash commands are not checkbox options: `/comment <text>`, `/decline <reason>`, and the pr-review-only `/request-changes <text>` stay available from the card's slash-command hint instead.
+Non-checkbox actions are not valid `options`: `/comment <text>` and the pr-review-only `/request-changes <text>` require slash-command text, while `/decline <reason>` is also shown in the card's slash-command hint for custom decline wording.
 A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
