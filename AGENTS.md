@@ -147,11 +147,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   not. `classify()` is correct given correct inputs and was not touched; the
   defect was entirely in how `check_status()` derived those inputs. See
   `tests/test_check_status.py`. Relatedly, `approve_ci()` dedups its
-  `action_required` run list by `workflowName` (keeping the highest
-  `databaseId` per head_sha) before approving, purely so Wheelhouse itself
-  stops manufacturing the duplicate-pending-run race that started the card
-  #392 incident - this dedup runs strictly after the risky-files/posture HOLD
-  check and never weakens it.
+  `action_required` run list by stable `workflowDatabaseId` when GitHub exposes
+  one, keeping the highest `databaseId` per head_sha, and leaves runs without a
+  stable workflow identity distinct before approving, purely so Wheelhouse itself
+  stops manufacturing the duplicate-pending-run race that started the card #392
+  incident - this dedup runs strictly after the risky-files/posture HOLD check
+  and never weakens it.
 - Decision cards are machine-created.
   The target author is shown as plain text (`by <login>`), never as a GitHub
   `@mention`.

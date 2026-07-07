@@ -1953,7 +1953,7 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
             "-R",
             slug,
             "--json",
-            "databaseId,workflowName,headSha,headBranch,url",
+            "databaseId,workflowDatabaseId,workflowName,headSha,headBranch,url",
         ],
         capture_output=True,
         text=True,
@@ -2022,21 +2022,18 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
         else:
             skipped.append("%s:%s" % (name, reason))
 
-    # Dedup: approve at most one pending run per workflow name (per head_sha).
-    # Approving every duplicate action_required run of the same workflow is
-    # what manufactures a same-workflow race that the workflow's own
-    # `concurrency: cancel-in-progress` group then resolves by cancelling
-    # one of them - producing a spurious CANCELLED check-run alongside a
-    # genuine SUCCESS. This only narrows which already-matched,
-    # already-safety-verified runs get approved; it never touches the
-    # risky-files/posture HOLD logic above, which already ran and returned
-    # before this point for an unsafe PR.
+    def dedup_key(run):
+        workflow_id = run.get("workflowDatabaseId")
+        if workflow_id not in (None, ""):
+            return ("workflow", str(workflow_id))
+        return ("run", str(run["databaseId"]))
+
     by_workflow = {}
     for run in matching:
-        wf = run.get("workflowName", "?")
-        prev = by_workflow.get(wf)
+        key = dedup_key(run)
+        prev = by_workflow.get(key)
         if prev is None or run["databaseId"] > prev["databaseId"]:
-            by_workflow[wf] = run
+            by_workflow[key] = run
     if len(by_workflow) < len(matching):
         winners = set(id(r) for r in by_workflow.values())
         for run in matching:
@@ -2045,9 +2042,7 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
                     "%s:duplicate-pending-run-%s"
                     % (run.get("workflowName", "?"), run["databaseId"])
                 )
-        matching = sorted(
-            by_workflow.values(), key=lambda r: r.get("workflowName", "?")
-        )
+        matching = sorted(by_workflow.values(), key=lambda r: r["databaseId"])
 
     if not matching:
         msg = "#%s (%s@%s): no matching workflow runs awaiting approval" % (

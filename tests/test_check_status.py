@@ -59,7 +59,7 @@ def test_duplicate_compliance_contexts_cancelled_then_success():
         check_run("build-and-test (ubuntu-latest)"),
         check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
     ]
-    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    comp, tests, ci, names = core.check_status(pr_with(rollup("SUCCESS", contexts)), CFG)
     check(
         "duplicate compliance ctx CANCELLED-then-SUCCESS -> fail (worst-wins)",
         comp == "fail",
@@ -75,7 +75,7 @@ def test_duplicate_compliance_contexts_success_then_cancelled():
         check_run("build-and-test (ubuntu-latest)"),
         check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
     ]
-    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    comp, tests, ci, names = core.check_status(pr_with(rollup("SUCCESS", contexts)), CFG)
     check(
         "duplicate compliance ctx SUCCESS-then-CANCELLED -> fail (order-independent)",
         comp == "fail",
