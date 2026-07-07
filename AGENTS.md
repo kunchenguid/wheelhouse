@@ -125,6 +125,33 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 ## Sharp edges
 
+- **`check_status()`'s `comp`/`tests` are worst-wins aggregates, never scalar
+  overwrites - card #392 was a false green from getting this wrong.**
+  GitHub's GraphQL `statusCheckRollup.contexts` can return more than one
+  check-run with the SAME name (e.g. Wheelhouse's own `approve_ci` approving
+  two duplicate pending runs of one workflow, one of which then gets
+  cancelled by the workflow's own `concurrency: cancel-in-progress` group).
+  `check_status()` (`scripts/wheelhouse_core.py`) collects every context
+  matching `cfg["compliance_check"]` into a list and reduces it after the
+  loop, exactly like it already did for `tests`: any terminal non-`SUCCESS`
+  conclusion anywhere in the group -> `"fail"`; else any non-`COMPLETED`
+  context -> `"pending"`; only if every matching context is a completed
+  `SUCCESS` -> `"pass"`. A scalar last-write-wins assignment inside the loop
+  (the original bug) makes the result depend on GraphQL array order instead
+  of policy. As a fail-toward-safe backstop, `check_status()` also clamps
+  `compliance` to `"fail"` whenever GitHub's own authoritative
+  `statusCheckRollup.state` is `"FAILURE"`/`"ERROR"` and the per-context read
+  would otherwise say `"pass"`/`"n/a"` - deliberately conservative (it can
+  hold a card over an untracked/optional check the rollup counts but this
+  config doesn't), because a false hold is recoverable and a false green is
+  not. `classify()` is correct given correct inputs and was not touched; the
+  defect was entirely in how `check_status()` derived those inputs. See
+  `tests/test_check_status.py`. Relatedly, `approve_ci()` dedups its
+  `action_required` run list by `workflowName` (keeping the highest
+  `databaseId` per head_sha) before approving, purely so Wheelhouse itself
+  stops manufacturing the duplicate-pending-run race that started the card
+  #392 incident - this dedup runs strictly after the risky-files/posture HOLD
+  check and never weakens it.
 - Decision cards are machine-created.
   The target author is shown as plain text (`by <login>`), never as a GitHub
   `@mention`.
@@ -707,7 +734,8 @@ Run the unit tests:
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and the current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a card already at the current version with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
-- `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.
+- `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-workflow-name: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
+- `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
@@ -717,3 +745,10 @@ YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.
 Secrets the maintainer must add: `FLEET_TOKEN` always, `CLAUDE_CODE_OAUTH_TOKEN` for auto triage/deep-review and/or nl_decisions, and optionally `READONLY_TOKEN` public-read only for auto triage, nl_decisions, and deep-review search.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

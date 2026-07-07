@@ -455,9 +455,16 @@ def check_status(pr, cfg):
         return ("none", "none", False, [])
     comp_name = cfg.get("compliance_check")
     patterns = cfg.get("test_check_patterns", []) or []
-    compliance = "missing" if comp_name else "n/a"
+    comp_results = []
     tests = []
     names = []
+    comp_terminal_fail = (
+        "FAILURE",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+    )
     for c in rollup["contexts"]["nodes"]:
         if c["__typename"] == "CheckRun":
             name = c.get("name") or ""
@@ -466,18 +473,11 @@ def check_status(pr, cfg):
             status = (c.get("status") or "").upper()
             done = status == "COMPLETED" or status == ""
             if comp_name and name == comp_name:
-                compliance = (
+                comp_results.append(
                     "pass"
                     if concl == "SUCCESS"
                     else "fail"
-                    if concl
-                    in (
-                        "FAILURE",
-                        "TIMED_OUT",
-                        "CANCELLED",
-                        "ACTION_REQUIRED",
-                        "STARTUP_FAILURE",
-                    )
+                    if concl in comp_terminal_fail
                     else "pending"
                 )
             elif any(p in name for p in patterns):
@@ -493,7 +493,7 @@ def check_status(pr, cfg):
             names.append(ctx)
             st = (c.get("state") or "").upper()
             if comp_name and ctx == comp_name:
-                compliance = (
+                comp_results.append(
                     "pass"
                     if st == "SUCCESS"
                     else "fail"
@@ -508,6 +508,21 @@ def check_status(pr, cfg):
                     if st == "PENDING"
                     else "fail"
                 )
+    # compliance is aggregated worst-wins across every context sharing
+    # comp_name, exactly like `tests` below - GitHub can return more than one
+    # check-run with the same name (e.g. a cancelled duplicate alongside the
+    # real successful run), and a scalar last-write-wins overwrite here would
+    # silently pick whichever context the API happened to return last.
+    if not comp_name:
+        compliance = "n/a"
+    elif not comp_results:
+        compliance = "missing"
+    elif "fail" in comp_results:
+        compliance = "fail"
+    elif "pending" in comp_results:
+        compliance = "pending"
+    else:
+        compliance = "pass"
     if not tests:
         tstate = "none"
     elif "fail" in tests:
@@ -516,6 +531,14 @@ def check_status(pr, cfg):
         tstate = "pending"
     else:
         tstate = "green"
+    # Fail-toward-safe backstop: GitHub's own authoritative rollup state is
+    # already fetched below and, until now, was never consulted. If it says
+    # the commit is not green, never let compliance come out pass/n/a-with-
+    # green-tests - deliberately conservative even though this can hold a
+    # card whose only failing check is one this config doesn't track; a false
+    # hold the owner can inspect is acceptable, a false green is not.
+    if rollup.get("state") in ("FAILURE", "ERROR") and compliance in ("pass", "n/a"):
+        compliance = "fail"
     return (compliance, tstate, True, names)
 
 
@@ -1998,6 +2021,34 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
             matching.append(run)
         else:
             skipped.append("%s:%s" % (name, reason))
+
+    # Dedup: approve at most one pending run per workflow name (per head_sha).
+    # Approving every duplicate action_required run of the same workflow is
+    # what manufactures a same-workflow race that the workflow's own
+    # `concurrency: cancel-in-progress` group then resolves by cancelling
+    # one of them - producing a spurious CANCELLED check-run alongside a
+    # genuine SUCCESS. This only narrows which already-matched,
+    # already-safety-verified runs get approved; it never touches the
+    # risky-files/posture HOLD logic above, which already ran and returned
+    # before this point for an unsafe PR.
+    by_workflow = {}
+    for run in matching:
+        wf = run.get("workflowName", "?")
+        prev = by_workflow.get(wf)
+        if prev is None or run["databaseId"] > prev["databaseId"]:
+            by_workflow[wf] = run
+    if len(by_workflow) < len(matching):
+        winners = set(id(r) for r in by_workflow.values())
+        for run in matching:
+            if id(run) not in winners:
+                skipped.append(
+                    "%s:duplicate-pending-run-%s"
+                    % (run.get("workflowName", "?"), run["databaseId"])
+                )
+        matching = sorted(
+            by_workflow.values(), key=lambda r: r.get("workflowName", "?")
+        )
+
     if not matching:
         msg = "#%s (%s@%s): no matching workflow runs awaiting approval" % (
             pr,
