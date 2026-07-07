@@ -141,6 +141,7 @@ jobs:
   Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
+  Verified duplicate pending runs sharing a stable `workflowDatabaseId` are deduped to the highest/newest run before approval; same-named distinct workflows and runs without a workflow identity are still treated as distinct.
 - **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want automatic issue-card triage caching.
   The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.
 - **Third-party alternative.** If you prefer, `peter-evans/repository-dispatch` does the same dispatch as an action; the `gh api` form above keeps you dependency-free.

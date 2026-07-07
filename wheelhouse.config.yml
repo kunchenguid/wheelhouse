@@ -19,6 +19,9 @@ repos:
     # merge". For lavish-axi this is the "raised via no-mistakes" contribution
     # gate. Set to null if you have no such gate. When set, a PR is never shown
     # as merge-ready until this check passes.
+    # Duplicate contexts with this exact name aggregate worst-wins. A GitHub
+    # rollup FAILURE/ERROR also fails closed rather than marking a PR merge-ready,
+    # even when this is null.
     compliance_check: "PR must be raised via no-mistakes"
     # Substrings that identify your *test* / CI checks. A PR is "tests green"
     # only when every check whose name contains one of these passes. lavish-axi
@@ -163,6 +166,9 @@ card_issues: true
 # The approval call also verifies each action_required workflow run against the
 # target PR: GitHub-populated pull_requests must name exactly that PR, and
 # fork-originated empty associations must match the PR head SHA plus head branch.
+# Verified duplicate pending runs sharing a stable workflowDatabaseId are
+# deduped to the highest/newest run before approval; runs without that stable
+# workflow identity are left distinct.
 # Caveat: this gates the fork `pull_request` run only. A `pull_request_target`
 # workflow runs automatically with repo secrets and is NOT gated by any approval,
 # so the posture check is a "don't silently auto-clear + warn me" signal plus a

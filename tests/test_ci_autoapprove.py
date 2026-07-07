@@ -29,6 +29,9 @@ These tests cover:
   * run-to-PR verification: same-repo runs use GitHub's populated
     `pull_requests` association, while fork runs with an empty association are
     bound by matching `head_sha` plus `head_branch`;
+  * duplicate pending-run hygiene: verified runs sharing a stable
+    workflowDatabaseId approve only the newest run, without collapsing same-named
+    distinct workflows or runs that lack a workflow identity;
   * idempotency by construction (a PR no longer `needs-ci-approval` is never
     re-approved), default-on, explicit opt-out, and the per-repo override.
 """

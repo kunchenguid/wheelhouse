@@ -19,6 +19,9 @@ contributor rebase nudge per head SHA.
 Approval verifies each awaiting run against the target PR: populated
 workflow_run.pull_requests must name that PR, while fork-originated empty
 associations must match the PR head SHA and branch.
+Verified duplicate pending runs sharing a stable workflowDatabaseId are deduped
+to the highest/newest run before approval; runs without that stable workflow
+identity are left distinct.
 Incomplete PR, issue, or closing-reference pagination is reported as a warning
 and marks the repo result as truncated, so reconcile will not self-heal close
 cards from an incomplete view of the repo.
@@ -448,6 +451,8 @@ def check_status(pr, cfg):
     """Return (compliance, tests, ci_present, names).
 
     compliance in pass/fail/pending/missing/n/a/none; tests in green/fail/pending/none.
+    Matching compliance contexts aggregate worst-wins, and a GitHub rollup
+    FAILURE/ERROR clamps an otherwise pass/n/a compliance read to fail.
     """
     commits = pr["commits"]["nodes"]
     rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
@@ -1882,6 +1887,9 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
     Each action_required run must also verify against the PR head: populated
     pull_requests associations stay strict, while fork-originated empty
     associations are accepted only on matching head SHA plus head branch.
+    After that verification, duplicate pending runs sharing a stable
+    workflowDatabaseId are deduped to the highest/newest run. Runs without that
+    stable workflow identity remain distinct.
 
     Returns (status, message). status in:
       approved - one or more runs approved
