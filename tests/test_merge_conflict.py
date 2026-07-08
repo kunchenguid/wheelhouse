@@ -17,6 +17,7 @@ import reconcile  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
 _failures = []
+UNSET = object()
 
 
 def check(name, cond):
@@ -118,7 +119,7 @@ def run_build_repo(
     card_issues=False,
     auto_approve_ci=False,
     pending_contributor_cleanup=False,
-    pending_contributor_cleanup_targets=None,
+    pending_contributor_cleanup_targets=UNSET,
     comments_by_pr=None,
 ):
     comments_by_pr = comments_by_pr if comments_by_pr is not None else {}
@@ -207,13 +208,19 @@ def run_build_repo(
     err = io.StringIO()
     try:
         with redirect_stderr(err):
+            kwargs = {
+                "auto_approve_ci": auto_approve_ci,
+                "pending_contributor_cleanup": pending_contributor_cleanup,
+            }
+            if pending_contributor_cleanup_targets is not UNSET:
+                kwargs["pending_contributor_cleanup_targets"] = (
+                    pending_contributor_cleanup_targets
+                )
             result, items = core.build_repo(
                 "owner",
                 repo_cfg,
                 card_issues,
-                auto_approve_ci=auto_approve_ci,
-                pending_contributor_cleanup=pending_contributor_cleanup,
-                pending_contributor_cleanup_targets=pending_contributor_cleanup_targets,
+                **kwargs,
             )
     finally:
         (
@@ -412,6 +419,15 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     )
     check("nudge: cleanup state is not armed when cleanup targets are empty",
           empty_target_calls["patches"] == [] and empty_target_calls["labels"] == [])
+
+    _, _, null_target_calls = run_build_repo(
+        [pr],
+        comments_by_pr={},
+        pending_contributor_cleanup=True,
+        pending_contributor_cleanup_targets=None,
+    )
+    check("nudge: cleanup state is not armed when cleanup targets are null",
+          null_target_calls["patches"] == [] and null_target_calls["labels"] == [])
 
 
 def test_untrusted_rebase_marker_does_not_suppress_nudge():

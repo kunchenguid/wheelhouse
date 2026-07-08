@@ -497,6 +497,21 @@ def test_review_comment_and_pr_body_edit_activity_block_close():
     closed = run(fake, now_days=14)
     check("fail-open: unaccounted PR body edit blocks close", closed == set())
 
+    record = request_record()
+    fake = FakeGitHub(
+        issue_obj=issue([core.PENDING_CONTRIBUTOR_LABEL], updated_at=ts(10)),
+        pr_obj=pr(updated_at=ts(1)),
+        comments=[
+            pending_comment(record),
+            comment("owner note", ts(2), OWNER, 8),
+            reminder_comment(record),
+        ],
+        reviews=[review(101, ts())],
+    )
+    closed = run(fake, now_days=14)
+    check("fail-open: later visible issue activity does not mask PR body edit",
+          closed == set())
+
 
 def test_pr_push_activity_blocks_close():
     record = request_record()

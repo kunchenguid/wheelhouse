@@ -172,6 +172,7 @@ PENDING_CONTRIBUTOR_REMINDER_PREFIX = "wheelhouse-pending-contributor-reminder"
 PENDING_CONTRIBUTOR_CLOSE_PREFIX = "wheelhouse-pending-contributor-close"
 PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
 PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
+_PENDING_CONTRIBUTOR_TARGETS_UNSET = object()
 PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS = {
     "committed",
     "head_ref_force_pushed",
@@ -1477,40 +1478,47 @@ def _timeline_event_has_contributor_actor(event, event_name, maintainer_logins):
     return False
 
 
-def _latest_known_target_activity(state, asked_dt):
-    latest = asked_dt
+def _known_target_activity_times(state):
+    times = {"issue": set(), "pr": set()}
 
-    def absorb(dt):
-        nonlocal latest
-        if dt is not None and dt > latest:
-            latest = dt
+    def absorb(targets, dt):
+        if dt is None:
+            return
+        for target in targets:
+            times[target].add(dt)
+
+    def absorb_item(targets, item, *keys):
+        for dt in _item_times(item, *keys):
+            absorb(targets, dt)
 
     for comment in state["comments"]:
-        for dt in _item_times(comment, "created_at", "submitted_at", "updated_at"):
-            absorb(dt)
+        absorb_item(
+            ("issue", "pr"), comment, "created_at", "submitted_at", "updated_at"
+        )
     for review in state["reviews"]:
-        for dt in _item_times(review, "submitted_at", "created_at", "updated_at"):
-            absorb(dt)
+        absorb_item(
+            ("issue", "pr"), review, "submitted_at", "created_at", "updated_at"
+        )
     for comment in state["review_comments"]:
-        for dt in _item_times(comment, "created_at", "submitted_at", "updated_at"):
-            absorb(dt)
+        absorb_item(
+            ("issue", "pr"), comment, "created_at", "submitted_at", "updated_at"
+        )
     for event in state["timeline"]:
         if not isinstance(event, dict):
             raise RuntimeError("timeline returned unexpected event")
         event_name = str(event.get("event") or "")
-        absorb(_timeline_event_time(event, event_name))
-        for dt in _item_times(event, "updated_at"):
-            absorb(dt)
-    return latest
+        absorb(("issue", "pr"), _timeline_event_time(event, event_name))
+        absorb_item(("issue", "pr"), event, "updated_at")
+    return times
 
 
 def _ensure_no_unaccounted_target_update(state, asked_dt):
-    latest = _latest_known_target_activity(state, asked_dt)
+    known = _known_target_activity_times(state)
     for target_name in ("issue", "pr"):
         dt = _item_time(state.get(target_name), "updated_at")
         if dt is None:
             raise RuntimeError("%s missing updated_at" % target_name)
-        if dt > latest:
+        if dt > asked_dt and dt not in known[target_name]:
             raise RuntimeError(
                 "%s updated after ask without attributable activity" % target_name
             )
@@ -1823,11 +1831,12 @@ def sweep_pending_contributor_actions(
     enabled=False,
     reminder_days=10,
     cleanup_days=14,
-    targets=None,
+    targets=_PENDING_CONTRIBUTOR_TARGETS_UNSET,
     now=None,
 ):
     effective_targets = _pending_contributor_cleanup_targets(
-        {}, ["pr"] if targets is None else targets
+        {},
+        ["pr"] if targets is _PENDING_CONTRIBUTOR_TARGETS_UNSET else targets,
     )
     if not enabled or "pr" not in effective_targets:
         return set()
@@ -1991,7 +2000,7 @@ def build_repo(
     pending_contributor_cleanup=False,
     pending_contributor_cleanup_days=14,
     pending_contributor_reminder_days=10,
-    pending_contributor_cleanup_targets=None,
+    pending_contributor_cleanup_targets=_PENDING_CONTRIBUTOR_TARGETS_UNSET,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -2076,7 +2085,7 @@ def build_repo(
     cleanup_targets = _pending_contributor_cleanup_targets(
         repo_cfg,
         ["pr"]
-        if pending_contributor_cleanup_targets is None
+        if pending_contributor_cleanup_targets is _PENDING_CONTRIBUTOR_TARGETS_UNSET
         else pending_contributor_cleanup_targets,
     )
     cleanup_days = _pending_contributor_cleanup_days(
