@@ -717,9 +717,12 @@ def cleanup_cfg(repo="target-repo", repo_cfg=None, enabled=True, targets=("pr",)
     )
 
 
-def open_pr(login="contributor", head_sha="abc123"):
+def open_pr(login="contributor", head_sha="abc123", user_type=None):
+    user = {"login": login}
+    if user_type is not None:
+        user["type"] = user_type
     return {"merged": False, "state": "open", "head": {"sha": head_sha},
-            "user": {"login": login}}
+            "user": user}
 
 
 def posts(calls):
@@ -905,12 +908,13 @@ def test_do_request_changes_refuses_self_review():
 
 def test_do_request_changes_does_not_arm_cleanup_for_excluded_authors():
     cases = [
-        ("maint-login", {"maint-login"}, "maintainer"),
-        ("ci-bot[bot]", set(), "bot"),
-        ("", set(), "blank author"),
+        ("maint-login", {"maint-login"}, "maintainer", None),
+        ("ci-bot[bot]", set(), "bot suffix", None),
+        ("release-please", set(), "REST bot", "Bot"),
+        ("", set(), "blank author", None),
     ]
-    for login, maintainers, label in cases:
-        fake, calls = fake_gh_rest(open_pr(login=login))
+    for login, maintainers, label, user_type in cases:
+        fake, calls = fake_gh_rest(open_pr(login=login, user_type=user_type))
         with patch_core(
             gh_rest=fake,
             load_config=lambda: cleanup_cfg(),

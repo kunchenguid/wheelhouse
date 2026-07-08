@@ -133,7 +133,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > When this key is absent Wheelhouse never auto-closes a target for contributor inactivity.
 > When enabled, the scheduled scan watches only PRs with a provable pending-contributor ask created by Wheelhouse: a successful `/request-changes` review or a merge-conflict rebase nudge.
 > It posts one reminder at `pending_contributor_reminder_days` and closes at `pending_contributor_cleanup_days` only if the reminder already exists.
-> It skips instead of closing if any required target timeline read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, edited the PR, or pushed after the ask, or if the target has the `wheelhouse:keep-open` label.
+> It skips instead of closing if any required target timeline read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, or pushed after the ask, if the target has an unaccounted post-ask update such as a PR body edit, or if the target has the `wheelhouse:keep-open` label.
 > Maintainer and bot activity never reset the clock.
 > Set it to `true` globally or on a single repo, and keep `pending_contributor_cleanup_targets: ["pr"]` for the current PR-only behavior.
 
@@ -407,7 +407,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **A pending-contributor PR did not get reminded or closed.**
   Check that `pending_contributor_cleanup` is enabled globally or for that repo.
   The cleanup sweep is intentionally narrow: it only handles PRs where Wheelhouse can prove a `/request-changes` review or merge-conflict rebase nudge happened.
-  It skips if the target has `wheelhouse:keep-open`, if the PR head changed, if a non-maintainer human commented, reviewed, left a review comment, edited the PR, or pushed after the ask, or if any required target timeline read is missing or ambiguous.
+  It skips if the target has `wheelhouse:keep-open`, if the PR head changed, if a non-maintainer human commented, reviewed, left a review comment, or pushed after the ask, if the target has an unaccounted post-ask update such as a PR body edit, or if any required target timeline read is missing or ambiguous.
   Search the latest `scan-backstop` log for `pending-contributor cleanup skipped`, `pending-contributor cleanup reminded`, or `pending-contributor cleanup closed`.
 - **An Approve-CI card disappeared before I acted.**
   Search the latest `scan-backstop` logs for `approve_ci noop`.

@@ -174,7 +174,6 @@ PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
 PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
 PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS = {
     "committed",
-    "edited",
     "head_ref_force_pushed",
     "renamed",
 }
@@ -816,13 +815,13 @@ def _author_login(author):
 def _author_typename(author):
     if not isinstance(author, dict):
         return ""
-    return str(author.get("__typename") or "").strip()
+    return str(author.get("__typename") or author.get("type") or "").strip()
 
 
 def _author_is_bot(author):
     typename = _author_typename(author)
     login = _author_login(author)
-    return typename == "Bot" or login.casefold().endswith("[bot]")
+    return typename.casefold() == "bot" or login.casefold().endswith("[bot]")
 
 
 def _author_excluded_from_queue(author, maintainer_logins):
@@ -1414,6 +1413,20 @@ def _item_time(item, *keys):
     return None
 
 
+def _item_times(item, *keys):
+    times = []
+    for key in keys:
+        dt = _parse_time((item or {}).get(key))
+        if dt is not None:
+            times.append(dt)
+    return times
+
+
+def _latest_item_time(item, *keys):
+    times = _item_times(item, *keys)
+    return max(times) if times else None
+
+
 def _commit_event_time(event):
     dt = _item_time(event, "created_at", "updated_at")
     if dt is not None:
@@ -1462,9 +1475,48 @@ def _timeline_event_has_contributor_actor(event, event_name, maintainer_logins):
     return False
 
 
+def _latest_known_target_activity(state, asked_dt):
+    latest = asked_dt
+
+    def absorb(dt):
+        nonlocal latest
+        if dt is not None and dt > latest:
+            latest = dt
+
+    for comment in state["comments"]:
+        for dt in _item_times(comment, "created_at", "submitted_at", "updated_at"):
+            absorb(dt)
+    for review in state["reviews"]:
+        for dt in _item_times(review, "submitted_at", "created_at", "updated_at"):
+            absorb(dt)
+    for comment in state["review_comments"]:
+        for dt in _item_times(comment, "created_at", "submitted_at", "updated_at"):
+            absorb(dt)
+    for event in state["timeline"]:
+        if not isinstance(event, dict):
+            raise RuntimeError("timeline returned unexpected event")
+        event_name = str(event.get("event") or "")
+        absorb(_timeline_event_time(event, event_name))
+        for dt in _item_times(event, "updated_at"):
+            absorb(dt)
+    return latest
+
+
+def _ensure_no_unaccounted_target_update(state, asked_dt):
+    latest = _latest_known_target_activity(state, asked_dt)
+    for target_name in ("issue", "pr"):
+        dt = _item_time(state.get(target_name), "updated_at")
+        if dt is None:
+            raise RuntimeError("%s missing updated_at" % target_name)
+        if dt > latest:
+            raise RuntimeError(
+                "%s updated after ask without attributable activity" % target_name
+            )
+
+
 def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
     for comment in state["comments"]:
-        dt = _item_time(comment, "created_at", "submitted_at", "updated_at")
+        dt = _latest_item_time(comment, "created_at", "submitted_at", "updated_at")
         if dt is None:
             raise RuntimeError("comment missing timestamp")
         if dt <= asked_dt:
@@ -1477,7 +1529,7 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
             return True
 
     for review in state["reviews"]:
-        dt = _item_time(review, "submitted_at", "created_at", "updated_at")
+        dt = _latest_item_time(review, "submitted_at", "created_at", "updated_at")
         if dt is None:
             raise RuntimeError("review missing timestamp")
         if dt <= asked_dt:
@@ -1490,7 +1542,7 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
             return True
 
     for comment in state["review_comments"]:
-        dt = _item_time(comment, "created_at", "submitted_at", "updated_at")
+        dt = _latest_item_time(comment, "created_at", "submitted_at", "updated_at")
         if dt is None:
             raise RuntimeError("review comment missing timestamp")
         if dt <= asked_dt:
@@ -1518,6 +1570,7 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
         ):
             return True
 
+    _ensure_no_unaccounted_target_update(state, asked_dt)
     return False
 
 

@@ -26,6 +26,7 @@ MAINTAINER = {"login": "co-maintainer", "__typename": "User"}
 CONTRIBUTOR = {"login": "contributor", "__typename": "User"}
 OTHER_HUMAN = {"login": "other", "__typename": "User"}
 BOT = {"login": "github-actions[bot]", "__typename": "Bot"}
+REST_BOT = {"login": "release-please", "type": "Bot"}
 BASE = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
@@ -33,16 +34,22 @@ def ts(days=0, seconds=0):
     return (BASE + timedelta(days=days, seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def issue(labels=None, user=CONTRIBUTOR, state="open"):
-    return {
+def issue(labels=None, user=CONTRIBUTOR, state="open", updated_at=None):
+    data = {
         "state": state,
         "user": user,
         "labels": [{"name": name} for name in (labels or [])],
     }
+    if updated_at is not None:
+        data["updated_at"] = updated_at
+    return data
 
 
-def pr(head="sha1", user=CONTRIBUTOR, state="open"):
-    return {"state": state, "head": {"sha": head}, "user": user}
+def pr(head="sha1", user=CONTRIBUTOR, state="open", updated_at=None):
+    data = {"state": state, "head": {"sha": head}, "user": user}
+    if updated_at is not None:
+        data["updated_at"] = updated_at
+    return data
 
 
 def comment(body, when, user=OWNER, cid=1):
@@ -138,6 +145,30 @@ class FakeGitHub:
         self.patch_error = patch_error
         self.timeline_error = timeline_error
         self.calls = []
+        self._fill_target_updated_at()
+
+    def _known_updated_at(self):
+        times = []
+        for item in self.comments + self.reviews + self.review_comments + self.timeline:
+            if not isinstance(item, dict):
+                continue
+            for key in ("created_at", "submitted_at", "updated_at"):
+                dt = core._parse_time(item.get(key))
+                if dt is not None:
+                    times.append(dt)
+            if item.get("event") == "committed":
+                for key in ("author", "committer"):
+                    actor = item.get(key)
+                    if isinstance(actor, dict):
+                        dt = core._parse_time(actor.get("date"))
+                        if dt is not None:
+                            times.append(dt)
+        return core._format_time(max(times)) if times else ts()
+
+    def _fill_target_updated_at(self):
+        updated_at = self._known_updated_at()
+        self.issue.setdefault("updated_at", updated_at)
+        self.pr.setdefault("updated_at", updated_at)
 
     def gh_rest(self, path, method=None, fields=None, jq=None, paginate=False, slurp=False):
         self.calls.append({"path": path, "method": method, "fields": fields})
@@ -417,6 +448,7 @@ def test_maintainer_and_bot_activity_do_not_reset_clock():
             pending_comment(record),
             comment("owner note", ts(1), OWNER, 4),
             comment("bot note", ts(2), BOT, 5),
+            comment("REST bot note", ts(3), REST_BOT, 6),
             reminder_comment(record),
         ],
         reviews=[review(101, ts())],
@@ -440,7 +472,7 @@ def test_exact_timestamp_equality_does_not_count_as_followup():
           closed == {7})
 
 
-def test_review_comment_and_edit_activity_block_close():
+def test_review_comment_and_pr_body_edit_activity_block_close():
     record, fake = base_request_state(
         review_comments=[review_comment(9, ts(1), CONTRIBUTOR)]
     )
@@ -449,12 +481,13 @@ def test_review_comment_and_edit_activity_block_close():
 
     record = request_record()
     fake = FakeGitHub(
+        issue_obj=issue([core.PENDING_CONTRIBUTOR_LABEL], updated_at=ts(12)),
+        pr_obj=pr(updated_at=ts(12)),
         comments=[pending_comment(record), reminder_comment(record)],
         reviews=[review(101, ts())],
-        timeline=[timeline_event("edited", ts(1), OTHER_HUMAN)],
     )
     closed = run(fake, now_days=14)
-    check("activity: contributor edit event blocks close", closed == set())
+    check("fail-open: unaccounted PR body edit blocks close", closed == set())
 
 
 def test_pr_push_activity_blocks_close():
@@ -729,7 +762,7 @@ def main():
     test_contributor_activity_blocks_and_clears_pending_label()
     test_maintainer_and_bot_activity_do_not_reset_clock()
     test_exact_timestamp_equality_does_not_count_as_followup()
-    test_review_comment_and_edit_activity_block_close()
+    test_review_comment_and_pr_body_edit_activity_block_close()
     test_pr_push_activity_blocks_close()
     test_unknown_push_activity_fails_open()
     test_head_change_blocks_and_clears_pending_label()
