@@ -116,6 +116,7 @@ class FakeGitHub:
         review_comments=None,
         timeline=None,
         post_comment_error=False,
+        patch_error=False,
         timeline_error=False,
     ):
         self.issue = issue_obj or issue([core.PENDING_CONTRIBUTOR_LABEL])
@@ -125,6 +126,7 @@ class FakeGitHub:
         self.review_comments = list(review_comments or [])
         self.timeline = list(timeline or [])
         self.post_comment_error = post_comment_error
+        self.patch_error = patch_error
         self.timeline_error = timeline_error
         self.calls = []
 
@@ -138,6 +140,8 @@ class FakeGitHub:
             self.comments.append(new)
             return dict(new)
         if method == "PATCH" and path.endswith("/issues/7"):
+            if self.patch_error:
+                raise RuntimeError("close patch failed")
             self.issue["state"] = "closed"
             self.pr["state"] = "closed"
             return {}
@@ -223,6 +227,12 @@ def test_config_defaults_off_and_per_repo_override():
           core._pending_contributor_cleanup_enabled({"pending_contributor_cleanup": True}, False) is True)
     check("config: default targets are PRs",
           core._pending_contributor_cleanup_targets({}, ["pr"]) == {"pr"})
+    check("config: explicit empty global targets stay empty",
+          core._pending_contributor_cleanup_targets({}, []) == set())
+    check("config: explicit empty repo targets stay empty",
+          core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": []}, ["pr"]) == set())
+    check("config: explicit empty set targets stay empty",
+          core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": set()}, ["pr"]) == set())
 
 
 def test_no_action_before_reminder_threshold():
@@ -327,6 +337,52 @@ def test_close_comment_failure_fails_open():
     check("fail-open: close comment failure does not close", closed == set())
     check("fail-open: close patch not attempted after comment failure",
           not any(c["method"] == "PATCH" for c in fake.calls))
+
+
+def test_close_patch_failure_does_not_repost_close_comment():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        patch_error=True,
+    )
+    closed = run(fake, now_days=14)
+    check("fail-open: close patch failure does not report closed", closed == set())
+    closed = run(fake, now_days=15)
+    close_posts = [
+        c for c in fake.calls
+        if c["method"] == "POST" and c["path"].endswith("/comments")
+        and "I am closing this because I requested changes" in c["fields"]["body"]
+    ]
+    patch_calls = [
+        c for c in fake.calls
+        if c["method"] == "PATCH" and c["path"].endswith("/issues/7")
+    ]
+    check("fail-open: close patch retry still does not report closed", closed == set())
+    check("fail-open: close comment is not reposted on patch retry",
+          len(close_posts) == 1)
+    check("fail-open: close patch is retried without another close comment",
+          len(patch_calls) == 2)
+
+
+def test_existing_unmarked_close_comment_is_idempotent():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[
+            pending_comment(record),
+            reminder_comment(record),
+            comment(core._pending_close_body(record), ts(14), OWNER, 9),
+        ],
+        reviews=[review(101, ts())],
+    )
+    closed = run(fake, now_days=15)
+    close_posts = [
+        c for c in fake.calls
+        if c["method"] == "POST" and c["path"].endswith("/comments")
+        and "I am closing this because I requested changes" in c["fields"]["body"]
+    ]
+    check("close: existing unmarked close comment still closes", closed == {7})
+    check("close: existing unmarked close comment is not reposted", close_posts == [])
 
 
 def test_contributor_activity_blocks_and_clears_pending_label():
@@ -502,6 +558,23 @@ def test_rebase_cleanup_clears_when_pr_no_longer_conflicted():
           core.PENDING_CONTRIBUTOR_LABEL not in labels)
 
 
+def test_legacy_rebase_cleanup_clears_when_pr_no_longer_conflicted():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+    )
+    closed = run(fake, enriched_pr(bucket="review-needed"), now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("legacy rebase: unblocked PR does not close", closed == set())
+    check("legacy rebase: unblocked PR clears stale pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
 def test_untrusted_pending_marker_skips_even_with_label():
     record = request_record()
     fake = FakeGitHub(
@@ -563,6 +636,21 @@ def test_ci_approval_and_disabled_cleanup_are_out_of_scope():
     check("scope: ci-approval targets are ignored even with a pending label",
           closed == set() and fake.calls == [])
 
+    fake = FakeGitHub(comments=[pending_comment(record)], reviews=[review(101, ts())])
+    with patch_rest(fake):
+        closed = core.sweep_pending_contributor_actions(
+            "owner",
+            {"name": "demo"},
+            [enriched_pr()],
+            {"owner", "co-maintainer"},
+            enabled=True,
+            targets=set(),
+            now=BASE + timedelta(days=14),
+        )
+    check("scope: explicit empty cleanup targets do nothing", closed == set())
+    check("scope: explicit empty cleanup targets perform no target reads",
+          fake.calls == [])
+
 
 def main():
     test_config_defaults_off_and_per_repo_override()
@@ -572,6 +660,8 @@ def main():
     test_close_threshold_requires_proven_reminder()
     test_close_after_prior_reminder_and_comment_content()
     test_close_comment_failure_fails_open()
+    test_close_patch_failure_does_not_repost_close_comment()
+    test_existing_unmarked_close_comment_is_idempotent()
     test_contributor_activity_blocks_and_clears_pending_label()
     test_maintainer_and_bot_activity_do_not_reset_clock()
     test_exact_timestamp_equality_does_not_count_as_followup()
@@ -583,6 +673,7 @@ def main():
     test_legacy_rebase_skip_when_timestamp_missing()
     test_legacy_rebase_requires_trusted_marker_author()
     test_rebase_cleanup_clears_when_pr_no_longer_conflicted()
+    test_legacy_rebase_cleanup_clears_when_pr_no_longer_conflicted()
     test_untrusted_pending_marker_skips_even_with_label()
     test_truncated_scan_labels_fall_back_to_target_label_read()
     test_non_arming_signals_do_not_enter_cleanup()

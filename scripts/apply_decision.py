@@ -647,7 +647,8 @@ def do_request_changes(owner, repo, number, head_sha, text):
                 % (repo, number, head_sha[:8], current[:8]),
                 "none",
             )
-        author = str(((pr or {}).get("user") or {}).get("login") or "")
+        target_author = (pr or {}).get("user") or {}
+        author = str(target_author.get("login") or "")
         if author and author.casefold() == owner.casefold():
             return (
                 "Can't request changes on %s#%s: it's your own PR (GitHub "
@@ -669,6 +670,14 @@ def do_request_changes(owner, repo, number, head_sha, text):
             "error",
         )
     if not _pending_contributor_cleanup_active(repo):
+        return (
+            "Requested changes on %s#%s and left the card open." % (repo, number),
+            "none",
+        )
+    maintainer_logins = {str(login).casefold() for login in core.maintainers()}
+    if owner:
+        maintainer_logins.add(owner.casefold())
+    if core._is_non_maintainer_human(target_author, maintainer_logins) is not True:
         return (
             "Requested changes on %s#%s and left the card open." % (repo, number),
             "none",

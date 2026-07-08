@@ -877,6 +877,7 @@ def test_do_request_changes_respects_cleanup_config():
             "per-repo disabled",
         ),
         (cleanup_cfg(targets=("issue",)), "PR target disabled"),
+        (cleanup_cfg(targets=()), "PR targets empty"),
     ):
         fake, calls = fake_gh_rest(open_pr())
         with patch_core(gh_rest=fake, load_config=lambda cfg=cfg: cfg):
@@ -900,6 +901,30 @@ def test_do_request_changes_refuses_self_review():
     check("request-changes: refuses a self-review with a clear error",
           terminal == "error" and "own PR" in message)
     check("request-changes: no review POST attempted for self-review", posts(calls) == [])
+
+
+def test_do_request_changes_does_not_arm_cleanup_for_excluded_authors():
+    cases = [
+        ("maint-login", {"maint-login"}, "maintainer"),
+        ("ci-bot[bot]", set(), "bot"),
+        ("", set(), "blank author"),
+    ]
+    for login, maintainers, label in cases:
+        fake, calls = fake_gh_rest(open_pr(login=login))
+        with patch_core(
+            gh_rest=fake,
+            load_config=lambda: cleanup_cfg(),
+            maintainers=lambda maintainers=maintainers: maintainers,
+        ):
+            message, terminal = ad.do_request_changes(
+                "owner-login", "target-repo", 5, "abc123", "please add a regression test"
+            )
+        check("request-changes: review still posts for %s" % label,
+              terminal == "none" and "Requested changes" in message)
+        check("request-changes: cleanup marker omitted for %s" % label,
+              not any(c["path"].endswith("/issues/5/comments") for c in posts(calls)))
+        check("request-changes: pending label omitted for %s" % label,
+              not any(c["path"].endswith("/issues/5/labels") for c in posts(calls)))
 
 
 def test_do_request_changes_surfaces_api_error():
@@ -1282,6 +1307,7 @@ def main():
     test_do_request_changes_posts_review()
     test_do_request_changes_respects_cleanup_config()
     test_do_request_changes_refuses_self_review()
+    test_do_request_changes_does_not_arm_cleanup_for_excluded_authors()
     test_do_request_changes_surfaces_api_error()
     test_do_request_changes_reports_cleanup_arming_failure_without_consuming()
     test_do_request_changes_review_reread_failure_is_cleanup_only()

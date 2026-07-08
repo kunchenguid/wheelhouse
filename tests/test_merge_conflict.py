@@ -404,6 +404,15 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     check("nudge: cleanup state is not armed when PR target disabled",
           target_disabled_calls["patches"] == [] and target_disabled_calls["labels"] == [])
 
+    _, _, empty_target_calls = run_build_repo(
+        [pr],
+        comments_by_pr={},
+        pending_contributor_cleanup=True,
+        pending_contributor_cleanup_targets=[],
+    )
+    check("nudge: cleanup state is not armed when cleanup targets are empty",
+          empty_target_calls["patches"] == [] and empty_target_calls["labels"] == [])
+
 
 def test_untrusted_rebase_marker_does_not_suppress_nudge():
     comments = {

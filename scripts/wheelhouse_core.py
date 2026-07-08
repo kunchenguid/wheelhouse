@@ -169,6 +169,7 @@ PENDING_CONTRIBUTOR_LABEL = "wheelhouse:pending-contributor-action"
 PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL = "wheelhouse:keep-open"
 PENDING_CONTRIBUTOR_MARKER_PREFIX = "wheelhouse-pending-contributor-action"
 PENDING_CONTRIBUTOR_REMINDER_PREFIX = "wheelhouse-pending-contributor-reminder"
+PENDING_CONTRIBUTOR_CLOSE_PREFIX = "wheelhouse-pending-contributor-close"
 PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
 PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
 
@@ -244,8 +245,7 @@ def load_config():
         ),
         "pending_contributor_cleanup_targets": cfg.get(
             "pending_contributor_cleanup_targets", ["pr"]
-        )
-        or ["pr"],
+        ),
     }
 
 
@@ -787,11 +787,16 @@ def _pending_contributor_reminder_days(repo_cfg, global_default):
 
 
 def _pending_contributor_cleanup_targets(repo_cfg, global_default):
-    v = repo_cfg.get("pending_contributor_cleanup_targets")
-    raw = global_default if v is None else v
+    raw = (
+        repo_cfg.get("pending_contributor_cleanup_targets")
+        if "pending_contributor_cleanup_targets" in repo_cfg
+        else global_default
+    )
+    if raw is None:
+        raw = ["pr"]
     if isinstance(raw, str):
         raw = [raw]
-    if not isinstance(raw, list):
+    if not isinstance(raw, (list, tuple, set)):
         return {"pr"}
     return {str(x).strip().casefold() for x in raw if str(x).strip()}
 
@@ -886,6 +891,10 @@ _PENDING_CONTRIBUTOR_REMINDER_RE = re.compile(
     % re.escape(PENDING_CONTRIBUTOR_REMINDER_PREFIX),
     re.S,
 )
+_PENDING_CONTRIBUTOR_CLOSE_RE = re.compile(
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(PENDING_CONTRIBUTOR_CLOSE_PREFIX),
+    re.S,
+)
 
 
 def _parse_time(value):
@@ -918,6 +927,14 @@ def _pending_contributor_reminder_marker(ask_id, reminded_at):
     payload = {"version": 1, "ask_id": ask_id, "reminded_at": reminded_at}
     return "<!-- %s: %s -->" % (
         PENDING_CONTRIBUTOR_REMINDER_PREFIX,
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _pending_contributor_close_marker(ask_id, closed_at):
+    payload = {"version": 1, "ask_id": ask_id, "closed_at": closed_at}
+    return "<!-- %s: %s -->" % (
+        PENDING_CONTRIBUTOR_CLOSE_PREFIX,
         json.dumps(payload, separators=(",", ":"), sort_keys=True),
     )
 
@@ -1470,6 +1487,37 @@ def _has_reminder(comments, ask_id, maintainer_logins, asked_dt):
     return False
 
 
+def _has_close_attempt(comments, record, maintainer_logins, asked_dt):
+    ask_id = record.get("ask_id")
+    legacy_body = _pending_close_body(record)
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if not _trusted_ask_author(_event_author(comment), maintainer_logins):
+            continue
+        comment_dt = _item_time(comment, "created_at")
+        if comment_dt is None or comment_dt <= asked_dt:
+            continue
+        body = str(comment.get("body") or "")
+        if body.strip() == legacy_body.strip():
+            return True
+        for match in _PENDING_CONTRIBUTOR_CLOSE_RE.finditer(body):
+            try:
+                payload = json.loads(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            closed_dt = _parse_time(payload.get("closed_at"))
+            if (
+                payload.get("ask_id") == ask_id
+                and closed_dt is not None
+                and closed_dt > asked_dt
+            ):
+                return True
+    return False
+
+
 def _pending_reminder_body(record, reminded_at):
     marker = _pending_contributor_reminder_marker(record["ask_id"], reminded_at)
     if record.get("ask_kind") == "needs-rebase":
@@ -1488,7 +1536,7 @@ def _pending_reminder_body(record, reminded_at):
     return text + "\n\n" + marker
 
 
-def _pending_close_body(record):
+def _pending_close_body(record, closed_at=None):
     asked = _parse_time(record.get("asked_at"))
     asked_date = asked.strftime("%Y-%m-%d") if asked else str(record.get("asked_at"))
     if record.get("ask_kind") == "needs-rebase":
@@ -1502,12 +1550,15 @@ def _pending_close_body(record):
             "I am closing this because I requested changes on %s, and I have not seen "
             "a comment or push since then." % asked_date
         )
-    return (
+    body = (
         why
         + "\n\n"
         + "If you still want to keep working on this, please reopen it or open a new PR and mention this one.\n\n"
         + "Happy to take another look when there is an update."
     )
+    if closed_at:
+        body += "\n\n" + _pending_contributor_close_marker(record["ask_id"], closed_at)
+    return body
 
 
 def _post_pending_reminder(slug, number, record, now):
@@ -1518,17 +1569,21 @@ def _post_pending_reminder(slug, number, record, now):
     )
 
 
-def _close_pending_target(slug, number, record):
-    gh_rest(
-        "/repos/%s/issues/%s/comments" % (slug, number),
-        method="POST",
-        fields={"body": _pending_close_body(record)},
-    )
+def _patch_pending_target_closed(slug, number):
     gh_rest(
         "/repos/%s/issues/%s" % (slug, number),
         method="PATCH",
         fields={"state": "closed"},
     )
+
+
+def _close_pending_target(slug, number, record, now):
+    gh_rest(
+        "/repos/%s/issues/%s/comments" % (slug, number),
+        method="POST",
+        fields={"body": _pending_close_body(record, _format_time(now))},
+    )
+    _patch_pending_target_closed(slug, number)
 
 
 def _active_pending_ask_kinds(pr):
@@ -1593,7 +1648,10 @@ def _sweep_pending_pr(
             stale_rebase_records = [
                 r for r in records if r.get("ask_kind") == "needs-rebase"
             ]
-            if stale_rebase_records and not active_records:
+            legacy_rebase_record = _legacy_rebase_record(
+                repo, number, head_sha, state["comments"], maintainer_logins
+            )
+            if (stale_rebase_records or legacy_rebase_record) and not active_records:
                 _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
                 return "activity"
         return "skip"
@@ -1627,7 +1685,10 @@ def _sweep_pending_pr(
             if not has_pending_label:
                 _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
             return "reminded"
-        _close_pending_target(slug, number, record)
+        if _has_close_attempt(state["comments"], record, maintainer_logins, asked_dt):
+            _patch_pending_target_closed(slug, number)
+        else:
+            _close_pending_target(slug, number, record, now)
         return "closed"
     if now >= reminder_at and not reminded:
         _post_pending_reminder(slug, number, record, now)
@@ -1648,7 +1709,13 @@ def sweep_pending_contributor_actions(
     targets=None,
     now=None,
 ):
-    if not enabled or "pr" not in (targets or {"pr"}):
+    if targets is None:
+        effective_targets = {"pr"}
+    elif isinstance(targets, str):
+        effective_targets = {targets.strip().casefold()}
+    else:
+        effective_targets = {str(target).strip().casefold() for target in targets}
+    if not enabled or "pr" not in effective_targets:
         return set()
     name = repo_cfg["name"]
     now = now or datetime.now(timezone.utc)
@@ -1893,7 +1960,10 @@ def build_repo(
         repo_cfg, pending_contributor_cleanup
     )
     cleanup_targets = _pending_contributor_cleanup_targets(
-        repo_cfg, pending_contributor_cleanup_targets or ["pr"]
+        repo_cfg,
+        ["pr"]
+        if pending_contributor_cleanup_targets is None
+        else pending_contributor_cleanup_targets,
     )
     cleanup_days = _pending_contributor_cleanup_days(
         repo_cfg, pending_contributor_cleanup_days
