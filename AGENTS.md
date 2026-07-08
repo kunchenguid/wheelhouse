@@ -43,7 +43,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   refresh the card. The state block also carries `updated_at` unconditionally
   (populated for issue-triage items, empty for pr-review) - it is NON-material,
   existing purely as the issue-triage auto-triage cache key, mirroring how
-  `head_sha` doubles as the pr-review cache key. Automatic triage (pr-review
+  `head_sha` doubles as the pr-review cache key. The state block also carries
+  `activity_reflected_at`, a NON-material target-activity sort stamp. When a
+  target's GitHub `updatedAt` advances past that stamp, Wheelhouse may make one
+  hidden state-only card body edit so GitHub's `sort:updated-desc` issue view
+  surfaces recently active targets first. That stamp is never part of
+  `MATERIAL_FIELDS`, never a triage revision, and never a decision input.
+  Automatic triage (pr-review
   AND issue-triage) adds non-material cache fields such as
   `triaged_sha`, `triage_status`, and `triage_recommendation`; those are
   deliberately outside `MATERIAL_FIELDS` so a triage result never changes

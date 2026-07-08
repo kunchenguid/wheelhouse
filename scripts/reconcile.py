@@ -63,6 +63,7 @@ def current_card(row):
         "body": card.get("body", ""),
         "state": state,
         "labels": card.get("labels", []),
+        "updated_at": render_card.card_updated_at(card),
     }
 
 
@@ -146,6 +147,7 @@ def main():
             "body": card.get("body", ""),
             "state": state,
             "labels": card.get("labels", []),
+            "updated_at": card.get("updated_at", ""),
         }
         existing[key] = row
         cards_with_state.append(row)
@@ -160,6 +162,7 @@ def main():
     #    unknown.
     created = 0
     refreshed = 0
+    activity_reflected = 0
     triage_queued = 0
     has_triage_token = auto_triage_has_token()
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
@@ -197,9 +200,11 @@ def main():
         # or whose held state no longer has a completion path. A card
         # mid-decision (processing/resolved/blocked) or with no trigger is left
         # completely untouched. `upsert_card` re-checks both guards before it edits.
-        if render_card.is_refreshable(ex["labels"]) and render_card.refresh_needed(
+        refreshable = render_card.is_refreshable(ex["labels"])
+        needs_full_refresh = refreshable and render_card.refresh_needed(
             item, ex["state"], has_triage_token
-        ):
+        )
+        if needs_full_refresh:
             try:
                 current = current_card(ex)
                 current_for_triage = current
@@ -218,6 +223,45 @@ def main():
             except Exception as e:
                 print(
                     "::warning::failed to refresh card #%s for %s#%s: %s"
+                    % (ex["number"], item["repo"], item["number"], str(e)[:160])
+                )
+        elif refreshable and render_card.should_auto_triage(
+            item, ex["state"], ex["labels"], has_triage_token
+        ):
+            current_for_triage = current_card(ex)
+        elif render_card.activity_reflection_needed(
+            item, ex["state"], ex["labels"], card_updated_at=ex.get("updated_at", "")
+        ):
+            try:
+                current = current_card(ex)
+                current_for_triage = current
+                if (
+                    current is not None
+                    and render_card.is_refreshable(current["labels"])
+                    and not render_card.refresh_needed(
+                        item, current["state"], has_triage_token
+                    )
+                    and not render_card.should_auto_triage(
+                        item, current["state"], current["labels"], has_triage_token
+                    )
+                    and render_card.activity_reflection_needed(
+                        item,
+                        current["state"],
+                        current["labels"],
+                        card_updated_at=current.get("updated_at", ""),
+                    )
+                ):
+                    if render_card.reflect_activity(
+                        current["number"],
+                        item,
+                        current.get("body", ""),
+                        card_updated_at=current.get("updated_at", ""),
+                    ):
+                        activity_reflected += 1
+                        current_for_triage = current_card(current)
+            except Exception as e:
+                print(
+                    "::warning::failed to reflect activity on card #%s for %s#%s: %s"
                     % (ex["number"], item["repo"], item["number"], str(e)[:160])
                 )
         if current_for_triage is None and render_card.should_auto_triage(
@@ -294,8 +338,9 @@ def main():
             )
 
     print(
-        "reconcile: %d card(s) created, %d refreshed, %d auto-triage queued, %d card(s) closed"
-        % (created, refreshed, triage_queued, closed)
+        "reconcile: %d card(s) created, %d refreshed, %d activity reflected, "
+        "%d auto-triage queued, %d card(s) closed"
+        % (created, refreshed, activity_reflected, triage_queued, closed)
     )
 
 

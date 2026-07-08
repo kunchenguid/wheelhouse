@@ -157,7 +157,7 @@ def scan_payload(items, open_pr_numbers=(42,), open_issue_numbers=()):
 
 
 def run_reconcile(scan, cards, current_cards=None, token="true"):
-    calls = {"upsert": [], "close": [], "mark": [], "dispatch": []}
+    calls = {"upsert": [], "close": [], "mark": [], "dispatch": [], "reflect": []}
     current_by_number = {
         c["number"]: dict(c)
         for c in (cards if current_cards is None else current_cards)
@@ -185,13 +185,34 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         return current_by_number.get(int(number))
 
     def fake_mark(number, it, body):
-        calls["mark"].append({"number": number, "item": it, "body": body})
         current = current_by_number[int(number)]
-        current["body"] = rc.body_with_triage_queued(body, it)
+        new_body = rc.body_with_triage_queued(body, it)
+        calls["mark"].append(
+            {"number": number, "item": it, "body": body, "body_after": new_body}
+        )
+        current["body"] = new_body
         return True
 
     def fake_dispatch(number, it):
         calls["dispatch"].append({"number": number, "item": it})
+
+    def fake_reflect(number, it, body, card_updated_at=""):
+        new_body = rc.body_with_activity_reflected(
+            body, it, card_updated_at=card_updated_at
+        )
+        calls["reflect"].append(
+            {
+                "number": number,
+                "item": it,
+                "body": body,
+                "card_updated_at": card_updated_at,
+                "body_after": new_body,
+            }
+        )
+        if new_body == body:
+            return False
+        current_by_number[int(number)]["body"] = new_body
+        return True
 
     old = (
         sys.argv[:],
@@ -200,6 +221,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         reconcile.render_card.get_card,
         reconcile.render_card.mark_triage_queued,
         reconcile.render_card.dispatch_triage_workflow,
+        reconcile.render_card.reflect_activity,
         os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"),
     )
     reconcile.render_card.upsert_card = fake_upsert
@@ -207,6 +229,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
     reconcile.render_card.get_card = fake_get_card
     reconcile.render_card.mark_triage_queued = fake_mark
     reconcile.render_card.dispatch_triage_workflow = fake_dispatch
+    reconcile.render_card.reflect_activity = fake_reflect
     os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = token
     try:
         with tempfile.TemporaryDirectory() as d:
@@ -227,6 +250,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
             reconcile.render_card.get_card,
             reconcile.render_card.mark_triage_queued,
             reconcile.render_card.dispatch_triage_workflow,
+            reconcile.render_card.reflect_activity,
             old_token,
         ) = old
         if old_token is None:
@@ -461,6 +485,13 @@ def test_structured_recommendation_persists_and_renders_accept():
           state.get("options", [])[0] == "accept-recommendation")
     check("accept render: no bare #127 survives in persisted/visible reason",
           " #127" not in body and "acme/wheelhouse#127" in body)
+    activity_only = dict(state)
+    activity_only["activity_reflected_at"] = "2099-01-01T00:00:00Z"
+    check(
+        "accept availability: activity_reflected_at does not affect accept",
+        rc.accept_recommendation_available(activity_only)
+        == rc.accept_recommendation_available(state),
+    )
 
 
 def test_accept_checkbox_is_conditional_and_never_ci_approval():
@@ -1337,8 +1368,16 @@ def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
         state.get("updated_at") == triaged["updated_at"],
     )
     check(
+        "state(issue): state carries activity_reflected_at",
+        state.get("activity_reflected_at") == triaged["updated_at"],
+    )
+    check(
         "state(issue): updated_at is not a material field",
         "updated_at" not in rc.MATERIAL_FIELDS,
+    )
+    check(
+        "state(issue): activity_reflected_at is not a material field",
+        "activity_reflected_at" not in rc.MATERIAL_FIELDS,
     )
 
 
@@ -1373,6 +1412,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
     check(
         "queue(issue): triaged_sha advances with updated_at",
         requeued_state.get("triaged_sha") == advanced["updated_at"],
+    )
+    check(
+        "queue(issue): activity stamp folds into queued write",
+        requeued_state.get("activity_reflected_at") == advanced["updated_at"],
     )
     stale = item_issue(updated_at="2024-02-01T00:00:00Z")
     rolled_back = rc.body_with_triage_queued(requeued, stale)
@@ -1437,6 +1480,11 @@ def test_should_auto_triage_cache_and_gates_for_issue():
     check(
         "cache(issue): matching triaged_sha (== updated_at) skips triage",
         rc.should_auto_triage(it, fresh_state, pure, has_token=True) is False,
+    )
+    activity_only = dict(fresh_state, activity_reflected_at="2099-01-01T00:00:00Z")
+    check(
+        "cache(issue): activity_reflected_at does not affect triage freshness",
+        rc.should_auto_triage(it, activity_only, pure, has_token=True) is False,
     )
     check(
         "cache(issue): advanced updated_at with old triaged_sha needs triage",
@@ -1562,9 +1610,40 @@ def test_reconcile_queues_after_issue_updated_at_advance():
         len(calls["dispatch"]) == 1,
     )
     check(
+        "reconcile(issue): updated_at advance does not do a separate activity stamp",
+        calls["reflect"] == [],
+    )
+    queued_state = core.parse_state_block(calls["mark"][0]["body_after"])
+    check(
+        "reconcile(issue): queued write folds activity_reflected_at",
+        queued_state.get("activity_reflected_at") == "2024-06-01T00:00:00Z",
+    )
+    check(
         "reconcile(issue): queued triage uses the new updated_at",
         calls["dispatch"]
         and calls["dispatch"][0]["item"]["updated_at"] == "2024-06-01T00:00:00Z",
+    )
+
+
+def test_reconcile_reflects_issue_updated_at_when_auto_triage_disabled():
+    old = item_issue(updated_at="2024-01-01T00:00:00Z", auto_triage_issues=False)
+    old_card = card_row(old)
+    new = item_issue(updated_at="2024-06-01T00:00:00Z", auto_triage_issues=False)
+    calls = run_reconcile(
+        scan_payload([new], open_pr_numbers=(), open_issue_numbers=(42,)), [old_card]
+    )
+    check(
+        "reconcile(issue): disabled triage does not queue",
+        calls["mark"] == [] and calls["dispatch"] == [],
+    )
+    check(
+        "reconcile(issue): disabled triage still reflects target activity",
+        len(calls["reflect"]) == 1,
+    )
+    reflected_state = core.parse_state_block(calls["reflect"][0]["body_after"])
+    check(
+        "reconcile(issue): reflected activity stamp uses new updated_at",
+        reflected_state.get("activity_reflected_at") == "2024-06-01T00:00:00Z",
     )
 
 
@@ -3051,6 +3130,7 @@ def main():
     test_reconcile_dispatch_failure_publish_failure_clears_cache()
     test_reconcile_queues_after_head_refresh()
     test_reconcile_queues_after_issue_updated_at_advance()
+    test_reconcile_reflects_issue_updated_at_when_auto_triage_disabled()
     test_auto_triage_toggles_are_independent_end_to_end()
     test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()

@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           gh api --paginate --slurp \
             "repos/{owner}/{repo}/issues?state=open&per_page=100" \
-            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
+            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
             > cards.json
 
       # Reconcile (create, refresh, close) in THIS repo - default token, so

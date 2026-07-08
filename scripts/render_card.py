@@ -158,6 +158,7 @@ SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL})
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
 MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
+ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -388,7 +389,7 @@ def state_revision(state, kind):
     return (state or {}).get("head_sha", "") or ""
 
 
-def _parse_issue_revision(value):
+def _parse_iso_timestamp(value):
     text = (value or "").strip()
     if not text:
         return None
@@ -401,6 +402,10 @@ def _parse_issue_revision(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _parse_issue_revision(value):
+    return _parse_iso_timestamp(value)
+
+
 def _issue_revision_is_older(revision, state):
     stored = state_revision(state, "issue-triage")
     if not revision or not stored:
@@ -408,6 +413,48 @@ def _issue_revision_is_older(revision, state):
     incoming = _parse_issue_revision(revision)
     current = _parse_issue_revision(stored)
     return bool(incoming and current and incoming < current)
+
+
+def target_activity_timestamp(item):
+    return item.get("updated_at", "") or ""
+
+
+def _activity_reflection_baseline(state, card_updated_at=""):
+    stored = (state or {}).get(ACTIVITY_REFLECTED_FIELD)
+    if stored:
+        parsed = _parse_iso_timestamp(stored)
+        if parsed:
+            return parsed
+    return _parse_iso_timestamp(card_updated_at)
+
+
+def activity_reflection_needed(item, state, labels, card_updated_at=""):
+    if not is_refreshable(labels):
+        return False
+    if not state:
+        return False
+    live = _parse_iso_timestamp(target_activity_timestamp(item))
+    if not live:
+        return False
+    baseline = _activity_reflection_baseline(state, card_updated_at)
+    return bool(baseline and live > baseline)
+
+
+def _state_with_activity_reflected(
+    state, item, card_updated_at="", allow_without_baseline=False
+):
+    live_text = target_activity_timestamp(item)
+    live = _parse_iso_timestamp(live_text)
+    if not live:
+        return dict(state or {})
+    baseline = _activity_reflection_baseline(state, card_updated_at)
+    if baseline and live <= baseline:
+        return dict(state or {})
+    if not baseline and not allow_without_baseline:
+        return dict(state or {})
+    new_state = dict(state or {})
+    new_state[ACTIVITY_REFLECTED_FIELD] = live_text
+    return new_state
 
 
 def triage_fresh(item, state):
@@ -759,6 +806,18 @@ def _replace_state_block(body, state):
     return (body or "").rstrip() + "\n\n" + marker
 
 
+def body_with_activity_reflected(body, item, card_updated_at=""):
+    state = parse_state_block(body)
+    if not state:
+        return body
+    new_state = _state_with_activity_reflected(
+        state, item, card_updated_at=card_updated_at
+    )
+    if new_state == state:
+        return body
+    return _replace_state_block(body, new_state)
+
+
 def _preserve_same_revision_triage(body, existing_body, item, old_state, owner=""):
     """Lift the existing `### Triage` section onto a same-revision refresh
     without spending a new triage attempt.
@@ -836,6 +895,9 @@ def body_with_triage_queued(body, item):
         return body
     clean = remove_triage_section(body)
     new_state = _state_with_triage(state, revision, "queued")
+    new_state = _state_with_activity_reflected(
+        new_state, item, allow_without_baseline=True
+    )
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     if not state.get("held"):
         clean = _publish_decision_section(clean, kind, new_state["options"])
@@ -958,6 +1020,7 @@ def render(item, held=False):
         "kind": kind,
         "head_sha": item.get("head_sha", "") or "",
         "updated_at": item.get("updated_at", "") or "",
+        ACTIVITY_REFLECTED_FIELD: target_activity_timestamp(item),
         "options": base_options,
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
@@ -1071,7 +1134,7 @@ def find_card(marker):
             "--label",
             marker,
             "--json",
-            "number,body,labels",
+            "number,body,labels,updatedAt",
             "--limit",
             "5",
         ]
@@ -1082,7 +1145,7 @@ def find_card(marker):
 
 def get_card(number):
     r = _gh(
-        ["issue", "view", str(number), "--json", "number,body,labels,state"],
+        ["issue", "view", str(number), "--json", "number,body,labels,state,updatedAt"],
         check=False,
     )
     if r.returncode != 0:
@@ -1092,6 +1155,10 @@ def get_card(number):
 
 def issue_is_open(issue):
     return str((issue or {}).get("state", "OPEN")).upper() == "OPEN"
+
+
+def card_updated_at(issue):
+    return (issue or {}).get("updated_at") or (issue or {}).get("updatedAt") or ""
 
 
 def _write_body(body):
@@ -1121,6 +1188,24 @@ def mark_triage_queued(number, item, body):
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
+    return True
+
+
+def reflect_activity(number, item, body, card_updated_at=""):
+    """Bump the card's own updated time with a hidden state-only body edit.
+
+    This never renders the full card, never changes labels, and never comments.
+    """
+    new_body = body_with_activity_reflected(
+        body, item, card_updated_at=card_updated_at
+    )
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    print(
+        "reflected target activity on card #%s for %s"
+        % (number, marker_label(item))
+    )
     return True
 
 
@@ -1374,6 +1459,13 @@ def upsert_card(item, existing=None, has_token=False):
     old_state = parse_state_block(existing.get("body", ""))
     publish_held = held_publish_needed(item, old_state, has_token)
     if not refresh_needed(item, old_state, has_token):
+        if not should_auto_triage(item, old_state, existing.get("labels"), has_token):
+            reflect_activity(
+                number,
+                item,
+                existing.get("body", ""),
+                card_updated_at=card_updated_at(existing),
+            )
         print("skip card #%s for %s: no material change" % (number, marker))
         return number
     held = bool((old_state or {}).get("held")) and not publish_held

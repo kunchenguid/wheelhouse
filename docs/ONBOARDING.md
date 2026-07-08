@@ -46,7 +46,8 @@ Omit it to follow the hub's global and per-repo `auto_triage` config.
 Set it to `false` for high-volume or sensitive dispatched PR-review items that should not spend a Claude turn.
 It cannot force auto triage on when the hub or repo config disables it.
 `auto_triage_issues` is the INDEPENDENT equivalent for dispatched `issue-triage` items - same item-level-opt-out-only rule, own global/per-repo config, never affects `auto_triage` or vice versa.
-Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (the issue's `updatedAt`) so the hub can cache the triage attempt the same way it caches PR triage by `head_sha`; omit it and the item is simply never eligible for automatic issue triage.
+Pass `updated_at` on every dispatch when you have the target's GitHub `updatedAt`, so the hub can reflect target activity onto the Wheelhouse card's own updated time for recently-updated queue sorting.
+For `issue-triage`, `updated_at` is also the triage revision because issues have no head SHA; omit it and the item is simply never eligible for automatic issue triage.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 Do not send `accept-recommendation` in `options`; Wheelhouse inserts that checkbox only from a fresh successful structured auto-triage recommendation, and never for `ci-approval`.

@@ -237,6 +237,17 @@ def test_pr_author_filter_skips_owner_maintainer_and_bots():
     check("author-filter: non-CI PRs do not invoke approve_ci", calls["approve"] == [])
 
 
+def test_pr_items_carry_updated_at_for_activity_sort():
+    pr = pr_node(5, author=HUMAN)
+    pr["updatedAt"] = "2026-02-03T04:05:06Z"
+    result, items, calls = run_build_repo([pr])
+    check("activity-sort: PR item is emitted", len(items) == 1)
+    check(
+        "activity-sort: PR item carries target updatedAt",
+        items and items[0].get("updated_at") == "2026-02-03T04:05:06Z",
+    )
+
+
 def test_ci_approval_author_filter_preserves_safe_auto_approve():
     prs = [
         needs_ci_pr(10, OWNER),
@@ -736,6 +747,7 @@ def test_cleanup_closure_recomputes_addressed_issue_map():
 
 def main():
     test_pr_author_filter_skips_owner_maintainer_and_bots()
+    test_pr_items_carry_updated_at_for_activity_sort()
     test_ci_approval_author_filter_preserves_safe_auto_approve()
     test_ci_approval_author_filter_suppresses_cards_after_approve_failure()
     test_ci_approval_author_filter_bypasses_global_opt_out_for_excluded_author()

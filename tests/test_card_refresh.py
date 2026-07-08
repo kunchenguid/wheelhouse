@@ -55,6 +55,7 @@ def item(**over):
         "bucket": "merge-ready",
         "comp": "pass",
         "tests": "green",
+        "updated_at": "2024-01-01T00:00:00Z",
         "url": "https://github.com/o/lavish-axi/pull/42",
         "summary": "compliance=pass tests=green",
         "recommendation": "Merge it.",
@@ -89,6 +90,10 @@ def test_state_block_carries_material_fields():
     check("state: carries tests", st.get("tests") == "green")
     check("state: carries kind", st.get("kind") == "pr-review")
     check("state: carries priority", st.get("priority") == "med")
+    check(
+        "state: carries activity_reflected_at",
+        st.get("activity_reflected_at") == "2024-01-01T00:00:00Z",
+    )
     check("state: options is material", "options" in rc.MATERIAL_FIELDS)
     # legacy fields are still there (the handler reads these).
     check(
@@ -199,6 +204,16 @@ def test_non_material_change_is_not_a_trigger():
         "change: summary/recommendation-only change -> NOT changed",
         rc.material_changed(item(summary="x", recommendation="y"), st) is False,
     )
+    with_activity = dict(st)
+    with_activity["activity_reflected_at"] = "2024-06-01T00:00:00Z"
+    check(
+        "change: activity_reflected_at-only change -> NOT material",
+        rc.material_changed(item(), with_activity) is False,
+    )
+    check(
+        "activity_reflected_at not in MATERIAL_FIELDS",
+        "activity_reflected_at" not in rc.MATERIAL_FIELDS,
+    )
 
 
 def test_legacy_card_missing_new_fields_refreshes_once():
@@ -239,6 +254,111 @@ def test_change_check_handles_missing_state():
     check(
         "change: None state -> changed (safe refresh)",
         rc.material_changed(item(), None) is True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# target activity reflection: hidden state-only maintenance write
+# --------------------------------------------------------------------------- #
+def test_activity_reflection_stamps_only_state_block_once():
+    old = item(updated_at="2024-01-01T00:00:00Z")
+    body = rc.render(old)["body"]
+    new = item(updated_at="2024-06-01T00:00:00Z")
+    labels_ = labels("needs-decision", "kind:pr-review")
+    check(
+        "activity: newer target updated_at needs reflection",
+        rc.activity_reflection_needed(
+            new, core.parse_state_block(body), labels_, card_updated_at="2024-01-02T00:00:00Z"
+        )
+        is True,
+    )
+    stamped = rc.body_with_activity_reflected(
+        body, new, card_updated_at="2024-01-02T00:00:00Z"
+    )
+    check("activity: body changed", stamped != body)
+    check(
+        "activity: only hidden state block changed",
+        rc._STATE_BLOCK_RE.sub("STATE", stamped)
+        == rc._STATE_BLOCK_RE.sub("STATE", body),
+    )
+    stamped_state = core.parse_state_block(stamped)
+    check(
+        "activity: state stamp advanced",
+        stamped_state.get("activity_reflected_at") == "2024-06-01T00:00:00Z",
+    )
+    check(
+        "activity: second pass is a no-op",
+        rc.body_with_activity_reflected(
+            stamped, new, card_updated_at="2024-01-02T00:00:00Z"
+        )
+        == stamped,
+    )
+
+
+def test_activity_reflection_guards_non_refreshable_and_bad_timestamps():
+    st = state_of(item())
+    newer = item(updated_at="2024-06-01T00:00:00Z")
+    check(
+        "activity: processing card is skipped",
+        rc.activity_reflection_needed(
+            newer, st, labels("needs-decision", "processing"), "2024-01-02T00:00:00Z"
+        )
+        is False,
+    )
+    check(
+        "activity: missing needs-decision is skipped",
+        rc.activity_reflection_needed(
+            newer, st, labels("kind:pr-review"), "2024-01-02T00:00:00Z"
+        )
+        is False,
+    )
+    check(
+        "activity: missing target updated_at is skipped",
+        rc.activity_reflection_needed(
+            item(updated_at=""), st, labels("needs-decision"), "2024-01-02T00:00:00Z"
+        )
+        is False,
+    )
+    check(
+        "activity: malformed target updated_at is skipped",
+        rc.activity_reflection_needed(
+            item(updated_at="not-a-date"),
+            st,
+            labels("needs-decision"),
+            "2024-01-02T00:00:00Z",
+        )
+        is False,
+    )
+    check(
+        "activity: missing state is skipped",
+        rc.activity_reflection_needed(
+            newer, None, labels("needs-decision"), "2024-01-02T00:00:00Z"
+        )
+        is False,
+    )
+
+
+def test_activity_reflection_legacy_uses_card_updated_at_baseline():
+    body = rc.render(item(updated_at="2024-01-01T00:00:00Z"))["body"]
+    legacy_state = core.parse_state_block(body)
+    legacy_state.pop("activity_reflected_at", None)
+    legacy_body = rc._replace_state_block(body, legacy_state)
+    same_or_older = item(updated_at="2024-01-02T00:00:00Z")
+    newer = item(updated_at="2024-06-01T00:00:00Z")
+    check(
+        "activity: legacy card does not stamp when card updated_at is newer",
+        rc.body_with_activity_reflected(
+            legacy_body, same_or_older, card_updated_at="2024-01-03T00:00:00Z"
+        )
+        == legacy_body,
+    )
+    stamped = rc.body_with_activity_reflected(
+        legacy_body, newer, card_updated_at="2024-01-03T00:00:00Z"
+    )
+    check("activity: legacy card stamps after newer target activity", stamped != legacy_body)
+    check(
+        "activity: legacy card without baseline does not one-time stamp",
+        rc.body_with_activity_reflected(legacy_body, newer) == legacy_body,
     )
 
 
@@ -354,6 +474,10 @@ def test_upsert_refreshes_once_on_render_version_alone():
         "upsert: refreshed body carries current render_version",
         new_state is not None
         and new_state.get("render_version") == rc.CARD_RENDER_VERSION,
+    )
+    check(
+        "upsert: render-version refresh carries activity_reflected_at",
+        new_state.get("activity_reflected_at") == it["updated_at"],
     )
     check(
         "upsert: same-head render-version refresh emits NO 'Target updated' comment",
@@ -894,7 +1018,7 @@ def test_upsert_refetches_known_card_before_refresh():
 
 
 def test_upsert_parses_state_block_after_refetch():
-    calls = {"refresh": 0, "old_state": None}
+    calls = {"refresh": 0, "old_state": None, "card_state": None}
     existing = {
         "number": 7,
         "body": rc.render(item())["body"],
@@ -916,6 +1040,7 @@ def test_upsert_parses_state_block_after_refetch():
     def fake_refresh(number, card, existing_, item_, old_state, preserve_triage=True):
         calls["refresh"] += 1
         calls["old_state"] = old_state
+        calls["card_state"] = core.parse_state_block(card.get("body", ""))
         return number
 
     old_get_card = rc.get_card
@@ -939,6 +1064,11 @@ def test_upsert_parses_state_block_after_refetch():
         "upsert: parsed state block used instead of issue state",
         isinstance(calls["old_state"], dict)
         and calls["old_state"].get("priority") == "med",
+    )
+    check(
+        "upsert: material refresh carries activity_reflected_at",
+        calls["card_state"].get("activity_reflected_at")
+        == item(priority="high")["updated_at"],
     )
 
 
@@ -1179,6 +1309,9 @@ def main():
     test_legacy_card_missing_new_fields_refreshes_once()
     test_legacy_triage_marker_still_parses_for_change_check()
     test_change_check_handles_missing_state()
+    test_activity_reflection_stamps_only_state_block_once()
+    test_activity_reflection_guards_non_refreshable_and_bad_timestamps()
+    test_activity_reflection_legacy_uses_card_updated_at_baseline()
     test_render_stamps_current_render_version()
     test_render_stale_true_when_missing_or_older()
     test_render_stale_false_when_current_or_newer()

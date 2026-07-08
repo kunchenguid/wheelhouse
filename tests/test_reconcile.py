@@ -39,6 +39,8 @@ def body_state(
     tests="green",
     priority="med",
     render_version=None,
+    updated_at="2024-01-01T00:00:00Z",
+    activity_reflected_at="2024-01-01T00:00:00Z",
 ):
     state = {
         "repo": repo,
@@ -49,6 +51,8 @@ def body_state(
         "comp": comp,
         "tests": tests,
         "priority": priority,
+        "updated_at": updated_at,
+        "activity_reflected_at": activity_reflected_at,
     }
     if render_version is not None:
         state["render_version"] = render_version
@@ -66,6 +70,7 @@ def work_item(**overrides):
         "bucket": "merge-ready",
         "comp": "pass",
         "tests": "green",
+        "updated_at": "2024-01-01T00:00:00Z",
         "url": "https://github.com/kunchenguid/wheelhouse/pull/42",
         "summary": "compliance=pass tests=green",
         "recommendation": "Merge - compliance and tests are green.",
@@ -76,7 +81,7 @@ def work_item(**overrides):
 
 
 def run_reconcile(scan, cards, current_cards=None):
-    calls = {"upsert": [], "close": []}
+    calls = {"upsert": [], "close": [], "reflect": []}
     current_by_number = {
         c["number"]: c for c in (cards if current_cards is None else current_cards)
     }
@@ -92,13 +97,33 @@ def run_reconcile(scan, cards, current_cards=None):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
+    def fake_reflect(number, item, body, card_updated_at=""):
+        new_body = reconcile.render_card.body_with_activity_reflected(
+            body, item, card_updated_at=card_updated_at
+        )
+        calls["reflect"].append(
+            {
+                "number": number,
+                "item": item,
+                "body": body,
+                "card_updated_at": card_updated_at,
+                "body_after": new_body,
+            }
+        )
+        if new_body == body:
+            return False
+        current_by_number[int(number)]["body"] = new_body
+        return True
+
     old_argv = sys.argv[:]
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
+    old_reflect = reconcile.render_card.reflect_activity
     reconcile.render_card.upsert_card = fake_upsert
     reconcile.render_card.close_card = fake_close
     reconcile.render_card.get_card = fake_get_card
+    reconcile.render_card.reflect_activity = fake_reflect
     try:
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
@@ -115,6 +140,7 @@ def run_reconcile(scan, cards, current_cards=None):
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
+        reconcile.render_card.reflect_activity = old_reflect
     return calls
 
 
@@ -146,6 +172,7 @@ def card(labels_, kind="pr-review", render_version=None):
         "body": body_state(kind=kind, render_version=render_version),
         "labels": labels_,
         "title": "[wheelhouse#42] Ready PR",
+        "updated_at": "2024-01-02T00:00:00Z",
     }
 
 
@@ -362,6 +389,121 @@ def test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile():
     check("reconcile: no close for a card still in the worklist", calls["close"] == [])
 
 
+def test_target_activity_newer_gets_state_only_reflection_once():
+    matched_options = ["merge", "close", "hold"]
+    fresh_card = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
+        render_version=reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    active = work_item(
+        options=matched_options,
+        updated_at="2024-06-01T00:00:00Z",
+    )
+    calls = run_reconcile(scan_payload(items=[active]), [fresh_card])
+    check("reconcile: activity reflection edits once", len(calls["reflect"]) == 1)
+    check("reconcile: activity reflection is not a full refresh", calls["upsert"] == [])
+    check("reconcile: activity reflection does not close/comment via close path", calls["close"] == [])
+    before = calls["reflect"][0]["body"] if calls["reflect"] else ""
+    after = calls["reflect"][0]["body_after"] if calls["reflect"] else ""
+    check(
+        "reconcile: activity reflection changes only hidden state",
+        reconcile.render_card._STATE_BLOCK_RE.sub("STATE", before)
+        == reconcile.render_card._STATE_BLOCK_RE.sub("STATE", after),
+    )
+    next_card = dict(fresh_card, body=after, updated_at="2024-06-01T00:00:01Z")
+    second = run_reconcile(scan_payload(items=[active]), [next_card])
+    check("reconcile: second activity pass is no-op", second["reflect"] == [])
+
+
+def test_target_activity_reflection_skips_non_pending_and_bad_timestamps():
+    matched_options = ["merge", "close", "hold"]
+    active = work_item(options=matched_options, updated_at="2024-06-01T00:00:00Z")
+    for label_name in ("processing", "resolved", "blocked"):
+        calls = run_reconcile(
+            scan_payload(items=[active]),
+            [
+                card(
+                    labels(
+                        "needs-decision",
+                        label_name,
+                        "repo:wheelhouse",
+                        "kind:pr-review",
+                    ),
+                    render_version=reconcile.render_card.CARD_RENDER_VERSION,
+                )
+            ],
+        )
+        check("reconcile: %s card is not activity-stamped" % label_name, calls["reflect"] == [])
+    missing_needs = run_reconcile(
+        scan_payload(items=[active]),
+        [
+            card(
+                labels("repo:wheelhouse", "kind:pr-review"),
+                render_version=reconcile.render_card.CARD_RENDER_VERSION,
+            )
+        ],
+    )
+    malformed = run_reconcile(
+        scan_payload(items=[work_item(options=matched_options, updated_at="bad")]),
+        [
+            card(
+                labels("needs-decision", "repo:wheelhouse", "kind:pr-review"),
+                render_version=reconcile.render_card.CARD_RENDER_VERSION,
+            )
+        ],
+    )
+    missing = run_reconcile(
+        scan_payload(items=[work_item(options=matched_options, updated_at="")]),
+        [
+            card(
+                labels("needs-decision", "repo:wheelhouse", "kind:pr-review"),
+                render_version=reconcile.render_card.CARD_RENDER_VERSION,
+            )
+        ],
+    )
+    check("reconcile: missing needs-decision is not activity-stamped", missing_needs["reflect"] == [])
+    check("reconcile: malformed target updated_at is not activity-stamped", malformed["reflect"] == [])
+    check("reconcile: missing target updated_at is not activity-stamped", missing["reflect"] == [])
+
+
+def test_target_activity_reflection_uses_legacy_card_updated_at_baseline():
+    matched_options = ["merge", "close", "hold"]
+    legacy = card(
+        labels("needs-decision", "repo:wheelhouse", "kind:pr-review"),
+        render_version=reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    state = reconcile.core.parse_state_block(legacy["body"])
+    state.pop("activity_reflected_at", None)
+    legacy["body"] = reconcile.render_card._replace_state_block(legacy["body"], state)
+    active = work_item(options=matched_options, updated_at="2024-01-02T00:00:00Z")
+    no_churn = run_reconcile(scan_payload(items=[active]), [legacy])
+    check("reconcile: legacy card baseline prevents one-time stamp", no_churn["reflect"] == [])
+    newer = dict(legacy, updated_at="2024-01-02T00:00:00Z")
+    newer_activity = work_item(options=matched_options, updated_at="2024-06-01T00:00:00Z")
+    stamped = run_reconcile(scan_payload(items=[newer_activity]), [newer])
+    check("reconcile: legacy card stamps once target passes card updated_at", len(stamped["reflect"]) == 1)
+
+
+def test_failed_repo_scan_leaves_cards_unstamped():
+    calls = run_reconcile(
+        scan_payload(items=[], ok=False),
+        [
+            card(
+                labels("needs-decision", "repo:wheelhouse", "kind:pr-review"),
+                render_version=reconcile.render_card.CARD_RENDER_VERSION,
+            )
+        ],
+    )
+    check("reconcile: failed repo scan does not reflect activity", calls["reflect"] == [])
+    check("reconcile: failed repo scan does not close card", calls["close"] == [])
+
+
 def test_render_stale_processing_card_is_not_refreshed_via_reconcile():
     """The is_refreshable guard still gates the render-version trigger inside
     reconcile: a processing card is never refreshed just because it is
@@ -439,6 +581,10 @@ def main():
     test_open_target_that_left_worklist_uses_current_labels_before_close()
     test_render_stale_only_pure_card_is_refreshed_via_reconcile()
     test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile()
+    test_target_activity_newer_gets_state_only_reflection_once()
+    test_target_activity_reflection_skips_non_pending_and_bad_timestamps()
+    test_target_activity_reflection_uses_legacy_card_updated_at_baseline()
+    test_failed_repo_scan_leaves_cards_unstamped()
     test_render_stale_processing_card_is_not_refreshed_via_reconcile()
     test_open_target_without_needs_decision_is_left_alone()
     test_truncated_repo_scan_does_not_self_heal_close_missing_issue()
