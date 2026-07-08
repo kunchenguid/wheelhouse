@@ -60,7 +60,7 @@ If the existing card is still a pure `needs-decision` card and a material field 
 The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
 `pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
-A stale render version can also apply internal card-body repairs, such as qualifying bare target refs preserved in older cached `Triage` sections.
+A stale render version can also apply internal card-body repairs, such as qualifying bare target refs and labeling known automated harness status lines preserved in older cached `Triage` sections.
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.

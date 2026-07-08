@@ -177,7 +177,8 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 #
 # Bumped 3 -> 4 to publish the conditional `Accept recommendation` checkbox
 # and suppress the deterministic top-level recommendation when a structured
-# triage recommendation is present.
+# triage recommendation is present. Bumped 4 -> 5 to label known
+# claude-code-action harness polling/status lines in card-visible agent output.
 CARD_RENDER_VERSION = 5
 
 ACCEPT_ALLOWED_BY_KIND = {
@@ -331,11 +332,12 @@ def material_changed(item, state):
 def render_stale(state):
     """True when the card's stored `render_version` is behind the current
     `CARD_RENDER_VERSION` - a non-material, one-time re-render trigger for
-    display-only or card-body repair fixes (e.g. dropping the author @mention
-    or re-qualifying cached triage refs) that have no material-field trigger.
-    A missing `render_version` (a card written before
-    this field existed) reads as version 0, so it is stale exactly once. Pure
-    and side-effect free, like `material_changed`."""
+    display-only or card-body repair fixes (e.g. dropping the author @mention,
+    re-qualifying cached triage refs, or labeling cached automated status
+    transcript lines) that have no material-field trigger. A missing
+    `render_version` (a card written before this field existed) reads as
+    version 0, so it is stale exactly once. Pure and side-effect free, like
+    `material_changed`."""
     raw_version = (state or {}).get("render_version", 0)
     if isinstance(raw_version, bool):
         stored_version = 0
@@ -671,7 +673,9 @@ def triage_section(triage=None, error=None, owner="", repo=""):
     """Render the visible `### Triage` block. `owner`+`repo` (the TARGET slug
     from deterministic card state, never from the model) qualify any bare
     `#N` cross-repo reference in the model's triage text so it does not
-    autolink to this CARDS repo instead of the target."""
+    autolink to this CARDS repo instead of the target. Known harness
+    polling/status transcript lines are preserved and labeled as automated
+    status for display only."""
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
         lines.append(
@@ -759,11 +763,11 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     """Lift the existing `### Triage` section onto a same-revision refresh
     without spending a new triage attempt.
 
-    Before reinserting it, re-qualify any bare `#N` cross-repo ref it carries.
-    `owner` is always `GITHUB_REPOSITORY_OWNER`; the target repo name comes from
-    the card's deterministic `old_state["repo"]` (falling back to the item),
-    never from the cached triage text itself - same trust rule as fresh triage
-    rendering."""
+    Before reinserting it, re-qualify any bare `#N` cross-repo ref it carries
+    and label any known automated status transcript lines. `owner` is always
+    `GITHUB_REPOSITORY_OWNER`; the target repo name comes from the card's
+    deterministic `old_state["repo"]` (falling back to the item), never from
+    the cached triage text itself - same trust rule as fresh triage rendering."""
     kind = item.get("kind", "pr-review")
     if kind not in AUTO_TRIAGE_FLAG_BY_KIND:
         return body
@@ -1328,9 +1332,10 @@ def upsert_card(item, existing=None, has_token=False):
       * A refresh runs when a MATERIAL field changed, the card's stored
         `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
         terminating re-render for display-only fixes and card-body repairs like
-        cached triage ref qualification), or a held card must be published
-        because auto triage is no longer eligible; a card with none of those
-        triggers is a full no-op (no body edit, no label churn, no comment).
+        cached triage ref qualification or automated-status labeling), or a
+        held card must be published because auto triage is no longer eligible;
+        a card with none of those triggers is a full no-op (no body edit, no
+        label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment. A held card whose refreshed
