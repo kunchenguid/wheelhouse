@@ -86,6 +86,8 @@ maintainer: ""
 # The card gains a Summary, Product implications, and Recommended next step.
 # A fresh successful structured recommendation may add an Accept recommendation
 # checkbox, but it still never acts unless the owner/maintainer ticks it.
+# Known claude-code-action harness polling/status lines are preserved but
+# labeled as automated status in card text.
 # A brand-new eligible card is first labeled pending-triage and shows no
 # decision checkboxes until that attempt completes or fails open.
 # This never acts and never changes routing; it only gives owner-facing context.
@@ -105,6 +107,8 @@ auto_triage: true
 # next step shape as PR auto triage, with the same possible Accept
 # recommendation shortcut for issue-safe actions; same advisory-only,
 # never-acts-unless-ticked guarantee.
+# Known claude-code-action harness polling/status lines are preserved but
+# labeled as automated status in card text.
 # Set false to opt out for token-spend control, or override per repo above with
 # `auto_triage_issues: false`.
 auto_triage_issues: true
@@ -119,7 +123,9 @@ auto_triage_issues: true
 # "needs token" note on the card instead of silently no-opping. The optional
 # READONLY_TOKEN secret enables scoped read-only search across the target repo
 # and configured fleet repos; without it deep review keeps the legacy no-shell,
-# Read/Grep/Glob-only behavior. All Claude-powered paths use the pinned
+# Read/Grep/Glob-only behavior. Known claude-code-action harness polling/status
+# lines are preserved in the posted verdict but labeled as automated status.
+# All Claude-powered paths use the pinned
 # claude-code-action v1.0.161 commit and pass `--model sonnet` to every Claude
 # step.
 

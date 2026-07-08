@@ -55,8 +55,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   block also carries `render_version`, another
   non-material field alongside `triaged_sha`: it is a one-time re-render
   trigger stamped by `render()` (see "Card refresh" in Sharp edges) that exists
-  purely so a display-only fix (e.g. the author `@mention` drop) propagates to
-  already-open cards; it is never a `MATERIAL_FIELDS` member and never
+  purely so a display-only fix (e.g. the author `@mention` drop or automated
+  status labeling) propagates to already-open cards; it is never a
+  `MATERIAL_FIELDS` member and never
   influences classification. `render_card.py` writes that marker, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
@@ -106,7 +107,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
   automatic triage section rendering, structured recommendation persistence,
   conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
-  updates, and trusted triage-result card edits that publish held cards),
+  updates, automated-status labeling for known harness transcript lines, and
+  trusted triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; non-checkbox actions including `comment`, `decline`, and
   pr-review-only `request-changes`; the virtual `accept-recommendation` checkbox
@@ -199,8 +201,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `4`: the
-  3 -> 4 bump publishes the conditional `Accept recommendation` checkbox and
+  it is not a material field). `CARD_RENDER_VERSION` is currently `5`: the
+  4 -> 5 bump labels known claude-code-action harness polling/status transcript
+  lines in card-visible auto-triage output and older cached `### Triage`
+  sections without stripping content; the 3 -> 4 bump publishes the
+  conditional `Accept recommendation` checkbox and
   suppresses the top-level deterministic recommendation when structured triage
   recommendation state is present; the 2 -> 3 bump publishes the
   `/request-changes <text>` PR-review slash hint on already-open cards; the
@@ -215,10 +220,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   the item's repo), NEVER the model's own text. This is the same one-time,
   self-terminating propagation shape as the earlier author `@mention` drop:
   every pre-existing card refreshes once, gets its cached triage refs
-  qualified and its `render_version` stamped with the current version, and the
-  next scan is a full no-op.
+  qualified, known automated status lines labeled, and its `render_version`
+  stamped with the current version, and the next scan is a full no-op.
   The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
-  `#N` so qualifying the whole section string leaves them intact.
+  `#N` and do not match the automated-status allowlist, so repairing the whole
+  section string leaves them intact.
   The shared pure helpers live in `render_card.py`
   (`material_changed`, `render_stale`, `held_publish_needed`, `refresh_needed`,
   `is_refreshable`, `plan_label_update`); `reconcile.py`
@@ -641,7 +647,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   meant for the target - it would silently mislink to the cards repo instead.
   Every surface where model text is rendered/posted onto a card runs it
   through the one shared, deterministic `wheelhouse_core.qualify_issue_refs(text,
-  owner, repo)` first, which rewrites a bare GitHub-autolink `#N` to
+  owner, repo)` before display or action, which rewrites a bare GitHub-autolink `#N` to
   `owner/repo#N` (already-qualified `owner/repo#N`, full URLs, markdown-link
   URLs, and non-reference `#` uses like `GH-123`/`#123abc`/`foo#N` are left
   untouched; null-safe and idempotent). `owner` is always
@@ -649,18 +655,27 @@ still appears where it's plain English, e.g. "triage the queue".)
   card's deterministic state (`state["repo"]`) - NEVER derived from the
   model's own output, so the model cannot redirect qualification by naming a
   different repo in its text.
+  For auto-triage and deep-review card text, trusted code also runs the same
+  card-visible output through `render_card.label_automated_status_lines`, which
+  preserves a narrow allowlist of claude-code-action harness polling/status lines
+  but prefixes them with `AUTOMATED_STATUS_LABEL` as presentation metadata.
+  It is deliberately line-oriented and conservative: no text is stripped, and
+  action routing, owner gates, token handling, and target posting behavior are
+  unchanged.
   The three live model-output surfaces: (1) auto-triage -
   `render_card.py`'s `triage_section`/`body_with_triage_result` thread
   `owner`+`state["repo"]` through before rendering the `### Triage` block, and
+  label known harness status lines after qualification;
   `recommendation_for_state` plus `apply_decision._accept_recommendation` qualify
   stored `recommended_reason` text before it can drive a target comment, a
   decline/close note, or a request-changes review (the `triage-apply`/
   `triage-fail` CLI read `GITHUB_REPOSITORY_OWNER` and `triage.yml`'s
   "Update the decision card" step passes it through its `env -i` sandbox);
   (2) deep-review - the "Post the verdict on the card" step in
-  `deep-review.yml` imports `wheelhouse_core` in its trusted Python heredoc and
-  qualifies the extracted verdict with the `resolve` step's deterministic
-  `repo` output before `gh issue comment`; (3) NL answer/clarify -
+  `deep-review.yml` imports `render_card` and `wheelhouse_core` in its trusted
+  Python heredoc, labels known harness status lines, and qualifies the extracted
+  verdict with the `resolve` step's deterministic `repo` output before posting
+  via `gh issue comment`; (3) NL answer/clarify -
   `apply_decision.route_decision` (the same trust-boundary function that
   validates the LLM's structured result) qualifies `out["answer"]` using the
   card's `state["repo"]` and a caller-supplied `owner` before returning, so
@@ -669,9 +684,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   `GITHUB_REPOSITORY_OWNER` from env and the `route` step in
   decision-handler.yml passes it through its own `env -i` sandbox.
   The same helper also runs during `_preserve_same_revision_triage` on
-  same-revision refreshes, so cached pre-qualification `### Triage` sections in
-  already-open cards are repaired before being reinserted; this is a card-body
-  sweep only and does not rewrite historical card comments.
+  same-revision refreshes, and `label_automated_status_lines` runs there too, so
+  cached pre-qualification or pre-labeling `### Triage` sections in already-open
+  cards are repaired before being reinserted; this is a card-body sweep only and
+  does not rewrite historical card comments.
   All three
   prompts (`triage.yml`, `deep-review.yml`, and the NL prompt in
   `apply_decision.build_nl_prompt`) also carry a defense-in-depth instruction
@@ -696,7 +712,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   For a pr-review card it checks out the target PR head read-only with `FLEET_TOKEN`, `persist-credentials: false`, and verifies the head did not move since queueing.
   For an issue-triage card it checks out the repo's DEFAULT branch read-only the same way (same substrate `deep-review.yml` uses for an issue card) - there is no head to verify.
   Both paths then run Claude with lower `--max-turns` than deep-review to produce structured `{summary, product_implications, recommended_action, recommended_reason}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff) and asks for an issue-appropriate action set, while the pr-review prompt keeps the PR title/body/diff and a PR action set.
-  Trusted code still renders the visible `### Triage` section, including a human-readable Recommended next step line, with `github.token`, never by Claude directly.
+  Trusted code still renders the visible `### Triage` section, including a human-readable Recommended next step line, with `github.token`, never by Claude directly, and labels known harness polling/status transcript lines as automated status.
   When the structured action is fresh, successful, per-kind allowlisted, and has any required reason text, trusted code persists `triage_recommendation` and may add the `Accept recommendation` checkbox.
   The result is advisory until the owner/maintainer ticks that checkbox, at which point `apply_decision.py` maps it to an existing deterministic action with the same guards.
   Apart from publishing a held card's own `pending-triage` label and placeholder decision section, plus that conditional accept shortcut, it never changes classification, managed labels, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
@@ -715,7 +731,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   No deterministic downstream step reads model-written files because verdict capture uses the action `execution_file` result event.
   Claude does not write a verdict file.
   The Claude action allows only `github-actions[bot]` as a bot actor so the maintainer-gated Investigate dispatch can pass; it must not allow `*` or any external bot actor.
-  Its final response is captured from the action's `execution_file` output by preferring the clean `type: "result"` event's `result` string, falling back to the last assistant text, and the trusted workflow step posts that text as a card comment with `github.token`.
+  Its final response is captured from the action's `execution_file` output by preferring the clean `type: "result"` event's `result` string, falling back to the last assistant text, and the trusted workflow step labels known harness polling/status transcript lines, qualifies target refs, then posts that text as a card comment with `github.token`.
   If no usable output is present, the workflow posts "Deep review ran but produced no verdict (see the workflow run logs)." and fails the run.
   The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of silently no-opping.
   Manual triggering means there is no runaway-cost reason for a config flag, so the old `deep_review` flag was removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.
@@ -771,14 +787,14 @@ Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
 - `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, and surfaces a raw API failure as an `"error"` terminal state.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
-- `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and the current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a card already at the current version with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
+- `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
-- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
+- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
+- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.

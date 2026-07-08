@@ -37,6 +37,7 @@ The deterministic core (ingest + decision-handler + scan-backstop) runs with a s
 Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three LLM features can also use an optional `READONLY_TOKEN` for scoped read-only search across the target repo and configured fleet repos.
 When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
+For auto triage and deep review, trusted rendering also preserves known claude-code-action harness polling/status transcript lines but prefixes them with `[automated status]` so they are visible as metadata instead of review substance.
 When auto triage will run for a newly created PR-review or issue-triage card, Wheelhouse holds the card under `pending-triage` and publishes the decision boxes only after that first attempt records a result or an unavailable note.
 
 ## Setup - a numbered checklist
@@ -147,6 +148,7 @@ Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TO
 
 - **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and a Recommended next step into the card.
   The workflow asks for structured `recommended_action` and `recommended_reason` fields; trusted code normalizes them and only adds *Accept recommendation* when the action is safe for that card kind and any required reason text is present.
+  If a captured field is one of the known claude-code-action harness polling/status lines, trusted rendering preserves it and labels it `[automated status]`.
   It is cached by PR head SHA, so an unchanged hourly scan does not re-run it.
   Newly created eligible cards are rendered as `pending-triage` placeholders and queued for that first triage attempt in the same scan or ingest run that creates them.
   The placeholder has no decision checkboxes, and the normal card is published when the attempt succeeds, fails, times out, or cannot be started.
@@ -156,6 +158,7 @@ Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TO
 - **Deep review (always-on)** - tick a card's *Investigate* box and Claude reviews the target's checked-out code without executing it.
   The repo owner can also apply the `needs-deep-review` label or run the `deep-review` workflow with only the decision-card issue number; that manual workflow path fetches the current card body with this repo's token.
   The workflow captures Claude's final response and posts it as the code-grounded merit/triage verdict.
+  Known claude-code-action harness polling/status transcript lines are preserved in that verdict but labeled `[automated status]` before posting.
   There is **no flag** - it runs whenever you trigger it, as long as the token is set.
   With the token missing it posts a one-line "needs token" note on the card so you know why nothing ran.
   With an optional public-read `READONLY_TOKEN`, it can use the same scoped `wheelhouse-search` wrapper for advisory related-work and code context.
@@ -184,6 +187,7 @@ Auto triage and deep review's no-token branches run with Read/Grep/Glob only, no
 When `READONLY_TOKEN` is present, search-enabled Claude steps receive it as GitHub CLI credentials for the scoped search wrapper.
 Auto triage's GitHub write is the workflow-owned card edit, deep review's GitHub write is the workflow-owned card comment, `nl_decisions` actions are performed by the deterministic handler, and `READONLY_TOKEN` never authorizes an action.
 Before auto-triage text, deep-review verdicts, or plain-English answer/clarify replies are posted back on a decision card, trusted workflow code rewrites bare GitHub `#N` refs to the target repo's `<owner>/<repo>#N` using deterministic card state, never the model's own text.
+For auto-triage text and deep-review verdicts, trusted code also labels known automated harness polling/status lines without stripping them.
 Already-qualified refs, URLs, Markdown link destinations, and code spans/blocks are left alone; the prompts ask Claude to write qualified refs too, but the rewrite is the guarantee.
 The merge thank-you comment is intentionally outside that rewrite because it is posted on the target PR itself.
 Deep review goes a step further: it explores the target's checked-out code without executing it, with **no `FLEET_TOKEN` left on disk** and **no ability to run the target's code**, so even a malicious PR can at worst produce a wrong verdict, never a compromise (see [Security notes](#security-notes)).
@@ -256,7 +260,7 @@ For refresh, auto-triage, and self-healing, a "pure pending" card means it has `
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
-The current render-version sweep publishes the conditional *Accept recommendation* checkbox behavior on already-open cards, keeps the PR-review `/request-changes <text>` slash hint sweep, and preserves the earlier cached `Triage` repair that qualifies bare target `#N` refs.
+The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
@@ -336,7 +340,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.
   Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
   The model cannot redirect that slug by naming a repo in its output, and the deterministic rewrite is the guarantee even though the prompts also ask for fully-qualified refs.
-  The render-version sweep also re-applies that rewrite to preserved cached `Triage` sections in card bodies; it does not rewrite already-posted card comments.
+  Auto-triage rendering and deep-review posting also label a narrow allowlist of claude-code-action harness polling/status transcript lines with `[automated status]`; this is display metadata only and does not strip content or change routing.
+  The render-version sweep also re-applies the ref rewrite and automated-status labels to preserved cached `Triage` sections in card bodies; it does not rewrite already-posted card comments.
 - **Deep review is code-grounded but sandboxed.** To review the real code, deep review checks out the target repo into the runner using `FLEET_TOKEN` - but only for the clone, with `persist-credentials: false`, so **no token is ever written to disk**.
   The Claude step that follows never gets `FLEET_TOKEN`.
   Without `READONLY_TOKEN`, it gets this repo's token and is restricted to **read-only** tools (`Read`/`Grep`/`Glob`) with **no shell**.
@@ -421,25 +426,25 @@ wheelhouse.config.yml          the one file you edit
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
   scan-backstop.yml            hourly scan -> create, refresh, or close cards against live repo state
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
-  deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow posts Claude's verdict
+  deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, CI safety, auto-approval, ref qualification, and scan logs
-  render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/close cards; queue/update auto triage
+  render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
 tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
-tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, and render-version triage ref repair
+tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
-tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, and workflow isolation
-tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting
+tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
+tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting, including ref qualification and automated-status labeling
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)

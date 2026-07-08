@@ -14,6 +14,8 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
+# Trusted rendering preserves known claude-code-action harness polling/status
+# transcript lines but labels them as automated status in the visible card text.
 #
 # For a pr-review card this checks out the PR head and verifies it did not move.
 # For an issue-triage card there is no head to verify - it checks out the

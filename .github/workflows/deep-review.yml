@@ -15,6 +15,9 @@ name: deep-review
 # In each case this workflow checks out the TARGET repo's code read-only, runs
 # Claude over it, captures Claude's final response from the action output, and
 # posts that merit / triage verdict as a card comment.
+# Known claude-code-action harness polling/status transcript lines are preserved
+# but labeled before posting, so they are visible as metadata rather than review
+# substance.
 #
 # There is NO enable flag. The only thing it needs is the CLAUDE_CODE_OAUTH_TOKEN
 # secret (a Claude *subscription* token from `claude setup-token`, NOT an
@@ -448,6 +451,8 @@ jobs:
       # The workflow does the posting, not Claude. The action exposes the Claude
       # SDK event log as `execution_file`; the final `result` event is the clean
       # closing assistant message, with the last assistant text as a fallback.
+      # Trusted code labels known automated harness status lines and qualifies
+      # target refs before posting.
       # If no usable verdict exists, self-explain and fail the run.
       - name: Post the verdict on the card
         if: ${{ always() && steps.gate.outputs.enabled == 'true' }}
@@ -496,6 +501,7 @@ jobs:
           import sys
 
           sys.path.insert(0, "scripts")
+          import render_card as cards
           import wheelhouse_core as core
 
           FALLBACK = "Deep review ran but produced no verdict (see the workflow run logs)."
@@ -560,9 +566,11 @@ jobs:
                   failed = True
 
           # The card lives in THIS (cards) repo, but the verdict is about the
-          # TARGET repo - qualify any bare `#N` the model wrote so it does not
-          # autolink to this repo instead. Owner/repo come from the
-          # deterministic `resolve` step output, never from the model text.
+          # TARGET repo. Label known automated harness status lines, then
+          # qualify any bare `#N` the model wrote so it does not autolink to
+          # this repo instead. Owner/repo come from the deterministic `resolve`
+          # step output, never from the model text.
+          verdict = cards.label_automated_status_lines(verdict)
           verdict = core.qualify_issue_refs(
               verdict,
               os.environ.get("GITHUB_REPOSITORY_OWNER", ""),

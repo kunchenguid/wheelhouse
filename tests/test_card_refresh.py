@@ -452,6 +452,84 @@ def test_render_version_refresh_preserves_triage_section():
     )
 
 
+def test_render_version_refresh_labels_preserved_triage_status_lines():
+    it = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(it)["body"], it),
+        it["head_sha"],
+        triage={
+            "summary": "Waited for background terminal 60s.",
+            "product_implications": "No product risk.",
+            "recommended_next_step": "merge - still safe.",
+        },
+    )
+    legacy = triaged.replace(
+        "`[automated status]` Waited for background terminal 60s.",
+        "Waited for background terminal 60s.",
+    )
+    stale_state = core.parse_state_block(legacy)
+    stale_state["render_version"] = rc.CARD_RENDER_VERSION - 1
+    stale_body = rc._replace_state_block(legacy, stale_state)
+    existing = {
+        "number": 7,
+        "body": stale_body,
+        "labels": labels(
+            "needs-decision",
+            "repo:lavish-axi",
+            "kind:pr-review",
+            "priority:med",
+            "target:lavish-axi-42",
+        ),
+    }
+
+    calls = {"comments": []}
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-body"
+
+    rc._write_body = fake_write
+    rc._gh = (
+        lambda args, check=True: calls["comments"].append(args)
+        if "comment" in args
+        else None
+    )
+    rc.os.unlink = lambda path: None
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    try:
+        rc.upsert_card(it, existing=existing)
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+
+    body = calls.get("body", "")
+    state = core.parse_state_block(body)
+    labeled_line = (
+        "- **Summary:** `[automated status]` Waited for background terminal 60s."
+    )
+    check(
+        "render-version refresh: preserved status line is labeled",
+        labeled_line in body,
+    )
+    check(
+        "render-version refresh: status line is not double-labeled",
+        body.count("`[automated status]` Waited for background terminal 60s.") == 1,
+    )
+    check(
+        "render-version refresh: labeled body stamped current version",
+        state is not None and state.get("render_version") == rc.CARD_RENDER_VERSION,
+    )
+
+
 def test_render_version_refresh_qualifies_stale_triage_refs():
     """Retroactive fix (see AGENTS.md): a render-version-behind card carries a
     triage section cached before cross-repo qualification existed. The next
@@ -1107,6 +1185,7 @@ def main():
     test_render_version_is_not_material()
     test_upsert_refreshes_once_on_render_version_alone()
     test_render_version_refresh_preserves_triage_section()
+    test_render_version_refresh_labels_preserved_triage_status_lines()
     test_render_version_refresh_qualifies_stale_triage_refs()
     test_render_version_current_and_qualified_triage_is_noop()
     test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched()

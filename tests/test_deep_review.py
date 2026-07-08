@@ -537,8 +537,18 @@ def test_code_grounded_checkout_and_tool_isolation():
             "import wheelhouse_core as core" in run
             and "core.qualify_issue_refs(" in run,
         )
+        check(
+            "workflow: post step labels automated transcript status before posting",
+            "import render_card as cards" in run
+            and "cards.label_automated_status_lines(verdict)" in run,
+        )
+        label_idx = run.find("cards.label_automated_status_lines(verdict)")
         qualify_idx = run.find("core.qualify_issue_refs(")
         post_idx = run.find('["gh", "issue", "comment"')
+        check(
+            "workflow: automated status labels are applied before ref qualification",
+            label_idx != -1 and qualify_idx != -1 and label_idx < qualify_idx,
+        )
         check(
             "workflow: qualification happens before the gh post, not after",
             qualify_idx != -1 and post_idx != -1 and qualify_idx < post_idx,
