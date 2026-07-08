@@ -575,6 +575,24 @@ def test_legacy_rebase_cleanup_clears_when_pr_no_longer_conflicted():
           core.PENDING_CONTRIBUTOR_LABEL not in labels)
 
 
+def test_legacy_rebase_cleanup_clears_after_head_move_and_unblock():
+    marker = core._rebase_nudge_marker("oldsha")
+    legacy_record = rebase_record(source_id=201, head="oldsha")
+    fake = FakeGitHub(
+        pr_obj=pr(head="newsha"),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+    )
+    closed = run(fake, enriched_pr(bucket="review-needed", head="newsha"), now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("legacy rebase: moved unblocked PR does not close", closed == set())
+    check("legacy rebase: moved unblocked PR clears stale pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
 def test_untrusted_pending_marker_skips_even_with_label():
     record = request_record()
     fake = FakeGitHub(
@@ -674,6 +692,7 @@ def main():
     test_legacy_rebase_requires_trusted_marker_author()
     test_rebase_cleanup_clears_when_pr_no_longer_conflicted()
     test_legacy_rebase_cleanup_clears_when_pr_no_longer_conflicted()
+    test_legacy_rebase_cleanup_clears_after_head_move_and_unblock()
     test_untrusted_pending_marker_skips_even_with_label()
     test_truncated_scan_labels_fall_back_to_target_label_read()
     test_non_arming_signals_do_not_enter_cleanup()

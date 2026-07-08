@@ -895,6 +895,9 @@ _PENDING_CONTRIBUTOR_CLOSE_RE = re.compile(
     r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(PENDING_CONTRIBUTOR_CLOSE_PREFIX),
     re.S,
 )
+_REBASE_NUDGE_RE = re.compile(
+    r"<!--\s*%s\s*:\s*([^>]*)-->" % re.escape(REBASE_NUDGE_MARKER_PREFIX)
+)
 
 
 def _parse_time(value):
@@ -1286,35 +1289,42 @@ def _records_from_sources(repo, number, comments, reviews, maintainer_logins):
 
 
 def _legacy_rebase_record(repo, number, head_sha, comments, maintainer_logins):
-    marker = _rebase_nudge_marker(head_sha)
     records = []
     for comment in comments:
         if not isinstance(comment, dict):
             continue
-        if marker not in str(comment.get("body") or ""):
-            continue
         if not _trusted_ask_author(_event_author(comment), maintainer_logins):
+            continue
+        heads = [
+            match.group(1).strip()
+            for match in _REBASE_NUDGE_RE.finditer(str(comment.get("body") or ""))
+        ]
+        if head_sha is not None:
+            heads = [head for head in heads if head == str(head_sha or "").strip()]
+        heads = [head for head in heads if head]
+        if not heads:
             continue
         created_at = comment.get("created_at")
         asked_dt = _parse_time(created_at)
         comment_id = comment.get("id")
         if asked_dt is None or comment_id is None:
             continue
-        records.append(
-            {
-                "version": 1,
-                "ask_id": "needs-rebase:%s:%s" % (head_sha, comment_id),
-                "ask_kind": "needs-rebase",
-                "asked_at": _format_time(asked_dt),
-                "asked_by": "",
-                "target_author": "",
-                "head_sha": str(head_sha or ""),
-                "repo": str(repo or ""),
-                "number": int(number),
-                "source_id": str(comment_id),
-                "legacy": True,
-            }
-        )
+        for head in heads:
+            records.append(
+                {
+                    "version": 1,
+                    "ask_id": "needs-rebase:%s:%s" % (head, comment_id),
+                    "ask_kind": "needs-rebase",
+                    "asked_at": _format_time(asked_dt),
+                    "asked_by": "",
+                    "target_author": "",
+                    "head_sha": str(head or ""),
+                    "repo": str(repo or ""),
+                    "number": int(number),
+                    "source_id": str(comment_id),
+                    "legacy": True,
+                }
+            )
     if not records:
         return None
     return max(records, key=lambda r: _parse_time(r["asked_at"]))
@@ -1649,7 +1659,7 @@ def _sweep_pending_pr(
                 r for r in records if r.get("ask_kind") == "needs-rebase"
             ]
             legacy_rebase_record = _legacy_rebase_record(
-                repo, number, head_sha, state["comments"], maintainer_logins
+                repo, number, None, state["comments"], maintainer_logins
             )
             if (stale_rebase_records or legacy_rebase_record) and not active_records:
                 _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
