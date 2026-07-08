@@ -430,6 +430,14 @@ def _closing_issue_numbers(owner, name, pr):
     return [i["number"] for i in nodes], True
 
 
+def _closing_map(prs):
+    closing = {}
+    for pr in prs:
+        for number in pr.get("closes") or []:
+            closing.setdefault(number, []).append(pr["number"])
+    return closing
+
+
 def _dedupe_numbered_nodes(nodes):
     seen = set()
     out = []
@@ -1297,8 +1305,12 @@ def _newest_active_pending_record(
     has_pending_label,
     allow_legacy_rebase,
     maintainer_logins,
+    active_ask_kinds=None,
 ):
     records = _records_from_sources(repo, number, comments, reviews, maintainer_logins)
+    if active_ask_kinds is not None:
+        active = {str(kind) for kind in active_ask_kinds}
+        records = [r for r in records if r.get("ask_kind") in active]
     if has_pending_label and records:
         return max(records, key=lambda r: _parse_time(r["asked_at"]))
     if allow_legacy_rebase:
@@ -1500,6 +1512,13 @@ def _close_pending_target(slug, number, record):
     )
 
 
+def _active_pending_ask_kinds(pr):
+    kinds = {"request-changes"}
+    if pr.get("bucket") == "needs-rebase":
+        kinds.add("needs-rebase")
+    return kinds
+
+
 def _sweep_pending_pr(
     owner,
     repo,
@@ -1532,6 +1551,7 @@ def _sweep_pending_pr(
     if not head_sha:
         return "skip"
 
+    active_ask_kinds = _active_pending_ask_kinds(pr)
     record = _newest_active_pending_record(
         repo,
         number,
@@ -1541,8 +1561,22 @@ def _sweep_pending_pr(
         has_pending_label,
         allow_legacy_rebase=pr.get("bucket") == "needs-rebase",
         maintainer_logins=maintainer_logins,
+        active_ask_kinds=active_ask_kinds,
     )
     if not record:
+        if has_pending_label and "needs-rebase" not in active_ask_kinds:
+            records = _records_from_sources(
+                repo, number, state["comments"], state["reviews"], maintainer_logins
+            )
+            active_records = [
+                r for r in records if r.get("ask_kind") in active_ask_kinds
+            ]
+            stale_rebase_records = [
+                r for r in records if r.get("ask_kind") == "needs-rebase"
+            ]
+            if stale_rebase_records and not active_records:
+                _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+                return "activity"
         return "skip"
 
     asked_dt = _parse_time(record.get("asked_at"))
@@ -1836,7 +1870,6 @@ def build_repo(
     maintainer_logins = {login.casefold() for login in maintainers()}
     all_names = set()
     enriched = []
-    closing = {}  # issue -> [pr numbers]
     closing_scan_complete = True
     closing_scan_warning = ""
     for pr in prs:
@@ -1866,8 +1899,6 @@ def build_repo(
                 closing_scan_warning = (
                     "PR closing issue scan incomplete for #%s" % pr["number"]
                 )
-        for i in closes:
-            closing.setdefault(i, []).append(pr["number"])
         enriched.append(
             {
                 "number": pr["number"],
@@ -1918,6 +1949,7 @@ def build_repo(
         enriched = [pr for pr in enriched if pr["number"] not in closed_by_cleanup]
         issues = [it for it in issues if it["number"] not in closed_by_cleanup]
 
+    closing = _closing_map(enriched)
     open_issue_numbers = [it["number"] for it in issues]
     addressed = {n for n in closing if n in set(open_issue_numbers)}
 

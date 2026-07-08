@@ -448,6 +448,23 @@ def test_legacy_rebase_requires_trusted_marker_author():
     check("retro: untrusted legacy marker skips", closed == set())
 
 
+def test_rebase_cleanup_clears_when_pr_no_longer_conflicted():
+    record = rebase_record(source_id=201)
+    body = "please rebase\n\n%s\n%s" % (
+        core._rebase_nudge_marker("sha1"),
+        core._pending_contributor_marker(record),
+    )
+    fake = FakeGitHub(
+        comments=[comment(body, ts(), OWNER, 201), reminder_comment(record)],
+        reviews=[],
+    )
+    closed = run(fake, enriched_pr(bucket="review-needed"), now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("rebase: unblocked PR does not close", closed == set())
+    check("rebase: unblocked PR clears stale pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
 def test_untrusted_pending_marker_skips_even_with_label():
     record = request_record()
     fake = FakeGitHub(
@@ -527,6 +544,7 @@ def main():
     test_legacy_rebase_marker_reminds_then_closes_when_provable()
     test_legacy_rebase_skip_when_timestamp_missing()
     test_legacy_rebase_requires_trusted_marker_author()
+    test_rebase_cleanup_clears_when_pr_no_longer_conflicted()
     test_untrusted_pending_marker_skips_even_with_label()
     test_truncated_scan_labels_fall_back_to_target_label_read()
     test_non_arming_signals_do_not_enter_cleanup()

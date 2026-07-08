@@ -670,6 +670,70 @@ def test_issue_scan_pages_closing_references_for_addressed_filter():
     )
 
 
+def test_cleanup_closure_recomputes_addressed_issue_map():
+    pr = pr_node(1, author=HUMAN, closes=[101])
+    issue = issue_node(101, author=HUMAN)
+    calls = {"sweep": []}
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
+
+    def fake_graphql(owner, name):
+        return graphql_data([pr], [issue])
+
+    def fake_load_config():
+        return {
+            "repos": {"demo": repo_cfg},
+            "maintainer": "co-maintainer",
+            "nl_decisions": False,
+            "card_issues": True,
+            "auto_approve_ci": True,
+        }
+
+    def fake_sweep(owner, repo_cfg, prs, maintainer_logins, **kwargs):
+        calls["sweep"].append([p["number"] for p in prs])
+        return {1}
+
+    save = (
+        core.gh_graphql,
+        core.load_config,
+        core.sweep_pending_contributor_actions,
+        os.environ.get("OWNER"),
+        os.environ.get("GITHUB_REPOSITORY_OWNER"),
+    )
+    core.gh_graphql = fake_graphql
+    core.load_config = fake_load_config
+    core.sweep_pending_contributor_actions = fake_sweep
+    os.environ["OWNER"] = "owner"
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
+    try:
+        result, items = core.build_repo(
+            "owner", repo_cfg, True, pending_contributor_cleanup=True
+        )
+    finally:
+        (
+            core.gh_graphql,
+            core.load_config,
+            core.sweep_pending_contributor_actions,
+            old_owner,
+            old_repo_owner,
+        ) = save
+        if old_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = old_owner
+        if old_repo_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_repo_owner
+    issue_cards = [it for it in items if it["kind"] == "issue-triage"]
+    check("cleanup: stale PR removed from open PR scan", result["open_pr_numbers"] == [])
+    check("cleanup: linked issue is carded after cleanup closes only PR",
+          [it["number"] for it in issue_cards] == [101])
+
+
 def main():
     test_pr_author_filter_skips_owner_maintainer_and_bots()
     test_ci_approval_author_filter_preserves_safe_auto_approve()
@@ -683,6 +747,7 @@ def main():
     test_issue_cards_skip_when_pr_scan_incomplete()
     test_issue_scan_pages_open_prs_for_addressed_filter()
     test_issue_scan_pages_closing_references_for_addressed_filter()
+    test_cleanup_closure_recomputes_addressed_issue_map()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
