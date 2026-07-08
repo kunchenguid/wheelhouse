@@ -188,7 +188,10 @@ def test_render_filters_non_checkbox_custom_options():
         "state: custom options keep only checkbox actions",
         st.get("options") == ["merge", "hold"],
     )
-    check("render: request-changes checkbox omitted", "opt:request-changes" not in card["body"])
+    check(
+        "render: request-changes checkbox omitted",
+        "opt:request-changes" not in card["body"],
+    )
     check("render: comment checkbox omitted", "opt:comment" not in card["body"])
     check("render: decline checkbox omitted", "opt:decline" not in card["body"])
     check("render: unknown checkbox omitted", "opt:bogus" not in card["body"])
@@ -272,7 +275,10 @@ def test_activity_reflection_stamps_only_state_block_once():
     check(
         "activity: newer target updated_at needs reflection",
         rc.activity_reflection_needed(
-            new, core.parse_state_block(body), labels_, card_updated_at="2024-01-02T00:00:00Z"
+            new,
+            core.parse_state_block(body),
+            labels_,
+            card_updated_at="2024-01-02T00:00:00Z",
         )
         is True,
     )
@@ -359,7 +365,10 @@ def test_activity_reflection_legacy_uses_card_updated_at_baseline():
     stamped = rc.body_with_activity_reflected(
         legacy_body, newer, card_updated_at="2024-01-03T00:00:00Z"
     )
-    check("activity: legacy card stamps after newer target activity", stamped != legacy_body)
+    check(
+        "activity: legacy card stamps after newer target activity",
+        stamped != legacy_body,
+    )
     check(
         "activity: legacy card without baseline does not one-time stamp",
         rc.body_with_activity_reflected(legacy_body, newer) == legacy_body,
@@ -736,7 +745,8 @@ def test_render_version_refresh_qualifies_stale_triage_refs():
     )
     check(
         "render-version refresh: stamped current render_version",
-        new_state is not None and new_state.get("render_version") == rc.CARD_RENDER_VERSION,
+        new_state is not None
+        and new_state.get("render_version") == rc.CARD_RENDER_VERSION,
     )
     check(
         "render-version refresh: triaged_sha still preserved",
@@ -795,7 +805,9 @@ def test_render_version_current_and_qualified_triage_is_noop():
         else:
             os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
     check("render-version current + qualified triage: no-op result", result == 7)
-    check("render-version current + qualified triage: no refresh", calls["refresh"] == 0)
+    check(
+        "render-version current + qualified triage: no refresh", calls["refresh"] == 0
+    )
 
 
 def test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched():
@@ -853,7 +865,9 @@ def test_preserve_triage_uses_state_repo_not_item_repo():
         },
     )
     old_state = core.parse_state_block(triaged)
-    check("fixture: old_state repo is lavish-axi", old_state.get("repo") == "lavish-axi")
+    check(
+        "fixture: old_state repo is lavish-axi", old_state.get("repo") == "lavish-axi"
+    )
     fresh_body = rc.render(it)["body"]
     result = rc._preserve_same_revision_triage(
         fresh_body, triaged, it, old_state, owner="kunchenguid"

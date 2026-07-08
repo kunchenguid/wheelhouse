@@ -930,8 +930,7 @@ _PENDING_CONTRIBUTOR_RE = re.compile(
     re.S,
 )
 _PENDING_CONTRIBUTOR_REMINDER_RE = re.compile(
-    r"<!--\s*%s:\s*(\{.*?\})\s*-->"
-    % re.escape(PENDING_CONTRIBUTOR_REMINDER_PREFIX),
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(PENDING_CONTRIBUTOR_REMINDER_PREFIX),
     re.S,
 )
 _PENDING_CONTRIBUTOR_CLOSE_RE = re.compile(
@@ -1021,7 +1020,9 @@ def _pending_record(
     }
 
 
-def _ensure_target_label(slug, name, color="fbca04", description="Managed by Wheelhouse"):
+def _ensure_target_label(
+    slug, name, color="fbca04", description="Managed by Wheelhouse"
+):
     try:
         gh_rest(
             "/repos/%s/labels" % slug,
@@ -1030,7 +1031,11 @@ def _ensure_target_label(slug, name, color="fbca04", description="Managed by Whe
         )
     except RuntimeError as e:
         msg = str(e).lower()
-        if "already_exists" not in msg and "already exists" not in msg and "422" not in msg:
+        if (
+            "already_exists" not in msg
+            and "already exists" not in msg
+            and "422" not in msg
+        ):
             raise
 
 
@@ -1102,8 +1107,7 @@ def _rebase_nudge_body(repo, number, head_sha):
         "conflict, and push? Once GitHub shows the PR as mergeable again, "
         "it'll be picked back up for review.\n\n"
         "<sub>Noted for %s#%s at `%s`.</sub>\n"
-        "%s"
-        % (repo, number, short, marker)
+        "%s" % (repo, number, short, marker)
     )
 
 
@@ -1425,7 +1429,9 @@ def _newest_active_pending_record(
     if has_pending_label and records:
         return max(records, key=lambda r: _parse_time(r["asked_at"]))
     if allow_legacy_rebase:
-        return _legacy_rebase_record(repo, number, head_sha, comments, maintainer_logins)
+        return _legacy_rebase_record(
+            repo, number, head_sha, comments, maintainer_logins
+        )
     return None
 
 
@@ -1567,9 +1573,7 @@ def _known_target_activity_times(state):
             ("issue", "pr"), comment, "created_at", "submitted_at", "updated_at"
         )
     for review in state["reviews"]:
-        absorb_item(
-            ("issue", "pr"), review, "submitted_at", "created_at", "updated_at"
-        )
+        absorb_item(("issue", "pr"), review, "submitted_at", "created_at", "updated_at")
     for comment in state["review_comments"]:
         absorb_item(
             ("issue", "pr"), comment, "created_at", "submitted_at", "updated_at"
@@ -1663,9 +1667,7 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
             raise RuntimeError("%s event missing timestamp" % event_name)
         if dt <= asked_dt:
             continue
-        if _timeline_event_has_contributor_actor(
-            event, event_name, maintainer_logins
-        ):
+        if _timeline_event_has_contributor_actor(event, event_name, maintainer_logins):
             return True
 
     _ensure_no_unaccounted_target_update(state, asked_dt)
@@ -1834,7 +1836,9 @@ def _sweep_pending_pr(
     if author_kind is not True:
         return "skip"
 
-    head_sha = str(((current_pr.get("head") or {}).get("sha")) or pr.get("head_sha") or "")
+    head_sha = str(
+        ((current_pr.get("head") or {}).get("sha")) or pr.get("head_sha") or ""
+    )
     if not head_sha:
         return "skip"
 
@@ -2001,8 +2005,7 @@ def _ci_safety_note(verdict):
         parts.append(
             "This PR targets base branch `%s`, but the repo default is `%s`. "
             "Wheelhouse only auto-checks `pull_request_target` posture on the "
-            "default branch, so it fails closed for manual review."
-            % (base, default)
+            "default branch, so it fails closed for manual review." % (base, default)
         )
     elif verdict.get("exploit"):
         parts.append(
@@ -2523,7 +2526,11 @@ def _markdown_reference_link_destination_spans(text):
                 if stripped[close] == "]":
                     break
                 close += 1
-            if close < len(stripped) and close + 1 < len(stripped) and stripped[close + 1] == ":":
+            if (
+                close < len(stripped)
+                and close + 1 < len(stripped)
+                and stripped[close + 1] == ":"
+            ):
                 start = pos + indent + close + 2
                 while start < line_end and text[start] in " \t":
                     start += 1

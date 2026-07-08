@@ -33,6 +33,7 @@ updated time for GitHub's recently-updated queue sort. The same eligibility gate
 decide whether render_card.py creates a brand-new card as a held
 `pending-triage` placeholder before that first auto-triage attempt.
 """
+
 import json
 import os
 import sys
@@ -104,8 +105,9 @@ def normalize(d):
 
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     path = "pull" if kind in ("pr-review", "ci-approval") else "issues"
-    url = d.get("url") or ("https://github.com/%s/%s/%s/%d" % (owner, repo, path, number)
-                           if owner else "")
+    url = d.get("url") or (
+        "https://github.com/%s/%s/%s/%d" % (owner, repo, path, number) if owner else ""
+    )
     try:
         cfg = load_config()
         repo_cfg = cfg["repos"].get(repo, {})

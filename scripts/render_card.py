@@ -294,7 +294,9 @@ def normalized_options(options):
 
 
 def normalized_material_options(options):
-    return sorted(o for o in normalized_options(options) if o != ACCEPT_RECOMMENDATION_OPTION)
+    return sorted(
+        o for o in normalized_options(options) if o != ACCEPT_RECOMMENDATION_OPTION
+    )
 
 
 def material_signature(item):
@@ -707,10 +709,13 @@ def accept_recommendation_available(state):
     revision = state_revision(state, kind)
     if not revision or (state or {}).get("triaged_sha") != revision:
         return False
-    return recommendation_for_state(
-        {"triage_recommendation": (state or {}).get("triage_recommendation")},
-        kind,
-    ) is not None
+    return (
+        recommendation_for_state(
+            {"triage_recommendation": (state or {}).get("triage_recommendation")},
+            kind,
+        )
+        is not None
+    )
 
 
 def options_for_state(kind, options, state):
@@ -791,9 +796,7 @@ def _set_recommendation_section_visible(body, visible):
 def _ensure_recommendation_section(body, recommendation):
     if "### Recommended action" in (body or ""):
         return body
-    section = "### Recommended action\n%s\n" % (
-        recommendation or "Needs your call."
-    )
+    section = "### Recommended action\n%s\n" % (recommendation or "Needs your call.")
     marker = "\n%s" % DECISION_START
     idx = (body or "").find(marker)
     if idx >= 0:
@@ -926,7 +929,9 @@ def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
     )
     updated = _insert_triage_section(body, section)
     recommendation = (
-        recommendation_for_state(normalized, kind, owner=owner, repo=state.get("repo", ""))
+        recommendation_for_state(
+            normalized, kind, owner=owner, repo=state.get("repo", "")
+        )
         if normalized
         else None
     )
@@ -993,7 +998,9 @@ def _publish_decision_section(body, kind, options):
     checkboxes, in place. A no-op (returns `body` unchanged) if the markers
     are missing, e.g. a pre-feature card that was never held."""
     section = _decision_section(kind, options, held=False)
-    new_body, count = _DECISION_SECTION_RE.subn(section.replace("\\", "\\\\"), body or "", count=1)
+    new_body, count = _DECISION_SECTION_RE.subn(
+        section.replace("\\", "\\\\"), body or "", count=1
+    )
     return new_body if count else body
 
 
@@ -1201,16 +1208,11 @@ def reflect_activity(number, item, body, card_updated_at=""):
 
     This never renders the full card, never changes labels, and never comments.
     """
-    new_body = body_with_activity_reflected(
-        body, item, card_updated_at=card_updated_at
-    )
+    new_body = body_with_activity_reflected(body, item, card_updated_at=card_updated_at)
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
-    print(
-        "reflected target activity on card #%s for %s"
-        % (number, marker_label(item))
-    )
+    print("reflected target activity on card #%s for %s" % (number, marker_label(item)))
     return True
 
 
@@ -1447,9 +1449,7 @@ def upsert_card(item, existing=None, has_token=False):
     if known_number:
         existing = get_card(known_number)
         if not existing or not issue_is_open(existing):
-            print(
-                "skip card #%s for %s: card no longer open" % (known_number, marker)
-            )
+            print("skip card #%s for %s: card no longer open" % (known_number, marker))
             return known_number
     else:
         existing = find_card(marker)
@@ -1762,7 +1762,12 @@ def main():
             print(
                 "::warning::failed to dispatch auto triage for card #%s (%s#%s): %s "
                 "- publishing the card so it is not left held indefinitely"
-                % (current["number"], item.get("repo"), item.get("number"), str(e)[:160])
+                % (
+                    current["number"],
+                    item.get("repo"),
+                    item.get("number"),
+                    str(e)[:160],
+                )
             )
             owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
             publish_dispatch_failure(

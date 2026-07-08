@@ -409,7 +409,10 @@ def test_target_activity_newer_gets_state_only_reflection_once():
     calls = run_reconcile(scan_payload(items=[active]), [fresh_card])
     check("reconcile: activity reflection edits once", len(calls["reflect"]) == 1)
     check("reconcile: activity reflection is not a full refresh", calls["upsert"] == [])
-    check("reconcile: activity reflection does not close/comment via close path", calls["close"] == [])
+    check(
+        "reconcile: activity reflection does not close/comment via close path",
+        calls["close"] == [],
+    )
     before = calls["reflect"][0]["body"] if calls["reflect"] else ""
     after = calls["reflect"][0]["body_after"] if calls["reflect"] else ""
     check(
@@ -440,7 +443,10 @@ def test_target_activity_reflection_skips_non_pending_and_bad_timestamps():
                 )
             ],
         )
-        check("reconcile: %s card is not activity-stamped" % label_name, calls["reflect"] == [])
+        check(
+            "reconcile: %s card is not activity-stamped" % label_name,
+            calls["reflect"] == [],
+        )
     missing_needs = run_reconcile(
         scan_payload(items=[active]),
         [
@@ -468,9 +474,18 @@ def test_target_activity_reflection_skips_non_pending_and_bad_timestamps():
             )
         ],
     )
-    check("reconcile: missing needs-decision is not activity-stamped", missing_needs["reflect"] == [])
-    check("reconcile: malformed target updated_at is not activity-stamped", malformed["reflect"] == [])
-    check("reconcile: missing target updated_at is not activity-stamped", missing["reflect"] == [])
+    check(
+        "reconcile: missing needs-decision is not activity-stamped",
+        missing_needs["reflect"] == [],
+    )
+    check(
+        "reconcile: malformed target updated_at is not activity-stamped",
+        malformed["reflect"] == [],
+    )
+    check(
+        "reconcile: missing target updated_at is not activity-stamped",
+        missing["reflect"] == [],
+    )
 
 
 def test_target_activity_reflection_uses_legacy_card_updated_at_baseline():
@@ -484,11 +499,19 @@ def test_target_activity_reflection_uses_legacy_card_updated_at_baseline():
     legacy["body"] = reconcile.render_card._replace_state_block(legacy["body"], state)
     active = work_item(options=matched_options, updated_at="2024-01-02T00:00:00Z")
     no_churn = run_reconcile(scan_payload(items=[active]), [legacy])
-    check("reconcile: legacy card baseline prevents one-time stamp", no_churn["reflect"] == [])
+    check(
+        "reconcile: legacy card baseline prevents one-time stamp",
+        no_churn["reflect"] == [],
+    )
     newer = dict(legacy, updated_at="2024-01-02T00:00:00Z")
-    newer_activity = work_item(options=matched_options, updated_at="2024-06-01T00:00:00Z")
+    newer_activity = work_item(
+        options=matched_options, updated_at="2024-06-01T00:00:00Z"
+    )
     stamped = run_reconcile(scan_payload(items=[newer_activity]), [newer])
-    check("reconcile: legacy card stamps once target passes card updated_at", len(stamped["reflect"]) == 1)
+    check(
+        "reconcile: legacy card stamps once target passes card updated_at",
+        len(stamped["reflect"]) == 1,
+    )
 
 
 def test_failed_repo_scan_leaves_cards_unstamped():
@@ -501,7 +524,9 @@ def test_failed_repo_scan_leaves_cards_unstamped():
             )
         ],
     )
-    check("reconcile: failed repo scan does not reflect activity", calls["reflect"] == [])
+    check(
+        "reconcile: failed repo scan does not reflect activity", calls["reflect"] == []
+    )
     check("reconcile: failed repo scan does not close card", calls["close"] == [])
 
 
@@ -570,7 +595,10 @@ def test_truncated_repo_scan_does_not_self_heal_close_missing_issue():
         ),
         [issue_card],
     )
-    check("reconcile: truncated scan leaves possibly unseen issue card open", calls["close"] == [])
+    check(
+        "reconcile: truncated scan leaves possibly unseen issue card open",
+        calls["close"] == [],
+    )
 
 
 def main():
