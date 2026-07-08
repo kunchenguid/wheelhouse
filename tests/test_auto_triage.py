@@ -724,6 +724,70 @@ def test_body_helpers_queue_and_apply_result():
           })
 
 
+def test_automated_status_lines_are_labeled_only_on_allowlist():
+    text = (
+        "Substantive review starts here.\n"
+        "Waited for background terminal 60s.\n"
+        "No watcher wake in the last minute; the background watcher is still running\n"
+        "Waited for background terminal before writing this note.\n"
+        "Human note: Waited for background terminal before commenting.\n"
+        "Substantive review ends here."
+    )
+    labeled = rc.label_automated_status_lines(text)
+    check(
+        "status-label: background terminal line is marked automated",
+        "`[automated status]` Waited for background terminal 60s." in labeled,
+    )
+    check(
+        "status-label: watcher line is marked automated",
+        (
+            "`[automated status]` No watcher wake in the last minute; "
+            "the background watcher is still running"
+        )
+        in labeled,
+    )
+    check(
+        "status-label: substantive prefix is preserved",
+        labeled.startswith("Substantive review starts here.\n"),
+    )
+    check(
+        "status-label: substantive suffix is preserved",
+        labeled.endswith("\nSubstantive review ends here."),
+    )
+    check(
+        "status-label: human sentence with phrase is not marked",
+        "`[automated status]` Human note" not in labeled
+        and "Human note: Waited for background terminal before commenting." in labeled,
+    )
+    check(
+        "status-label: human line with same prefix but no duration is not marked",
+        "`[automated status]` Waited for background terminal before writing"
+        not in labeled
+        and "Waited for background terminal before writing this note." in labeled,
+    )
+    check(
+        "status-label: labeling is idempotent",
+        rc.label_automated_status_lines(labeled) == labeled,
+    )
+
+    triage = {
+        "summary": "Waited for background terminal 60s.",
+        "product_implications": "Routine product note.",
+        "recommended_next_step": "merge - safe.",
+    }
+    section = rc.triage_section(triage)
+    check(
+        "status-label: visible triage field marks automated status",
+        "- **Summary:** `[automated status]` Waited for background terminal 60s."
+        in section,
+    )
+    check(
+        "status-label: visible triage substantive field remains unmarked",
+        "- **Product implications:** Routine product note." in section
+        and "`[automated status]` Routine product note." not in section,
+    )
+
+
 def test_should_auto_triage_cache_and_gates():
     it = item()
     pure = labels("needs-decision", "kind:pr-review")
@@ -2958,6 +3022,7 @@ def main():
     test_accept_checkbox_is_conditional_and_never_ci_approval()
     test_triage_requires_complete_structured_json()
     test_body_helpers_queue_and_apply_result()
+    test_automated_status_lines_are_labeled_only_on_allowlist()
     test_body_helpers_queue_and_apply_result_for_issue()
     test_should_auto_triage_cache_and_gates()
     test_should_auto_triage_cache_and_gates_for_issue()

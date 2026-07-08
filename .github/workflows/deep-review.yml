@@ -496,6 +496,7 @@ jobs:
           import sys
 
           sys.path.insert(0, "scripts")
+          import render_card as cards
           import wheelhouse_core as core
 
           FALLBACK = "Deep review ran but produced no verdict (see the workflow run logs)."
@@ -563,6 +564,7 @@ jobs:
           # TARGET repo - qualify any bare `#N` the model wrote so it does not
           # autolink to this repo instead. Owner/repo come from the
           # deterministic `resolve` step output, never from the model text.
+          verdict = cards.label_automated_status_lines(verdict)
           verdict = core.qualify_issue_refs(
               verdict,
               os.environ.get("GITHUB_REPOSITORY_OWNER", ""),

@@ -514,6 +514,61 @@ def _clean_triage_text(value, limit=700, default="n/a"):
     return text or default
 
 
+AUTOMATED_STATUS_LABEL = "`[automated status]`"
+_AUTOMATED_STATUS_LINE_RE = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?P<text>"
+    # Known claude-code-action harness transcript noise. Keep this allowlist
+    # intentionally narrow so agent reasoning and human-authored text are not
+    # reclassified by presentation cleanup.
+    r"Waited for background terminal\s+"
+    r"\d+(?:\.\d+)?\s*"
+    r"(?:ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes)\.?"
+    r"|No watcher wake in the last minute; the background watcher is still running\.?"
+    r")"
+    r"(?P<trailing>\s*)$"
+)
+
+
+def _split_line_ending(line):
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n") or line.endswith("\r"):
+        return line[:-1], line[-1]
+    return line, ""
+
+
+def label_automated_status_lines(text):
+    """Mark known harness polling/status lines in card-visible agent output.
+
+    This is presentation metadata only: it does not strip text or affect action
+    routing. The allowlist is deliberately tight and line-oriented so ordinary
+    agent reasoning, target content, or maintainer text stays unmarked.
+    """
+    if not isinstance(text, str) or not text:
+        return text or ""
+    labeled = []
+    changed = False
+    for raw_line in text.splitlines(keepends=True):
+        line, ending = _split_line_ending(raw_line)
+        match = _AUTOMATED_STATUS_LINE_RE.match(line)
+        if match and not match.group("text").startswith(AUTOMATED_STATUS_LABEL):
+            labeled.append(
+                "%s%s %s%s%s"
+                % (
+                    match.group("indent"),
+                    AUTOMATED_STATUS_LABEL,
+                    match.group("text"),
+                    match.group("trailing"),
+                    ending,
+                )
+            )
+            changed = True
+        else:
+            labeled.append(raw_line)
+    return "".join(labeled) if changed else text
+
+
 def normalize_triage(data):
     if not isinstance(data, dict):
         return None
@@ -616,15 +671,22 @@ def triage_section(triage=None, error=None, owner="", repo=""):
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
         lines.append(
-            "- **Summary:** %s" % qualify_issue_refs(triage["summary"], owner, repo)
+            "- **Summary:** %s"
+            % label_automated_status_lines(
+                qualify_issue_refs(triage["summary"], owner, repo)
+            )
         )
         lines.append(
             "- **Product implications:** %s"
-            % qualify_issue_refs(triage["product_implications"], owner, repo)
+            % label_automated_status_lines(
+                qualify_issue_refs(triage["product_implications"], owner, repo)
+            )
         )
         lines.append(
             "- **Recommended next step:** %s"
-            % qualify_issue_refs(triage["recommended_next_step"], owner, repo)
+            % label_automated_status_lines(
+                qualify_issue_refs(triage["recommended_next_step"], owner, repo)
+            )
         )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
