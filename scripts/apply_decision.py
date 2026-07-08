@@ -513,6 +513,32 @@ def _thank_contributor(owner, repo, number, pr):
         )
 
 
+def _pending_contributor_cleanup_active(repo):
+    try:
+        cfg = core.load_config()
+    except SystemExit as e:
+        print(
+            "::warning::wheelhouse pending-contributor cleanup config unavailable for %s: %s"
+            % (repo, str(e)[:160])
+        )
+        return False
+    except Exception as e:
+        print(
+            "::warning::wheelhouse pending-contributor cleanup config unavailable for %s: %s"
+            % (repo, str(e)[:160])
+        )
+        return False
+    repo_cfg = (cfg.get("repos") or {}).get(repo, {})
+    if not core._pending_contributor_cleanup_enabled(
+        repo_cfg, cfg.get("pending_contributor_cleanup", False)
+    ):
+        return False
+    targets = core._pending_contributor_cleanup_targets(
+        repo_cfg, cfg.get("pending_contributor_cleanup_targets", ["pr"])
+    )
+    return "pr" in targets
+
+
 def _stale_pr_head_result(repo, number, expected, current, action):
     if expected and current and current != expected:
         return (
@@ -637,18 +663,26 @@ def do_request_changes(owner, repo, number, head_sha, text):
         submitted_at = (
             (review or {}).get("submitted_at") if isinstance(review, dict) else None
         )
-        if review_id and not submitted_at:
-            reread = core.gh_rest(
-                "/repos/%s/pulls/%s/reviews/%s" % (slug, number, review_id)
-            )
-            if isinstance(reread, dict):
-                submitted_at = reread.get("submitted_at")
     except RuntimeError as e:
         return (
             "Requesting changes on %s#%s failed: %s" % (repo, number, str(e)[:200]),
             "error",
         )
+    if not _pending_contributor_cleanup_active(repo):
+        return (
+            "Requested changes on %s#%s and left the card open." % (repo, number),
+            "none",
+        )
     try:
+        if review_id and not submitted_at:
+            try:
+                reread = core.gh_rest(
+                    "/repos/%s/pulls/%s/reviews/%s" % (slug, number, review_id)
+                )
+            except RuntimeError as e:
+                raise RuntimeError("review timestamp lookup failed: %s" % str(e)[:160])
+            if isinstance(reread, dict):
+                submitted_at = reread.get("submitted_at")
         core.arm_pending_contributor_action(
             owner,
             repo,

@@ -1052,7 +1052,9 @@ def _patch_comment_body(slug, comment_id, body):
     )
 
 
-def _post_rebase_nudge_if_needed(slug, repo, number, head_sha, maintainer_logins):
+def _post_rebase_nudge_if_needed(
+    slug, repo, number, head_sha, maintainer_logins, arm_cleanup=False
+):
     comments = gh_rest(
         "/repos/%s/issues/%s/comments?per_page=100" % (slug, number),
         paginate=True,
@@ -1068,7 +1070,7 @@ def _post_rebase_nudge_if_needed(slug, repo, number, head_sha, maintainer_logins
     )
     comment_id = (posted or {}).get("id") if isinstance(posted, dict) else None
     created_at = (posted or {}).get("created_at") if isinstance(posted, dict) else None
-    if comment_id and created_at:
+    if arm_cleanup and comment_id and created_at:
         record = _pending_record(
             repo,
             number,
@@ -1085,7 +1087,7 @@ def _post_rebase_nudge_if_needed(slug, repo, number, head_sha, maintainer_logins
             body + "\n" + _pending_contributor_marker(record),
         )
         _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
-    else:
+    elif arm_cleanup:
         print(
             "::warning::wheelhouse rebase-nudge could not arm stale cleanup %s#%s: missing comment timestamp"
             % (repo, number),
@@ -1094,10 +1096,15 @@ def _post_rebase_nudge_if_needed(slug, repo, number, head_sha, maintainer_logins
     return True
 
 
-def _maybe_nudge_rebase(slug, repo, pr, maintainer_logins):
+def _maybe_nudge_rebase(slug, repo, pr, maintainer_logins, arm_cleanup=False):
     try:
         posted = _post_rebase_nudge_if_needed(
-            slug, repo, pr["number"], pr.get("head_sha"), maintainer_logins
+            slug,
+            repo,
+            pr["number"],
+            pr.get("head_sha"),
+            maintainer_logins,
+            arm_cleanup=arm_cleanup,
         )
     except Exception as e:
         print(
@@ -1882,6 +1889,19 @@ def build_repo(
         )
     default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
     maintainer_logins = {login.casefold() for login in maintainers()}
+    cleanup_enabled = _pending_contributor_cleanup_enabled(
+        repo_cfg, pending_contributor_cleanup
+    )
+    cleanup_targets = _pending_contributor_cleanup_targets(
+        repo_cfg, pending_contributor_cleanup_targets or ["pr"]
+    )
+    cleanup_days = _pending_contributor_cleanup_days(
+        repo_cfg, pending_contributor_cleanup_days
+    )
+    reminder_days = _pending_contributor_reminder_days(
+        repo_cfg, pending_contributor_reminder_days
+    )
+    arm_rebase_cleanup = cleanup_enabled and "pr" in cleanup_targets
     all_names = set()
     enriched = []
     closing_scan_complete = True
@@ -1935,20 +1955,10 @@ def build_repo(
             }
         )
         if bucket == "needs-rebase" and not author_excluded:
-            _maybe_nudge_rebase(slug, name, enriched[-1], maintainer_logins)
+            _maybe_nudge_rebase(
+                slug, name, enriched[-1], maintainer_logins, arm_rebase_cleanup
+            )
 
-    cleanup_enabled = _pending_contributor_cleanup_enabled(
-        repo_cfg, pending_contributor_cleanup
-    )
-    cleanup_targets = _pending_contributor_cleanup_targets(
-        repo_cfg, pending_contributor_cleanup_targets or ["pr"]
-    )
-    cleanup_days = _pending_contributor_cleanup_days(
-        repo_cfg, pending_contributor_cleanup_days
-    )
-    reminder_days = _pending_contributor_reminder_days(
-        repo_cfg, pending_contributor_reminder_days
-    )
     closed_by_cleanup = sweep_pending_contributor_actions(
         owner,
         repo_cfg,

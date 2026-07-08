@@ -654,7 +654,14 @@ def patch_core(**attrs):
             setattr(ad.core, name, value)
 
 
-def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
+def fake_gh_rest(
+    pr,
+    merge_error=None,
+    comment_error=None,
+    calls=None,
+    review_submitted_at="2026-01-01T00:00:00Z",
+    review_get_error=None,
+):
     """A no-network stand-in for core.gh_rest covering the calls do_merge and
     _thank_contributor make: GET the PR, PUT the merge, POST the comment."""
     calls = calls if calls is not None else []
@@ -663,7 +670,9 @@ def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
         calls.append({"path": path, "method": method, "fields": fields})
         if method in (None, "GET"):
             if "/reviews/" in path:
-                return {"id": 9001, "submitted_at": "2026-01-01T00:00:00Z"}
+                if review_get_error:
+                    raise RuntimeError(review_get_error)
+                return {"id": 9001, "submitted_at": review_submitted_at}
             return pr
         if method == "PUT":
             if merge_error:
@@ -673,7 +682,7 @@ def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
             if comment_error:
                 raise RuntimeError(comment_error)
             if path.endswith("/reviews"):
-                return {"id": 9001, "submitted_at": "2026-01-01T00:00:00Z"}
+                return {"id": 9001, "submitted_at": review_submitted_at}
             return {}
         return {}
 
@@ -697,6 +706,15 @@ def thank_cfg(repo="target-repo", repo_cfg=None, **overrides):
     cfg.update(overrides)
     cfg["repos"] = {repo: dict(repo_cfg or {})}
     return cfg
+
+
+def cleanup_cfg(repo="target-repo", repo_cfg=None, enabled=True, targets=("pr",)):
+    return thank_cfg(
+        repo=repo,
+        repo_cfg=repo_cfg,
+        pending_contributor_cleanup=enabled,
+        pending_contributor_cleanup_targets=list(targets),
+    )
 
 
 def open_pr(login="contributor", head_sha="abc123"):
@@ -830,7 +848,7 @@ def test_thank_on_merge_custom_message_and_per_repo_precedence():
 # --------------------------------------------------------------------------- #
 def test_do_request_changes_posts_review():
     fake, calls = fake_gh_rest(open_pr())
-    with patch_core(gh_rest=fake):
+    with patch_core(gh_rest=fake, load_config=lambda: cleanup_cfg()):
         message, terminal = ad.do_request_changes(
             "owner-login", "target-repo", 5, "abc123", "please add a regression test"
         )
@@ -849,6 +867,28 @@ def test_do_request_changes_posts_review():
     label_posts = [c for c in posts(calls) if c["path"].endswith("/issues/5/labels")]
     check("request-changes: adds the pending contributor label",
           label_posts and label_posts[0]["fields"]["labels[]"] == ad.core.PENDING_CONTRIBUTOR_LABEL)
+
+
+def test_do_request_changes_respects_cleanup_config():
+    for cfg, label in (
+        (cleanup_cfg(enabled=False), "global disabled"),
+        (
+            cleanup_cfg(repo_cfg={"pending_contributor_cleanup": False}),
+            "per-repo disabled",
+        ),
+        (cleanup_cfg(targets=("issue",)), "PR target disabled"),
+    ):
+        fake, calls = fake_gh_rest(open_pr())
+        with patch_core(gh_rest=fake, load_config=lambda cfg=cfg: cfg):
+            message, terminal = ad.do_request_changes(
+                "owner-login", "target-repo", 5, "abc123", "please add a regression test"
+            )
+        check("request-changes: review still posts when cleanup %s" % label,
+              terminal == "none" and "Requested changes" in message)
+        check("request-changes: no cleanup marker when cleanup %s" % label,
+              not any(c["path"].endswith("/issues/5/comments") for c in posts(calls)))
+        check("request-changes: no pending label when cleanup %s" % label,
+              not any(c["path"].endswith("/issues/5/labels") for c in posts(calls)))
 
 
 def test_do_request_changes_refuses_self_review():
@@ -878,7 +918,8 @@ def test_do_request_changes_reports_cleanup_arming_failure_without_consuming():
     def fake_arm(*args, **kwargs):
         raise RuntimeError("label write failed")
 
-    with patch_core(gh_rest=fake, arm_pending_contributor_action=fake_arm):
+    with patch_core(gh_rest=fake, load_config=lambda: cleanup_cfg(),
+                    arm_pending_contributor_action=fake_arm):
         message, terminal = ad.do_request_changes(
             "owner-login", "target-repo", 5, "abc123", "please add a regression test"
         )
@@ -886,6 +927,26 @@ def test_do_request_changes_reports_cleanup_arming_failure_without_consuming():
           terminal == "none" and "not armed" in message)
     check("request-changes: review was still posted before arming failed",
           any(c["path"].endswith("/reviews") for c in posts(calls)))
+
+
+def test_do_request_changes_review_reread_failure_is_cleanup_only():
+    fake, calls = fake_gh_rest(
+        open_pr(),
+        review_submitted_at=None,
+        review_get_error="503 Service Unavailable",
+    )
+    with patch_core(gh_rest=fake, load_config=lambda: cleanup_cfg()):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "abc123", "please add a regression test"
+        )
+    check("request-changes: reread failure keeps the card open",
+          terminal == "none" and "not armed" in message)
+    check("request-changes: reread failure reports cleanup arming context",
+          "timestamp lookup failed" in message and "503" in message)
+    review_posts = [c for c in posts(calls) if c["path"].endswith("/reviews")]
+    check("request-changes: review posted before reread failed", len(review_posts) == 1)
+    check("request-changes: reread failure posts no cleanup marker",
+          not any(c["path"].endswith("/issues/5/comments") for c in posts(calls)))
 
 
 def test_do_request_changes_requires_text():
@@ -1219,9 +1280,11 @@ def main():
     test_thank_on_merge_skips_owner_maintainer_bot_and_blank_author()
     test_thank_on_merge_custom_message_and_per_repo_precedence()
     test_do_request_changes_posts_review()
+    test_do_request_changes_respects_cleanup_config()
     test_do_request_changes_refuses_self_review()
     test_do_request_changes_surfaces_api_error()
     test_do_request_changes_reports_cleanup_arming_failure_without_consuming()
+    test_do_request_changes_review_reread_failure_is_cleanup_only()
     test_do_request_changes_requires_text()
     test_cmd_execute_request_changes_requires_text()
     test_cmd_execute_request_changes_keeps_stale_head_refreshable()

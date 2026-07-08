@@ -117,6 +117,8 @@ def run_build_repo(
     *,
     card_issues=False,
     auto_approve_ci=False,
+    pending_contributor_cleanup=False,
+    pending_contributor_cleanup_targets=None,
     comments_by_pr=None,
 ):
     comments_by_pr = comments_by_pr if comments_by_pr is not None else {}
@@ -206,7 +208,12 @@ def run_build_repo(
     try:
         with redirect_stderr(err):
             result, items = core.build_repo(
-                "owner", repo_cfg, card_issues, auto_approve_ci=auto_approve_ci
+                "owner",
+                repo_cfg,
+                card_issues,
+                auto_approve_ci=auto_approve_ci,
+                pending_contributor_cleanup=pending_contributor_cleanup,
+                pending_contributor_cleanup_targets=pending_contributor_cleanup_targets,
             )
     finally:
         (
@@ -371,7 +378,31 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     check("nudge: body carries a head-specific marker", core._rebase_nudge_marker("sha42") in body)
     check("nudge: comment fetch uses pagination slurp", calls1["fetches"] and calls1["fetches"][0]["slurp"] is True)
     check("nudge: marker persists in stored comments", len(comments.get(42, [])) == 1)
+    check("nudge: cleanup state is not armed while cleanup disabled",
+          calls1["patches"] == [] and calls1["labels"] == [])
     check("nudge: second scan still ok", result2["ok"] is True)
+
+    enabled_comments = {}
+    _, _, enabled_calls = run_build_repo(
+        [pr], comments_by_pr=enabled_comments, pending_contributor_cleanup=True
+    )
+    patch_bodies = [p["body"] for p in enabled_calls["patches"]]
+    check("nudge: cleanup marker is armed when cleanup enabled",
+          any(core.PENDING_CONTRIBUTOR_MARKER_PREFIX in body for body in patch_bodies))
+    check("nudge: pending contributor label is added when cleanup enabled",
+          any(
+              (item["fields"] or {}).get("labels[]") == core.PENDING_CONTRIBUTOR_LABEL
+              for item in enabled_calls["labels"]
+          ))
+
+    _, _, target_disabled_calls = run_build_repo(
+        [pr],
+        comments_by_pr={},
+        pending_contributor_cleanup=True,
+        pending_contributor_cleanup_targets=["issue"],
+    )
+    check("nudge: cleanup state is not armed when PR target disabled",
+          target_disabled_calls["patches"] == [] and target_disabled_calls["labels"] == [])
 
 
 def test_untrusted_rebase_marker_does_not_suppress_nudge():
