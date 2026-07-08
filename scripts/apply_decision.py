@@ -318,7 +318,6 @@ def _normalize_recommendation_action(value):
         "request-change": "request-changes",
         "changes-requested": "request-changes",
         "look-closer": "investigate",
-        "discuss": "comment",
     }
     return aliases.get(text, text) if text else ""
 
@@ -391,6 +390,7 @@ def cmd_parse():
         set_output("decision", "")
         return
 
+    decision_key = decision
     if decision == ACCEPT_RECOMMENDATION_OPTION:
         decision, free_text = _accept_recommendation(state)
         if not decision:
@@ -404,7 +404,7 @@ def cmd_parse():
         # and dispatches deep-review.yml + clears the box. No FLEET_TOKEN, no
         # action on the target.
         set_output("decision", "")
-        set_output("investigate", decision)
+        set_output("investigate", decision_key)
         set_output("target_repo", state.get("repo", ""))
         set_output("target_number", state.get("number", ""))
         set_output("kind", kind)

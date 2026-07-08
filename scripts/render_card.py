@@ -558,7 +558,6 @@ def normalize_recommendation_action(value):
         "changes-requested": "request-changes",
         "look-closer": "investigate",
         "investigate": "investigate",
-        "discuss": "comment",
     }
     return aliases.get(text, text) if text else ""
 

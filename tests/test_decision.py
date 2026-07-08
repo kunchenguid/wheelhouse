@@ -359,12 +359,20 @@ def test_accept_recommendation_maps_allowed_actions():
     check("accept(pr): request-changes carries the recommended reason",
           out.get("free_text") == "please add tests")
 
+    out = run_parse(_tick_accept(accept_card(action="investigate", reason="")))
+    check("accept(issue): investigate remains non-consuming",
+          out.get("decision", "") == "" and out.get("target_repo") == "lavish-axi")
+    check("accept(issue): clears the clicked accept checkbox",
+          out.get("investigate") == "accept-recommendation")
+
 
 def test_accept_recommendation_invalid_state_noops():
     cases = (
         ("legacy no structured rec", accept_card(extra_state={"triage_recommendation": None})),
         ("failed triage", accept_card(extra_state={"triage_status": "error"})),
         ("invalid action", accept_card(action="approve-ci")),
+        ("non-allowlisted discuss alias", accept_card(action="discuss",
+                                                     reason="should stay private")),
         ("missing required reason", accept_card(action="decline", reason="")),
         ("stale triage cache", accept_card(extra_state={"triaged_sha": "old"})),
     )

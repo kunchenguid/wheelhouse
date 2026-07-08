@@ -510,6 +510,21 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
     check("accept conditional: missing required reason omitted",
           "<!-- opt:accept-recommendation -->" not in rc.render(missing_reason)["body"])
 
+    discuss = item_issue(
+        triage={
+            "summary": "Needs maintainer discussion.",
+            "product_implications": "Owner should decide whether to comment.",
+            "recommended_action": "discuss",
+            "recommended_reason": "This should not become a target comment.",
+        }
+    )
+    discuss_body = rc.render(discuss)["body"]
+    discuss_state = core.parse_state_block(discuss_body)
+    check("accept conditional: discuss action stays inert",
+          "<!-- opt:accept-recommendation -->" not in discuss_body)
+    check("accept conditional: discuss action is not persisted",
+          "triage_recommendation" not in discuss_state)
+
     failed = rc.body_with_triage_result(
         rc.render(item_issue())["body"],
         item_issue()["updated_at"],
