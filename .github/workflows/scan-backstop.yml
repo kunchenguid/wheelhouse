@@ -1,7 +1,8 @@
 name: scan-backstop
 
 # The primary keep-current path. On a schedule (and on demand), scan the whole
-# fleet, open cards for anything new that needs a decision, REFRESH an open
+# fleet, run deterministic target-side stale pending-contributor cleanup, open
+# cards for anything new that needs a decision, REFRESH an open
 # `needs-decision` card whose target materially changed or whose card render
 # version is stale, publish a held card whose auto-triage path is no longer
 # available, queue advisory auto triage for eligible PR-review or issue-triage
@@ -45,8 +46,9 @@ jobs:
         run: pip install --quiet pyyaml
 
       # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
-      # runs, and may post rebase nudges, so this step requires FLEET_TOKEN with
-      # Actions write scope.
+      # runs, may post rebase nudges, and may remind or close stale
+      # pending-contributor PRs, so this step requires FLEET_TOKEN with Actions
+      # write scope.
       - name: Scan the fleet
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}

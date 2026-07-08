@@ -33,7 +33,10 @@ repos:
     # auto_approve_ci: false       # optional override of the global setting
     # auto_triage: false           # optional per-repo opt-out for Claude spend (pr-review)
     # auto_triage_issues: false    # optional per-repo opt-out for Claude spend (issue-triage)
-    # pending_contributor_cleanup: false  # optional per-repo opt-out for stale PR cleanup
+    # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
+    # pending_contributor_cleanup_days: 14
+    # pending_contributor_reminder_days: 10
+    # pending_contributor_cleanup_targets: ["pr"]
     # thank_on_merge: false        # optional per-repo opt-out for the merge thank-you comment
     # thank_on_merge_message: "Cheers @{author}, this just merged!"  # optional per-repo wording override
 
@@ -162,7 +165,7 @@ card_issues: true
 # review, review comment, edit, or head push after the ask.
 # Maintainer and bot activity do not reset the clock.
 # Add the target-side `wheelhouse:keep-open` label to exempt a PR.
-# You can override these per repo above.
+# You can override the enable flag, thresholds, and targets per repo above.
 pending_contributor_cleanup: true
 pending_contributor_cleanup_days: 14
 pending_contributor_reminder_days: 10

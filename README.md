@@ -66,6 +66,9 @@ repos:
     # auto_triage: false                  # optional per-repo LLM spend opt-out (pr-review)
     # auto_triage_issues: false           # optional per-repo LLM spend opt-out (issue-triage)
     # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
+    # pending_contributor_cleanup_days: 14
+    # pending_contributor_reminder_days: 10
+    # pending_contributor_cleanup_targets: ["pr"]
     # thank_on_merge: false                # optional per-repo opt-out for the merge thank-you comment
     # thank_on_merge_message: "Cheers @{author}, this just merged!"  # optional per-repo wording
   - name: my-cli
@@ -136,6 +139,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > It skips instead of closing if any required target timeline or PR edit-history read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if the target has the `wheelhouse:keep-open` label.
 > Maintainer and bot activity never reset the clock.
 > Set it to `true` globally or on a single repo, and keep `pending_contributor_cleanup_targets: ["pr"]` for the current PR-only behavior.
+> The reminder days, cleanup days, and targets can also be overridden per repo.
 
 Not sure what your check names are?
 After step 6, run the `scan-backstop` workflow and read its logs, or use the `checks` helper locally:
@@ -405,7 +409,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Open the latest `scan-backstop` run logs and look for `scan incomplete`.
   Wheelhouse paginates open PRs, open issues, PR closing references, and hub cards; if any repo page or closing-reference page cannot be read completely, it reports the warning, suppresses new issue-triage cards that might be duplicates of PR-addressed issues, and refuses to self-heal close existing cards for that repo until a complete scan succeeds.
 - **A pending-contributor PR did not get reminded or closed.**
-  Check that `pending_contributor_cleanup` is enabled globally or for that repo.
+  Check that `pending_contributor_cleanup` is enabled globally or for that repo, and that the effective `pending_contributor_cleanup_targets` contains `pr`.
   The cleanup sweep is intentionally narrow: it only handles PRs where Wheelhouse can prove a `/request-changes` review or merge-conflict rebase nudge happened.
   It skips if the target has `wheelhouse:keep-open`, if the PR head changed, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if any required target timeline or PR edit-history read is missing or ambiguous.
   Search the latest `scan-backstop` log for `pending-contributor cleanup skipped`, `pending-contributor cleanup reminded`, or `pending-contributor cleanup closed`.
@@ -452,22 +456,22 @@ wheelhouse.config.yml          the one file you edit
 .github/workflows/
   ingest.yml                   repository_dispatch / manual -> create or refresh a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
-  scan-backstop.yml            hourly scan -> create, refresh, or close cards against live repo state
+  scan-backstop.yml            hourly scan -> create, refresh, close cards, and run target-side stale pending-contributor cleanup
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
-  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, CI safety, auto-approval, ref qualification, and scan logs
+  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, pending-contributor cleanup, CI safety, auto-approval, ref qualification, and scan logs
   render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
-tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution, and NL answer ref qualification
+tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
-tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
+tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, retro rebase markers, and fail-open timeline proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop

@@ -32,8 +32,8 @@ replaces has been dropped: the local single-flight lock (-> Actions
 state), per-repo `owner` (-> derived from github.repository_owner).
 
 Usage:
-  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, and log outcomes
-  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI, nudge conflicted PR-review candidates, and log outcomes
+  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
+  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
@@ -2100,7 +2100,11 @@ def build_repo(
     defaulting True); a repo may override it per-repo. `auto_triage` mirrors that
     model for the advisory Claude pass on pr-review cards, and `auto_triage_issues`
     is the INDEPENDENT equivalent for issue-triage cards (its own global/per-repo
-    default, never affected by `auto_triage` or vice versa). Same-repo PRs with no CI
+    default, never affected by `auto_triage` or vice versa).
+    `pending_contributor_cleanup` is the opposite default: OFF unless the owner
+    opts in globally or per repo. When enabled for PR targets, this scan may
+    remind or close stale PRs only from provable target-side request-changes or
+    needs-rebase asks, and every uncertainty fails open. Same-repo PRs with no CI
     signal route to normal review, not CI approval. Unknown fork status keeps a
     manual CI-approval card with no auto-approve attempt for contributor-authored
     PRs and logs a suppressed card for owner/maintainer/bot-authored PRs. When

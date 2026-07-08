@@ -67,10 +67,16 @@ still appears where it's plain English, e.g. "triage the queue".)
   no-ops. The local lock/board/ledger from the original `triage.py`
   are intentionally dropped (replaced by Actions
   `concurrency` + issues/labels/comments).
+  Stale pending-contributor cleanup deliberately stores its state on the TARGET
+  PR, not on a Wheelhouse card: the active label is
+  `wheelhouse:pending-contributor-action`, the opt-out label is
+  `wheelhouse:keep-open`, and hidden JSON markers in target comments carry the
+  provable ask/reminder/close records.
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
   (tick/slash/**plain-English** -> act on target -> consume terminal cards or
   leave non-terminal cards open), `scan-backstop`
-  (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
+  (hourly scan -> deterministic target-side cleanup plus reconcile:
+  create/refresh/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a
   held-card publish trigger; safe to run hourly because reconcile is a full
   no-op when none of those triggers fires, and queues automatic PR or issue
@@ -97,7 +103,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `CONTRIBUTING.md`).
 - **Scripts:** `wheelhouse_core.py` (scan/classify/dedup/security gate + the
   shared CI-safety verdict `ci_safety` / `repo_pr_target_posture` and scan-time
-  auto-approve in `build_repo`, plus shared utils
+  auto-approve in `build_repo`, stale pending-contributor cleanup
+  (`sweep_pending_contributor_actions`, target-side markers/labels, and the
+  rebase-nudge arming path), plus shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`,
   `auto-triage-enabled`, `auto-triage-issues-enabled`, `qualify_issue_refs`
   (rewrites a bare GitHub-autolink `#N` in model text to `owner/repo#N` - see
@@ -111,7 +119,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   trusted triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; non-checkbox actions including `comment`, `decline`, and
-  pr-review-only `request-changes`; the virtual `accept-recommendation` checkbox
+  pr-review-only `request-changes` with optional cleanup arming after a successful
+  GitHub review; the virtual `accept-recommendation` checkbox
   routing into existing deterministic actions; the NON-CONSUMING `investigate`
   routing + `clear-checkbox`; plus the natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
@@ -442,8 +451,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   already on disk from a
   `persist-credentials: false` checkout, so NO acting token is left on disk for
   the LLM to read.
-  `READONLY_TOKEN` is never used by `execute` and never gates or authorizes an
-  action.
+  `READONLY_TOKEN` is never used by `execute`, never used by stale
+  pending-contributor cleanup, and never gates or authorizes an action.
 - **Investigate is a NON-CONSUMING checkbox (the one tick that doesn't close the
   card).** It is offered on pr-review/issue-triage cards (NOT ci-approval, a fast
   security gate). Ticking it must NEVER consume the card: `apply_decision.py
@@ -511,6 +520,53 @@ still appears where it's plain English, e.g. "triage the queue".)
   required-reviews - a real (if reversible) effect on the target repo, so this
   is the one action added to the NL-selectable set since `investigate` was
   excluded from it.
+  When `pending_contributor_cleanup` is active for that repo and `pr` is an
+  effective cleanup target, `do_request_changes` also arms the target PR for
+  stale cleanup after the review POST succeeds.
+  Arming requires a non-maintainer human target author, the current head SHA, a
+  review id, and a provable `submitted_at` timestamp (reread by review id if the
+  POST response omits it).
+  It writes a hidden `wheelhouse-pending-contributor-action` marker comment and
+  adds `wheelhouse:pending-contributor-action`.
+  Any arming failure is cleanup-only: the review stays posted, the card remains
+  open, and the result message says stale cleanup was not armed.
+- **Stale pending-contributor cleanup is PR-only, deterministic, and fail-open.**
+  The feature is default OFF in code (`pending_contributor_cleanup: false` when
+  absent) but Kun's committed `wheelhouse.config.yml` opts in globally with
+  `pending_contributor_cleanup_targets: ["pr"]`, a 10-day reminder, and a 14-day
+  close threshold.
+  Every global setting has a per-repo override, including the enable flag,
+  thresholds, and targets.
+  It is intentionally scoped to provable contributor-action asks:
+  successful `/request-changes` reviews and merge-conflict `needs-rebase`
+  nudges.
+  It never handles `ci-approval`, never handles issue-triage, never runs from
+  ingest, never runs in Claude/LLM paths, and never uses `READONLY_TOKEN`.
+  The sweep runs inside `wheelhouse_core.py scan` under `FLEET_TOKEN`, before
+  worklist emission, so a PR closed by cleanup is removed from the scanned open
+  PR set and the addressed-issue map is recomputed without it.
+  A close requires an open target PR, a non-maintainer human author, no
+  `wheelhouse:keep-open` target label, an active structured marker plus
+  `wheelhouse:pending-contributor-action` label (or a provable legacy rebase
+  nudge), the same head SHA, a verified original ask, complete target comments,
+  reviews, review-comments, timeline, and PR edit-history reads, no qualifying
+  contributor activity after the ask, and a visible maintainer-authored reminder
+  marker posted after the ask.
+  At or after the close threshold with no reminder, it posts the reminder and
+  waits for a later scan instead of closing immediately.
+  Contributor comments, reviews, review comments, PR body edits, head pushes,
+  and other target timeline actions after the ask stop cleanup and clear the
+  active pending label.
+  Maintainer and bot activity is known activity but does not reset the clock.
+  A moved head also clears the active pending label.
+  Any uncertainty skips: unreadable or too-large paginated endpoints, missing or
+  ambiguous timestamps/authors, unaccounted target `updated_at`, untrusted
+  marker authorship, an unprovable review/nudge, invalid targets, or disabled
+  config all fail open.
+  Legacy `<!-- wheelhouse-rebase-nudge:<head_sha> -->` comments are retrofitted
+  only when a trusted author, the original comment timestamp/id, and unchanged
+  head can be proven; the first eligible pass reminds and adds the active label,
+  and only a later pass with that reminder may close.
 - NL conversation memory is owner-scoped, and the scoping IS the security
   boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
   `github.token`) and `apply_decision.py assemble_history` renders it as a
@@ -551,6 +607,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   This never rewrites `needs-ci-approval`: fork CI approval is independent of whether the eventual merge would conflict, and issue triage is unrelated.
   On the `ok:true` scan path, `build_repo` posts a contributor nudge under `FLEET_TOKEN` for non-owner/non-maintainer/non-bot `needs-rebase` PRs.
   The nudge body carries hidden marker `<!-- wheelhouse-rebase-nudge:<head_sha> -->`; before posting, Wheelhouse paginates the PR comments and skips if that marker already exists, so it posts at most once per conflicted head SHA and can nudge again only after a new push creates a new head.
+  If stale pending-contributor cleanup is active for PRs, a newly posted nudge is
+  patched with a structured `wheelhouse-pending-contributor-action` marker and
+  the target gets `wheelhouse:pending-contributor-action`; if the nudge comment
+  response lacks a comment id or timestamp, the cleanup arming fails open with a
+  warning and the nudge remains posted.
   If comment lookup or posting fails, the scan logs a warning and still emits no card; it never posts without first checking for the current marker.
   The PR stays in `open_pr_numbers` but drops out of `items`, so `reconcile.py` consumes any existing pure `needs-decision` card on the next successful scan.
 - **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
@@ -769,6 +830,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
 
 Messages Wheelhouse posts onto **target repos** (e.g. a rebase nudge on a contributor's PR) speak naturally, like a friendly maintainer bot.
 They must not name the product ("Wheelhouse") or use internal-state jargon ("maintainer queue", "resurface", bucket/kind names).
+This includes pending-contributor cleanup reminders and close comments.
 
 Owner-facing decision cards and comments on **this repo's** issues are the private queue; those may keep the Wheelhouse name and internal vocabulary.
 
@@ -785,14 +847,15 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, and surfaces a raw API failure as an `"error"` terminal state.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
-- `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
+- `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, optional pending-contributor cleanup arming for rebase nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
-- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
+- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
+- `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
