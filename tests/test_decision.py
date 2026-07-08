@@ -881,6 +881,17 @@ def test_do_request_changes_respects_cleanup_config():
         ),
         (cleanup_cfg(targets=("issue",)), "PR target disabled"),
         (cleanup_cfg(targets=()), "PR targets empty"),
+        (
+            thank_cfg(
+                pending_contributor_cleanup=True,
+                pending_contributor_cleanup_targets=False,
+            ),
+            "PR targets invalid",
+        ),
+        (
+            cleanup_cfg(repo_cfg={"pending_contributor_cleanup_targets": None}),
+            "per-repo PR targets null",
+        ),
     ):
         fake, calls = fake_gh_rest(open_pr())
         with patch_core(gh_rest=fake, load_config=lambda cfg=cfg: cfg):

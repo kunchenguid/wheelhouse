@@ -273,6 +273,14 @@ def test_config_defaults_off_and_per_repo_override():
           core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": []}, ["pr"]) == set())
     check("config: explicit empty set targets stay empty",
           core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": set()}, ["pr"]) == set())
+    check("config: explicit null global targets stay empty",
+          core._pending_contributor_cleanup_targets({}, None) == set())
+    check("config: explicit null repo targets stay empty",
+          core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": None}, ["pr"]) == set())
+    check("config: explicit invalid global targets stay empty",
+          core._pending_contributor_cleanup_targets({}, False) == set())
+    check("config: explicit invalid repo targets stay empty",
+          core._pending_contributor_cleanup_targets({"pending_contributor_cleanup_targets": {}}, ["pr"]) == set())
 
 
 def test_no_action_before_reminder_threshold():
@@ -501,6 +509,18 @@ def test_pr_push_activity_blocks_close():
     labels = [item["name"] for item in fake.issue["labels"]]
     check("activity: contributor commit blocks close", closed == set())
     check("activity: contributor commit clears pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        timeline=[commit_event(ts(1), MAINTAINER)],
+    )
+    closed = run(fake, now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("activity: actorless committed event blocks close", closed == set())
+    check("activity: actorless committed event clears pending label",
           core.PENDING_CONTRIBUTOR_LABEL not in labels)
 
     record = request_record()
@@ -746,6 +766,21 @@ def test_ci_approval_and_disabled_cleanup_are_out_of_scope():
         )
     check("scope: explicit empty cleanup targets do nothing", closed == set())
     check("scope: explicit empty cleanup targets perform no target reads",
+          fake.calls == [])
+
+    fake = FakeGitHub(comments=[pending_comment(record)], reviews=[review(101, ts())])
+    with patch_rest(fake):
+        closed = core.sweep_pending_contributor_actions(
+            "owner",
+            {"name": "demo"},
+            [enriched_pr()],
+            {"owner", "co-maintainer"},
+            enabled=True,
+            targets=False,
+            now=BASE + timedelta(days=14),
+        )
+    check("scope: explicit invalid cleanup targets do nothing", closed == set())
+    check("scope: explicit invalid cleanup targets perform no target reads",
           fake.calls == [])
 
 

@@ -798,11 +798,11 @@ def _pending_contributor_cleanup_targets(repo_cfg, global_default):
         else global_default
     )
     if raw is None:
-        raw = ["pr"]
+        return set()
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, (list, tuple, set)):
-        return {"pr"}
+        return set()
     return {str(x).strip().casefold() for x in raw if str(x).strip()}
 
 
@@ -1452,7 +1452,7 @@ def _timeline_event_authors(event, event_name):
         actor = _event_author(event)
         return [actor] if actor is not None else []
     authors = []
-    for key in ("actor", "user", "author", "committer"):
+    for key in ("actor", "user"):
         actor = event.get(key)
         if isinstance(actor, dict):
             authors.append(actor)
@@ -1461,6 +1461,8 @@ def _timeline_event_authors(event, event_name):
 
 def _timeline_event_has_contributor_actor(event, event_name, maintainer_logins):
     authors = _timeline_event_authors(event, event_name)
+    if event_name == "committed" and not authors:
+        return True
     if not authors:
         raise RuntimeError("%s event author missing or ambiguous" % event_name)
     ambiguous = False
@@ -1824,12 +1826,9 @@ def sweep_pending_contributor_actions(
     targets=None,
     now=None,
 ):
-    if targets is None:
-        effective_targets = {"pr"}
-    elif isinstance(targets, str):
-        effective_targets = {targets.strip().casefold()}
-    else:
-        effective_targets = {str(target).strip().casefold() for target in targets}
+    effective_targets = _pending_contributor_cleanup_targets(
+        {}, ["pr"] if targets is None else targets
+    )
     if not enabled or "pr" not in effective_targets:
         return set()
     name = repo_cfg["name"]
