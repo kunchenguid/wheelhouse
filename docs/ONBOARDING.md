@@ -25,7 +25,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `number`         | yes      | the PR or issue number                                             |
 | `kind`           | no       | `pr-review` (default), `ci-approval`, or `issue-triage`            |
 | `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge or request-changes action |
-| `updated_at`     | no       | the issue's `updatedAt` revision (issue-triage only) - recommended; enables automatic issue-card triage caching (issues have no head SHA) |
+| `updated_at`     | no       | the target PR/issue `updatedAt` - recommended; reflects target activity for queue sorting, and is the issue-triage auto-triage revision |
 | `title`          | no       | short title of the target                                          |
 | `author`         | no       | the PR/issue author's login                                        |
 | `comp`           | no       | compliance status shown on the card                               |
@@ -117,6 +117,7 @@ jobs:
           P_REPO: ${{ github.event.repository.name }}
           P_NUMBER: ${{ github.event.pull_request.number }}
           P_SHA: ${{ github.event.pull_request.head.sha }}
+          P_UPDATED_AT: ${{ github.event.pull_request.updated_at }}
           P_TITLE: ${{ github.event.pull_request.title }}
           P_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
@@ -124,11 +125,12 @@ jobs:
             --arg repo "$P_REPO" \
             --arg number "$P_NUMBER" \
             --arg sha "$P_SHA" \
+            --arg updated_at "$P_UPDATED_AT" \
             --arg title "$P_TITLE" \
             --arg author "$P_AUTHOR" \
             '{event_type:"wheelhouse-item", client_payload:{
                 repo:$repo, number:($number|tonumber), kind:"pr-review",
-                head_sha:$sha, title:$title, author:$author }}')"
+                head_sha:$sha, updated_at:$updated_at, title:$title, author:$author }}')"
           echo "$payload" | gh api "repos/$HUB/dispatches" --input -
 ```
 
@@ -146,7 +148,7 @@ jobs:
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
   Verified duplicate pending runs sharing a stable `workflowDatabaseId` are deduped to the highest/newest run before approval; same-named distinct workflows and runs without a workflow identity are still treated as distinct.
-- **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want automatic issue-card triage caching.
+- **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want activity sorting and automatic issue-card triage caching.
   The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.
 - **Third-party alternative.** If you prefer, `peter-evans/repository-dispatch` does the same dispatch as an action; the `gh api` form above keeps you dependency-free.
 
@@ -155,7 +157,7 @@ jobs:
 You can exercise the whole path without touching a source repo:
 
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
-2. Fill in `repo`, `number`, and (recommended) `head_sha` for a PR-review card or `updated_at` for an issue-triage card.
+2. Fill in `repo`, `number`, and the recommended `head_sha` plus `updated_at` for a PR-review card, or `updated_at` for an issue-triage card.
 3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place.
    If auto triage is eligible, it may first appear with `pending-triage` and no decision boxes; wait for the triage result or unavailable note to publish it.
 4. Tick a consuming decision box to confirm the handler acts on the target.

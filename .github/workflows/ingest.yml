@@ -36,7 +36,7 @@ on:
         description: "PR head SHA (recommended for pr-review/ci-approval)"
         required: false
       updated_at:
-        description: "Issue updatedAt revision (recommended for issue-triage; enables auto-triage caching)"
+        description: "Target PR/issue updatedAt (recommended; issue-triage uses it as the triage revision)"
         required: false
       title:
         description: "Short title of the target"
