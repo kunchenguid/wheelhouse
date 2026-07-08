@@ -67,6 +67,15 @@ def timeline_event(event, when, actor=CONTRIBUTOR):
     return {"event": event, "created_at": when, "actor": actor}
 
 
+def commit_event(when, author=CONTRIBUTOR, committer=None):
+    event = {"event": "committed", "author": author}
+    if when is not None:
+        event["created_at"] = when
+    if committer is not None:
+        event["committer"] = committer
+    return event
+
+
 def request_record(source_id=101, asked_at=None, head="sha1"):
     return core._pending_record(
         "demo",
@@ -448,6 +457,43 @@ def test_review_comment_and_edit_activity_block_close():
     check("activity: contributor edit event blocks close", closed == set())
 
 
+def test_pr_push_activity_blocks_close():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        timeline=[commit_event(ts(1), CONTRIBUTOR)],
+    )
+    closed = run(fake, now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("activity: contributor commit blocks close", closed == set())
+    check("activity: contributor commit clears pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        timeline=[timeline_event("head_ref_force_pushed", ts(1), CONTRIBUTOR)],
+    )
+    closed = run(fake, now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("activity: contributor force-push blocks close", closed == set())
+    check("activity: contributor force-push clears pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
+def test_unknown_push_activity_fails_open():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        timeline=[commit_event(ts(1), {})],
+    )
+    closed = run(fake, now_days=14)
+    check("fail-open: ambiguous post-ask commit skips cleanup", closed == set())
+
+
 def test_head_change_blocks_and_clears_pending_label():
     record = request_record(head="oldsha")
     fake = FakeGitHub(
@@ -684,6 +730,8 @@ def main():
     test_maintainer_and_bot_activity_do_not_reset_clock()
     test_exact_timestamp_equality_does_not_count_as_followup()
     test_review_comment_and_edit_activity_block_close()
+    test_pr_push_activity_blocks_close()
+    test_unknown_push_activity_fails_open()
     test_head_change_blocks_and_clears_pending_label()
     test_keep_open_and_unknown_timeline_fail_open()
     test_unknown_author_fails_open()

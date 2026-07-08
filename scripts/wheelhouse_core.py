@@ -172,6 +172,12 @@ PENDING_CONTRIBUTOR_REMINDER_PREFIX = "wheelhouse-pending-contributor-reminder"
 PENDING_CONTRIBUTOR_CLOSE_PREFIX = "wheelhouse-pending-contributor-close"
 PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
 PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
+PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS = {
+    "committed",
+    "edited",
+    "head_ref_force_pushed",
+    "renamed",
+}
 
 # Decision-card "kind" per PR bucket.
 PR_KIND = {
@@ -1408,6 +1414,54 @@ def _item_time(item, *keys):
     return None
 
 
+def _commit_event_time(event):
+    dt = _item_time(event, "created_at", "updated_at")
+    if dt is not None:
+        return dt
+    for key in ("author", "committer"):
+        author = event.get(key)
+        if not isinstance(author, dict):
+            continue
+        dt = _item_time(author, "date")
+        if dt is not None:
+            return dt
+    return None
+
+
+def _timeline_event_time(event, event_name):
+    if event_name == "committed":
+        return _commit_event_time(event)
+    return _item_time(event, "created_at")
+
+
+def _timeline_event_authors(event, event_name):
+    if event_name != "committed":
+        actor = _event_author(event)
+        return [actor] if actor is not None else []
+    authors = []
+    for key in ("actor", "user", "author", "committer"):
+        actor = event.get(key)
+        if isinstance(actor, dict):
+            authors.append(actor)
+    return authors
+
+
+def _timeline_event_has_contributor_actor(event, event_name, maintainer_logins):
+    authors = _timeline_event_authors(event, event_name)
+    if not authors:
+        raise RuntimeError("%s event author missing or ambiguous" % event_name)
+    ambiguous = False
+    for actor in authors:
+        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
+        if is_contributor is True:
+            return True
+        if is_contributor is None:
+            ambiguous = True
+    if ambiguous:
+        raise RuntimeError("%s event author missing or ambiguous" % event_name)
+    return False
+
+
 def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
     for comment in state["comments"]:
         dt = _item_time(comment, "created_at", "submitted_at", "updated_at")
@@ -1448,22 +1502,20 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
         if is_contributor:
             return True
 
-    edit_events = {"renamed", "edited"}
     for event in state["timeline"]:
         if not isinstance(event, dict):
             raise RuntimeError("timeline returned unexpected event")
-        if str(event.get("event") or "") not in edit_events:
+        event_name = str(event.get("event") or "")
+        if event_name not in PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS:
             continue
-        dt = _item_time(event, "created_at")
+        dt = _timeline_event_time(event, event_name)
         if dt is None:
-            raise RuntimeError("edit event missing timestamp")
+            raise RuntimeError("%s event missing timestamp" % event_name)
         if dt <= asked_dt:
             continue
-        actor = _event_author(event)
-        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
-        if is_contributor is None:
-            raise RuntimeError("edit event author missing or ambiguous")
-        if is_contributor:
+        if _timeline_event_has_contributor_actor(
+            event, event_name, maintainer_logins
+        ):
             return True
 
     return False
