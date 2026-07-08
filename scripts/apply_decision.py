@@ -118,6 +118,22 @@ NON_CONSUMING_ACTIONS = frozenset({"investigate"})
 NL_EXCLUDED_ACTIONS = frozenset({"investigate"})
 TEXT_REQUIRED_ACTIONS = frozenset({"comment", "request-changes"})
 SLASH_ONLY_ACTIONS = frozenset({"comment", "decline", "request-changes"})
+ACCEPT_RECOMMENDATION_OPTION = "accept-recommendation"
+ACCEPT_ALLOWED_BY_KIND = {
+    "pr-review": {
+        "merge",
+        "request-changes",
+        "decline",
+        "close",
+        "hold",
+        "investigate",
+        "comment",
+    },
+    "issue-triage": {"close", "decline", "hold", "investigate", "comment"},
+}
+ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
+    {"close", "decline", "comment", "request-changes"}
+)
 
 
 def nl_allowed(kind):
@@ -127,7 +143,10 @@ def nl_allowed(kind):
 
 
 def checkbox_allowed(kind):
-    return ALLOWED.get(kind, set()) - SLASH_ONLY_ACTIONS
+    allowed = ALLOWED.get(kind, set()) - SLASH_ONLY_ACTIONS
+    if kind in ACCEPT_ALLOWED_BY_KIND:
+        allowed = set(allowed) | {ACCEPT_RECOMMENDATION_OPTION}
+    return allowed
 
 
 SLASH = {
@@ -202,6 +221,8 @@ def parse_slash(comment, allowed):
         return (None, "")
     if action in TEXT_REQUIRED_ACTIONS and not rest:
         return (None, "")  # nothing to post
+    if action == "close":
+        rest = ""
     if action == "decline" and not rest:
         rest = "Declining for now."
     return (action, rest)
@@ -290,6 +311,49 @@ def parse_label(label_name, allowed):
     return None
 
 
+def _normalize_recommendation_action(value):
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"\s+", "-", text)
+    aliases = {
+        "request-change": "request-changes",
+        "changes-requested": "request-changes",
+        "look-closer": "investigate",
+        "discuss": "comment",
+    }
+    return aliases.get(text, text) if text else ""
+
+
+def _accept_recommendation(state):
+    kind = (state or {}).get("kind", "pr-review")
+    rec = (state or {}).get("triage_recommendation")
+    if not isinstance(rec, dict):
+        return (None, "")
+    if (state or {}).get("triage_status") != "succeeded":
+        return (None, "")
+    revision = (
+        (state or {}).get("updated_at", "")
+        if kind == "issue-triage"
+        else (state or {}).get("head_sha", "")
+    )
+    if not revision or (state or {}).get("triaged_sha") != revision:
+        return (None, "")
+    action = _normalize_recommendation_action(rec.get("action"))
+    if action not in ACCEPT_ALLOWED_BY_KIND.get(kind, set()):
+        return (None, "")
+    if action == "approve-ci":
+        return (None, "")
+    reason = str(rec.get("reason") or "").strip()
+    if action in ACCEPT_TEXT_REQUIRED_ACTIONS and not reason:
+        return (None, "")
+    if reason:
+        reason = core.qualify_issue_refs(
+            reason,
+            os.environ.get("GITHUB_REPOSITORY_OWNER", ""),
+            str((state or {}).get("repo") or ""),
+        )
+    return (action, reason)
+
+
 def cmd_parse():
     body = os.environ.get("ISSUE_BODY", "")
     state = core.parse_state_block(body)
@@ -326,6 +390,12 @@ def cmd_parse():
     if not decision:
         set_output("decision", "")
         return
+
+    if decision == ACCEPT_RECOMMENDATION_OPTION:
+        decision, free_text = _accept_recommendation(state)
+        if not decision:
+            set_output("decision", "")
+            return
 
     if decision in NON_CONSUMING_ACTIONS:
         # investigate: trigger the code-grounded deep review and leave the card
@@ -591,7 +661,7 @@ def cmd_execute():
     elif decision == "approve-ci":
         message, terminal = do_approve_ci(owner, repo, number)
     elif decision == "close":
-        message, terminal = do_close(owner, repo, number)
+        message, terminal = do_close(owner, repo, number, reason=free_text or None)
     elif decision == "decline":
         message, terminal = do_close(
             owner, repo, number, reason=free_text or "Declining for now."

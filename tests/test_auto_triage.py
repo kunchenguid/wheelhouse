@@ -428,6 +428,110 @@ def test_render_triage_section_qualifies_cross_repo_refs():
     )
 
 
+def test_structured_recommendation_persists_and_renders_accept():
+    triaged = item_issue(
+        triage={
+            "summary": "Reporter hit a duplicate of #127.",
+            "product_implications": "Routine duplicate closure.",
+            "recommended_action": "decline",
+            "recommended_reason": "Duplicate of #127; fixed on default.",
+        }
+    )
+    prior = os.environ.get("GITHUB_REPOSITORY_OWNER")
+    os.environ["GITHUB_REPOSITORY_OWNER"] = "acme"
+    try:
+        body = rc.render(triaged)["body"]
+    finally:
+        if prior is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = prior
+    state = core.parse_state_block(body)
+    check("accept render: checkbox appears for valid structured rec",
+          "<!-- opt:accept-recommendation -->" in body)
+    check("accept render: deterministic recommendation is suppressed",
+          "### Recommended action" not in body)
+    check("accept state: structured recommendation persisted",
+          state.get("triage_recommendation") == {
+              "action": "decline",
+              "reason": "Duplicate of acme/wheelhouse#127; fixed on default.",
+          })
+    check("accept state: option list matches visible checkbox set",
+          state.get("options", [])[0] == "accept-recommendation")
+    check("accept render: no bare #127 survives in persisted/visible reason",
+          " #127" not in body and "acme/wheelhouse#127" in body)
+
+
+def test_accept_checkbox_is_conditional_and_never_ci_approval():
+    valid = item(
+        triage={
+            "summary": "Ready to merge.",
+            "product_implications": "Routine.",
+            "recommended_action": "merge",
+            "recommended_reason": "Green checks.",
+        }
+    )
+    valid_body = rc.render(valid)["body"]
+    check("accept conditional: pr merge rec renders accept",
+          "<!-- opt:accept-recommendation -->" in valid_body)
+
+    legacy = item(
+        triage={
+            "summary": "Ready to merge.",
+            "product_implications": "Routine.",
+            "recommended_next_step": "merge - green checks.",
+        }
+    )
+    legacy_body = rc.render(legacy)["body"]
+    check("accept conditional: legacy markdown rec does not render accept",
+          "<!-- opt:accept-recommendation -->" not in legacy_body)
+    check("accept conditional: legacy keeps deterministic recommendation",
+          "### Recommended action" in legacy_body)
+
+    invalid = item_issue(
+        triage={
+            "summary": "Close it.",
+            "product_implications": "Routine.",
+            "recommended_action": "merge",
+            "recommended_reason": "Issues cannot merge.",
+        }
+    )
+    check("accept conditional: invalid per-kind action omitted",
+          "<!-- opt:accept-recommendation -->" not in rc.render(invalid)["body"])
+
+    missing_reason = item_issue(
+        triage={
+            "summary": "Close it.",
+            "product_implications": "Routine.",
+            "recommended_action": "decline",
+            "recommended_reason": "",
+        }
+    )
+    check("accept conditional: missing required reason omitted",
+          "<!-- opt:accept-recommendation -->" not in rc.render(missing_reason)["body"])
+
+    failed = rc.body_with_triage_result(
+        rc.render(item_issue())["body"],
+        item_issue()["updated_at"],
+        error="timeout",
+    )
+    check("accept conditional: failed triage omits accept",
+          "<!-- opt:accept-recommendation -->" not in failed)
+
+    ci = item(
+        kind="ci-approval",
+        options=["approve-ci", "close", "hold"],
+        triage={
+            "summary": "Safe.",
+            "product_implications": "Routine.",
+            "recommended_action": "approve-ci",
+            "recommended_reason": "Checks are waiting.",
+        },
+    )
+    check("accept conditional: ci-approval never renders accept",
+          "<!-- opt:accept-recommendation -->" not in rc.render(ci)["body"])
+
+
 def test_triage_section_owner_repo_drive_qualification_not_model_text():
     """Qualification uses the CALLER-supplied owner/repo (deterministic card
     state), never anything the model itself might claim inside the text."""
@@ -559,6 +663,28 @@ def test_body_helpers_queue_and_apply_result():
         updated.find("### Triage") < updated.find("### Recommended action"),
     )
     check("result: status succeeded", updated_state.get("triage_status") == "succeeded")
+
+    structured = rc.body_with_triage_result(
+        queued,
+        it["head_sha"],
+        triage={
+            "summary": "Adds lightweight context.",
+            "product_implications": "Routine internal change.",
+            "recommended_action": "request-changes",
+            "recommended_reason": "Please add a regression test for #7.",
+        },
+        owner="acme",
+    )
+    structured_state = core.parse_state_block(structured)
+    check("result: structured recommendation persisted into state",
+          structured_state.get("triage_recommendation") == {
+              "action": "request-changes",
+              "reason": "Please add a regression test for acme/wheelhouse#7.",
+          })
+    check("result: accept checkbox appears after structured triage succeeds",
+          "<!-- opt:accept-recommendation -->" in structured)
+    check("result: deterministic recommendation suppressed after structured triage",
+          "### Recommended action" not in structured)
 
 
 def test_should_auto_triage_cache_and_gates():
@@ -1472,11 +1598,15 @@ def test_triage_workflow_issue_path_isolation():
         )
         check(
             "workflow: issue prompt requests an issue-appropriate recommendation",
-            "look closer | discuss | decline" in run,
+            '"recommended_action": "close | decline | hold | investigate | comment"'
+            in run
+            and '"recommended_reason":' in run,
         )
         check(
             "workflow: pr prompt keeps the merge-oriented recommendation",
-            "merge | look closer | discuss | decline" in run,
+            '"recommended_action": "merge | request-changes | decline | close | hold | investigate | comment"'
+            in run
+            and '"recommended_reason":' in run,
         )
 
     check(
@@ -2787,6 +2917,8 @@ def main():
     test_render_triage_section_has_no_mentions_and_caches_sha()
     test_render_issue_triage_section_has_no_mentions_and_caches_revision()
     test_recommended_next_step_is_conservative_when_unexpected()
+    test_structured_recommendation_persists_and_renders_accept()
+    test_accept_checkbox_is_conditional_and_never_ci_approval()
     test_triage_requires_complete_structured_json()
     test_body_helpers_queue_and_apply_result()
     test_body_helpers_queue_and_apply_result_for_issue()

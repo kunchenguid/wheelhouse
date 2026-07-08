@@ -359,11 +359,13 @@ jobs:
             if [ "$KIND" = "issue-triage" ]; then
               echo '  "summary": "plain one-sentence summary of what the issue is asking for",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine/low-risk, with why",'
-              echo '  "recommended_next_step": "look closer | discuss | decline - one-line reason (e.g. needs-repro, duplicate, good first issue)"'
+              echo '  "recommended_action": "close | decline | hold | investigate | comment",'
+              echo '  "recommended_reason": "one concise reason/comment to post or show for the recommended action"'
             else
               echo '  "summary": "plain one-sentence summary of what the PR does",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
-              echo '  "recommended_next_step": "merge | look closer | discuss | decline - one-line reason"'
+              echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
+              echo '  "recommended_reason": "one concise reason/comment/review body for the recommended action"'
             fi
             echo "}"
             echo "Do not include Markdown fences or extra prose."
