@@ -12,6 +12,9 @@ Phases, run as separate workflow steps so each uses the right token:
                only diffs the parsed option keys, it no longer scrapes the body.
                A held `pending-triage` card is intentionally inert until
                render_card.py publishes its first auto-triage result.
+               The virtual accept-recommendation checkbox is parsed only from
+               fresh successful structured triage_recommendation state, then
+               mapped to an existing deterministic action.
                The NON-CONSUMING `investigate` tick is routed apart from every
                other action: it sets `investigate` (not `decision`) so the
                handler triggers deep-review.yml and leaves the card OPEN.
@@ -35,8 +38,9 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
   nl-prompt    Build the LLM prompt: the deterministic card context + the
                owner/maintainer's comment (trusted instructions) plus the target
                content as clearly-delimited UNTRUSTED data. Writes `prompt` to
-               $GITHUB_OUTPUT. The card's advisory auto-triage section is omitted
-               from trusted context. The card's
+               $GITHUB_OUTPUT. The card's advisory auto-triage section and
+               hidden triage_recommendation state are omitted from trusted
+               context. The card's
                prior comment thread is folded in as owner-scoped conversation
                history (see assemble_history) so follow-up questions keep
                continuity. When the workflow has an optional READONLY_TOKEN, it
@@ -84,8 +88,10 @@ _STATE_BLOCK_RE = re.compile(
     re.S,
 )
 
-# Actions allowed per kind. Checkbox options are a subset of these; comment,
-# decline, and request-changes are not checkbox options because GitHub issue-form
+# Actions allowed per kind. Regular checkbox options are a subset of these;
+# `accept-recommendation` is a virtual checkbox that validates hidden structured
+# triage state and then maps back to one of these actions. comment, decline, and
+# request-changes are not regular checkbox options because GitHub issue-form
 # checkboxes cannot carry free text. comment and request-changes require
 # slash-command text, while decline can also be driven by a decision label with
 # its default reason. request-changes goes through the normal `decision`

@@ -9,6 +9,7 @@ The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
 That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
 When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
+If successful triage returns a fresh structured recommendation with an action allowed for that card kind, the published boxes can include an `Accept recommendation` shortcut.
 For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
 
 > You add these files to **your source repos**, not to Wheelhouse.
@@ -30,7 +31,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `comp`           | no       | compliance status shown on the card                               |
 | `tests`          | no       | test status shown on the card                                     |
 | `summary`        | no       | one-line situation summary                                         |
-| `recommendation` | no       | recommended action shown on the card                              |
+| `recommendation` | no       | fallback recommended action shown on the card when structured auto triage has not provided an accept-capable recommendation |
 | `priority`       | no       | `high` / `med` / `low`                                             |
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
 | `auto_triage`    | no       | `false` opts this dispatched pr-review item out of automatic PR-card triage |
@@ -48,13 +49,15 @@ It cannot force auto triage on when the hub or repo config disables it.
 Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (the issue's `updatedAt`) so the hub can cache the triage attempt the same way it caches PR triage by `head_sha`; omit it and the item is simply never eligible for automatic issue triage.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
+Do not send `accept-recommendation` in `options`; Wheelhouse inserts that checkbox only from a fresh successful structured auto-triage recommendation, and never for `ci-approval`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
 If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
 Non-checkbox actions are not valid `options`: `/comment <text>` and the pr-review-only `/request-changes <text>` require slash-command text, while `/decline <reason>` is also shown in the card's slash-command hint for custom decline wording.
 A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
-If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
+If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or source-provided checkbox `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
+The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
 `pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
 A stale render version can also apply internal card-body repairs, such as qualifying bare target refs preserved in older cached `Triage` sections.
@@ -155,5 +158,6 @@ You can exercise the whole path without touching a source repo:
 3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place.
    If auto triage is eligible, it may first appear with `pending-triage` and no decision boxes; wait for the triage result or unavailable note to publish it.
 4. Tick a consuming decision box to confirm the handler acts on the target.
+   If `Accept recommendation` appears, it is still just a deterministic checkbox path and follows the same target guards as the underlying action.
 
 This is the quickest way to validate `FLEET_TOKEN` scope before wiring real dispatches.

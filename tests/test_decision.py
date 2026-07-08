@@ -13,6 +13,9 @@ Covers:
   * the natural-language structured-intent contract: an `action` result drives
     the deterministic executor, while `answer`/`clarify` only reply and leave
     the card open - i.e. `execute` runs ONLY for `action` mode;
+  * the accept-recommendation checkbox contract: only fresh successful
+    structured triage_recommendation state maps to an existing deterministic
+    action, with missing/stale/invalid recommendations no-oping safely;
   * the NON-CONSUMING investigate routing: ticking investigate emits the
     `investigate` output (not `decision`), so the card is NOT consumed; every
     other action still sets `decision`; investigate is in the per-kind allow-set

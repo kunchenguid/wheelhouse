@@ -84,6 +84,8 @@ maintainer: ""
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
 # card gets one quick advisory triage per PR head SHA.
 # The card gains a Summary, Product implications, and Recommended next step.
+# A fresh successful structured recommendation may add an Accept recommendation
+# checkbox, but it still never acts unless the owner/maintainer ticks it.
 # A brand-new eligible card is first labeled pending-triage and shows no
 # decision checkboxes until that attempt completes or fails open.
 # This never acts and never changes routing; it only gives owner-facing context.
@@ -100,7 +102,9 @@ auto_triage: true
 # decision checkboxes until that attempt completes or fails open.
 # It checks out the repo's default branch read-only for a little code context;
 # there is no diff to review. Same Summary / Product implications / Recommended
-# next step shape as PR auto triage; same advisory-only, never-acts guarantee.
+# next step shape as PR auto triage, with the same possible Accept
+# recommendation shortcut for issue-safe actions; same advisory-only,
+# never-acts-unless-ticked guarantee.
 # Set false to opt out for token-spend control, or override per repo above with
 # `auto_triage_issues: false`.
 auto_triage_issues: true

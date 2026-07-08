@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Offline checks for automatic lightweight PR-card and issue-card triage,
-including held-card publish and recovery behavior.
+including structured accept recommendations, held-card publish, and recovery
+behavior.
 
 Run: python tests/test_auto_triage.py
 """

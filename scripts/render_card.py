@@ -14,6 +14,9 @@ triage card is created HELD - `pending-triage` on top of `needs-decision`, a
 placeholder body with no checkboxes - and published to its normal actionable
 form by `update_card_triage` the moment its first auto-triage attempt
 completes, success or failure alike. See "Held cards" above `HOLD_LABEL`.
+Fresh successful structured triage recommendations can add a conditional
+`Accept recommendation` checkbox and persist `triage_recommendation` in the
+state block; the visible Markdown recommendation text is never parsed for this.
 
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
@@ -47,6 +50,11 @@ from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 # cannot carry free text. Comment and request-changes require slash-command text;
 # decline can carry a slash-command reason or fall back to its default label
 # reason (see apply_decision.py).
+#
+# `accept-recommendation` is not a source-provided checkbox option. It is a
+# conditional, renderer-inserted shortcut backed by fresh successful structured
+# auto-triage recommendation state, and apply_decision.py maps it back to an
+# existing deterministic action.
 #
 # `investigate` is the odd one out: it is NON-CONSUMING. Ticking it triggers a
 # code-grounded deep review (deep-review.yml) and leaves the card open for the
