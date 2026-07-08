@@ -79,6 +79,10 @@ _AUTO_TRIAGE_SECTION_RE = re.compile(
     r"<!--\s*wheelhouse-triage:end\s*-->\n?",
     re.S,
 )
+_STATE_BLOCK_RE = re.compile(
+    r"<!--\s*((?:wheelhouse|triage)-state):\s*(\{.*?\})\s*-->",
+    re.S,
+)
 
 # Actions allowed per kind. Checkbox options are a subset of these; comment,
 # decline, and request-changes are not checkbox options because GitHub issue-form
@@ -720,7 +724,22 @@ def search_repos_for_prompt(owner, state):
 
 def trusted_card_context(card_body):
     body = _AUTO_TRIAGE_SECTION_RE.sub("\n", card_body or "").strip()
+    body = _STATE_BLOCK_RE.sub(_trusted_state_block, body)
     return body + "\n" if body else ""
+
+
+def _trusted_state_block(match):
+    try:
+        state = json.loads(match.group(2))
+    except (TypeError, ValueError):
+        return match.group(0)
+    if not isinstance(state, dict) or "triage_recommendation" not in state:
+        return match.group(0)
+    state.pop("triage_recommendation", None)
+    return "<!-- %s: %s -->" % (
+        match.group(1),
+        json.dumps(state, separators=(",", ":")),
+    )
 
 
 def build_nl_prompt(
@@ -1075,6 +1094,8 @@ def route_decision(result, kind, state, owner=""):
                 "What changes should I request? Tell me what needs to change."
             )
             return finish()
+        if action == "close":
+            free_text = ""
         if action == "decline" and not free_text:
             free_text = "Declining for now."
         out.update(mode="action", decision=action, free_text=free_text)

@@ -1395,7 +1395,7 @@ def parse_triage_json(text):
     triage = normalize_triage(data)
     if not triage:
         return None
-    return triage
+    return data
 
 
 # --------------------------------------------------------------------------- #

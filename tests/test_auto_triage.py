@@ -701,6 +701,27 @@ def test_body_helpers_queue_and_apply_result():
     check("result: deterministic recommendation suppressed after structured triage",
           "### Recommended action" not in structured)
 
+    parsed_structured = rc.parse_triage_json(json.dumps({
+        "summary": "Adds lightweight context.",
+        "product_implications": "Routine internal change.",
+        "recommended_action": "request-changes",
+        "recommended_reason": "Please add a regression test for #8.",
+    }))
+    from_parsed = rc.body_with_triage_result(
+        queued,
+        it["head_sha"],
+        triage=parsed_structured,
+        owner="acme",
+    )
+    from_parsed_state = core.parse_state_block(from_parsed)
+    check("result: parsed structured Claude output still renders accept",
+          "<!-- opt:accept-recommendation -->" in from_parsed)
+    check("result: parsed structured Claude output persists recommendation",
+          from_parsed_state.get("triage_recommendation") == {
+              "action": "request-changes",
+              "reason": "Please add a regression test for acme/wheelhouse#8.",
+          })
+
 
 def test_should_auto_triage_cache_and_gates():
     it = item()
