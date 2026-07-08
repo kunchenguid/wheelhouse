@@ -178,7 +178,7 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # Bumped 3 -> 4 to publish the conditional `Accept recommendation` checkbox
 # and suppress the deterministic top-level recommendation when a structured
 # triage recommendation is present.
-CARD_RENDER_VERSION = 4
+CARD_RENDER_VERSION = 5
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -517,6 +517,9 @@ def _clean_triage_text(value, limit=700, default="n/a"):
 AUTOMATED_STATUS_LABEL = "`[automated status]`"
 _AUTOMATED_STATUS_LINE_RE = re.compile(
     r"^(?P<indent>\s*)"
+    r"(?P<prefix>"
+    r"(?:-\s+\*\*(?:Summary|Product implications|Recommended next step):\*\*\s+)?"
+    r")"
     r"(?P<text>"
     # Known claude-code-action harness transcript noise. Keep this allowlist
     # intentionally narrow so agent reasoning and human-authored text are not
@@ -554,9 +557,10 @@ def label_automated_status_lines(text):
         match = _AUTOMATED_STATUS_LINE_RE.match(line)
         if match and not match.group("text").startswith(AUTOMATED_STATUS_LABEL):
             labeled.append(
-                "%s%s %s%s%s"
+                "%s%s%s %s%s%s"
                 % (
                     match.group("indent"),
+                    match.group("prefix"),
                     AUTOMATED_STATUS_LABEL,
                     match.group("text"),
                     match.group("trailing"),
@@ -773,6 +777,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     if section:
         repo = (old_state or {}).get("repo") or item.get("repo", "")
         section = qualify_issue_refs(section, owner, repo)
+        section = label_automated_status_lines(section)
         body = _insert_triage_section(body, section)
 
     state = parse_state_block(body)

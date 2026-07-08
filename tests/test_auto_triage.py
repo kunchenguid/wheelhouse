@@ -769,6 +769,18 @@ def test_automated_status_lines_are_labeled_only_on_allowlist():
         "status-label: labeling is idempotent",
         rc.label_automated_status_lines(labeled) == labeled,
     )
+    formatted = "- **Summary:** Waited for background terminal 60s.\n"
+    formatted_labeled = rc.label_automated_status_lines(formatted)
+    check(
+        "status-label: formatted triage row is marked automated",
+        formatted_labeled == (
+            "- **Summary:** `[automated status]` Waited for background terminal 60s.\n"
+        ),
+    )
+    check(
+        "status-label: formatted triage row is idempotent",
+        rc.label_automated_status_lines(formatted_labeled) == formatted_labeled,
+    )
 
     triage = {
         "summary": "Waited for background terminal 60s.",
