@@ -23,7 +23,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
   A hidden HTML comment holds the machine-readable state.
   The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
-- **GitHub Actions are the handlers:** they create cards, refresh pending cards when their targets change, execute your decisions, and reconcile the queue against live repo state.
+- **GitHub Actions are the handlers:** they create cards, refresh pending cards when material target state changes, reflect target activity for recently-updated sorting, execute your decisions, and reconcile the queue against live repo state.
 
 ```
  source repos ──dispatch──▶ ingest ─────────┐
@@ -220,7 +220,7 @@ Two ways for items to enter the queue, and you can use either or both:
 ### 6. Verify
 
 1. In this repo, open the **Actions** tab ▸ **scan-backstop** ▸ **Run workflow**.
-2. Watch the run. Within a minute, decision-card issues should appear or refresh for anything in your fleet that needs your call.
+2. Watch the run. Within a minute, decision-card issues should appear, refresh, or move upward in Recently updated sort for anything in your fleet that needs your call.
 3. Tick a consuming decision checkbox on one card and confirm the action lands on the target repo and the card closes.
    If the card is still labeled `pending-triage`, wait for the triage result or unavailable note to publish the checkboxes first.
 
@@ -421,7 +421,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   That means Wheelhouse verified no matching workflow run was still awaiting approval, emitted no worklist item, and let reconcile consume the stale card.
 - **Cron lag.**
   The scheduled keep-current path runs hourly, but GitHub cron is best-effort and can be delayed.
-  For lower-latency items, wire the dispatch path from [`docs/ONBOARDING.md`](docs/ONBOARDING.md); dispatches nudge the same card-refresh logic immediately.
+  For lower-latency items, wire the dispatch path from [`docs/ONBOARDING.md`](docs/ONBOARDING.md); dispatches nudge the same keep-current logic immediately.
 - **A card shows `pending-triage` and no decision checkboxes.**
   Its first auto-triage attempt has been queued but has not published yet.
   Wait for the **triage** workflow to attach either the `Triage` section or an unavailable note; either outcome removes `pending-triage` and restores the normal checkboxes.
@@ -457,29 +457,29 @@ wheelhouse.config.yml          the one file you edit
 .github/ISSUE_TEMPLATE/
   wheelhouse-decision.yml      schema for machine-rendered card decisions (held cards intentionally render no checkboxes)
 .github/workflows/
-  ingest.yml                   repository_dispatch / manual -> create or refresh a decision card
+  ingest.yml                   repository_dispatch / manual -> create, refresh, or activity-reflect a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
-  scan-backstop.yml            hourly scan -> create, refresh, close cards, and run target-side stale pending-contributor cleanup
+  scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, and run target-side stale pending-contributor cleanup
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, pending-contributor cleanup, CI safety, auto-approval, ref qualification, and scan logs
-  render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/close cards; queue/update auto triage; label automated status lines
+  render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
-  reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
+  reconcile.py                 backstop: open new cards, refresh stale pending cards, reflect target activity, close consumed ones
 tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
-tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
-tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
+tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
+tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, retro rebase markers, and fail-open timeline proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
-tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
-tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
+tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
+tests/test_auto_triage.py      offline unit test for automatic triage config, cache, activity-stamp interaction, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting, including ref qualification and automated-status labeling
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification

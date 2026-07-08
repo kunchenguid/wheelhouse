@@ -48,7 +48,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   target's GitHub `updatedAt` advances past that stamp, Wheelhouse may make one
   hidden state-only card body edit so GitHub's `sort:updated-desc` issue view
   surfaces recently active targets first. That stamp is never part of
-  `MATERIAL_FIELDS`, never a triage revision, and never a decision input.
+  `MATERIAL_FIELDS`, never a triage revision, and never a decision input. Cards
+  written before the stamp existed use the card issue's own GitHub `updatedAt`
+  as the baseline, so legacy queues do not churn just to backfill the stamp.
   Automatic triage (pr-review
   AND issue-triage) adds non-material cache fields such as
   `triaged_sha`, `triage_status`, and `triage_recommendation`; those are
@@ -82,11 +84,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   (tick/slash/**plain-English** -> act on target -> consume terminal cards or
   leave non-terminal cards open), `scan-backstop`
   (hourly scan -> deterministic target-side cleanup plus reconcile:
-  create/refresh/close - the primary keep-current path
+  create/refresh/activity-reflect/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a
-  held-card publish trigger; safe to run hourly because reconcile is a full
-  no-op when none of those triggers fires, and queues automatic PR or issue
-  triage when the
+  held-card publish trigger, and can make a hidden state-only activity stamp
+  write when live target activity is newer than the card's reflected stamp;
+  safe to run hourly because reconcile no-ops unless one of those maintenance
+  triggers or an auto-triage cache miss applies, and queues automatic PR or
+  issue triage when the
   current revision (a PR's `head_sha`, or an issue's `updatedAt`) lacks a fresh
   `triaged_sha` cache; its "List open cards" step lists THIS repo's open cards via
   `gh api --paginate --slurp "repos/{owner}/{repo}/issues?..." | jq '...'` -
@@ -122,7 +126,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   automatic triage section rendering, structured recommendation persistence,
   conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
   updates, automated-status labeling for known harness transcript lines, and
-  trusted triage-result card edits that publish held cards),
+  target-activity state reflection, plus trusted triage-result card edits that
+  publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; non-checkbox actions including `comment`, `decline`, and
   pr-review-only `request-changes` with optional cleanup arming after a successful
@@ -133,7 +138,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed LLM
   context),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
-  create/**refresh**/close and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
+  create/**refresh**/activity-reflect/close and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
   `nl_readonly_search`; `reconcile`/`render_card` import `wheelhouse_core` (and
   `build_item` imports `render_card`) via
   `sys.path.insert(0, dirname(__file__))`.
@@ -236,17 +241,29 @@ still appears where it's plain English, e.g. "triage the queue".)
   self-terminating propagation shape as the earlier author `@mention` drop:
   every pre-existing card refreshes once, gets its cached triage refs
   qualified, known automated status lines labeled, and its `render_version`
-  stamped with the current version, and the next scan is a full no-op.
+  stamped with the current version, and the next scan is a full no-op unless
+  target activity later advances past the reflected stamp.
   The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
   `#N` and do not match the automated-status allowlist, so repairing the whole
   section string leaves them intact.
+  Target-activity sorting is deliberately not a full refresh. If a pure pending
+  card's live target `updated_at` is strictly newer than its stored
+  `activity_reflected_at`, `reflect_activity` may replace only the hidden state
+  block so the card issue's own GitHub `updatedAt` moves for
+  `sort:updated-desc`. It never re-renders visible card UI, changes labels,
+  comments, or touches the target repo. A full refresh and the auto-triage
+  queued-cache write both stamp `activity_reflected_at` as part of their
+  existing body edit, so they do not do a second activity-only write. For a
+  legacy card with no stamp, the card issue's own `updatedAt` is the baseline,
+  which avoids one-time churn across an old queue.
   The shared pure helpers live in `render_card.py`
   (`material_changed`, `render_stale`, `held_publish_needed`, `refresh_needed`,
-  `is_refreshable`, `plan_label_update`); `reconcile.py`
+  `activity_reflection_needed`, `is_refreshable`, `plan_label_update`);
+  `reconcile.py`
   pre-checks them (using the card row it already listed) so the common
-  no-change case never hits the API, and `upsert_card` re-checks them before it
-  edits (defense in depth for the event path). Three rules are load-bearing and
-  must not be loosened:
+  no-change and activity-fresh case never hits the API, and `upsert_card`
+  re-checks them before it edits (defense in depth for the event path). Four
+  rules are load-bearing and must not be loosened:
   - **Only refresh a pure `needs-decision` card.** A re-render resets the card's
     checkboxes, so a card already `processing`/`resolved`/`blocked` is left
     completely untouched - refreshing one would clobber an in-flight decision or
@@ -256,15 +273,21 @@ still appears where it's plain English, e.g. "triage the queue".)
     never refreshed just because it is render-stale.
     A held `pending-triage` card deliberately stays refreshable because it keeps
     `needs-decision` and carries no non-refreshable lock label.
-  - **No-op when neither trigger fires.** A card that is both materially
-    unchanged AND render-fresh, and does not need held-state publishing, gets no
-    body edit, no label churn, and no comment - never rewrite a card just to
-    put back an identical body. The
+  - **Keep activity reflection state-only.** A card that is materially unchanged,
+    render-fresh, and does not need held-state publishing may still get one
+    hidden `activity_reflected_at` edit when target activity advanced. That edit
+    is card-only under the default token, with no target write, no label churn,
+    no comment, and no full re-render. If target activity is not newer either,
+    the card gets no body edit - never rewrite a card just to put back an
+    identical body. The
     material check is a cheap dict compare of the state block's material
     fields, which is why those fields are carried in the state JSON; the
     render-staleness check is the same kind of cheap compare against
     `render_version`, and `held_publish_needed` is the same kind of cheap
     predicate for a held card whose auto-triage path is no longer available.
+    The activity check is a cheap timestamp compare against
+    `activity_reflected_at` or, for legacy cards, the card issue's own
+    `updatedAt`.
   - **Replace the managed labels, don't just add.** `upsert_card` removes
     `repo:*`/`kind:*`/`priority:*`/`target:*` labels that no longer apply
     (`plan_label_update`), so a changed priority/kind doesn't leave both the old
@@ -273,12 +296,13 @@ still appears where it's plain English, e.g. "triage the queue".)
     label are never removed.
   When `head_sha` changed the refresh also drops a short "target updated" card
   comment so the owner sees a re-review is warranted rather than being silently
-  swapped underneath. All of this stays on the ambient `GH_TOKEN` (= default
-  `GITHUB_TOKEN`) like every other card write, so a refresh never re-triggers the
-  handler and never runs under `FLEET_TOKEN`. reconcile only ever refreshes from
-  scanned `items`, which exist solely for `ok:true` repos, so an `ok:false` repo
-  (state unknown) is never refreshed - the same invariant that bars closing its
-  cards.
+  swapped underneath. All card writes described here, including target-activity
+  reflection, stay on the ambient `GH_TOKEN` (= default `GITHUB_TOKEN`) like
+  every other card write, so they never re-trigger the handler and never run
+  under `FLEET_TOKEN`. reconcile only ever refreshes or reflects from scanned
+  `items`, which exist solely for `ok:true` repos, so an `ok:false` repo (state
+  unknown) is never refreshed or activity-stamped - the same invariant that bars
+  closing its cards.
 - **Automatic triage is a cached card-side side job, not routing - and now
   covers issue-triage as well as pr-review, on two INDEPENDENT toggles.**
   It applies only to pure `needs-decision` cards (including held
@@ -855,14 +879,14 @@ Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
 - `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
-- `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
-- `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
+- `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
+- `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, optional pending-contributor cleanup arming for rebase nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
-- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
+- `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network.
-- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
+- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, `activity_reflected_at` remaining non-material and being folded into queued writes, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.

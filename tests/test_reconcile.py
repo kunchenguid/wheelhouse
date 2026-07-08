@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit-exercise reconcile routing with NO network.
+Unit-exercise reconcile routing and activity reflection with NO network.
 
 Run: python tests/test_reconcile.py
 """
@@ -366,7 +366,8 @@ def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
 
 def test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile():
     """Neither trigger fires when the card is both materially unchanged AND
-    already carries the current render_version - a full no-op."""
+    already carries the current render_version, with no newer activity stamp
+    needed - a full no-op."""
     matched_options = ["merge", "close", "hold"]
     fresh_card = card(
         labels(

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Unit-exercise the card-refresh logic with NO network (pure functions only).
+Unit-exercise the card-refresh and activity-reflection logic with NO network.
 
 Run: python tests/test_card_refresh.py   (stdlib only; exits non-zero on failure)
 
 An open decision card must reflect CURRENT target state, not just the snapshot
-taken when it was created. These tests cover the three pure pieces both the
+taken when it was created. These tests cover the pure pieces both the
 event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) rely on:
 
   * change detection - `material_changed` is true iff a material field
@@ -16,6 +16,10 @@ event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) rely on
   * the refreshability guard - `is_refreshable` refuses to rewrite a card that
     is mid-decision (`processing`/`resolved`/`blocked`), so a refresh never
     clobbers an in-flight decision or races the handler;
+  * target activity reflection - a newer target `updated_at` makes one hidden
+    state-only edit to `activity_reflected_at` for GitHub Recently updated sort,
+    while malformed timestamps, non-pending cards, and legacy cards whose issue
+    `updatedAt` is already newer are no-ops;
   * the label replace - `plan_label_update` removes stale wheelhouse-managed
     labels (`repo:`/`kind:`/`priority:`/`target:`) while keeping
     `needs-decision` and any human-added label, and is a no-op when nothing

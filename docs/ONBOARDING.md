@@ -1,9 +1,9 @@
 # Onboarding a source repo (the fast path)
 
-The scheduled `scan-backstop` already finds and refreshes items in your fleet hourly with **no** changes to your other repos.
-This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up or refresh in your queue in real time instead of waiting for the next hourly scan.
+The scheduled `scan-backstop` already finds, refreshes, and activity-sorts items in your fleet hourly with **no** changes to your other repos.
+This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up, refresh, or rise in Recently updated sort in your queue in real time instead of waiting for the next hourly scan.
 
-Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed, when Wheelhouse's internal card render version is stale, or when a held card should be published because auto triage is no longer eligible; the backstop still reconciles everything later.
+Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card, refreshes a pure pending card when material state has changed, updates the hidden activity stamp when the target `updatedAt` advanced, re-renders when Wheelhouse's internal card render version is stale, or publishes a held card when auto triage is no longer eligible; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
@@ -11,6 +11,7 @@ That includes a newly created card: the hub threads the issue number from the up
 When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
 If successful triage returns a fresh structured recommendation with an action allowed for that card kind, the published boxes can include an `Accept recommendation` shortcut.
 For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
+For any kind, a new `updated_at` can make a hidden state-only card edit for activity sorting when no refresh or triage-queue write is already happening.
 
 > You add these files to **your source repos**, not to Wheelhouse.
 > The hub only ever reads; it never pushes to your source repos except to execute a decision you made.
@@ -58,12 +59,14 @@ A held `pending-triage` card still stores the same options in its hidden state, 
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
 If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or source-provided checkbox `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
+If no full refresh is needed but target `updated_at` is newer than the card's hidden `activity_reflected_at`, the hub edits only the hidden state block so GitHub's Recently updated sort can surface the target's activity.
 The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
 `pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
 A stale render version can also apply internal card-body repairs, such as qualifying bare target refs and labeling known automated harness status lines preserved in older cached `Triage` sections.
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
-Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
+The activity-stamp edit is also hidden-state only, so it does not update visible title, summary, or recommendation text.
+Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh or activity-stamp edit cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.
 For a held card, any completed attempt publishes the decision boxes fail-open; if workflow dispatch itself fails after the cache write, the hub publishes the card immediately with an unavailable note.
 If `triage.yml` fails before its update step, its final recovery step publishes a genuinely stuck held card for that exact revision, or clears the queued cache when trusted source setup was unavailable so a later scan can retry.
@@ -140,7 +143,7 @@ jobs:
 - **PR-review merge conflicts.** Ingest dispatches create cards from the payload; they do not read GraphQL `mergeable` or post rebase nudges.
   The scheduled scan later treats `CONFLICTING` PRs as `needs-rebase`, posts any contributor nudge, and consumes stale pure pending cards.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
-  Ingest dispatches create or refresh a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
+  Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
   If the scan later verifies that no matching run is awaiting approval, it emits no worklist item and reconcile consumes any stale CI-approval card.
   The `scan-backstop` logs emit one notice for each approved or no-pending run, one `wheelhouse auto-approve carded ...` warning for each contributor run that becomes a card, or one `wheelhouse auto-approve suppressed-card ...` warning for each owner, maintainer, or bot run that cannot be approved and does not emit a card.
@@ -158,7 +161,7 @@ You can exercise the whole path without touching a source repo:
 
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
 2. Fill in `repo`, `number`, and the recommended `head_sha` plus `updated_at` for a PR-review card, or `updated_at` for an issue-triage card.
-3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place.
+3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place, while target activity can update only the hidden activity stamp for Recently updated sorting.
    If auto triage is eligible, it may first appear with `pending-triage` and no decision boxes; wait for the triage result or unavailable note to publish it.
 4. Tick a consuming decision box to confirm the handler acts on the target.
    If `Accept recommendation` appears, it is still just a deterministic checkbox path and follows the same target guards as the underlying action.

@@ -5,9 +5,10 @@ Wheelhouse - decision-card renderer + card operations.
 `render(item)` turns one classified item into a decision card: a human-readable
 body with quick-decision checkboxes (or a held auto-triage placeholder) and a
 hidden machine-readable state block.
-`upsert_card`/`close_card` create/refresh/consume cards in THIS repo (via the
-ambient GH_TOKEN, which the workflow sets to the default GITHUB_TOKEN so that
-card-side activity never re-triggers the handler).
+`upsert_card`/`reflect_activity`/`close_card` create, refresh, activity-stamp,
+or consume cards in THIS repo (via the ambient GH_TOKEN, which the workflow
+sets to the default GITHUB_TOKEN so that card-side activity never re-triggers
+the handler).
 
 When auto triage is enabled (`should_hold`), a brand-new pr-review/issue-
 triage card is created HELD - `pending-triage` on top of `needs-decision`, a
@@ -96,7 +97,8 @@ KIND_LABEL = {
 
 
 # --------------------------------------------------------------------------- #
-# Card-refresh semantics (an open card must reflect CURRENT target state)
+# Card-refresh and activity-reflection semantics
+# (an open card must reflect CURRENT target state)
 # --------------------------------------------------------------------------- #
 # Wheelhouse-managed label namespaces. On refresh `upsert_card` REPLACES these
 # (removing ones that no longer apply); `needs-decision` and any human-added
@@ -107,8 +109,8 @@ MANAGED_LABEL_PREFIXES = ("repo:", "kind:", "priority:", "target:")
 # decision in flight (`processing`), the card is consumed (`resolved`), or the
 # owner parked it (`blocked`, via the `/hold` decision). Re-rendering the body
 # resets its checkboxes, which would clobber an in-progress decision or race
-# the decision-handler - so a refresh SKIPS a card with any of these. Only a
-# pure `needs-decision` card is refreshed.
+# the decision-handler - so full refresh and activity reflection SKIP a card
+# with any of these. Only a pure `needs-decision` card is maintained this way.
 NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 
 # A held card (see "Held cards" below) ALSO carries `needs-decision` and is
@@ -158,6 +160,9 @@ SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL})
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
 MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
+
+# Non-material hidden timestamp used only to mirror target GitHub activity onto
+# the card issue's own updatedAt for `sort:updated-desc`.
 ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
 
 # The version of the body `render()` currently produces. A card's stored
@@ -535,7 +540,7 @@ def _label_names(labels):
 def is_refreshable(labels):
     """A card is refreshable only while it has `needs-decision` and no
     in-flight or terminal label. `pending-triage` is allowed because held cards
-    must still refresh, auto-triage, and self-heal."""
+    must still refresh, reflect activity, auto-triage, and self-heal."""
     names = _label_names(labels)
     return "needs-decision" in names and names.isdisjoint(NON_REFRESHABLE_LABELS)
 
@@ -1419,8 +1424,13 @@ def upsert_card(item, existing=None, has_token=False):
         terminating re-render for display-only fixes and card-body repairs like
         cached triage ref qualification or automated-status labeling), or a
         held card must be published because auto triage is no longer eligible;
-        a card with none of those triggers is a full no-op (no body edit, no
-        label churn, no comment).
+        these are full-card refreshes.
+      * If no full refresh or auto-triage queued write is needed, but the
+        target's `updated_at` is newer than the hidden `activity_reflected_at`
+        stamp, `reflect_activity` edits only the state block so GitHub's
+        recently-updated issue sort sees the target activity. If that stamp is
+        fresh too, the card is a full no-op (no body edit, no label churn, no
+        comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment. A held card whose refreshed

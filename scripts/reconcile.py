@@ -13,8 +13,10 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
     state changed (head_sha/compliance/tests/kind/priority/options), when its
     render version is stale, or when a held card should be published because
     auto triage is no longer eligible - so the queue reflects current state,
-    not just the snapshot taken when the card was first created; cards with
-    none of those triggers are left completely untouched, and
+    not just the snapshot taken when the card was first created,
+  * reflects target activity with a hidden state-only card body edit when the
+    target's `updated_at` is newer than the card's `activity_reflected_at` and
+    no full refresh or auto-triage queued write is already editing the body, and
   * queues lightweight automatic triage for eligible pure pending pr-review or
     issue-triage cards whose current revision lacks a `triaged_sha` cache
     (`pending-triage` held cards still count as pure pending), and
@@ -32,7 +34,8 @@ handler).
 Usage:
   reconcile.py scan.json cards.json
 
-cards.json is an array of open issue rows with number, body, labels, and title.
+cards.json is an array of open issue rows with number, body, labels, title, and
+updated_at.
 """
 
 import json
@@ -156,10 +159,11 @@ def main():
 
     # 1) For each scanned worklist item, create a card if none exists, else
     #    refresh it in place when its target materially changed, its card
-    #    render_version is stale, or a held card should now be published. Items
-    #    only come from ok:true repos (build_repo returns no items for a failed
-    #    scan), so this path never refreshes a card for a repo whose state is
-    #    unknown.
+    #    render_version is stale, or a held card should now be published. If no
+    #    full refresh is needed, reflect newer target activity with a hidden
+    #    state-only edit. Items only come from ok:true repos (build_repo returns
+    #    no items for a failed scan), so this path never refreshes or
+    #    activity-stamps a card for a repo whose state is unknown.
     created = 0
     refreshed = 0
     activity_reflected = 0
@@ -197,8 +201,10 @@ def main():
             continue
         # Card exists: refresh only a pure needs-decision card whose target
         # materially changed, whose stored render_version is behind current,
-        # or whose held state no longer has a completion path. A card
-        # mid-decision (processing/resolved/blocked) or with no trigger is left
+        # or whose held state no longer has a completion path. If no full
+        # refresh or triage queued write is needed, a newer target updated_at can
+        # get one hidden state-only activity reflection. A card mid-decision
+        # (processing/resolved/blocked), or with no trigger at all, is left
         # completely untouched. `upsert_card` re-checks both guards before it edits.
         refreshable = render_card.is_refreshable(ex["labels"])
         needs_full_refresh = refreshable and render_card.refresh_needed(

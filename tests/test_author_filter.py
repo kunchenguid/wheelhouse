@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit-exercise scan author filtering with NO network.
+Unit-exercise scan author filtering and PR updatedAt propagation with NO network.
 
 Run: python tests/test_author_filter.py
 """
