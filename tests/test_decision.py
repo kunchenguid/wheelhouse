@@ -662,6 +662,8 @@ def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
     def fake(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
         calls.append({"path": path, "method": method, "fields": fields})
         if method in (None, "GET"):
+            if "/reviews/" in path:
+                return {"id": 9001, "submitted_at": "2026-01-01T00:00:00Z"}
             return pr
         if method == "PUT":
             if merge_error:
@@ -670,6 +672,8 @@ def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
         if method == "POST":
             if comment_error:
                 raise RuntimeError(comment_error)
+            if path.endswith("/reviews"):
+                return {"id": 9001, "submitted_at": "2026-01-01T00:00:00Z"}
             return {}
         return {}
 
@@ -832,13 +836,19 @@ def test_do_request_changes_posts_review():
         )
     check("request-changes: leaves the card open (non-consuming, like comment)",
           terminal == "none")
-    p = posts(calls)
+    p = [c for c in posts(calls) if c["path"].endswith("/reviews")]
     check("request-changes: exactly one review POST", len(p) == 1)
     check("request-changes: posts to the target PR's reviews endpoint",
           p and p[0]["path"] == "/repos/owner-login/target-repo/pulls/5/reviews")
     check("request-changes: event is REQUEST_CHANGES with the free text as body",
           p and (p[0]["fields"] or {}).get("event") == "REQUEST_CHANGES"
           and (p[0]["fields"] or {}).get("body") == "please add a regression test")
+    marker_posts = [c for c in posts(calls) if c["path"].endswith("/issues/5/comments")]
+    check("request-changes: arms stale cleanup with a hidden marker comment",
+          marker_posts and "wheelhouse-pending-contributor-action" in marker_posts[0]["fields"]["body"])
+    label_posts = [c for c in posts(calls) if c["path"].endswith("/issues/5/labels")]
+    check("request-changes: adds the pending contributor label",
+          label_posts and label_posts[0]["fields"]["labels[]"] == ad.core.PENDING_CONTRIBUTOR_LABEL)
 
 
 def test_do_request_changes_refuses_self_review():
@@ -860,6 +870,22 @@ def test_do_request_changes_surfaces_api_error():
         )
     check("request-changes: API failure surfaces as an error", terminal == "error")
     check("request-changes: error message carries the API detail", "422" in message)
+
+
+def test_do_request_changes_reports_cleanup_arming_failure_without_consuming():
+    fake, calls = fake_gh_rest(open_pr())
+
+    def fake_arm(*args, **kwargs):
+        raise RuntimeError("label write failed")
+
+    with patch_core(gh_rest=fake, arm_pending_contributor_action=fake_arm):
+        message, terminal = ad.do_request_changes(
+            "owner-login", "target-repo", 5, "abc123", "please add a regression test"
+        )
+    check("request-changes: arming failure keeps the card open",
+          terminal == "none" and "not armed" in message)
+    check("request-changes: review was still posted before arming failed",
+          any(c["path"].endswith("/reviews") for c in posts(calls)))
 
 
 def test_do_request_changes_requires_text():
@@ -1195,6 +1221,7 @@ def main():
     test_do_request_changes_posts_review()
     test_do_request_changes_refuses_self_review()
     test_do_request_changes_surfaces_api_error()
+    test_do_request_changes_reports_cleanup_arming_failure_without_consuming()
     test_do_request_changes_requires_text()
     test_cmd_execute_request_changes_requires_text()
     test_cmd_execute_request_changes_keeps_stale_head_refreshable()

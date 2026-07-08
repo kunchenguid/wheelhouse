@@ -33,6 +33,7 @@ repos:
     # auto_approve_ci: false       # optional override of the global setting
     # auto_triage: false           # optional per-repo opt-out for Claude spend (pr-review)
     # auto_triage_issues: false    # optional per-repo opt-out for Claude spend (issue-triage)
+    # pending_contributor_cleanup: false  # optional per-repo opt-out for stale PR cleanup
     # thank_on_merge: false        # optional per-repo opt-out for the merge thank-you comment
     # thank_on_merge_message: "Cheers @{author}, this just merged!"  # optional per-repo wording override
 
@@ -151,6 +152,21 @@ nl_decisions: true
 # (`auto_triage_issues` above); tick a card's "Investigate" box any time for a
 # deeper code-grounded read.
 card_issues: true
+
+# Stale pending-contributor cleanup. DEFAULT OFF when this key is absent; Kun's
+# own Wheelhouse opts in here.
+# The PR-only MVP arms cleanup only after deterministic asks: `/request-changes`
+# reviews and merge-conflict rebase nudges.
+# It reminds once after 10 days and closes after 14 days only if the reminder was
+# already posted and the target timeline shows no qualifying contributor comment,
+# review, review comment, edit, or head push after the ask.
+# Maintainer and bot activity do not reset the clock.
+# Add the target-side `wheelhouse:keep-open` label to exempt a PR.
+# You can override these per repo above.
+pending_contributor_cleanup: true
+pending_contributor_cleanup_days: 14
+pending_contributor_reminder_days: 10
+pending_contributor_cleanup_targets: ["pr"]
 
 # Auto-approve provably-safe fork-CI runs at scan time, so only risky or
 # uncertain contributor-authored ones still raise an "approve CI" card for you.

@@ -628,15 +628,43 @@ def do_request_changes(owner, repo, number, head_sha, text):
                 "rejects self-review)." % (repo, number),
                 "error",
             )
-        core.gh_rest(
+        review = core.gh_rest(
             "/repos/%s/pulls/%s/reviews" % (slug, number),
             method="POST",
             fields={"body": text, "event": "REQUEST_CHANGES"},
         )
+        review_id = (review or {}).get("id") if isinstance(review, dict) else None
+        submitted_at = (
+            (review or {}).get("submitted_at") if isinstance(review, dict) else None
+        )
+        if review_id and not submitted_at:
+            reread = core.gh_rest(
+                "/repos/%s/pulls/%s/reviews/%s" % (slug, number, review_id)
+            )
+            if isinstance(reread, dict):
+                submitted_at = reread.get("submitted_at")
     except RuntimeError as e:
         return (
             "Requesting changes on %s#%s failed: %s" % (repo, number, str(e)[:200]),
             "error",
+        )
+    try:
+        core.arm_pending_contributor_action(
+            owner,
+            repo,
+            number,
+            "request-changes",
+            submitted_at,
+            current,
+            author,
+            asked_by=owner,
+            source_id=review_id,
+        )
+    except Exception as e:
+        return (
+            "Requested changes on %s#%s and left the card open. Stale cleanup was not armed: %s"
+            % (repo, number, str(e)[:160]),
+            "none",
         )
     return (
         "Requested changes on %s#%s and left the card open." % (repo, number),

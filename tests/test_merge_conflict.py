@@ -120,7 +120,7 @@ def run_build_repo(
     comments_by_pr=None,
 ):
     comments_by_pr = comments_by_pr if comments_by_pr is not None else {}
-    calls = {"posts": [], "fetches": [], "safety": []}
+    calls = {"posts": [], "fetches": [], "safety": [], "patches": [], "labels": []}
     repo_cfg = {
         "name": "demo",
         "compliance_check": "Gate",
@@ -140,12 +140,31 @@ def run_build_repo(
         }
 
     def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
+        if path.endswith("/labels"):
+            calls["labels"].append({"path": path, "fields": fields})
+            return {}
+        if "/issues/comments/" in path and method == "PATCH":
+            comment_id = int(path.rsplit("/", 1)[-1])
+            body = (fields or {}).get("body", "")
+            calls["patches"].append({"comment_id": comment_id, "body": body})
+            for comments in comments_by_pr.values():
+                for comment in comments:
+                    if comment.get("id") == comment_id:
+                        comment["body"] = body
+            return {}
         number = _issue_number_from_comments_path(path)
         if method == "POST":
             body = (fields or {}).get("body", "")
             calls["posts"].append({"number": number, "body": body})
-            comments_by_pr.setdefault(number, []).append({"body": body})
-            return {"id": len(comments_by_pr[number])}
+            comments = comments_by_pr.setdefault(number, [])
+            comment = {
+                "id": len(comments) + 1,
+                "body": body,
+                "created_at": "2026-01-01T00:00:00Z",
+                "user": {"login": "owner", "__typename": "User"},
+            }
+            comments.append(comment)
+            return dict(comment)
         calls["fetches"].append(
             {"number": number, "paginate": paginate, "slurp": slurp}
         )

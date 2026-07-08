@@ -55,7 +55,8 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 try:
     import yaml
@@ -164,6 +165,12 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
 NEEDS_MAINTAINER = {"merge-ready", "needs-ci-approval", "review-needed"}
 # (waiting-on-contributor: needs-reraise, needs-rebase, fix-tests, draft, ci-running)
 REBASE_NUDGE_MARKER_PREFIX = "wheelhouse-rebase-nudge"
+PENDING_CONTRIBUTOR_LABEL = "wheelhouse:pending-contributor-action"
+PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL = "wheelhouse:keep-open"
+PENDING_CONTRIBUTOR_MARKER_PREFIX = "wheelhouse-pending-contributor-action"
+PENDING_CONTRIBUTOR_REMINDER_PREFIX = "wheelhouse-pending-contributor-reminder"
+PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
+PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
 
 # Decision-card "kind" per PR bucket.
 PR_KIND = {
@@ -224,6 +231,21 @@ def load_config():
         # you want a mention); empty/absent means "use the built-in default".
         # A per-repo `thank_on_merge_message` override takes precedence.
         "thank_on_merge_message": str(cfg.get("thank_on_merge_message") or "").strip(),
+        # Stale pending-contributor cleanup is DEFAULT OFF. A fresh fork should
+        # never auto-close target PRs until the owner opts in globally or per repo.
+        "pending_contributor_cleanup": bool(
+            cfg.get("pending_contributor_cleanup", False)
+        ),
+        "pending_contributor_cleanup_days": cfg.get(
+            "pending_contributor_cleanup_days", 14
+        ),
+        "pending_contributor_reminder_days": cfg.get(
+            "pending_contributor_reminder_days", 10
+        ),
+        "pending_contributor_cleanup_targets": cfg.get(
+            "pending_contributor_cleanup_targets", ["pr"]
+        )
+        or ["pr"],
     }
 
 
@@ -727,6 +749,45 @@ def _thank_on_merge_message(repo_cfg, global_message):
     return global_message
 
 
+def _pending_contributor_cleanup_enabled(repo_cfg, global_default):
+    """Effective pending_contributor_cleanup for one repo.
+
+    Unlike auto triage and thank-on-merge, this is default OFF in code. A repo
+    must opt in globally or with a per-repo override before scan-time cleanup can
+    remind or close a target PR.
+    """
+    v = repo_cfg.get("pending_contributor_cleanup")
+    return global_default if v is None else bool(v)
+
+
+def _pending_contributor_cleanup_days(repo_cfg, global_default):
+    v = repo_cfg.get("pending_contributor_cleanup_days")
+    try:
+        n = int(global_default if v is None else v)
+    except (TypeError, ValueError):
+        n = 14
+    return max(1, n)
+
+
+def _pending_contributor_reminder_days(repo_cfg, global_default):
+    v = repo_cfg.get("pending_contributor_reminder_days")
+    try:
+        n = int(global_default if v is None else v)
+    except (TypeError, ValueError):
+        n = 10
+    return max(1, n)
+
+
+def _pending_contributor_cleanup_targets(repo_cfg, global_default):
+    v = repo_cfg.get("pending_contributor_cleanup_targets")
+    raw = global_default if v is None else v
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return {"pr"}
+    return {str(x).strip().casefold() for x in raw if str(x).strip()}
+
+
 def _author_login(author):
     if not isinstance(author, dict):
         return ""
@@ -800,6 +861,158 @@ def _has_rebase_nudge(comments, head_sha):
     return False
 
 
+_PENDING_CONTRIBUTOR_RE = re.compile(
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(PENDING_CONTRIBUTOR_MARKER_PREFIX),
+    re.S,
+)
+_PENDING_CONTRIBUTOR_REMINDER_RE = re.compile(
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->"
+    % re.escape(PENDING_CONTRIBUTOR_REMINDER_PREFIX),
+    re.S,
+)
+
+
+def _parse_time(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_time(dt):
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pending_contributor_marker(record):
+    return "<!-- %s: %s -->" % (
+        PENDING_CONTRIBUTOR_MARKER_PREFIX,
+        json.dumps(record, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _pending_contributor_reminder_marker(ask_id, reminded_at):
+    payload = {"version": 1, "ask_id": ask_id, "reminded_at": reminded_at}
+    return "<!-- %s: %s -->" % (
+        PENDING_CONTRIBUTOR_REMINDER_PREFIX,
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def _pending_record(
+    repo,
+    number,
+    ask_kind,
+    asked_at,
+    head_sha,
+    target_author,
+    asked_by,
+    source_id,
+):
+    if ask_kind not in PENDING_CONTRIBUTOR_ASK_KINDS_PR:
+        raise RuntimeError("unknown pending contributor ask kind: %s" % ask_kind)
+    asked_dt = _parse_time(asked_at)
+    if asked_dt is None:
+        raise RuntimeError("pending contributor ask has no provable timestamp")
+    if not str(head_sha or "").strip():
+        raise RuntimeError("pending contributor ask has no provable head SHA")
+    if not str(source_id or "").strip():
+        raise RuntimeError("pending contributor ask has no source id")
+    source = str(source_id).strip()
+    ask_id = "%s:%s:%s" % (ask_kind, str(head_sha).strip(), source)
+    return {
+        "version": 1,
+        "ask_id": ask_id,
+        "ask_kind": ask_kind,
+        "asked_at": _format_time(asked_dt),
+        "asked_by": str(asked_by or "").strip(),
+        "target_author": str(target_author or "").strip(),
+        "head_sha": str(head_sha or "").strip(),
+        "repo": str(repo or "").strip(),
+        "number": int(number),
+        "source_id": source,
+        "reminded_at": None,
+    }
+
+
+def _ensure_target_label(slug, name, color="fbca04", description="Managed by Wheelhouse"):
+    try:
+        gh_rest(
+            "/repos/%s/labels" % slug,
+            method="POST",
+            fields={"name": name, "color": color, "description": description},
+        )
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "already_exists" not in msg and "already exists" not in msg and "422" not in msg:
+            raise
+
+
+def _add_target_label(slug, number, label):
+    _ensure_target_label(slug, label)
+    gh_rest(
+        "/repos/%s/issues/%s/labels" % (slug, number),
+        method="POST",
+        fields={"labels[]": label},
+    )
+
+
+def _remove_target_label(slug, number, label):
+    try:
+        gh_rest(
+            "/repos/%s/issues/%s/labels/%s" % (slug, number, quote(label, safe="")),
+            method="DELETE",
+        )
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "404" not in msg and "not found" not in msg:
+            raise
+
+
+def arm_pending_contributor_action(
+    owner,
+    repo,
+    number,
+    ask_kind,
+    asked_at,
+    head_sha,
+    target_author,
+    asked_by=None,
+    source_id=None,
+):
+    """Persist a deterministic target-side pending-contributor ask.
+
+    This writes a hidden marker comment plus the active target label. Callers use
+    it only after a provable ask was created; failures raise so the caller can
+    report that cleanup was not armed without undoing the original ask.
+    """
+    slug = "%s/%s" % (owner, repo)
+    record = _pending_record(
+        repo,
+        number,
+        ask_kind,
+        asked_at,
+        head_sha,
+        target_author,
+        asked_by or owner,
+        source_id,
+    )
+    gh_rest(
+        "/repos/%s/issues/%s/comments" % (slug, number),
+        method="POST",
+        fields={"body": _pending_contributor_marker(record)},
+    )
+    _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+    return record
+
+
 def _rebase_nudge_body(repo, number, head_sha):
     marker = _rebase_nudge_marker(head_sha)
     short = str(head_sha or "").strip()[:8] or "current head"
@@ -815,6 +1028,14 @@ def _rebase_nudge_body(repo, number, head_sha):
     )
 
 
+def _patch_comment_body(slug, comment_id, body):
+    gh_rest(
+        "/repos/%s/issues/comments/%s" % (slug, comment_id),
+        method="PATCH",
+        fields={"body": body},
+    )
+
+
 def _post_rebase_nudge_if_needed(slug, repo, number, head_sha):
     comments = gh_rest(
         "/repos/%s/issues/%s/comments?per_page=100" % (slug, number),
@@ -823,11 +1044,37 @@ def _post_rebase_nudge_if_needed(slug, repo, number, head_sha):
     )
     if _has_rebase_nudge(comments, head_sha):
         return False
-    gh_rest(
+    body = _rebase_nudge_body(repo, number, head_sha)
+    posted = gh_rest(
         "/repos/%s/issues/%s/comments" % (slug, number),
         method="POST",
-        fields={"body": _rebase_nudge_body(repo, number, head_sha)},
+        fields={"body": body},
     )
+    comment_id = (posted or {}).get("id") if isinstance(posted, dict) else None
+    created_at = (posted or {}).get("created_at") if isinstance(posted, dict) else None
+    if comment_id and created_at:
+        record = _pending_record(
+            repo,
+            number,
+            "needs-rebase",
+            created_at,
+            head_sha,
+            "",
+            "",
+            comment_id,
+        )
+        _patch_comment_body(
+            slug,
+            comment_id,
+            body + "\n" + _pending_contributor_marker(record),
+        )
+        _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+    else:
+        print(
+            "::warning::wheelhouse rebase-nudge could not arm stale cleanup %s#%s: missing comment timestamp"
+            % (repo, number),
+            file=sys.stderr,
+        )
     return True
 
 
@@ -853,6 +1100,510 @@ def _maybe_nudge_rebase(slug, repo, pr):
             ),
             file=sys.stderr,
         )
+
+
+def _label_names_from_nodes(nodes):
+    names = []
+    for label in nodes or []:
+        if isinstance(label, dict) and label.get("name"):
+            names.append(str(label["name"]))
+        elif isinstance(label, str):
+            names.append(label)
+    return names
+
+
+def _label_names_from_issue(issue):
+    return _label_names_from_nodes((issue or {}).get("labels") or [])
+
+
+def _is_non_maintainer_human(author, maintainer_logins):
+    if not isinstance(author, dict):
+        return None
+    if _author_is_bot(author):
+        return False
+    login = _author_login(author)
+    if not login:
+        return None
+    return login.casefold() not in maintainer_logins
+
+
+def _flatten_pages(data):
+    return _flatten_paginated_comments(data)
+
+
+def _read_paginated_list(path):
+    data = gh_rest(path, paginate=True, slurp=True)
+    values = _flatten_pages(data)
+    if not isinstance(values, list):
+        raise RuntimeError("paginated endpoint returned unexpected data")
+    if len(values) >= PENDING_CONTRIBUTOR_TIMELINE_LIMIT:
+        raise RuntimeError("paginated endpoint reached safety limit")
+    return values
+
+
+def _read_pr_cleanup_state(slug, number):
+    issue = gh_rest("/repos/%s/issues/%s" % (slug, number))
+    pr = gh_rest("/repos/%s/pulls/%s" % (slug, number))
+    comments = _read_paginated_list(
+        "/repos/%s/issues/%s/comments?per_page=100" % (slug, number)
+    )
+    reviews = _read_paginated_list(
+        "/repos/%s/pulls/%s/reviews?per_page=100" % (slug, number)
+    )
+    review_comments = _read_paginated_list(
+        "/repos/%s/pulls/%s/comments?per_page=100" % (slug, number)
+    )
+    timeline = _read_paginated_list(
+        "/repos/%s/issues/%s/timeline?per_page=100" % (slug, number)
+    )
+    return {
+        "issue": issue,
+        "pr": pr,
+        "comments": comments,
+        "reviews": reviews,
+        "review_comments": review_comments,
+        "timeline": timeline,
+    }
+
+
+def _parse_pending_markers(body):
+    records = []
+    for match in _PENDING_CONTRIBUTOR_RE.finditer(str(body or "")):
+        try:
+            record = json.loads(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _valid_pending_record(record, repo, number):
+    if not isinstance(record, dict):
+        return None
+    if int(record.get("version") or 0) != 1:
+        return None
+    if str(record.get("repo") or "") != str(repo):
+        return None
+    try:
+        if int(record.get("number")) != int(number):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if record.get("ask_kind") not in PENDING_CONTRIBUTOR_ASK_KINDS_PR:
+        return None
+    if not str(record.get("ask_id") or "").strip():
+        return None
+    if _parse_time(record.get("asked_at")) is None:
+        return None
+    if not str(record.get("head_sha") or "").strip():
+        return None
+    return record
+
+
+def _records_from_sources(repo, number, comments, reviews):
+    records = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        for record in _parse_pending_markers(comment.get("body")):
+            record = dict(record)
+            record.setdefault("marker_source", "comment")
+            if comment.get("id") is not None:
+                record.setdefault("marker_comment_id", str(comment.get("id")))
+            valid = _valid_pending_record(record, repo, number)
+            if valid:
+                records.append(valid)
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        for record in _parse_pending_markers(review.get("body")):
+            record = dict(record)
+            record.setdefault("marker_source", "review")
+            if review.get("id") is not None:
+                record.setdefault("marker_review_id", str(review.get("id")))
+            valid = _valid_pending_record(record, repo, number)
+            if valid:
+                records.append(valid)
+    return records
+
+
+def _legacy_rebase_record(repo, number, head_sha, comments):
+    marker = _rebase_nudge_marker(head_sha)
+    records = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if marker not in str(comment.get("body") or ""):
+            continue
+        created_at = comment.get("created_at")
+        asked_dt = _parse_time(created_at)
+        comment_id = comment.get("id")
+        if asked_dt is None or comment_id is None:
+            continue
+        records.append(
+            {
+                "version": 1,
+                "ask_id": "needs-rebase:%s:%s" % (head_sha, comment_id),
+                "ask_kind": "needs-rebase",
+                "asked_at": _format_time(asked_dt),
+                "asked_by": "",
+                "target_author": "",
+                "head_sha": str(head_sha or ""),
+                "repo": str(repo or ""),
+                "number": int(number),
+                "source_id": str(comment_id),
+                "legacy": True,
+            }
+        )
+    if not records:
+        return None
+    return max(records, key=lambda r: _parse_time(r["asked_at"]))
+
+
+def _newest_active_pending_record(
+    repo,
+    number,
+    head_sha,
+    comments,
+    reviews,
+    has_pending_label,
+    allow_legacy_rebase,
+):
+    records = _records_from_sources(repo, number, comments, reviews)
+    if has_pending_label and records:
+        return max(records, key=lambda r: _parse_time(r["asked_at"]))
+    if allow_legacy_rebase:
+        return _legacy_rebase_record(repo, number, head_sha, comments)
+    return None
+
+
+def _same_time(a, b):
+    da = _parse_time(a)
+    db = _parse_time(b)
+    return da is not None and db is not None and da == db
+
+
+def _prove_pending_ask(record, comments, reviews):
+    kind = record.get("ask_kind")
+    source = str(record.get("source_id") or "")
+    if kind == "needs-rebase":
+        marker = _rebase_nudge_marker(record.get("head_sha"))
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            if str(comment.get("id")) != source:
+                continue
+            return marker in str(comment.get("body") or "") and _same_time(
+                comment.get("created_at"), record.get("asked_at")
+            )
+        return False
+    if kind == "request-changes":
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            if str(review.get("id")) != source:
+                continue
+            state = str(review.get("state") or "").upper()
+            return state in {"CHANGES_REQUESTED", "REQUEST_CHANGES"} and _same_time(
+                review.get("submitted_at"), record.get("asked_at")
+            )
+        return False
+    return False
+
+
+def _event_author(item):
+    if not isinstance(item, dict):
+        return None
+    for key in ("user", "author", "actor"):
+        author = item.get(key)
+        if isinstance(author, dict):
+            return author
+    return None
+
+
+def _item_time(item, *keys):
+    for key in keys:
+        dt = _parse_time((item or {}).get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
+def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
+    for comment in state["comments"]:
+        dt = _item_time(comment, "created_at", "submitted_at", "updated_at")
+        if dt is None:
+            raise RuntimeError("comment missing timestamp")
+        if dt <= asked_dt:
+            continue
+        actor = _event_author(comment)
+        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
+        if is_contributor is None:
+            raise RuntimeError("comment author missing or ambiguous")
+        if is_contributor:
+            return True
+
+    for review in state["reviews"]:
+        dt = _item_time(review, "submitted_at", "created_at", "updated_at")
+        if dt is None:
+            raise RuntimeError("review missing timestamp")
+        if dt <= asked_dt:
+            continue
+        actor = _event_author(review)
+        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
+        if is_contributor is None:
+            raise RuntimeError("review author missing or ambiguous")
+        if is_contributor:
+            return True
+
+    for comment in state["review_comments"]:
+        dt = _item_time(comment, "created_at", "submitted_at", "updated_at")
+        if dt is None:
+            raise RuntimeError("review comment missing timestamp")
+        if dt <= asked_dt:
+            continue
+        actor = _event_author(comment)
+        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
+        if is_contributor is None:
+            raise RuntimeError("review comment author missing or ambiguous")
+        if is_contributor:
+            return True
+
+    edit_events = {"renamed", "edited"}
+    for event in state["timeline"]:
+        if not isinstance(event, dict):
+            raise RuntimeError("timeline returned unexpected event")
+        if str(event.get("event") or "") not in edit_events:
+            continue
+        dt = _item_time(event, "created_at")
+        if dt is None:
+            raise RuntimeError("edit event missing timestamp")
+        if dt <= asked_dt:
+            continue
+        actor = _event_author(event)
+        is_contributor = _is_non_maintainer_human(actor, maintainer_logins)
+        if is_contributor is None:
+            raise RuntimeError("edit event author missing or ambiguous")
+        if is_contributor:
+            return True
+
+    return False
+
+
+def _has_reminder(comments, ask_id):
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        for match in _PENDING_CONTRIBUTOR_REMINDER_RE.finditer(
+            str(comment.get("body") or "")
+        ):
+            try:
+                payload = json.loads(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get("ask_id") == ask_id:
+                return True
+    return False
+
+
+def _pending_reminder_body(record, reminded_at):
+    marker = _pending_contributor_reminder_marker(record["ask_id"], reminded_at)
+    if record.get("ask_kind") == "needs-rebase":
+        text = (
+            "Quick reminder: this PR still looks blocked on a rebase or merge conflict fix.\n\n"
+            "If you are still interested, please rebase onto the current base branch, "
+            "resolve the conflict, and push.\n\n"
+            "If I do not hear back, I may close this as inactive."
+        )
+    else:
+        text = (
+            "Quick reminder: this is still waiting on your update.\n\n"
+            "If you are still interested, please push the requested changes or leave a quick comment.\n\n"
+            "If I do not hear back, I may close this as inactive."
+        )
+    return text + "\n\n" + marker
+
+
+def _pending_close_body(record):
+    asked = _parse_time(record.get("asked_at"))
+    asked_date = asked.strftime("%Y-%m-%d") if asked else str(record.get("asked_at"))
+    if record.get("ask_kind") == "needs-rebase":
+        why = (
+            "I am closing this because it has been waiting on a rebase or merge-conflict "
+            "fix since %s, and I have not seen a comment or push since then."
+            % asked_date
+        )
+    else:
+        why = (
+            "I am closing this because I requested changes on %s, and I have not seen "
+            "a comment or push since then." % asked_date
+        )
+    return (
+        why
+        + "\n\n"
+        + "If you still want to keep working on this, please reopen it or open a new PR and mention this one.\n\n"
+        + "Happy to take another look when there is an update."
+    )
+
+
+def _post_pending_reminder(slug, number, record, now):
+    gh_rest(
+        "/repos/%s/issues/%s/comments" % (slug, number),
+        method="POST",
+        fields={"body": _pending_reminder_body(record, _format_time(now))},
+    )
+
+
+def _close_pending_target(slug, number, record):
+    gh_rest(
+        "/repos/%s/issues/%s/comments" % (slug, number),
+        method="POST",
+        fields={"body": _pending_close_body(record)},
+    )
+    gh_rest(
+        "/repos/%s/issues/%s" % (slug, number),
+        method="PATCH",
+        fields={"state": "closed"},
+    )
+
+
+def _sweep_pending_pr(
+    owner,
+    repo,
+    pr,
+    maintainer_logins,
+    reminder_days,
+    cleanup_days,
+    now,
+):
+    slug = "%s/%s" % (owner, repo)
+    number = pr["number"]
+    state = _read_pr_cleanup_state(slug, number)
+    issue = state["issue"] or {}
+    current_pr = state["pr"] or {}
+
+    if issue.get("state") != "open" or current_pr.get("state") != "open":
+        return "skip"
+
+    labels = set(_label_names_from_issue(issue))
+    if PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL in labels:
+        return "skip"
+    has_pending_label = PENDING_CONTRIBUTOR_LABEL in labels
+
+    target_author = _event_author(issue) or _event_author(current_pr)
+    author_kind = _is_non_maintainer_human(target_author, maintainer_logins)
+    if author_kind is not True:
+        return "skip"
+
+    head_sha = str(((current_pr.get("head") or {}).get("sha")) or pr.get("head_sha") or "")
+    if not head_sha:
+        return "skip"
+
+    record = _newest_active_pending_record(
+        repo,
+        number,
+        head_sha,
+        state["comments"],
+        state["reviews"],
+        has_pending_label,
+        allow_legacy_rebase=pr.get("bucket") == "needs-rebase",
+    )
+    if not record:
+        return "skip"
+
+    asked_dt = _parse_time(record.get("asked_at"))
+    if asked_dt is None:
+        return "skip"
+    if str(record.get("head_sha") or "") != head_sha:
+        if has_pending_label:
+            _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+        return "activity"
+    if not _prove_pending_ask(record, state["comments"], state["reviews"]):
+        return "skip"
+
+    if _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
+        if has_pending_label:
+            _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+        return "activity"
+
+    reminder_at = asked_dt + timedelta(days=reminder_days)
+    close_at = asked_dt + timedelta(days=cleanup_days)
+    reminded = _has_reminder(state["comments"], record["ask_id"])
+
+    if now >= close_at:
+        if not reminded:
+            _post_pending_reminder(slug, number, record, now)
+            if not has_pending_label:
+                _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+            return "reminded"
+        _close_pending_target(slug, number, record)
+        return "closed"
+    if now >= reminder_at and not reminded:
+        _post_pending_reminder(slug, number, record, now)
+        if not has_pending_label:
+            _add_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
+        return "reminded"
+    return "skip"
+
+
+def sweep_pending_contributor_actions(
+    owner,
+    repo_cfg,
+    prs,
+    maintainer_logins,
+    enabled=False,
+    reminder_days=10,
+    cleanup_days=14,
+    targets=None,
+    now=None,
+):
+    if not enabled or "pr" not in (targets or {"pr"}):
+        return set()
+    name = repo_cfg["name"]
+    now = now or datetime.now(timezone.utc)
+    closed = set()
+    for pr in prs:
+        if pr.get("author_excluded"):
+            continue
+        if pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval":
+            continue
+        maybe_pending = pr.get("bucket") == "needs-rebase" or PENDING_CONTRIBUTOR_LABEL in set(
+            pr.get("labels") or []
+        )
+        if not maybe_pending:
+            continue
+        try:
+            outcome = _sweep_pending_pr(
+                owner,
+                name,
+                pr,
+                maintainer_logins,
+                reminder_days,
+                cleanup_days,
+                now,
+            )
+        except Exception as e:
+            print(
+                "::warning::wheelhouse pending-contributor cleanup skipped %s#%s: %s"
+                % (name, pr.get("number"), _workflow_command_text(str(e)[:160])),
+                file=sys.stderr,
+            )
+            continue
+        if outcome == "closed":
+            closed.add(pr["number"])
+            print(
+                "::notice::wheelhouse pending-contributor cleanup closed %s#%s"
+                % (name, pr["number"]),
+                file=sys.stderr,
+            )
+        elif outcome == "reminded":
+            print(
+                "::notice::wheelhouse pending-contributor cleanup reminded %s#%s"
+                % (name, pr["number"]),
+                file=sys.stderr,
+            )
+    return closed
 
 
 def _non_default_base_posture(base_ref, default_branch):
@@ -964,6 +1715,10 @@ def build_repo(
     auto_approve_ci=True,
     auto_triage=True,
     auto_triage_issues=True,
+    pending_contributor_cleanup=False,
+    pending_contributor_cleanup_days=14,
+    pending_contributor_reminder_days=10,
+    pending_contributor_cleanup_targets=None,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -1082,6 +1837,9 @@ def build_repo(
                 "title": pr["title"],
                 "author": _author_login(author) or "?",
                 "author_excluded": author_excluded,
+                "labels": _label_names_from_nodes(
+                    (pr.get("labels") or {}).get("nodes") or []
+                ),
                 "comp": comp,
                 "tests": tests,
                 "ci": ci,
@@ -1095,6 +1853,32 @@ def build_repo(
         )
         if bucket == "needs-rebase" and not author_excluded:
             _maybe_nudge_rebase(slug, name, enriched[-1])
+
+    cleanup_enabled = _pending_contributor_cleanup_enabled(
+        repo_cfg, pending_contributor_cleanup
+    )
+    cleanup_targets = _pending_contributor_cleanup_targets(
+        repo_cfg, pending_contributor_cleanup_targets or ["pr"]
+    )
+    cleanup_days = _pending_contributor_cleanup_days(
+        repo_cfg, pending_contributor_cleanup_days
+    )
+    reminder_days = _pending_contributor_reminder_days(
+        repo_cfg, pending_contributor_reminder_days
+    )
+    closed_by_cleanup = sweep_pending_contributor_actions(
+        owner,
+        repo_cfg,
+        enriched,
+        maintainer_logins,
+        enabled=cleanup_enabled,
+        reminder_days=reminder_days,
+        cleanup_days=cleanup_days,
+        targets=cleanup_targets,
+    )
+    if closed_by_cleanup:
+        enriched = [pr for pr in enriched if pr["number"] not in closed_by_cleanup]
+        issues = [it for it in issues if it["number"] not in closed_by_cleanup]
 
     open_issue_numbers = [it["number"] for it in issues]
     addressed = {n for n in closing if n in set(open_issue_numbers)}
@@ -2136,6 +2920,10 @@ def cmd_scan(only_repo=None):
             cfg["auto_approve_ci"],
             cfg["auto_triage"],
             cfg["auto_triage_issues"],
+            cfg["pending_contributor_cleanup"],
+            cfg["pending_contributor_cleanup_days"],
+            cfg["pending_contributor_reminder_days"],
+            cfg["pending_contributor_cleanup_targets"],
         )
         out_repos[name] = result
         items.extend(repo_items)
@@ -2149,6 +2937,7 @@ def cmd_scan(only_repo=None):
         "auto_approve_ci": cfg["auto_approve_ci"],
         "auto_triage": cfg["auto_triage"],
         "auto_triage_issues": cfg["auto_triage_issues"],
+        "pending_contributor_cleanup": cfg["pending_contributor_cleanup"],
         "repos": out_repos,
         "items": items,
     }
