@@ -86,7 +86,7 @@ query($owner:String!, $name:String!) {
         headRefName headRefOid baseRefName
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
-        labels(first:20){ nodes{ name } }
+        labels(first:100){ totalCount nodes{ name } }
         closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
@@ -119,7 +119,7 @@ query($owner:String!, $name:String!, $after:String!) {
         headRefName headRefOid baseRefName
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
-        labels(first:20){ nodes{ name } }
+        labels(first:100){ totalCount nodes{ name } }
         closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
@@ -851,12 +851,20 @@ def _flatten_paginated_comments(data):
     return data
 
 
-def _has_rebase_nudge(comments, head_sha):
+def _trusted_ask_author(author, maintainer_logins):
+    login = _author_login(author).casefold()
+    trusted = {str(item).casefold() for item in (maintainer_logins or [])}
+    return bool(login and login in trusted)
+
+
+def _has_rebase_nudge(comments, head_sha, maintainer_logins):
     marker = _rebase_nudge_marker(head_sha)
     for comment in _flatten_paginated_comments(comments):
         if not isinstance(comment, dict):
             continue
-        if marker in str(comment.get("body") or ""):
+        if marker in str(comment.get("body") or "") and _trusted_ask_author(
+            _event_author(comment), maintainer_logins
+        ):
             return True
     return False
 
@@ -1036,13 +1044,13 @@ def _patch_comment_body(slug, comment_id, body):
     )
 
 
-def _post_rebase_nudge_if_needed(slug, repo, number, head_sha):
+def _post_rebase_nudge_if_needed(slug, repo, number, head_sha, maintainer_logins):
     comments = gh_rest(
         "/repos/%s/issues/%s/comments?per_page=100" % (slug, number),
         paginate=True,
         slurp=True,
     )
-    if _has_rebase_nudge(comments, head_sha):
+    if _has_rebase_nudge(comments, head_sha, maintainer_logins):
         return False
     body = _rebase_nudge_body(repo, number, head_sha)
     posted = gh_rest(
@@ -1078,10 +1086,10 @@ def _post_rebase_nudge_if_needed(slug, repo, number, head_sha):
     return True
 
 
-def _maybe_nudge_rebase(slug, repo, pr):
+def _maybe_nudge_rebase(slug, repo, pr, maintainer_logins):
     try:
         posted = _post_rebase_nudge_if_needed(
-            slug, repo, pr["number"], pr.get("head_sha")
+            slug, repo, pr["number"], pr.get("head_sha"), maintainer_logins
         )
     except Exception as e:
         print(
@@ -1114,6 +1122,19 @@ def _label_names_from_nodes(nodes):
 
 def _label_names_from_issue(issue):
     return _label_names_from_nodes((issue or {}).get("labels") or [])
+
+
+def _label_connection_truncated(labels):
+    if not isinstance(labels, dict):
+        return False
+    nodes = labels.get("nodes") or []
+    try:
+        total = int(labels.get("totalCount"))
+    except (TypeError, ValueError):
+        total = None
+    if total is not None:
+        return total > len(nodes)
+    return bool((labels.get("pageInfo") or {}).get("hasNextPage"))
 
 
 def _is_non_maintainer_human(author, maintainer_logins):
@@ -1201,10 +1222,12 @@ def _valid_pending_record(record, repo, number):
     return record
 
 
-def _records_from_sources(repo, number, comments, reviews):
+def _records_from_sources(repo, number, comments, reviews, maintainer_logins):
     records = []
     for comment in comments:
         if not isinstance(comment, dict):
+            continue
+        if not _trusted_ask_author(_event_author(comment), maintainer_logins):
             continue
         for record in _parse_pending_markers(comment.get("body")):
             record = dict(record)
@@ -1217,6 +1240,8 @@ def _records_from_sources(repo, number, comments, reviews):
     for review in reviews:
         if not isinstance(review, dict):
             continue
+        if not _trusted_ask_author(_event_author(review), maintainer_logins):
+            continue
         for record in _parse_pending_markers(review.get("body")):
             record = dict(record)
             record.setdefault("marker_source", "review")
@@ -1228,13 +1253,15 @@ def _records_from_sources(repo, number, comments, reviews):
     return records
 
 
-def _legacy_rebase_record(repo, number, head_sha, comments):
+def _legacy_rebase_record(repo, number, head_sha, comments, maintainer_logins):
     marker = _rebase_nudge_marker(head_sha)
     records = []
     for comment in comments:
         if not isinstance(comment, dict):
             continue
         if marker not in str(comment.get("body") or ""):
+            continue
+        if not _trusted_ask_author(_event_author(comment), maintainer_logins):
             continue
         created_at = comment.get("created_at")
         asked_dt = _parse_time(created_at)
@@ -1269,12 +1296,13 @@ def _newest_active_pending_record(
     reviews,
     has_pending_label,
     allow_legacy_rebase,
+    maintainer_logins,
 ):
-    records = _records_from_sources(repo, number, comments, reviews)
+    records = _records_from_sources(repo, number, comments, reviews, maintainer_logins)
     if has_pending_label and records:
         return max(records, key=lambda r: _parse_time(r["asked_at"]))
     if allow_legacy_rebase:
-        return _legacy_rebase_record(repo, number, head_sha, comments)
+        return _legacy_rebase_record(repo, number, head_sha, comments, maintainer_logins)
     return None
 
 
@@ -1284,7 +1312,7 @@ def _same_time(a, b):
     return da is not None and db is not None and da == db
 
 
-def _prove_pending_ask(record, comments, reviews):
+def _prove_pending_ask(record, comments, reviews, maintainer_logins):
     kind = record.get("ask_kind")
     source = str(record.get("source_id") or "")
     if kind == "needs-rebase":
@@ -1294,6 +1322,8 @@ def _prove_pending_ask(record, comments, reviews):
                 continue
             if str(comment.get("id")) != source:
                 continue
+            if not _trusted_ask_author(_event_author(comment), maintainer_logins):
+                return False
             return marker in str(comment.get("body") or "") and _same_time(
                 comment.get("created_at"), record.get("asked_at")
             )
@@ -1304,6 +1334,8 @@ def _prove_pending_ask(record, comments, reviews):
                 continue
             if str(review.get("id")) != source:
                 continue
+            if not _trusted_ask_author(_event_author(review), maintainer_logins):
+                return False
             state = str(review.get("state") or "").upper()
             return state in {"CHANGES_REQUESTED", "REQUEST_CHANGES"} and _same_time(
                 review.get("submitted_at"), record.get("asked_at")
@@ -1508,6 +1540,7 @@ def _sweep_pending_pr(
         state["reviews"],
         has_pending_label,
         allow_legacy_rebase=pr.get("bucket") == "needs-rebase",
+        maintainer_logins=maintainer_logins,
     )
     if not record:
         return "skip"
@@ -1519,7 +1552,9 @@ def _sweep_pending_pr(
         if has_pending_label:
             _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
         return "activity"
-    if not _prove_pending_ask(record, state["comments"], state["reviews"]):
+    if not _prove_pending_ask(
+        record, state["comments"], state["reviews"], maintainer_logins
+    ):
         return "skip"
 
     if _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
@@ -1568,8 +1603,10 @@ def sweep_pending_contributor_actions(
             continue
         if pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval":
             continue
-        maybe_pending = pr.get("bucket") == "needs-rebase" or PENDING_CONTRIBUTOR_LABEL in set(
-            pr.get("labels") or []
+        maybe_pending = (
+            pr.get("bucket") == "needs-rebase"
+            or PENDING_CONTRIBUTOR_LABEL in set(pr.get("labels") or [])
+            or pr.get("labels_truncated")
         )
         if not maybe_pending:
             continue
@@ -1840,6 +1877,7 @@ def build_repo(
                 "labels": _label_names_from_nodes(
                     (pr.get("labels") or {}).get("nodes") or []
                 ),
+                "labels_truncated": _label_connection_truncated(pr.get("labels")),
                 "comp": comp,
                 "tests": tests,
                 "ci": ci,
@@ -1852,7 +1890,7 @@ def build_repo(
             }
         )
         if bucket == "needs-rebase" and not author_excluded:
-            _maybe_nudge_rebase(slug, name, enriched[-1])
+            _maybe_nudge_rebase(slug, name, enriched[-1], maintainer_logins)
 
     cleanup_enabled = _pending_contributor_cleanup_enabled(
         repo_cfg, pending_contributor_cleanup

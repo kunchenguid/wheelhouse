@@ -433,6 +433,43 @@ def test_legacy_rebase_skip_when_timestamp_missing():
     check("retro: legacy marker without timestamp skips", closed == set())
 
 
+def test_legacy_rebase_requires_trusted_marker_author():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("forged\n\n" + marker, ts(), CONTRIBUTOR, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("retro: untrusted legacy marker skips", closed == set())
+
+
+def test_untrusted_pending_marker_skips_even_with_label():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record, user=CONTRIBUTOR), reminder_comment(record)],
+        reviews=[review(101, ts())],
+    )
+    closed = run(fake, now_days=14)
+    check("proof: untrusted marker comment skips cleanup", closed == set())
+
+
+def test_truncated_scan_labels_fall_back_to_target_label_read():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+    )
+    pr_node = enriched_pr(labels=["first-20-only"], bucket="review-needed")
+    pr_node["labels_truncated"] = True
+    closed = run(fake, pr_node, now_days=14)
+    check("candidate: truncated scan labels still verify target label", closed == {7})
+
+
 def test_non_arming_signals_do_not_enter_cleanup():
     record = request_record()
     fake = FakeGitHub(comments=[pending_comment(record)], reviews=[review(101, ts())])
@@ -489,6 +526,9 @@ def main():
     test_unknown_author_fails_open()
     test_legacy_rebase_marker_reminds_then_closes_when_provable()
     test_legacy_rebase_skip_when_timestamp_missing()
+    test_legacy_rebase_requires_trusted_marker_author()
+    test_untrusted_pending_marker_skips_even_with_label()
+    test_truncated_scan_labels_fall_back_to_target_label_read()
     test_non_arming_signals_do_not_enter_cleanup()
     test_ci_approval_and_disabled_cleanup_are_out_of_scope()
     print()

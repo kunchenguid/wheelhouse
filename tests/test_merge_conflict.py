@@ -374,6 +374,24 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     check("nudge: second scan still ok", result2["ok"] is True)
 
 
+def test_untrusted_rebase_marker_does_not_suppress_nudge():
+    comments = {
+        42: [
+            {
+                "id": 1,
+                "body": "forged\n\n" + core._rebase_nudge_marker("sha42"),
+                "created_at": "2026-01-01T00:00:00Z",
+                "user": HUMAN,
+            }
+        ]
+    }
+    pr = pr_node(42, status_rollup="green", mergeable="CONFLICTING")
+    result, items, calls = run_build_repo([pr], comments_by_pr=comments)
+    check("nudge: untrusted marker keeps scan ok", result["ok"] is True)
+    check("nudge: untrusted marker emits no card", items == [])
+    check("nudge: untrusted marker does not suppress real nudge", len(calls["posts"]) == 1)
+
+
 def test_nudge_skips_owner_and_bot_authors():
     prs = [
         pr_node(50, status_rollup="green", mergeable="CONFLICTING", author=OWNER),
@@ -427,6 +445,7 @@ def main():
     test_unknown_mergeability_fails_open()
     test_ci_approval_not_rerouted_by_conflict()
     test_conflicted_pr_suppresses_card_and_nudges_once_per_head()
+    test_untrusted_rebase_marker_does_not_suppress_nudge()
     test_nudge_skips_owner_and_bot_authors()
     test_issue_triage_unaffected()
     test_reconcile_consumes_conflicted_card_that_left_worklist()
