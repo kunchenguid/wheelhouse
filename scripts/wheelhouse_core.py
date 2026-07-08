@@ -1435,9 +1435,14 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
     return False
 
 
-def _has_reminder(comments, ask_id):
+def _has_reminder(comments, ask_id, maintainer_logins, asked_dt):
     for comment in comments:
         if not isinstance(comment, dict):
+            continue
+        if not _trusted_ask_author(_event_author(comment), maintainer_logins):
+            continue
+        comment_dt = _item_time(comment, "created_at")
+        if comment_dt is None or comment_dt <= asked_dt:
             continue
         for match in _PENDING_CONTRIBUTOR_REMINDER_RE.finditer(
             str(comment.get("body") or "")
@@ -1446,7 +1451,14 @@ def _has_reminder(comments, ask_id):
                 payload = json.loads(match.group(1))
             except (TypeError, ValueError):
                 continue
-            if isinstance(payload, dict) and payload.get("ask_id") == ask_id:
+            if not isinstance(payload, dict):
+                continue
+            reminded_dt = _parse_time(payload.get("reminded_at"))
+            if (
+                payload.get("ask_id") == ask_id
+                and reminded_dt is not None
+                and reminded_dt > asked_dt
+            ):
                 return True
     return False
 
@@ -1598,7 +1610,9 @@ def _sweep_pending_pr(
 
     reminder_at = asked_dt + timedelta(days=reminder_days)
     close_at = asked_dt + timedelta(days=cleanup_days)
-    reminded = _has_reminder(state["comments"], record["ask_id"])
+    reminded = _has_reminder(
+        state["comments"], record["ask_id"], maintainer_logins, asked_dt
+    )
 
     if now >= close_at:
         if not reminded:

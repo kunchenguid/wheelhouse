@@ -94,12 +94,15 @@ def rebase_record(source_id=201, asked_at=None, head="sha1"):
 
 
 def pending_comment(record, cid=2, when=None, user=OWNER):
-    return comment(core._pending_contributor_marker(record), when or ts(seconds=1), user, cid)
+    return comment(
+        core._pending_contributor_marker(record), when or ts(seconds=1), user, cid
+    )
 
 
-def reminder_comment(record, cid=3, when=None):
-    marker = core._pending_contributor_reminder_marker(record["ask_id"], when or ts(10))
-    return comment("reminder\n\n" + marker, when or ts(10), OWNER, cid)
+def reminder_comment(record, cid=3, when=None, user=OWNER, marker_when=None):
+    marker_when = marker_when or when or ts(10)
+    marker = core._pending_contributor_reminder_marker(record["ask_id"], marker_when)
+    return comment("reminder\n\n" + marker, when or ts(10), user, cid)
 
 
 class FakeGitHub:
@@ -257,6 +260,40 @@ def test_close_threshold_requires_prior_reminder():
     check("clock: close threshold without reminder nudges first",
           any(core.PENDING_CONTRIBUTOR_REMINDER_PREFIX in c["fields"].get("body", "")
               for c in fake.calls if c["method"] == "POST"))
+
+
+def test_close_threshold_requires_proven_reminder():
+    cases = [
+        (
+            "untrusted author",
+            lambda record: reminder_comment(record, user=BOT),
+        ),
+        (
+            "pre-ask comment",
+            lambda record: reminder_comment(record, when=ts(seconds=-1)),
+        ),
+        (
+            "pre-ask marker time",
+            lambda record: reminder_comment(
+                record, when=ts(10), marker_when=ts(seconds=-1)
+            ),
+        ),
+    ]
+    for label, make_reminder in cases:
+        record = request_record()
+        fake = FakeGitHub(
+            comments=[pending_comment(record), make_reminder(record)],
+            reviews=[review(101, ts())],
+        )
+        closed = run(fake, now_days=14)
+        reminder_posts = [
+            c for c in fake.calls
+            if c["method"] == "POST" and c["path"].endswith("/comments")
+            and core.PENDING_CONTRIBUTOR_REMINDER_PREFIX in c["fields"]["body"]
+        ]
+        check("proof: %s reminder does not close" % label, closed == set())
+        check("proof: %s reminder is replaced with a real nudge" % label,
+              len(reminder_posts) == 1)
 
 
 def test_close_after_prior_reminder_and_comment_content():
@@ -532,6 +569,7 @@ def main():
     test_no_action_before_reminder_threshold()
     test_reminder_at_threshold_and_idempotent()
     test_close_threshold_requires_prior_reminder()
+    test_close_threshold_requires_proven_reminder()
     test_close_after_prior_reminder_and_comment_content()
     test_close_comment_failure_fails_open()
     test_contributor_activity_blocks_and_clears_pending_label()
