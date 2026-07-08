@@ -161,6 +161,20 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
 }
 """
 
+PR_USER_CONTENT_EDITS_GQL = """
+query($owner:String!, $name:String!, $number:Int!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      userContentEdits(first:100, after:$after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { editedAt editor { login __typename } }
+      }
+    }
+  }
+}
+"""
+
 # Buckets that need the maintainer's call vs. ones waiting on the contributor.
 NEEDS_MAINTAINER = {"merge-ready", "needs-ci-approval", "review-needed"}
 # (waiting-on-contributor: needs-reraise, needs-rebase, fix-tests, draft, ci-running)
@@ -173,11 +187,6 @@ PENDING_CONTRIBUTOR_CLOSE_PREFIX = "wheelhouse-pending-contributor-close"
 PENDING_CONTRIBUTOR_ASK_KINDS_PR = {"request-changes", "needs-rebase"}
 PENDING_CONTRIBUTOR_TIMELINE_LIMIT = 1000
 _PENDING_CONTRIBUTOR_TARGETS_UNSET = object()
-PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS = {
-    "committed",
-    "head_ref_force_pushed",
-    "renamed",
-}
 
 # Decision-card "kind" per PR bucket.
 PR_KIND = {
@@ -370,6 +379,34 @@ def gh_graphql_closing_refs_page(owner, name, number, after):
     if not pr:
         raise RuntimeError("pull request #%s not found" % number)
     return pr["closingIssuesReferences"]
+
+
+def gh_graphql_pr_user_content_edits_page(owner, name, number, after=None):
+    args = [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + PR_USER_CONTENT_EDITS_GQL,
+        "-f",
+        "owner=" + owner,
+        "-f",
+        "name=" + name,
+        "-F",
+        "number=%s" % number,
+    ]
+    if after is not None:
+        args.extend(["-f", "after=" + after])
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        raise RuntimeError(json.dumps(data["errors"]))
+    pr = data["data"]["repository"]["pullRequest"]
+    if not pr:
+        raise RuntimeError("pull request #%s not found" % number)
+    return pr["userContentEdits"]
 
 
 def _page_open_prs(owner, name, first_page):
@@ -1203,6 +1240,38 @@ def _read_paginated_list(path):
     return values
 
 
+def _read_pr_user_content_edits(slug, number):
+    owner, name = slug.split("/", 1)
+    values = []
+    cursor = None
+    seen_cursors = set()
+    while True:
+        page = gh_graphql_pr_user_content_edits_page(owner, name, number, cursor)
+        if not isinstance(page, dict):
+            raise RuntimeError("PR edit history returned unexpected data")
+        nodes = page.get("nodes") or []
+        if not isinstance(nodes, list):
+            raise RuntimeError("PR edit history returned unexpected nodes")
+        values.extend(nodes)
+        if len(values) >= PENDING_CONTRIBUTOR_TIMELINE_LIMIT:
+            raise RuntimeError("PR edit history reached safety limit")
+        page_info = page.get("pageInfo")
+        if not isinstance(page_info, dict):
+            raise RuntimeError("PR edit history pagination missing")
+        if not page_info.get("hasNextPage"):
+            try:
+                total = int(page.get("totalCount", len(values)))
+            except (TypeError, ValueError):
+                raise RuntimeError("PR edit history total missing")
+            if total > len(values):
+                raise RuntimeError("PR edit history incomplete")
+            return values
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("PR edit history pagination did not advance")
+        seen_cursors.add(cursor)
+
+
 def _read_pr_cleanup_state(slug, number):
     issue = gh_rest("/repos/%s/issues/%s" % (slug, number))
     pr = gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -1218,6 +1287,7 @@ def _read_pr_cleanup_state(slug, number):
     timeline = _read_paginated_list(
         "/repos/%s/issues/%s/timeline?per_page=100" % (slug, number)
     )
+    body_edits = _read_pr_user_content_edits(slug, number)
     return {
         "issue": issue,
         "pr": pr,
@@ -1225,6 +1295,7 @@ def _read_pr_cleanup_state(slug, number):
         "reviews": reviews,
         "review_comments": review_comments,
         "timeline": timeline,
+        "body_edits": body_edits,
     }
 
 
@@ -1503,6 +1574,10 @@ def _known_target_activity_times(state):
         absorb_item(
             ("issue", "pr"), comment, "created_at", "submitted_at", "updated_at"
         )
+    for edit in state.get("body_edits", []):
+        if not isinstance(edit, dict):
+            raise RuntimeError("PR body edit returned unexpected data")
+        absorb_item(("issue", "pr"), edit, "editedAt", "edited_at")
     for event in state["timeline"]:
         if not isinstance(event, dict):
             raise RuntimeError("timeline returned unexpected event")
@@ -1564,12 +1639,25 @@ def _has_qualifying_contributor_activity(state, asked_dt, maintainer_logins):
         if is_contributor:
             return True
 
+    for edit in state.get("body_edits", []):
+        if not isinstance(edit, dict):
+            raise RuntimeError("PR body edit returned unexpected data")
+        dt = _item_time(edit, "editedAt", "edited_at")
+        if dt is None:
+            raise RuntimeError("PR body edit missing timestamp")
+        if dt <= asked_dt:
+            continue
+        editor = (edit or {}).get("editor")
+        is_contributor = _is_non_maintainer_human(editor, maintainer_logins)
+        if is_contributor is None:
+            raise RuntimeError("PR body edit editor missing or ambiguous")
+        if is_contributor:
+            return True
+
     for event in state["timeline"]:
         if not isinstance(event, dict):
             raise RuntimeError("timeline returned unexpected event")
         event_name = str(event.get("event") or "")
-        if event_name not in PENDING_CONTRIBUTOR_TIMELINE_ACTIVITY_EVENTS:
-            continue
         dt = _timeline_event_time(event, event_name)
         if dt is None:
             raise RuntimeError("%s event missing timestamp" % event_name)

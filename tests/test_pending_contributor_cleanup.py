@@ -83,6 +83,10 @@ def commit_event(when, author=CONTRIBUTOR, committer=None):
     return event
 
 
+def body_edit(when, editor=CONTRIBUTOR):
+    return {"editedAt": when, "editor": editor}
+
+
 def request_record(source_id=101, asked_at=None, head="sha1"):
     return core._pending_record(
         "demo",
@@ -131,9 +135,11 @@ class FakeGitHub:
         reviews=None,
         review_comments=None,
         timeline=None,
+        body_edits=None,
         post_comment_error=False,
         patch_error=False,
         timeline_error=False,
+        body_edits_error=False,
     ):
         self.issue = issue_obj or issue([core.PENDING_CONTRIBUTOR_LABEL])
         self.pr = pr_obj or pr()
@@ -141,18 +147,27 @@ class FakeGitHub:
         self.reviews = list(reviews or [])
         self.review_comments = list(review_comments or [])
         self.timeline = list(timeline or [])
+        self.body_edits = list(body_edits or [])
         self.post_comment_error = post_comment_error
         self.patch_error = patch_error
         self.timeline_error = timeline_error
+        self.body_edits_error = body_edits_error
         self.calls = []
         self._fill_target_updated_at()
 
     def _known_updated_at(self):
         times = []
-        for item in self.comments + self.reviews + self.review_comments + self.timeline:
+        items = (
+            self.comments
+            + self.reviews
+            + self.review_comments
+            + self.timeline
+            + self.body_edits
+        )
+        for item in items:
             if not isinstance(item, dict):
                 continue
-            for key in ("created_at", "submitted_at", "updated_at"):
+            for key in ("created_at", "submitted_at", "updated_at", "editedAt"):
                 dt = core._parse_time(item.get(key))
                 if dt is not None:
                     times.append(dt)
@@ -215,15 +230,31 @@ class FakeGitHub:
             return [self.timeline] if slurp else self.timeline
         raise AssertionError("unexpected gh_rest path: %s" % path)
 
+    def gh_graphql_pr_user_content_edits_page(self, owner, name, number, after=None):
+        if self.body_edits_error:
+            raise RuntimeError("PR edit history unavailable")
+        if owner != "owner" or name != "demo" or int(number) != 7:
+            raise AssertionError("unexpected edit history target: %s/%s#%s" % (owner, name, number))
+        return {
+            "nodes": self.body_edits,
+            "totalCount": len(self.body_edits),
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
+
 
 @contextlib.contextmanager
 def patch_rest(fake):
-    old = core.gh_rest
+    old_rest = core.gh_rest
+    old_edits = core.gh_graphql_pr_user_content_edits_page
     core.gh_rest = fake.gh_rest
+    core.gh_graphql_pr_user_content_edits_page = (
+        fake.gh_graphql_pr_user_content_edits_page
+    )
     try:
         yield
     finally:
-        core.gh_rest = old
+        core.gh_rest = old_rest
+        core.gh_graphql_pr_user_content_edits_page = old_edits
 
 
 def enriched_pr(labels=None, bucket="review-needed", head="sha1", author_excluded=False):
@@ -513,6 +544,27 @@ def test_review_comment_and_pr_body_edit_activity_block_close():
           closed == set())
 
 
+def test_pr_body_edit_history_blocks_close_when_updated_at_is_masked():
+    record = request_record()
+    fake = FakeGitHub(
+        issue_obj=issue([core.PENDING_CONTRIBUTOR_LABEL], updated_at=ts(10)),
+        pr_obj=pr(updated_at=ts(10)),
+        comments=[
+            pending_comment(record),
+            comment("owner note after hidden edit", ts(10), OWNER, 8),
+            reminder_comment(record, cid=9, when=ts(10, seconds=1)),
+        ],
+        reviews=[review(101, ts())],
+        body_edits=[body_edit(ts(1), CONTRIBUTOR)],
+    )
+    closed = run(fake, now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("activity: contributor PR body edit blocks close after later activity",
+          closed == set())
+    check("activity: contributor PR body edit clears pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
 def test_pr_push_activity_blocks_close():
     record = request_record()
     fake = FakeGitHub(
@@ -548,6 +600,20 @@ def test_pr_push_activity_blocks_close():
     labels = [item["name"] for item in fake.issue["labels"]]
     check("activity: contributor force-push blocks close", closed == set())
     check("activity: contributor force-push clears pending label",
+          core.PENDING_CONTRIBUTOR_LABEL not in labels)
+
+
+def test_unhandled_contributor_timeline_activity_blocks_close():
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+        timeline=[timeline_event("ready_for_review", ts(1), CONTRIBUTOR)],
+    )
+    closed = run(fake, now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("activity: contributor ready_for_review blocks close", closed == set())
+    check("activity: contributor ready_for_review clears pending label",
           core.PENDING_CONTRIBUTOR_LABEL not in labels)
 
 
@@ -589,6 +655,10 @@ def test_keep_open_and_unknown_timeline_fail_open():
     _, fake = base_request_state(timeline_error=True)
     closed = run(fake, now_days=14)
     check("fail-open: unreadable timeline skips cleanup", closed == set())
+
+    _, fake = base_request_state(body_edits_error=True)
+    closed = run(fake, now_days=14)
+    check("fail-open: unreadable PR edit history skips cleanup", closed == set())
 
 
 def test_unknown_author_fails_open():
@@ -813,7 +883,9 @@ def main():
     test_maintainer_and_bot_activity_do_not_reset_clock()
     test_exact_timestamp_equality_does_not_count_as_followup()
     test_review_comment_and_pr_body_edit_activity_block_close()
+    test_pr_body_edit_history_blocks_close_when_updated_at_is_masked()
     test_pr_push_activity_blocks_close()
+    test_unhandled_contributor_timeline_activity_blocks_close()
     test_unknown_push_activity_fails_open()
     test_head_change_blocks_and_clears_pending_label()
     test_keep_open_and_unknown_timeline_fail_open()
