@@ -19,6 +19,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
 - **Labels carry state:** `needs-decision` (in the queue), `pending-triage` (first auto-triage attempt is still publishing), `processing` (a handler is acting), `resolved`, `blocked`, plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
 - **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
+  When successful auto triage returns a fresh structured recommendation, the card shows an *Accept recommendation* checkbox and hides the older top-level recommended-action text so there is one primary recommendation surface.
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
   A hidden HTML comment holds the machine-readable state.
   The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
@@ -33,7 +34,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ```
 
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
-Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`), **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
+Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three LLM features can also use an optional `READONLY_TOKEN` for scoped read-only search across the target repo and configured fleet repos.
 When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
 When auto triage will run for a newly created PR-review or issue-triage card, Wheelhouse holds the card under `pending-triage` and publishes the decision boxes only after that first attempt records a result or an unavailable note.
@@ -89,6 +90,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > Each pure pending PR-review card is triaged at most once per `head_sha`; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, and later unchanged scans do not spend another token call.
 > A brand-new eligible PR-review card is first labeled `pending-triage` and has no decision checkboxes until that first attempt completes.
 > Completion publishes the normal card whether triage succeeds, fails, times out, or cannot be started.
+> If successful triage also returns a fresh structured recommendation with an allowlisted action, Wheelhouse adds an *Accept recommendation* checkbox that still routes through the deterministic handler.
 > Set it to `false` to opt out globally for token-spend control, or add `auto_triage: false` to a single `repos:` entry.
 > Auto triage is advisory only: it never changes routing, never acts, and never replaces your checkbox or slash-command decision.
 
@@ -97,6 +99,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > Issues have no head SHA, so each pure pending issue-triage card is triaged at most once per `updatedAt` revision (the issue's GraphQL `updatedAt`, which advances on any edit or new comment); existing open cards with no fresh `triaged_sha` marker backfill on the next scan.
 > Because an issue's `updatedAt` is not a material card field, a new comment can make a card eligible for one fresh triage attempt without a full card refresh.
 > A brand-new eligible issue-triage card uses the same `pending-triage` placeholder and publishes its checkboxes when the first attempt completes, success or failure alike.
+> A successful structured issue recommendation can also add the same deterministic *Accept recommendation* checkbox, limited to issue-safe actions.
 > Set it to `false` to opt out globally, or add `auto_triage_issues: false` to a single `repos:` entry.
 > It checks out the repo's default branch read-only for a little code context (there is no diff to review) and is advisory only, exactly like PR auto triage.
 
@@ -142,13 +145,14 @@ That is the only secret the deterministic machine needs.
 Skip this for the deterministic machine.
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
 
-- **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and Recommended next step into the card.
+- **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and a Recommended next step into the card.
+  The workflow asks for structured `recommended_action` and `recommended_reason` fields; trusted code normalizes them and only adds *Accept recommendation* when the action is safe for that card kind and any required reason text is present.
   It is cached by PR head SHA, so an unchanged hourly scan does not re-run it.
   Newly created eligible cards are rendered as `pending-triage` placeholders and queued for that first triage attempt in the same scan or ingest run that creates them.
   The placeholder has no decision checkboxes, and the normal card is published when the attempt succeeds, fails, times out, or cannot be started.
   Existing pure pending PR-review cards that predate the feature backfill once on the next scan.
   Set `auto_triage: false` globally or per repo when you want to control token spend.
-  Issue-triage cards get the same treatment under the INDEPENDENT `auto_triage_issues` flag (also default-on): since issues have no head SHA, it caches by the issue's `updatedAt` instead, checks out the repo's default branch read-only for a little code context, and is opt-out the same way with `auto_triage_issues: false`.
+  Issue-triage cards get the same treatment under the INDEPENDENT `auto_triage_issues` flag (also default-on): since issues have no head SHA, it caches by the issue's `updatedAt` instead, checks out the repo's default branch read-only for a little code context, uses an issue-safe recommendation action set, and is opt-out the same way with `auto_triage_issues: false`.
 - **Deep review (always-on)** - tick a card's *Investigate* box and Claude reviews the target's checked-out code without executing it.
   The repo owner can also apply the `needs-deep-review` label or run the `deep-review` workflow with only the decision-card issue number; that manual workflow path fetches the current card body with this repo's token.
   The workflow captures Claude's final response and posts it as the code-grounded merit/triage verdict.
@@ -208,8 +212,12 @@ You drive the queue three ways - whichever fits the decision:
 - **Read the automatic triage.** PR-review and issue-triage cards can both include a `Triage` section with a quick Summary, Product implications, and Recommended next step.
   For PR-review this is automatic when `auto_triage` is on and `CLAUDE_CODE_OAUTH_TOKEN` exists, cached once per PR head SHA; for issue-triage it's the same, gated by the INDEPENDENT `auto_triage_issues` and cached once per issue `updatedAt` revision instead (issues have no head SHA).
   A newly created eligible card may first show `pending-triage` and a placeholder instead of decision boxes; decide after the `Triage` section or unavailable note appears and the boxes publish.
-  Both are advisory only: they give you context before deciding and never act or change which checkbox is valid.
+  A fresh successful structured recommendation can prepend *Accept recommendation* to the decision boxes; ticking it maps the recommendation to the same deterministic action that a checkbox or slash-command would have used.
+  Auto triage itself is still advisory: it gives you context before deciding and never acts without your tick.
 - **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*). Tick exactly one; the handler executes it and closes the card.
+  *Accept recommendation*, when present, is also a checkbox, but it only appears for fresh successful structured auto-triage recommendations on PR-review and issue-triage cards.
+  It never appears on CI-approval cards or maps to `/approve-ci`.
+  If the accepted recommendation is a non-terminal action such as `comment`, `request-changes`, or `investigate`, the card stays open just as it would for that direct action.
 - **Want a deeper look first? - tick *Investigate*.** PR-review and issue-triage cards also offer an *Investigate - deep code-grounded review* box.
   It is the one tick that **does not consume the card**: it kicks off a code-grounded deep review, captures Claude's final response from the action output, posts that merit/triage verdict as a comment, and leaves the card open with the box cleared, so you can investigate again after new commits and still make your real call afterwards.
   (CI-approval cards don't offer it - that's a fast security gate, not a merit review.)
@@ -248,7 +256,7 @@ For refresh, auto-triage, and self-healing, a "pure pending" card means it has `
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
-The current render-version sweep publishes the PR-review `/request-changes <text>` slash hint on already-open cards and also preserves the earlier cached `Triage` repair that qualifies bare target `#N` refs.
+The current render-version sweep publishes the conditional *Accept recommendation* checkbox behavior on already-open cards, keeps the PR-review `/request-changes <text>` slash hint sweep, and preserves the earlier cached `Triage` repair that qualifies bare target `#N` refs.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
@@ -294,6 +302,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   A brand-new card that is eligible for that attempt is created under an additional `pending-triage` label with no decision checkboxes.
   It keeps `needs-decision` so the triage workflow can still resolve it, but the checkbox, slash-command, and plain-English decision paths ignore it until the attempt completes.
   `triage-apply`, `triage-fail`, dispatch-failure handling, and the recovery step all publish the normal checkboxes fail-open, so a stuck or failed triage run does not permanently hide a card.
+  A fresh successful structured recommendation is persisted as hidden `triage_recommendation` state and may add *Accept recommendation* for pr-review or issue-triage only.
+  That checkbox is inert for legacy Markdown-only, failed, stale, invalid, non-allowlisted, or missing-required-reason recommendations; it never appears for ci-approval or maps to `approve-ci`.
+  When accepted, the deterministic handler maps it to the existing action and keeps the same head-SHA rechecks, token boundaries, terminal/non-terminal behavior, and per-kind allowlist.
   If `auto_triage` (pr-review) or `auto_triage_issues` (issue-triage) is false, or `CLAUDE_CODE_OAUTH_TOKEN` is absent, no workflow is dispatched and cards render without a triage section; the two flags are independent, so disabling one never disables the other.
   For an issue-triage card the target checkout is the repo's default branch, read-only, the same way `deep-review.yml` checks out an issue card.
   The model never receives `FLEET_TOKEN`; target checkout uses `persist-credentials: false`, and optional search uses only `READONLY_TOKEN` through `wheelhouse-search`.
@@ -322,7 +333,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is re-validated against the per-kind allowlist before the deterministic handler acts, and the workflow preserves only `decision.json` before routing/executing from a read-only trusted source copy.
   For deep review, the trusted workflow posts the action-output verdict and no deterministic downstream step reads model-written files.
-- **Cross-repo refs in LLM card text.** Auto triage summaries, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards while referring to a different target repo.
+- **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.
   Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
   The model cannot redirect that slug by naming a repo in its output, and the deterministic rewrite is the guarantee even though the prompts also ask for fully-qualified refs.
   The render-version sweep also re-applies that rewrite to preserved cached `Triage` sections in card bodies; it does not rewrite already-posted card comments.
@@ -382,6 +393,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   A newly created eligible card should queue in the same **scan-backstop** or **ingest** run that created it.
   Check the latest **scan-backstop**, **ingest**, and **triage** workflow logs.
   On an already-published card, if the triage workflow failed after queuing, the card may show a subtle unavailable note or simply keep the hidden cache so the same revision is not retried every hour.
+- **A Triage section appeared but there is no Accept recommendation box.**
+  That is expected for legacy Markdown-only recommendations, failed or stale triage, ci-approval cards, non-allowlisted actions, and actions that require text when Claude did not provide a usable reason.
+  The box is only a shortcut for a fresh successful structured recommendation; use the normal checkbox or slash-command instead.
 - **A plain-English reply did nothing / I only get slash-commands.**
   `nl_decisions` is inert unless `nl_decisions: true` **and** `CLAUDE_CODE_OAUTH_TOKEN` is set; the handler logs `nl path inert (...)` showing which condition is missing.
   Comments from anyone but the owner (or configured `maintainer`) are ignored, and a comment that starts with `/` is always treated as a slash-command.
@@ -416,7 +430,7 @@ scripts/
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
-tests/test_decision.py         offline unit test for parse/route logic, investigate routing, request-changes routing/execution, and NL answer ref qualification
+tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, labels, and render-version triage ref repair
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
@@ -424,7 +438,7 @@ tests/test_merge_conflict.py   offline unit test for mergeability routing, rebas
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
-tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, held-card publish/recovery, same-pass new-card dispatch, ref qualification, and workflow isolation
+tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, and workflow isolation
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification

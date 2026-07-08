@@ -17,7 +17,9 @@ pr-review and issue-triage include the non-consuming `investigate` checkbox;
 ci-approval does not. Non-checkbox actions (`comment`, `decline`, and
 pr-review-only `request-changes`) are not valid `options`: `comment` and
 `request-changes` require slash-command text, while `decline` can carry a
-slash-command reason or fall back to its default label reason.
+slash-command reason or fall back to its default label reason. The conditional
+`accept-recommendation` checkbox is not a source-provided option; render_card.py
+adds it only from fresh successful structured auto-triage recommendation state.
 When omitted, `auto_triage` follows the global/per-repo config; a false payload
 value can only opt this item out. `auto_triage_issues` is the INDEPENDENT
 equivalent for issue-triage items - it follows its own global/per-repo config

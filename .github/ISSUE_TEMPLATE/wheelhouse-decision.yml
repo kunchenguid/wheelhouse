@@ -23,12 +23,16 @@ body:
       # by exact heading text. The options below are the full union across card
       # kinds; the parser reads the ACTUAL ticked lines from the card body, so
       # this list is only for schema validity, not for matching.
+      # Accept recommendation is a conditional, renderer-inserted checkbox
+      # backed by structured auto-triage state; source dispatches cannot request
+      # it through options.
       # Non-checkbox actions like comment, decline, and request-changes are
       # intentionally absent from these checkbox options.
       # comment and request-changes require slash-command text; decline can
       # carry a slash-command reason or fall back to its default label reason.
       label: Your decision
       options:
+        - label: Accept recommendation
         - label: Merge it
         - label: Approve the CI run (security-gated)
         - label: Close / decline

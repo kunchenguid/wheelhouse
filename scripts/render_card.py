@@ -14,6 +14,9 @@ triage card is created HELD - `pending-triage` on top of `needs-decision`, a
 placeholder body with no checkboxes - and published to its normal actionable
 form by `update_card_triage` the moment its first auto-triage attempt
 completes, success or failure alike. See "Held cards" above `HOLD_LABEL`.
+Fresh successful structured triage recommendations can add a conditional
+`Accept recommendation` checkbox and persist `triage_recommendation` in the
+state block; the visible Markdown recommendation text is never parsed for this.
 
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
@@ -48,6 +51,11 @@ from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 # decline can carry a slash-command reason or fall back to its default label
 # reason (see apply_decision.py).
 #
+# `accept-recommendation` is not a source-provided checkbox option. It is a
+# conditional, renderer-inserted shortcut backed by fresh successful structured
+# auto-triage recommendation state, and apply_decision.py maps it back to an
+# existing deterministic action.
+#
 # `investigate` is the odd one out: it is NON-CONSUMING. Ticking it triggers a
 # code-grounded deep review (deep-review.yml) and leaves the card open for the
 # owner's real decision; the handler clears the box so it can be re-triggered
@@ -60,7 +68,10 @@ CHECKBOX_OPTIONS = {
     "issue-triage": ["close", "investigate", "hold"],
 }
 
+ACCEPT_RECOMMENDATION_OPTION = "accept-recommendation"
+
 OPTION_LABELS = {
+    ACCEPT_RECOMMENDATION_OPTION: "Accept recommendation",
     "merge": "Merge it",
     "approve-ci": "Approve the CI run (security-gated)",
     "close": "Close / decline",
@@ -163,9 +174,29 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # sections (bare `#N` -> `owner/repo#N`) via `_preserve_same_revision_triage`,
 # mirroring how version 0 -> 1 propagated the author `@mention` drop. Bumped
 # 2 -> 3 to publish the `/request-changes <text>` PR-review slash hint.
-CARD_RENDER_VERSION = 3
+#
+# Bumped 3 -> 4 to publish the conditional `Accept recommendation` checkbox
+# and suppress the deterministic top-level recommendation when a structured
+# triage recommendation is present.
+CARD_RENDER_VERSION = 4
 
-TRIAGE_FIELDS = ("summary", "product_implications", "recommended_next_step")
+ACCEPT_ALLOWED_BY_KIND = {
+    "pr-review": {
+        "merge",
+        "request-changes",
+        "decline",
+        "close",
+        "hold",
+        "investigate",
+        "comment",
+    },
+    "issue-triage": {"close", "decline", "hold", "investigate", "comment"},
+}
+ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
+    {"close", "decline", "comment", "request-changes"}
+)
+
+TRIAGE_FIELDS = ("summary", "product_implications")
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
 TRIAGE_UNAVAILABLE = "Auto triage unavailable for this version."
@@ -177,6 +208,10 @@ _STATE_BLOCK_RE = re.compile(
 _TRIAGE_SECTION_RE = re.compile(
     r"\n?<!--\s*wheelhouse-triage:start\s*-->.*?"
     r"<!--\s*wheelhouse-triage:end\s*-->\n?",
+    re.S,
+)
+_RECOMMENDATION_SECTION_RE = re.compile(
+    r"\n?### Recommended action\n.*?(?=\n<!--\s*wheelhouse-decision:start\s*-->)",
     re.S,
 )
 
@@ -226,12 +261,33 @@ def checkbox_options(kind, options):
     return cleaned or list(defaults)
 
 
+def rendered_checkbox_options(kind, options):
+    defaults = CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+    if isinstance(options, str):
+        raw = [options]
+    else:
+        raw = list(options or [])
+    allowed = set(defaults) | {ACCEPT_RECOMMENDATION_OPTION}
+    cleaned = []
+    seen = set()
+    for option in raw:
+        key = str(option).strip()
+        if key in allowed and key not in seen:
+            cleaned.append(key)
+            seen.add(key)
+    return cleaned or list(defaults)
+
+
 def normalized_options(options):
     if options is None:
         return []
     if isinstance(options, str):
         options = [options]
     return sorted({str(o) for o in options})
+
+
+def normalized_material_options(options):
+    return sorted(o for o in normalized_options(options) if o != ACCEPT_RECOMMENDATION_OPTION)
 
 
 def material_signature(item):
@@ -245,7 +301,7 @@ def material_signature(item):
         "tests": item.get("tests", "n/a"),
         "kind": kind,
         "priority": item.get("priority", "low"),
-        "options": normalized_options(card_options(item)),
+        "options": normalized_material_options(card_options(item)),
     }
 
 
@@ -259,7 +315,7 @@ def _state_material(state):
         if field not in s:
             material[field] = _UNKNOWN
         elif field == "options":
-            material[field] = normalized_options(s.get(field))
+            material[field] = normalized_material_options(s.get(field))
         else:
             material[field] = s.get(field)
     return material
@@ -470,11 +526,86 @@ def normalize_triage(data):
         if not cleaned:
             return None
         triage[field] = cleaned
-    rec = triage["recommended_next_step"]
-    allowed = ("merge", "look closer", "discuss", "decline")
-    if not rec.lower().startswith(allowed):
-        triage["recommended_next_step"] = "look closer - " + rec
+    action = normalize_recommendation_action(data.get("recommended_action"))
+    reason = ""
+    if isinstance(data.get("recommended_reason"), str):
+        reason = _clean_triage_text(data.get("recommended_reason"), default="")
+    if action:
+        triage["recommended_next_step"] = (
+            "%s - %s" % (action, reason) if reason else action
+        )
+        if action in _all_accept_actions():
+            triage["triage_recommendation"] = {"action": action, "reason": reason}
+    else:
+        rec = data.get("recommended_next_step")
+        if not isinstance(rec, str):
+            return None
+        rec = _clean_triage_text(rec, default="")
+        if not rec:
+            return None
+        allowed = ("merge", "look closer", "discuss", "decline")
+        triage["recommended_next_step"] = (
+            rec if rec.lower().startswith(allowed) else "look closer - " + rec
+        )
     return triage
+
+
+def _all_accept_actions():
+    actions = set()
+    for allowed in ACCEPT_ALLOWED_BY_KIND.values():
+        actions.update(allowed)
+    return actions
+
+
+def normalize_recommendation_action(value):
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"\s+", "-", text)
+    aliases = {
+        "request-changes": "request-changes",
+        "request-change": "request-changes",
+        "changes-requested": "request-changes",
+        "look-closer": "investigate",
+        "investigate": "investigate",
+    }
+    return aliases.get(text, text) if text else ""
+
+
+def recommendation_for_state(triage, kind, owner="", repo=""):
+    rec = (triage or {}).get("triage_recommendation")
+    if not isinstance(rec, dict):
+        return None
+    action = normalize_recommendation_action(rec.get("action"))
+    if action not in ACCEPT_ALLOWED_BY_KIND.get(kind, set()):
+        return None
+    reason = _clean_triage_text(rec.get("reason"), default="")
+    if action in ACCEPT_TEXT_REQUIRED_ACTIONS and not reason:
+        return None
+    if reason:
+        reason = qualify_issue_refs(reason, owner, repo)
+    return {"action": action, "reason": reason}
+
+
+def accept_recommendation_available(state):
+    kind = (state or {}).get("kind")
+    if kind not in ACCEPT_ALLOWED_BY_KIND:
+        return False
+    if (state or {}).get("triage_status") != "succeeded":
+        return False
+    revision = state_revision(state, kind)
+    if not revision or (state or {}).get("triaged_sha") != revision:
+        return False
+    return recommendation_for_state(
+        {"triage_recommendation": (state or {}).get("triage_recommendation")},
+        kind,
+    ) is not None
+
+
+def options_for_state(kind, options, state):
+    cleaned = rendered_checkbox_options(kind, options)
+    if accept_recommendation_available(state):
+        cleaned = [o for o in cleaned if o != ACCEPT_RECOMMENDATION_OPTION]
+        return [ACCEPT_RECOMMENDATION_OPTION] + cleaned
+    return [o for o in cleaned if o != ACCEPT_RECOMMENDATION_OPTION]
 
 
 def triage_section(triage=None, error=None, owner="", repo=""):
@@ -529,6 +660,25 @@ def _insert_triage_section(body, section):
     return without + "\n\n" + section
 
 
+def _set_recommendation_section_visible(body, visible):
+    if visible:
+        return body
+    return _RECOMMENDATION_SECTION_RE.sub("\n", body or "", count=1).strip() + "\n"
+
+
+def _ensure_recommendation_section(body, recommendation):
+    if "### Recommended action" in (body or ""):
+        return body
+    section = "### Recommended action\n%s\n" % (
+        recommendation or "Needs your call."
+    )
+    marker = "\n%s" % DECISION_START
+    idx = (body or "").find(marker)
+    if idx >= 0:
+        return (body or "")[:idx].rstrip() + "\n\n" + section + (body or "")[idx:]
+    return (body or "").rstrip() + "\n\n" + section
+
+
 def _replace_state_block(body, state):
     marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
         state or {},
@@ -567,14 +717,23 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     if not state:
         return body
     changed = False
-    for key in ("triaged_sha", "triage_status", "triage_error"):
+    for key in (
+        "triaged_sha",
+        "triage_status",
+        "triage_error",
+        "triage_recommendation",
+    ):
         if key in (old_state or {}):
             state[key] = old_state[key]
             changed = True
+    if accept_recommendation_available(state):
+        state["options"] = options_for_state(kind, state.get("options"), state)
+        body = _publish_decision_section(body, kind, state["options"])
+        body = _set_recommendation_section_visible(body, visible=False)
     return _replace_state_block(body, state) if changed else body
 
 
-def _state_with_triage(state, revision, status, error=None):
+def _state_with_triage(state, revision, status, error=None, recommendation=None):
     new_state = dict(state or {})
     new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
@@ -582,6 +741,10 @@ def _state_with_triage(state, revision, status, error=None):
         new_state["triage_error"] = _clean_triage_text(error, limit=220)
     else:
         new_state.pop("triage_error", None)
+    if status == "succeeded" and recommendation:
+        new_state["triage_recommendation"] = recommendation
+    else:
+        new_state.pop("triage_recommendation", None)
     return new_state
 
 
@@ -601,7 +764,12 @@ def body_with_triage_queued(body, item):
     elif state_revision(state, kind) != revision:
         return body
     clean = remove_triage_section(body)
-    return _replace_state_block(clean, _state_with_triage(state, revision, "queued"))
+    new_state = _state_with_triage(state, revision, "queued")
+    new_state["options"] = options_for_state(kind, state.get("options"), new_state)
+    if not state.get("held"):
+        clean = _publish_decision_section(clean, kind, new_state["options"])
+        clean = _ensure_recommendation_section(clean, item.get("recommendation"))
+    return _replace_state_block(clean, new_state)
 
 
 def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
@@ -619,9 +787,21 @@ def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
         normalized, error or TRIAGE_UNAVAILABLE, owner=owner, repo=state.get("repo", "")
     )
     updated = _insert_triage_section(body, section)
-    new_state = _state_with_triage(
-        state, revision, status, None if normalized else error
+    recommendation = (
+        recommendation_for_state(normalized, kind, owner=owner, repo=state.get("repo", ""))
+        if normalized
+        else None
     )
+    new_state = _state_with_triage(
+        state,
+        revision,
+        status,
+        None if normalized else error,
+        recommendation=recommendation,
+    )
+    new_state["options"] = options_for_state(kind, state.get("options"), new_state)
+    updated = _publish_decision_section(updated, kind, new_state["options"])
+    updated = _set_recommendation_section_visible(updated, visible=not recommendation)
     return _replace_state_block(updated, new_state)
 
 
@@ -634,7 +814,7 @@ _DECISION_SECTION_RE = re.compile(
 
 
 def _decision_lines(kind, options):
-    options = checkbox_options(kind, options)
+    options = rendered_checkbox_options(kind, options)
     lines = [
         "### Your decision",
         "",
@@ -689,7 +869,8 @@ def render(item, held=False):
     repo = item["repo"]
     number = int(item["number"])
     title = (item.get("title") or "").strip() or "(no title)"
-    options = card_options(item)
+    base_options = card_options(item)
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     triage = (
         normalize_triage(item.get("triage"))
         if kind in AUTO_TRIAGE_FLAG_BY_KIND
@@ -706,7 +887,7 @@ def render(item, held=False):
         "kind": kind,
         "head_sha": item.get("head_sha", "") or "",
         "updated_at": item.get("updated_at", "") or "",
-        "options": options,
+        "options": base_options,
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
@@ -715,6 +896,11 @@ def render(item, held=False):
     if triage:
         state["triaged_sha"] = item.get("triaged_sha") or triage_revision(item)
         state["triage_status"] = "succeeded"
+        recommendation = recommendation_for_state(triage, kind, owner=owner, repo=repo)
+        if recommendation:
+            state["triage_recommendation"] = recommendation
+    options = options_for_state(kind, base_options, state)
+    state["options"] = options
 
     short = title if len(title) <= 70 else title[:67] + "..."
     issue_title = "[%s#%d] %s" % (repo, number, short)
@@ -747,12 +933,12 @@ def render(item, held=False):
         lines.append("> %s" % item["warning"])
         lines.append("")
     if triage:
-        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         lines.append(triage_section(triage, owner=owner, repo=repo))
         lines.append("")
-    lines.append("### Recommended action")
-    lines.append(item.get("recommendation", "Needs your call."))
-    lines.append("")
+    if not accept_recommendation_available(state):
+        lines.append("### Recommended action")
+        lines.append(item.get("recommendation", "Needs your call."))
+        lines.append("")
     lines.append(_decision_section(kind, options, held))
     lines.append("")
     lines.append(
@@ -1217,7 +1403,7 @@ def parse_triage_json(text):
     triage = normalize_triage(data)
     if not triage:
         return None
-    return triage
+    return data
 
 
 # --------------------------------------------------------------------------- #

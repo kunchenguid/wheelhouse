@@ -12,6 +12,9 @@ Phases, run as separate workflow steps so each uses the right token:
                only diffs the parsed option keys, it no longer scrapes the body.
                A held `pending-triage` card is intentionally inert until
                render_card.py publishes its first auto-triage result.
+               The virtual accept-recommendation checkbox is parsed only from
+               fresh successful structured triage_recommendation state, then
+               mapped to an existing deterministic action.
                The NON-CONSUMING `investigate` tick is routed apart from every
                other action: it sets `investigate` (not `decision`) so the
                handler triggers deep-review.yml and leaves the card OPEN.
@@ -35,8 +38,9 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
   nl-prompt    Build the LLM prompt: the deterministic card context + the
                owner/maintainer's comment (trusted instructions) plus the target
                content as clearly-delimited UNTRUSTED data. Writes `prompt` to
-               $GITHUB_OUTPUT. The card's advisory auto-triage section is omitted
-               from trusted context. The card's
+               $GITHUB_OUTPUT. The card's advisory auto-triage section and
+               hidden triage_recommendation state are omitted from trusted
+               context. The card's
                prior comment thread is folded in as owner-scoped conversation
                history (see assemble_history) so follow-up questions keep
                continuity. When the workflow has an optional READONLY_TOKEN, it
@@ -79,9 +83,15 @@ _AUTO_TRIAGE_SECTION_RE = re.compile(
     r"<!--\s*wheelhouse-triage:end\s*-->\n?",
     re.S,
 )
+_STATE_BLOCK_RE = re.compile(
+    r"<!--\s*((?:wheelhouse|triage)-state):\s*(\{.*?\})\s*-->",
+    re.S,
+)
 
-# Actions allowed per kind. Checkbox options are a subset of these; comment,
-# decline, and request-changes are not checkbox options because GitHub issue-form
+# Actions allowed per kind. Regular checkbox options are a subset of these;
+# `accept-recommendation` is a virtual checkbox that validates hidden structured
+# triage state and then maps back to one of these actions. comment, decline, and
+# request-changes are not regular checkbox options because GitHub issue-form
 # checkboxes cannot carry free text. comment and request-changes require
 # slash-command text, while decline can also be driven by a decision label with
 # its default reason. request-changes goes through the normal `decision`
@@ -118,6 +128,22 @@ NON_CONSUMING_ACTIONS = frozenset({"investigate"})
 NL_EXCLUDED_ACTIONS = frozenset({"investigate"})
 TEXT_REQUIRED_ACTIONS = frozenset({"comment", "request-changes"})
 SLASH_ONLY_ACTIONS = frozenset({"comment", "decline", "request-changes"})
+ACCEPT_RECOMMENDATION_OPTION = "accept-recommendation"
+ACCEPT_ALLOWED_BY_KIND = {
+    "pr-review": {
+        "merge",
+        "request-changes",
+        "decline",
+        "close",
+        "hold",
+        "investigate",
+        "comment",
+    },
+    "issue-triage": {"close", "decline", "hold", "investigate", "comment"},
+}
+ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
+    {"close", "decline", "comment", "request-changes"}
+)
 
 
 def nl_allowed(kind):
@@ -127,7 +153,10 @@ def nl_allowed(kind):
 
 
 def checkbox_allowed(kind):
-    return ALLOWED.get(kind, set()) - SLASH_ONLY_ACTIONS
+    allowed = ALLOWED.get(kind, set()) - SLASH_ONLY_ACTIONS
+    if kind in ACCEPT_ALLOWED_BY_KIND:
+        allowed = set(allowed) | {ACCEPT_RECOMMENDATION_OPTION}
+    return allowed
 
 
 SLASH = {
@@ -202,6 +231,8 @@ def parse_slash(comment, allowed):
         return (None, "")
     if action in TEXT_REQUIRED_ACTIONS and not rest:
         return (None, "")  # nothing to post
+    if action == "close":
+        rest = ""
     if action == "decline" and not rest:
         rest = "Declining for now."
     return (action, rest)
@@ -290,6 +321,48 @@ def parse_label(label_name, allowed):
     return None
 
 
+def _normalize_recommendation_action(value):
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"\s+", "-", text)
+    aliases = {
+        "request-change": "request-changes",
+        "changes-requested": "request-changes",
+        "look-closer": "investigate",
+    }
+    return aliases.get(text, text) if text else ""
+
+
+def _accept_recommendation(state):
+    kind = (state or {}).get("kind", "pr-review")
+    rec = (state or {}).get("triage_recommendation")
+    if not isinstance(rec, dict):
+        return (None, "")
+    if (state or {}).get("triage_status") != "succeeded":
+        return (None, "")
+    revision = (
+        (state or {}).get("updated_at", "")
+        if kind == "issue-triage"
+        else (state or {}).get("head_sha", "")
+    )
+    if not revision or (state or {}).get("triaged_sha") != revision:
+        return (None, "")
+    action = _normalize_recommendation_action(rec.get("action"))
+    if action not in ACCEPT_ALLOWED_BY_KIND.get(kind, set()):
+        return (None, "")
+    if action == "approve-ci":
+        return (None, "")
+    reason = str(rec.get("reason") or "").strip()
+    if action in ACCEPT_TEXT_REQUIRED_ACTIONS and not reason:
+        return (None, "")
+    if reason:
+        reason = core.qualify_issue_refs(
+            reason,
+            os.environ.get("GITHUB_REPOSITORY_OWNER", ""),
+            str((state or {}).get("repo") or ""),
+        )
+    return (action, reason)
+
+
 def cmd_parse():
     body = os.environ.get("ISSUE_BODY", "")
     state = core.parse_state_block(body)
@@ -327,6 +400,13 @@ def cmd_parse():
         set_output("decision", "")
         return
 
+    decision_key = decision
+    if decision == ACCEPT_RECOMMENDATION_OPTION:
+        decision, free_text = _accept_recommendation(state)
+        if not decision:
+            set_output("decision", "")
+            return
+
     if decision in NON_CONSUMING_ACTIONS:
         # investigate: trigger the code-grounded deep review and leave the card
         # OPEN. We deliberately do NOT set `decision` (that is what drives the
@@ -334,7 +414,7 @@ def cmd_parse():
         # and dispatches deep-review.yml + clears the box. No FLEET_TOKEN, no
         # action on the target.
         set_output("decision", "")
-        set_output("investigate", decision)
+        set_output("investigate", decision_key)
         set_output("target_repo", state.get("repo", ""))
         set_output("target_number", state.get("number", ""))
         set_output("kind", kind)
@@ -591,7 +671,7 @@ def cmd_execute():
     elif decision == "approve-ci":
         message, terminal = do_approve_ci(owner, repo, number)
     elif decision == "close":
-        message, terminal = do_close(owner, repo, number)
+        message, terminal = do_close(owner, repo, number, reason=free_text or None)
     elif decision == "decline":
         message, terminal = do_close(
             owner, repo, number, reason=free_text or "Declining for now."
@@ -650,7 +730,22 @@ def search_repos_for_prompt(owner, state):
 
 def trusted_card_context(card_body):
     body = _AUTO_TRIAGE_SECTION_RE.sub("\n", card_body or "").strip()
+    body = _STATE_BLOCK_RE.sub(_trusted_state_block, body)
     return body + "\n" if body else ""
+
+
+def _trusted_state_block(match):
+    try:
+        state = json.loads(match.group(2))
+    except (TypeError, ValueError):
+        return match.group(0)
+    if not isinstance(state, dict) or "triage_recommendation" not in state:
+        return match.group(0)
+    state.pop("triage_recommendation", None)
+    return "<!-- %s: %s -->" % (
+        match.group(1),
+        json.dumps(state, separators=(",", ":")),
+    )
 
 
 def build_nl_prompt(
@@ -1005,6 +1100,8 @@ def route_decision(result, kind, state, owner=""):
                 "What changes should I request? Tell me what needs to change."
             )
             return finish()
+        if action == "close":
+            free_text = ""
         if action == "decline" and not free_text:
             free_text = "Declining for now."
         out.update(mode="action", decision=action, free_text=free_text)

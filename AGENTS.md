@@ -45,9 +45,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   existing purely as the issue-triage auto-triage cache key, mirroring how
   `head_sha` doubles as the pr-review cache key. Automatic triage (pr-review
   AND issue-triage) adds non-material cache fields such as
-  `triaged_sha` and `triage_status`; those are deliberately outside
-  `MATERIAL_FIELDS` so a triage result never changes classification or forces a
-  card refresh. A held card also carries non-material `held: true` until its
+  `triaged_sha`, `triage_status`, and `triage_recommendation`; those are
+  deliberately outside `MATERIAL_FIELDS` so a triage result never changes
+  classification or forces a card refresh. The auto-inserted
+  `accept-recommendation` option is stripped from material option comparisons
+  because it is derived from non-material triage state, not from source-provided
+  checkbox options. A held card also carries non-material `held: true` until its
   first auto-triage attempt publishes the normal decision controls. The state
   block also carries `render_version`, another
   non-material field alongside `triaged_sha`: it is a one-time re-render
@@ -101,11 +104,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   `render_card.py` (render + card CRUD; `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
   the per-kind checkboxes, including the non-consuming `investigate` box on
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
-  automatic triage section rendering, `triaged_sha` cache updates, and trusted
-  triage-result card edits that publish held cards), `apply_decision.py` (deterministic `parse` then
+  automatic triage section rendering, structured recommendation persistence,
+  conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
+  updates, and trusted triage-result card edits that publish held cards),
+  `apply_decision.py` (deterministic `parse` then
   `execute`; non-checkbox actions including `comment`, `decline`, and
-  pr-review-only `request-changes`; the NON-CONSUMING `investigate` routing +
-  `clear-checkbox`; plus the natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
+  pr-review-only `request-changes`; the virtual `accept-recommendation` checkbox
+  routing into existing deterministic actions; the NON-CONSUMING `investigate`
+  routing + `clear-checkbox`; plus the natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
   the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed LLM
   context),
@@ -193,11 +199,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `3`: the
-  2 -> 3 bump publishes the `/request-changes <text>` PR-review slash hint on
-  already-open cards; the earlier 1 -> 2 bump retroactively re-qualifies
-  cross-repo refs cached in an already-open card's `### Triage` section from
-  before `qualify_issue_refs` existed.
+  it is not a material field). `CARD_RENDER_VERSION` is currently `4`: the
+  3 -> 4 bump publishes the conditional `Accept recommendation` checkbox and
+  suppresses the top-level deterministic recommendation when structured triage
+  recommendation state is present; the 2 -> 3 bump publishes the
+  `/request-changes <text>` PR-review slash hint on already-open cards; the
+  earlier 1 -> 2 bump retroactively re-qualifies cross-repo refs cached in an
+  already-open card's `### Triage` section from before `qualify_issue_refs`
+  existed.
   `_preserve_same_revision_triage` now runs the lifted section
   through `wheelhouse_core.qualify_issue_refs(section, owner, repo)` before
   re-inserting it - `owner` is `GITHUB_REPOSITORY_OWNER` (read in
@@ -291,10 +300,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   N`, so that path also reads by number; `queue-triage` keeps the `find_card`
   lookup only as a fallback when no number is supplied (back-compat for a
   manual invocation).
-  `triaged_sha`, `updated_at`, and the visible `### Triage` section are
-  non-material: they must never affect `classify`, `material_changed`,
-  decision parsing, target execution, fork-CI approval, author filtering, or
-  conflict routing.
+  `triaged_sha`, `triage_recommendation`, `updated_at`, and the visible
+  `### Triage` section are non-material: they must never affect `classify`,
+  `material_changed`, fork-CI approval, author filtering, or conflict routing.
   For a pr-review card, `head_sha` IS material, so a head move both refreshes
   the card and makes the fresh head eligible for one new triage attempt in the
   same pass. For an issue-triage card, `updated_at` is NOT material (an issue's
@@ -310,6 +318,27 @@ still appears where it's plain English, e.g. "triage the queue".)
   gate/Claude/card-update steps, security posture, and `--revision` CLI
   argument (`render_card.py triage-apply|triage-fail --revision <head_sha or
   updated_at>`).
+- **Accept recommendation is a deterministic shortcut, not model action.** A
+  successful current auto-triage attempt for pr-review or issue-triage may
+  prepend an `Accept recommendation` checkbox when the structured
+  `triage_recommendation` state is fresh (`triaged_sha` equals the current
+  revision) and its normalized action is in `ACCEPT_ALLOWED_BY_KIND`.
+  It is never rendered for `ci-approval`, never maps to `approve-ci`, and legacy
+  `recommended_next_step` Markdown is deliberately not parsed into an accept
+  action.
+  Actions that post text (`close`, `decline`, `comment`, `request-changes`)
+  require a non-empty `recommended_reason`; missing, stale, failed, invalid,
+  non-allowlisted, and non-structured recommendations no-op at parse time.
+  Ticking the box maps to the existing deterministic executor action and
+  `free_text`, preserving head-SHA rechecks and token boundaries; if the
+  recommendation is `investigate`, it stays non-consuming and clears the clicked
+  accept box.
+  While a structured accept recommendation is available, render suppresses the
+  top-level deterministic `### Recommended action` section so the card has one
+  primary recommendation surface.
+  Bare `#N` refs in `recommended_reason` are qualified against the card state's
+  target repo before the reason can be posted, used as a decline/close note, or
+  submitted as a request-changes review.
 - **Held cards - a card is not owner-visible in its normal form until its
   first auto-triage attempt completes.** When `should_hold` says a brand-new
   pr-review/issue-triage card would have triage queued for it (same gate as
@@ -373,6 +402,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   (so every guard - allowlist, head-SHA re-check, fork-CI HOLD, token isolation,
   concurrency - applies unchanged). `answer`/`clarify` only post a card comment
   and leave the card open.
+  The advisory `### Triage` section and hidden `triage_recommendation` state are
+  removed from the trusted card context before the NL prompt is built, so a prior
+  model recommendation cannot become an instruction to the intent-mapper.
   When `READONLY_TOKEN` is absent, the LLM stays in the
   legacy `--allowedTools Write` mode and receives no shell `GH_TOKEN`. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
@@ -619,10 +651,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   different repo in its text.
   The three live model-output surfaces: (1) auto-triage -
   `render_card.py`'s `triage_section`/`body_with_triage_result` thread
-  `owner`+`state["repo"]` through before rendering the `### Triage` block (the
-  `triage-apply`/`triage-fail` CLI read `GITHUB_REPOSITORY_OWNER` and
-  `triage.yml`'s "Update the decision card" step passes it through its `env -i`
-  sandbox); (2) deep-review - the "Post the verdict on the card" step in
+  `owner`+`state["repo"]` through before rendering the `### Triage` block, and
+  `recommendation_for_state` plus `apply_decision._accept_recommendation` qualify
+  stored `recommended_reason` text before it can drive a target comment, a
+  decline/close note, or a request-changes review (the `triage-apply`/
+  `triage-fail` CLI read `GITHUB_REPOSITORY_OWNER` and `triage.yml`'s
+  "Update the decision card" step passes it through its `env -i` sandbox);
+  (2) deep-review - the "Post the verdict on the card" step in
   `deep-review.yml` imports `wheelhouse_core` in its trusted Python heredoc and
   qualifies the extracted verdict with the `resolve` step's deterministic
   `repo` output before `gh issue comment`; (3) NL answer/clarify -
@@ -660,9 +695,11 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   pr-review is opt-out through `auto_triage`; issue-triage is opt-out through the INDEPENDENT `auto_triage_issues` - both global default true, per-repo override allowed, and both inert unless `CLAUDE_CODE_OAUTH_TOKEN` is present. Neither flag affects the other.
   For a pr-review card it checks out the target PR head read-only with `FLEET_TOKEN`, `persist-credentials: false`, and verifies the head did not move since queueing.
   For an issue-triage card it checks out the repo's DEFAULT branch read-only the same way (same substrate `deep-review.yml` uses for an issue card) - there is no head to verify.
-  Both paths then run Claude with lower `--max-turns` than deep-review to produce only structured `{summary, product_implications, recommended_next_step}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff) and asks for an issue-appropriate recommendation, while the pr-review prompt keeps the PR title/body/diff and merge-oriented recommendation - unchanged from before this feature.
-  It writes the visible `### Triage` section by a trusted workflow step with `github.token`, never by Claude, and the result is advisory only.
-  Apart from publishing a held card's own `pending-triage` label and placeholder decision section, it never changes classification, labels, checkbox options, `apply_decision.py`, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
+  Both paths then run Claude with lower `--max-turns` than deep-review to produce structured `{summary, product_implications, recommended_action, recommended_reason}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff) and asks for an issue-appropriate action set, while the pr-review prompt keeps the PR title/body/diff and a PR action set.
+  Trusted code still renders the visible `### Triage` section, including a human-readable Recommended next step line, with `github.token`, never by Claude directly.
+  When the structured action is fresh, successful, per-kind allowlisted, and has any required reason text, trusted code persists `triage_recommendation` and may add the `Accept recommendation` checkbox.
+  The result is advisory until the owner/maintainer ticks that checkbox, at which point `apply_decision.py` maps it to an existing deterministic action with the same guards.
+  Apart from publishing a held card's own `pending-triage` label and placeholder decision section, plus that conditional accept shortcut, it never changes classification, managed labels, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
   Before dispatch, the queueing path writes `triaged_sha=<current revision>` and `triage_status=queued`, so errors and timeouts fail open without retriggering the same revision on every scan.
   Existing open cards of either kind with no `triaged_sha` are intentionally stale and backfill once on the next eligible scan.
   Optional `READONLY_TOKEN` search uses the unchanged `wheelhouse-search` wrapper and remains untrusted evidence only.
