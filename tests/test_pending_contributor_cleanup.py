@@ -151,6 +151,7 @@ class FakeGitHub:
         body_edits_error=False,
         review_rereads=None,
         reread_error=False,
+        mergeable_reads=None,
     ):
         self.issue = issue_obj or issue([core.PENDING_CONTRIBUTOR_LABEL])
         self.pr = pr_obj or pr()
@@ -165,6 +166,8 @@ class FakeGitHub:
         self.body_edits_error = body_edits_error
         self.review_rereads = dict(review_rereads or {})
         self.reread_error = reread_error
+        self.mergeable_reads = list(mergeable_reads or ["CONFLICTING"])
+        self.mergeable_calls = []
         self.calls = []
         self._fill_target_updated_at()
 
@@ -260,20 +263,36 @@ class FakeGitHub:
             "pageInfo": {"hasNextPage": False, "endCursor": None},
         }
 
+    def gh_graphql_pr_mergeable(self, owner, name, number):
+        if owner != "owner" or name != "demo" or int(number) != 7:
+            raise AssertionError(
+                "unexpected mergeability target: %s/%s#%s" % (owner, name, number)
+            )
+        self.mergeable_calls.append(int(number))
+        if not self.mergeable_reads:
+            raise AssertionError("unexpected mergeability re-read")
+        value = self.mergeable_reads.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
 
 @contextlib.contextmanager
 def patch_rest(fake):
     old_rest = core.gh_rest
     old_edits = core.gh_graphql_pr_user_content_edits_page
+    old_mergeable = core.gh_graphql_pr_mergeable
     core.gh_rest = fake.gh_rest
     core.gh_graphql_pr_user_content_edits_page = (
         fake.gh_graphql_pr_user_content_edits_page
     )
+    core.gh_graphql_pr_mergeable = fake.gh_graphql_pr_mergeable
     try:
         yield
     finally:
         core.gh_rest = old_rest
         core.gh_graphql_pr_user_content_edits_page = old_edits
+        core.gh_graphql_pr_mergeable = old_mergeable
 
 
 def enriched_pr(
@@ -1103,6 +1122,8 @@ def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
           closed == set())
     check("ci-noop: reminder arms pending label for the later close",
           core.PENDING_CONTRIBUTOR_LABEL in labels)
+    check("ci-noop: reminder revalidates the current conflict",
+          fake.mergeable_calls == [7])
 
     legacy_record = rebase_record(source_id=201)
     fake = FakeGitHub(
@@ -1121,6 +1142,33 @@ def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
     )
     check("ci-noop: nudged conflicting ci-approval PR closes on the later scan",
           closed == {7})
+    check("ci-noop: close revalidates the current conflict",
+          fake.mergeable_calls == [7])
+
+
+def test_widened_ci_noop_skips_when_conflict_has_resolved():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+        mergeable_reads=["UNKNOWN", "MERGEABLE"],
+    )
+    closed = run(
+        fake,
+        enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
+                    mergeable="CONFLICTING", cross_repo=True),
+        now_days=14,
+    )
+    check("ci-noop: resolved conflict skips the stale close", closed == set())
+    check("ci-noop: resolved conflict performs no writes",
+          not any(call["method"] for call in fake.calls))
+    check("ci-noop: UNKNOWN re-read settles before skipping",
+          fake.mergeable_calls == [7, 7])
 
 
 def test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope():
@@ -1237,6 +1285,7 @@ def main():
     test_widened_backlog_respects_keep_open()
     test_widened_backlog_contributor_activity_fails_open()
     test_widened_ci_noop_conflicting_pr_reminds_then_closes()
+    test_widened_ci_noop_skips_when_conflict_has_resolved()
     test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope()
     test_conflicting_non_ci_noop_lanes_stay_out_of_scope()
     test_widened_ci_noop_respects_keep_open()

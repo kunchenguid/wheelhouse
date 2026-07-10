@@ -2173,11 +2173,22 @@ def _pr_conflicting_for_cleanup(pr):
     """
     if pr.get("bucket") == "needs-rebase":
         return True
+    return _is_ci_noop_cleanup_candidate(pr) and _mergeable_is_conflicting(
+        pr.get("mergeable")
+    )
+
+
+def _is_ci_noop_cleanup_candidate(pr):
     return (
         pr.get("bucket") == "needs-ci-approval"
         and pr.get("cross_repo") is True
-        and _mergeable_is_conflicting(pr.get("mergeable"))
     )
+
+
+def _ci_noop_conflict_is_current(owner, repo, pr):
+    if not _is_ci_noop_cleanup_candidate(pr):
+        return True
+    return _mergeable_is_conflicting(_settle_mergeable(owner, repo, pr["number"]))
 
 
 def _active_pending_ask_kinds(pr):
@@ -2274,6 +2285,12 @@ def _sweep_pending_pr(
     reminded = _has_reminder(
         state["comments"], record["ask_id"], maintainer_logins, asked_dt
     )
+
+    action_due = now >= close_at or (now >= reminder_at and not reminded)
+    if not action_due:
+        return "skip"
+    if not _ci_noop_conflict_is_current(owner, repo, pr):
+        return "skip"
 
     if now >= close_at:
         if not reminded:
