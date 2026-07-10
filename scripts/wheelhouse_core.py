@@ -3630,24 +3630,18 @@ def _this_repo_slug():
 
 
 def _find_scan_health_issue(slug):
-    """Locate the health-ledger issue by its label (any state), preferring one
-    that already carries the hidden marker. Returns the issue dict or None."""
-    path = "repos/%s/issues?state=all&labels=%s&per_page=20" % (
+    """Locate the marker-owned health-ledger issue in any state."""
+    path = "repos/%s/issues?state=all&labels=%s&per_page=100" % (
         slug,
         quote(SCAN_HEALTH_LABEL),
     )
-    issues = gh_rest(path) or []
-    if not isinstance(issues, list):
-        return None
-    candidates = [
-        it
-        for it in issues
-        if isinstance(it, dict) and "pull_request" not in it
-    ]
-    for it in candidates:
+    issues = _flatten_paginated_comments(gh_rest(path, paginate=True, slurp=True))
+    for it in issues:
+        if not isinstance(it, dict) or "pull_request" in it:
+            continue
         if _SCAN_HEALTH_RE.search(it.get("body") or ""):
             return it
-    return candidates[0] if candidates else None
+    return None
 
 
 def _create_scan_health_issue(slug, body):
@@ -3720,7 +3714,7 @@ def cmd_scan_health(scan_path):
             gh_rest(
                 "repos/%s/issues/%s" % (slug, issue["number"]),
                 method="PATCH",
-                fields={"body": body},
+                fields={"body": body, "state": "closed"},
             )
         else:
             _create_scan_health_issue(slug, body)

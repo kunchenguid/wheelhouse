@@ -406,6 +406,7 @@ def test_cmd_scan_health_alerts_and_fails_run():
     check("cmd-health: failed the run (non-zero exit)", exit_code not in (None, 0))
     patched = [c for c in rest_log if c["method"] == "PATCH"]
     check("cmd-health: persisted the updated ledger via PATCH", len(patched) == 1)
+    check("cmd-health: re-closes the repaired ledger", patched[0]["fields"]["state"] == "closed")
     new_counts = core.parse_scan_health(patched[0]["fields"]["body"])
     check("cmd-health: ledger now records 3 failures", new_counts["firstmate"]["consecutive_failures"] == 3)
 
@@ -455,6 +456,45 @@ def test_create_scan_health_issue_creates_label_first():
         "cmd-health-create: creates the dedicated health label",
         events[0] == ("label", "owner/cards", core.SCAN_HEALTH_LABEL),
     )
+
+
+def test_find_scan_health_issue_requires_marker_and_paginates():
+    manual = {"number": 4, "body": "manually labeled"}
+    ledger = {
+        "number": 25,
+        "body": core.render_scan_health_body({"firstmate": {"consecutive_failures": 1}}),
+    }
+    calls = []
+    save_rest = core.gh_rest
+
+    def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
+        calls.append({"path": path, "paginate": paginate, "slurp": slurp})
+        return [[manual], [ledger]]
+
+    core.gh_rest = fake_rest
+    try:
+        found = core._find_scan_health_issue("owner/cards")
+    finally:
+        core.gh_rest = save_rest
+    check("cmd-health-find: ignores manually labeled issues", found == ledger)
+    check(
+        "cmd-health-find: paginates every labeled issue",
+        calls
+        == [
+            {
+                "path": "repos/owner/cards/issues?state=all&labels=wheelhouse%3Ascan-health&per_page=100",
+                "paginate": True,
+                "slurp": True,
+            }
+        ],
+    )
+
+    core.gh_rest = lambda *args, **kwargs: [[manual]]
+    try:
+        found = core._find_scan_health_issue("owner/cards")
+    finally:
+        core.gh_rest = save_rest
+    check("cmd-health-find: refuses an unmarked issue", found is None)
 
 
 def test_checks_command_reads_every_pr_page():
@@ -861,6 +901,7 @@ def main():
     test_cmd_scan_health_alerts_and_fails_run()
     test_cmd_scan_health_green_run_no_alert()
     test_create_scan_health_issue_creates_label_first()
+    test_find_scan_health_issue_requires_marker_and_paginates()
     test_checks_command_reads_every_pr_page()
     test_cmd_scan_health_missing_scanfile_fails_open()
     test_cmd_scan_health_ledger_io_error_fails_open()

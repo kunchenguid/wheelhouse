@@ -644,7 +644,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   show a merge-ready posture. Settling to `CONFLICTING` routes it to `needs-rebase`
   (nudged + consumed); if it still can't be proven mergeable it is demoted to
   `review-needed` (card stays open, no false merge-ready) and the next scan
-  routes it correctly. Re-read failure fails open to the bulk value.
+  routes it correctly. A re-read failure preserves the bulk value, then follows
+  the same never-proven-mergeable demotion rather than emitting a false merge-ready card.
 - **Fleet-scan health ledger (loud signal for a persistently-dark repo).** A repo
   that fails EVERY scan hides behind an otherwise-green scheduled run.
   `scan-backstop.yml`'s final `always()` step runs `wheelhouse_core.py scan-health
