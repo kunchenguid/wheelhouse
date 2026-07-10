@@ -828,25 +828,31 @@ _MERGEABLE_SETTLEMENT_UNSET = object()
 
 def _settle_mergeables(owner, name, numbers):
     values = {number: None for number in dict.fromkeys(numbers)}
+    errors = {}
     pending = list(values)
     for i in range(MERGEABLE_SETTLE_READS):
         next_round = []
         for number in pending:
             try:
                 value = gh_graphql_pr_mergeable(owner, name, number)
-            except Exception:
+            except Exception as e:
+                errors[number] = str(e)
+                next_round.append(number)
                 continue
             values[number] = value
-            if not _mergeable_is_conclusive(value):
-                next_round.append(number)
+            if _mergeable_is_conclusive(value):
+                errors.pop(number, None)
+                continue
+            next_round.append(number)
         pending = next_round
         if pending and i + 1 < MERGEABLE_SETTLE_READS:
             _sleep(min(MERGEABLE_SETTLE_BASE * (2 ** i), MERGEABLE_SETTLE_CAP))
-    return values
+    return values, errors
 
 
 def _settle_mergeable(owner, name, number):
-    return _settle_mergeables(owner, name, [number])[number]
+    values, _ = _settle_mergeables(owner, name, [number])
+    return values[number]
 
 
 def _resolve_pr_bucket(
@@ -2462,7 +2468,37 @@ def build_repo(
         ):
             settle_numbers.append(pr["number"])
 
-    settled_mergeables = _settle_mergeables(owner, name, settle_numbers)
+    settled_mergeables, settlement_errors = _settle_mergeables(
+        owner, name, settle_numbers
+    )
+    if settlement_errors:
+        indeterminate = sorted(
+            number
+            for number in settle_numbers
+            if not _mergeable_is_conclusive(settled_mergeables.get(number))
+        )
+        failed_numbers = sorted(settlement_errors)
+        failed_reason = settlement_errors[failed_numbers[0]]
+        return (
+            {
+                "name": name,
+                "ok": False,
+                "warning": (
+                    "%s scan failed: mergeability settlement query failed for "
+                    "PR(s) %s: %s"
+                    % (
+                        slug,
+                        ", ".join("#%s" % number for number in failed_numbers),
+                        failed_reason[:160],
+                    )
+                ),
+                "open_pr_numbers": [pr["number"] for pr in prs],
+                "open_issue_numbers": [it["number"] for it in issues],
+                "indeterminate_pr_numbers": indeterminate,
+                "truncated": pr_truncated or issue_truncated,
+            },
+            [],
+        )
     for pr, author, comp, tests, ci, cross_repo in pr_contexts:
         bucket = _resolve_pr_bucket(
             owner,

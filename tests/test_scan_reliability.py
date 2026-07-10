@@ -828,7 +828,10 @@ def _run_build_repo(
     def fake_mergeable(owner, name, num):
         if settlement_events is not None:
             settlement_events.append(("read", num))
-        return reads.pop(0) if reads else "UNKNOWN"
+        value = reads.pop(0) if reads else "UNKNOWN"
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
         if method == "POST" and "/comments" in path:
@@ -953,6 +956,45 @@ def test_build_repo_unknown_mergeable_unsettled_freezes():
     check("build-unknown-frozen: repo scan stays ok", result["ok"] is True)
 
 
+def test_build_repo_mergeability_read_failure_is_unhealthy():
+    first = {
+        "totalCount": 1,
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [_full_pr(56, mergeable="UNKNOWN")],
+    }
+    result, items, posts = _run_build_repo(
+        first, mergeable_reads=[RuntimeError("HTTP 502")]
+    )
+    check("build-mergeability-error: repo is unhealthy", result["ok"] is False)
+    check("build-mergeability-error: no worklist item emitted", items == [])
+    check("build-mergeability-error: no rebase nudge", posts == [])
+    check(
+        "build-mergeability-error: failed PR remains indeterminate",
+        result["indeterminate_pr_numbers"] == [56],
+    )
+    check(
+        "build-mergeability-error: warning preserves the query failure",
+        "mergeability settlement query failed" in result["warning"]
+        and "HTTP 502" in result["warning"],
+    )
+
+
+def test_build_repo_mergeability_read_error_that_recovers_is_healthy():
+    first = {
+        "totalCount": 1,
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [_full_pr(57, mergeable="UNKNOWN")],
+    }
+    result, items, _ = _run_build_repo(
+        first, mergeable_reads=[RuntimeError("HTTP 502"), "MERGEABLE"]
+    )
+    check("build-mergeability-recovery: repo remains healthy", result["ok"] is True)
+    check(
+        "build-mergeability-recovery: settled card emitted",
+        len(items) == 1 and items[0]["number"] == 57,
+    )
+
+
 def test_build_repo_review_needed_unknown_settles_conflicting():
     first = {
         "totalCount": 1,
@@ -1053,6 +1095,8 @@ def main():
     test_build_repo_unknown_mergeable_conflict_nudges_no_card()
     test_build_repo_unknown_mergeable_settles_mergeable_card()
     test_build_repo_unknown_mergeable_unsettled_freezes()
+    test_build_repo_mergeability_read_failure_is_unhealthy()
+    test_build_repo_mergeability_read_error_that_recovers_is_healthy()
     test_build_repo_review_needed_unknown_settles_conflicting()
     test_build_repo_settles_unknown_prs_in_rounds()
     test_build_repo_static_conflict_never_enters_worklist()

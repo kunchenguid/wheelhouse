@@ -683,6 +683,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   consume a card** (in stays in, out stays out). The reconcile freeze is a
   per-PR extension of the existing `ok:false`/`truncated` unreadable-state skip,
   NOT the (separate, out-of-scope) K-consecutive-absence soft-close hysteresis.
+  A settlement query error that does not recover to a conclusive answer marks
+  the repo `ok:false` so its warning reaches the scan-health ledger while the
+  same freeze remains in effect.
   Only an explicit `UNKNOWN` is polled; a missing/None value keeps classify's
   fail-open (GraphQL never returns null for an open PR's `mergeable`).
 - **Merge conflicts leave the maintainer queue.**
