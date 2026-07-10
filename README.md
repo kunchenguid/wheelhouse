@@ -517,6 +517,7 @@ tests/test_deep_review.py      offline unit test for the always-on deep-review +
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification
 tests/test_scan_reliability.py offline unit test for scan retry/pagination, scan-health ledger, and UNKNOWN-mergeability safety
+tests/test_config_schema.py    offline structural test for checked-in fleet-config entry shape, normalized names/patterns, and case-insensitive name uniqueness
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
 

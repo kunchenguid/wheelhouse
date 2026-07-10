@@ -56,8 +56,12 @@ def test_every_repo_entry_is_well_formed():
             continue
 
         name = entry.get("name")
-        valid_name = isinstance(name, str) and bool(name.strip())
-        check("%s: name is a non-empty str" % label, valid_name)
+        valid_name = (
+            isinstance(name, str)
+            and bool(name)
+            and name == name.strip()
+        )
+        check("%s: name is a trimmed non-empty str" % label, valid_name)
         if valid_name:
             check("%s: loader preserves the entry" % label,
                   repos.get(name) == entry)
@@ -71,9 +75,12 @@ def test_every_repo_entry_is_well_formed():
         ok_pats = (
             pats is None
             or (isinstance(pats, list)
-                and all(isinstance(p, str) and bool(p) for p in pats))
+                and all(
+                    isinstance(p, str) and bool(p) and p == p.strip()
+                    for p in pats
+                ))
         )
-        check("%s: test_check_patterns is a list of non-empty strs (or unset)" % label,
+        check("%s: test_check_patterns is a list of trimmed non-empty strs (or unset)" % label,
               ok_pats)
         # merge_method, when present, is one of the methods the executor accepts.
         mm = entry.get("merge_method")
@@ -93,7 +100,9 @@ def test_repo_names_are_unique():
         and isinstance(entry.get("name"), str)
         and entry["name"].strip()
     ]
-    check("no duplicate repo names in the file", len(names) == len(set(names)))
+    folded_names = [name.casefold() for name in names]
+    check("no case-insensitive duplicate repo names in the file",
+          len(folded_names) == len(set(folded_names)))
     check("mapping keeps every raw repo entry", len(entries) == len(core.load_config()["repos"]))
 
 
