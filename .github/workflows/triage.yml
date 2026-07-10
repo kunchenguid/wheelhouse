@@ -275,6 +275,7 @@ jobs:
           READONLY_SEARCH_ENABLED: ${{ steps.readonly.outputs.enabled }}
         run: |
           set -euo pipefail
+          BASE_SHA=""
           {
             echo "<target-content repo=\"$SLUG\" number=\"$NUMBER\" kind=\"$KIND\">"
             if [ "$KIND" = "issue-triage" ]; then
@@ -294,13 +295,13 @@ jobs:
               DIFF_COMPLETE=false
               diff_limit_bytes=120000
               diff_raw="diff.raw"
-              base_sha="$(GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/pulls/$NUMBER" --jq '.base.sha // empty' 2>/dev/null || true)"
-              if printf '%s' "$base_sha" | grep -Eq '^[0-9A-Fa-f]{7,64}$' \
+              BASE_SHA="$(GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/pulls/$NUMBER" --jq '.base.sha // empty' 2>/dev/null || true)"
+              if printf '%s' "$BASE_SHA" | grep -Eq '^[0-9A-Fa-f]{7,64}$' \
                 && printf '%s' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{7,64}$'; then
                 set +e
                 GH_TOKEN="$FLEET_TOKEN" gh api \
                   -H 'Accept: application/vnd.github.v3.diff' \
-                  "repos/$SLUG/compare/$base_sha...$HEAD_SHA" \
+                  "repos/$SLUG/compare/$BASE_SHA...$HEAD_SHA" \
                   | head -c "$((diff_limit_bytes + 1))" > "$diff_raw"
                 pipe_status=("${PIPESTATUS[@]}")
                 diff_status=${pipe_status[0]}
@@ -317,9 +318,9 @@ jobs:
                 printf '\n\n[diff truncated after %s bytes]\n' "$diff_limit_bytes"
               elif { [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; } || [ "$head_status" -ne 0 ]; then
                 echo "(could not fetch diff)"
-              elif [ "$diff_size" -eq 0 ] || grep -Eq '^(Binary files .+ differ|GIT binary patch|Binary file .+ has changed)$' "$diff_raw"; then
+              elif [ "$diff_size" -eq 0 ] || grep -Eq '^(Binary files .+ differ|GIT binary patch|Binary file .+ has changed)$|(^|[+-])version https://git-lfs\.github\.com/spec/v1$|(^|[+-])Subproject commit [0-9A-Fa-f]{7,64}(-dirty)?$' "$diff_raw"; then
                 cat "$diff_raw"
-                printf '\n\n[diff contains binary data unavailable for auto-merge assessment]\n'
+                printf '\n\n[diff contains binary, LFS, or submodule data unavailable for auto-merge assessment]\n'
               else
                 cat "$diff_raw"
                 DIFF_COMPLETE=true
@@ -362,6 +363,7 @@ jobs:
               AUTOMERGE_VERDICT_AVAILABLE=true
             else
               VISION_SHA=""
+              BASE_SHA=""
             fi
           fi
 
@@ -469,6 +471,7 @@ jobs:
             cat prompt.txt
             echo "$delimiter"
             echo "vision_sha=$VISION_SHA"
+            echo "base_sha=$BASE_SHA"
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
@@ -554,6 +557,7 @@ jobs:
           HEAD_MESSAGE: ${{ steps.verify_head.outputs.message }}
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -598,6 +602,7 @@ jobs:
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
                 --vision-sha "$VISION_SHA" \
+                --base-sha "$BASE_SHA" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}"
           fi
 

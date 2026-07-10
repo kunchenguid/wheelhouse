@@ -357,6 +357,7 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           TRIGGER_BODY: ${{ github.event.issue.body }}
           TRIGGER_UPDATED_AT: ${{ github.event.issue.updated_at }}
+          TRIGGER_LABELS: ${{ toJSON(github.event.issue.labels) }}
         run: |
           set -euo pipefail
           card="$(gh issue view "$ISSUE" --json state,labels,body,updatedAt)"
@@ -364,9 +365,11 @@ jobs:
           if [ -n "$TRIGGER_UPDATED_AT" ] && jq -e \
             --arg trigger_body "$TRIGGER_BODY" \
             --arg trigger_updated_at "$TRIGGER_UPDATED_AT" '
-            [.labels[].name] as $labels
+            ([.labels[].name] | sort | unique) as $labels
+            | ($trigger_labels | map(.name) | sort | unique) as $trigger_labels
             | (.body // "") == $trigger_body
             and (.updatedAt // "") == $trigger_updated_at
+            and $labels == $trigger_labels
             and .state == "OPEN"
             and ($labels | index("needs-decision") != null)
             and ($labels | index("processing") == null)

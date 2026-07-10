@@ -33,6 +33,8 @@ input HOLDS for human review. These tests cover, end-to-end through the
 import io
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stderr
@@ -60,6 +62,7 @@ ELIGIBLE_A = {
     "changes_existing_or_default_behavior": False,
     "recommend_merge": True,
     "vision_sha": "vsha",
+    "base_sha": "b1" * 20,
 }
 ELIGIBLE_B = dict(ELIGIBLE_A, behavior_class="B")
 ELIGIBLE_C = dict(
@@ -608,6 +611,41 @@ def test_G2_uses_complete_immutable_base_head_comparison():
         core.gh_rest = saved
 
 
+def test_G2_immutable_comparison_checks_renamed_old_path():
+    saved = core.gh_rest
+    base = "a" * 40
+    head = "b" * 40
+
+    def gh_rest(path, **kwargs):
+        return {
+            "files": [
+                {
+                    "filename": "src/util.py",
+                    "previous_filename": "src/auth.py",
+                }
+            ]
+        }
+
+    core.gh_rest = gh_rest
+    try:
+        files, ok, complete = am.immutable_compare_files(
+            "owner/fmt", base, head, 1
+        )
+        check(
+            "G2: renamed paths include both the old and new filename",
+            files == ["src/util.py", "src/auth.py"] and ok and complete,
+        )
+        check(
+            "G2: a rename from an excluded old path holds",
+            any(
+                hit.startswith("authentication:src/auth.py")
+                for hit in core._auto_merge_exclusions(files)
+            ),
+        )
+    finally:
+        core.gh_rest = saved
+
+
 def test_G2_missing_live_base_sha_holds():
     w, items, cards = default_world(head="ba" * 20)
     w.set_pr("owner/fmt", 5, make_pr(head="ba" * 20, base=""))
@@ -1055,7 +1093,9 @@ def test_G7_escape_hatch_appears_before_acting_holds():
 
 
 def test_G7_base_changed_before_acting_holds():
-    w, items, cards = default_world(head="bd" * 20)
+    w, items, cards = default_world(
+        head="bd" * 20, verdict=dict(ELIGIBLE_A, base_sha="a1" * 20)
+    )
     good = make_pr(head="bd" * 20, base="a1" * 20)
     moved = make_pr(head="bd" * 20, base="b2" * 20)
     w.set_pr("owner/fmt", 5, [good, moved])
@@ -1169,7 +1209,22 @@ def test_G6_vision_revision_mismatch_holds():
     check("G6: stale VISION.md revision holds", "VISION.md revision" in _held_reason(payload))
 
 
-def test_triage_persists_trusted_vision_revision():
+def test_G6_base_revision_missing_or_mismatch_holds():
+    w, items, cards = default_world(verdict=dict(ELIGIBLE_A, base_sha=""))
+    payload, _ = run_act(w, items, cards)
+    check("G6: verdict without a base SHA holds", "base SHA" in _held_reason(payload))
+
+    w2, items2, cards2 = default_world(
+        verdict=dict(ELIGIBLE_A, base_sha="a2" * 20)
+    )
+    payload2, _ = run_act(w2, items2, cards2)
+    check(
+        "G6: verdict for a superseded base SHA holds",
+        "current base SHA" in _held_reason(payload2),
+    )
+
+
+def test_triage_persists_trusted_policy_revisions():
     item = make_item("fmt", 5, "vv" * 20)
     triage = {
         "summary": "A focused change.",
@@ -1180,11 +1235,14 @@ def test_triage_persists_trusted_vision_revision():
     body = render_card.body_with_triage_result(
         render_card.render(item)["body"], item["head_sha"], triage=triage,
         vision_sha="trusted-vision-sha",
+        base_sha="b" * 40,
     )
     verdict = core.parse_state_block(body).get("automerge_verdict")
     check(
-        "triage: persists the trusted VISION.md revision with verdict",
-        verdict and verdict.get("vision_sha") == "trusted-vision-sha",
+        "triage: persists trusted VISION.md and base revisions with verdict",
+        verdict
+        and verdict.get("vision_sha") == "trusted-vision-sha"
+        and verdict.get("base_sha") == "b" * 40,
     )
 
 
@@ -1854,8 +1912,10 @@ def test_scan_backstop_wiring_and_token_discipline():
         and "wheelhouse:auto-merge-claim" in current.get("run", "")
         and "TRIGGER_BODY" in (current.get("env") or {})
         and "TRIGGER_UPDATED_AT" in (current.get("env") or {})
+        and "TRIGGER_LABELS" in (current.get("env") or {})
         and "body,updatedAt" in current.get("run", "")
         and "trigger_updated_at" in current.get("run", "")
+        and "$labels == $trigger_labels" in current.get("run", "")
         and "steps.current-card.outputs.allowed == 'true'" in json.dumps(handler_steps),
     )
 
@@ -1884,7 +1944,10 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     )
     check(
         "triage: binds verdict storage to the fetched VISION.md SHA",
-        "vision_sha=$VISION_SHA" in text and "--vision-sha \"$VISION_SHA\"" in text,
+        "vision_sha=$VISION_SHA" in text
+        and "--vision-sha \"$VISION_SHA\"" in text
+        and "base_sha=$BASE_SHA" in text
+        and "--base-sha \"$BASE_SHA\"" in text,
     )
     check(
         "triage: incomplete diffs suppress auto-merge verdict storage",
@@ -1900,18 +1963,45 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         and 'head -c "$vision_limit_bytes" > vision.md' not in text,
     )
     check(
-        "triage: binary diff input suppresses auto-merge verdict storage",
+        "triage: binary, LFS, and submodule diff input suppresses auto-merge verdict storage",
         "Binary files .+ differ" in text
         and "GIT binary patch" in text
         and '"$diff_size" -eq 0' in text
-        and "binary data unavailable for auto-merge assessment" in text,
+        and "git-lfs\\.github\\.com/spec/v1" in text
+        and "Subproject commit" in text
+        and "data unavailable for auto-merge assessment" in text,
     )
     check(
         "triage: behavior verdict diff is fetched from immutable base and dispatched head SHAs",
-        "repos/$SLUG/compare/$base_sha...$HEAD_SHA" in text
+        "repos/$SLUG/compare/$BASE_SHA...$HEAD_SHA" in text
         and "HEAD_SHA: ${{ steps.resolve.outputs.revision }}" in text
         and 'gh pr diff "$NUMBER"' not in text,
     )
+
+
+def test_triage_rejects_lfs_and_submodule_diff_markers():
+    text = _read(".github/workflows/triage.yml")
+    match = re.search(r"grep -Eq '([^']+)' \"\$diff_raw\"", text)
+    pattern = match.group(1) if match else ""
+    for label, diff in (
+        (
+            "LFS pointer",
+            "+version https://git-lfs.github.com/spec/v1\n"
+            "+oid sha256:0123456789abcdef\n+",
+        ),
+        (
+            "submodule gitlink",
+            "-Subproject commit 0123456789abcdef\n"
+            "+Subproject commit fedcba9876543210\n",
+        ),
+    ):
+        result = subprocess.run(
+            ["grep", "-Eq", pattern], input=diff, text=True, capture_output=True
+        )
+        check(
+            "triage: %s marker makes the diff unavailable" % label,
+            bool(pattern) and result.returncode == 0,
+        )
 
 
 # --------------------------------------------------------------------------- #

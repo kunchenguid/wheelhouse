@@ -1006,7 +1006,7 @@ def body_with_triage_queued(body, item):
 
 
 def body_with_triage_result(
-    body, revision, triage=None, error=None, owner="", vision_sha=""
+    body, revision, triage=None, error=None, owner="", vision_sha="", base_sha=""
 ):
     state = parse_state_block(body)
     kind = (state or {}).get("kind") if state else None
@@ -1032,9 +1032,14 @@ def body_with_triage_result(
     automerge_verdict = (
         (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
     )
-    if automerge_verdict and vision_sha:
+    if (
+        automerge_verdict
+        and vision_sha
+        and re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or ""))
+    ):
         automerge_verdict = dict(automerge_verdict)
         automerge_verdict["vision_sha"] = vision_sha
+        automerge_verdict["base_sha"] = base_sha
     else:
         automerge_verdict = None
     new_state = _state_with_triage(
@@ -1438,7 +1443,7 @@ def publish_dispatch_failure(number, revision, message, owner=""):
 
 
 def update_card_triage(
-    number, revision, triage=None, error=None, owner="", vision_sha=""
+    number, revision, triage=None, error=None, owner="", vision_sha="", base_sha=""
 ):
     """Attach a completed auto-triage attempt's result to its card.
 
@@ -1484,6 +1489,7 @@ def update_card_triage(
         error=error,
         owner=owner,
         vision_sha=vision_sha,
+        base_sha=base_sha,
     )
     if new_body == body and not held:
         return False
@@ -1761,6 +1767,7 @@ def main():
     ta.add_argument("--revision", required=True)
     ta.add_argument("--execution-file", required=True)
     ta.add_argument("--vision-sha", default="")
+    ta.add_argument("--base-sha", default="")
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
@@ -1820,6 +1827,7 @@ def main():
                 triage=triage,
                 owner=owner,
                 vision_sha=args.vision_sha,
+                base_sha=args.base_sha,
             ):
                 print("updated auto triage on card #%s" % args.issue)
             else:
