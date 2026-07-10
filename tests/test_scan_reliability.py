@@ -20,6 +20,7 @@ Unit-exercise the fleet-scan reliability + correctness hardening, NO network:
 
 Run: python tests/test_scan_reliability.py
 """
+
 import io
 import json
 import os
@@ -93,11 +94,15 @@ def test_transient_classification():
     )
     check(
         "transient: secondary rate limit is transient",
-        core._is_transient_stderr("You have exceeded a rate limit... was submitted too quickly"),
+        core._is_transient_stderr(
+            "You have exceeded a rate limit... was submitted too quickly"
+        ),
     )
     check(
         "transient: a 404 / not-found is NOT transient",
-        not core._is_transient_stderr("Could not resolve to a Repository with the name"),
+        not core._is_transient_stderr(
+            "Could not resolve to a Repository with the name"
+        ),
     )
     check(
         "transient: HTTP 422 validation is NOT transient",
@@ -138,13 +143,18 @@ def test_retry_recovers_after_transient_5xx():
     ]
     with _RunPatch(procs) as rp:
         data = core._gh_graphql_data(["gh", "api", "graphql"])
-    check("retry: recovered on 3rd attempt", data["data"]["repository"] == {"pullRequests": {"nodes": []}})
+    check(
+        "retry: recovered on 3rd attempt",
+        data["data"]["repository"] == {"pullRequests": {"nodes": []}},
+    )
     check("retry: made exactly 3 subprocess calls", rp.calls == 3)
     check("retry: slept twice (once per transient retry)", len(rp.sleeps) == 2)
 
 
 def test_retry_exhausts_then_raises():
-    procs = [FakeProc(returncode=1, stderr="HTTP 502 Bad Gateway")] * core.GRAPHQL_MAX_ATTEMPTS
+    procs = [
+        FakeProc(returncode=1, stderr="HTTP 502 Bad Gateway")
+    ] * core.GRAPHQL_MAX_ATTEMPTS
     raised = False
     with _RunPatch(procs) as rp:
         try:
@@ -180,14 +190,21 @@ def test_transient_graphql_errors_retried():
         FakeProc(
             returncode=0,
             stdout=json.dumps(
-                {"errors": [{"message": "Something went wrong while executing your query."}]}
+                {
+                    "errors": [
+                        {"message": "Something went wrong while executing your query."}
+                    ]
+                }
             ),
         ),
         FakeProc(returncode=0, stdout=_ok_stdout({"issues": {"nodes": []}})),
     ]
     with _RunPatch(procs) as rp:
         data = core._gh_graphql_data(["gh", "api", "graphql"])
-    check("gql-errors: retried and recovered", data["data"]["repository"] == {"issues": {"nodes": []}})
+    check(
+        "gql-errors: retried and recovered",
+        data["data"]["repository"] == {"issues": {"nodes": []}},
+    )
     check("gql-errors: two attempts", rp.calls == 2)
 
 
@@ -216,7 +233,9 @@ def test_unparseable_body_retried_as_transient():
     ]
     with _RunPatch(procs) as rp:
         data = core._gh_graphql_data(["gh", "api", "graphql"])
-    check("unparseable: retried and recovered", data["data"]["repository"] == {"ok": True})
+    check(
+        "unparseable: retried and recovered", data["data"]["repository"] == {"ok": True}
+    )
     check("unparseable: two attempts", rp.calls == 2)
 
 
@@ -278,25 +297,38 @@ def test_pagination_midpage_failure_propagates():
         raised = True
     finally:
         core.gh_graphql_pr_page = save
-    check("pagination-fail: mid-page failure propagates (caller marks truncated)", raised)
+    check(
+        "pagination-fail: mid-page failure propagates (caller marks truncated)", raised
+    )
 
 
 def test_page_queries_keep_closing_references_bounded():
     expected = "closingIssuesReferences(first:%d" % core.CLOSING_REFS_PAGE_SIZE
     check("page-size: initial closing references are bounded", expected in core.GQL)
-    check("page-size: continued closing references are bounded", expected in core.CLOSING_REFS_PAGE_GQL)
+    check(
+        "page-size: continued closing references are bounded",
+        expected in core.CLOSING_REFS_PAGE_GQL,
+    )
 
 
 # --------------------------------------------------------------------------- #
 # fleet-scan health ledger
 # --------------------------------------------------------------------------- #
 def test_health_parse_roundtrip():
-    counts = {"firstmate": {"consecutive_failures": 3, "last_warning": "scan failed: HTTP 502"}}
+    counts = {
+        "firstmate": {
+            "consecutive_failures": 3,
+            "last_warning": "scan failed: HTTP 502",
+        }
+    }
     body = core.render_scan_health_body(counts, updated_at="2026-07-10T00:00:00Z")
     parsed = core.parse_scan_health(body)
     check("health-parse: round-trips the counts", parsed == counts)
     check("health-parse: human summary names the dark repo", "firstmate" in body)
-    check("health-parse: missing marker -> empty", core.parse_scan_health("no marker here") == {})
+    check(
+        "health-parse: missing marker -> empty",
+        core.parse_scan_health("no marker here") == {},
+    )
     check("health-parse: blank body -> empty", core.parse_scan_health("") == {})
     check(
         "health-parse: garbled marker -> empty",
@@ -305,27 +337,41 @@ def test_health_parse_roundtrip():
 
 
 def test_health_increment_reset_and_alert():
-    prev = {"firstmate": {"consecutive_failures": 2}, "axi": {"consecutive_failures": 1}}
+    prev = {
+        "firstmate": {"consecutive_failures": 2},
+        "axi": {"consecutive_failures": 1},
+    }
     repos = {
         "firstmate": {"ok": False, "warning": "owner/firstmate scan failed: HTTP 502"},
         "axi": {"ok": True},
         "gnhf": {"ok": False, "warning": "owner/gnhf scan failed: HTTP 504"},
     }
     counts, alerts = core.update_scan_health(prev, repos, threshold=3)
-    check("health: ok:false increments", counts["firstmate"]["consecutive_failures"] == 3)
+    check(
+        "health: ok:false increments", counts["firstmate"]["consecutive_failures"] == 3
+    )
     check("health: ok:true resets to 0", counts["axi"]["consecutive_failures"] == 0)
-    check("health: newly-failing repo starts at 1", counts["gnhf"]["consecutive_failures"] == 1)
+    check(
+        "health: newly-failing repo starts at 1",
+        counts["gnhf"]["consecutive_failures"] == 1,
+    )
     names = [a["name"] for a in alerts]
     check("health: firstmate crosses threshold -> alert", "firstmate" in names)
     check("health: gnhf below threshold -> no alert", "gnhf" not in names)
     check("health: axi (ok) -> no alert", "axi" not in names)
-    check("health: alert carries the warning", alerts[0]["warning"].endswith("HTTP 502"))
+    check(
+        "health: alert carries the warning", alerts[0]["warning"].endswith("HTTP 502")
+    )
 
 
 def test_health_recovery_clears_alert():
     prev = {"firstmate": {"consecutive_failures": 5}}
-    counts, alerts = core.update_scan_health(prev, {"firstmate": {"ok": True}}, threshold=3)
-    check("health-recovery: reset to 0", counts["firstmate"]["consecutive_failures"] == 0)
+    counts, alerts = core.update_scan_health(
+        prev, {"firstmate": {"ok": True}}, threshold=3
+    )
+    check(
+        "health-recovery: reset to 0", counts["firstmate"]["consecutive_failures"] == 0
+    )
     check("health-recovery: no alert after recovery", alerts == [])
 
 
@@ -336,7 +382,10 @@ def test_health_carries_forward_unscanned_repos():
     counts, alerts = core.update_scan_health(
         prev, {"firstmate": {"ok": True}}, threshold=3
     )
-    check("health-carry: unscanned gnhf preserved", counts["gnhf"]["consecutive_failures"] == 4)
+    check(
+        "health-carry: unscanned gnhf preserved",
+        counts["gnhf"]["consecutive_failures"] == 4,
+    )
     check("health-carry: unscanned repo never alerts", alerts == [])
 
 
@@ -344,8 +393,14 @@ def test_health_legacy_int_entry_tolerated():
     counts, alerts = core.update_scan_health(
         {"firstmate": 2}, {"firstmate": {"ok": False, "warning": "x"}}, threshold=3
     )
-    check("health-legacy: int entry increments to 3", counts["firstmate"]["consecutive_failures"] == 3)
-    check("health-legacy: alerts at threshold", [a["name"] for a in alerts] == ["firstmate"])
+    check(
+        "health-legacy: int entry increments to 3",
+        counts["firstmate"]["consecutive_failures"] == 3,
+    )
+    check(
+        "health-legacy: alerts at threshold",
+        [a["name"] for a in alerts] == ["firstmate"],
+    )
 
 
 def _run_cmd_scan_health(payload, issue, rest_log, threshold=None):
@@ -398,32 +453,59 @@ def test_cmd_scan_health_alerts_and_fails_run():
     # makes it 3 (== threshold) -> loud ::error:: and a non-zero exit.
     issue = {
         "number": 7,
-        "body": core.render_scan_health_body({"firstmate": {"consecutive_failures": 2}}),
+        "body": core.render_scan_health_body(
+            {"firstmate": {"consecutive_failures": 2}}
+        ),
     }
     rest_log = []
     payload = {
         "generated_at": "2026-07-10T01:00:00Z",
-        "repos": {"firstmate": {"ok": False, "warning": "owner/firstmate scan failed: HTTP 502"}},
+        "repos": {
+            "firstmate": {
+                "ok": False,
+                "warning": "owner/firstmate scan failed: HTTP 502",
+            }
+        },
     }
     exit_code, err = _run_cmd_scan_health(payload, issue, rest_log, threshold=3)
-    check("cmd-health: emitted ::error:: for the dark repo", "::error::" in err and "firstmate" in err)
+    check(
+        "cmd-health: emitted ::error:: for the dark repo",
+        "::error::" in err and "firstmate" in err,
+    )
     check("cmd-health: failed the run (non-zero exit)", exit_code not in (None, 0))
     patched = [c for c in rest_log if c["method"] == "PATCH"]
     check("cmd-health: persisted the updated ledger via PATCH", len(patched) == 1)
-    check("cmd-health: re-closes the repaired ledger", patched[0]["fields"]["state"] == "closed")
+    check(
+        "cmd-health: re-closes the repaired ledger",
+        patched[0]["fields"]["state"] == "closed",
+    )
     new_counts = core.parse_scan_health(patched[0]["fields"]["body"])
-    check("cmd-health: ledger now records 3 failures", new_counts["firstmate"]["consecutive_failures"] == 3)
+    check(
+        "cmd-health: ledger now records 3 failures",
+        new_counts["firstmate"]["consecutive_failures"] == 3,
+    )
 
 
 def test_cmd_scan_health_green_run_no_alert():
-    issue = {"number": 7, "body": core.render_scan_health_body({"firstmate": {"consecutive_failures": 2}})}
+    issue = {
+        "number": 7,
+        "body": core.render_scan_health_body(
+            {"firstmate": {"consecutive_failures": 2}}
+        ),
+    }
     rest_log = []
     payload = {"generated_at": "t", "repos": {"firstmate": {"ok": True}}}
     exit_code, err = _run_cmd_scan_health(payload, issue, rest_log, threshold=3)
     check("cmd-health-green: no ::error::", "::error::" not in err)
     check("cmd-health-green: run not failed", exit_code in (None, 0))
     patched = [c for c in rest_log if c["method"] == "PATCH"]
-    check("cmd-health-green: reset persisted", core.parse_scan_health(patched[0]["fields"]["body"])["firstmate"]["consecutive_failures"] == 0)
+    check(
+        "cmd-health-green: reset persisted",
+        core.parse_scan_health(patched[0]["fields"]["body"])["firstmate"][
+            "consecutive_failures"
+        ]
+        == 0,
+    )
 
 
 def test_create_scan_health_issue_creates_label_first():
@@ -466,7 +548,9 @@ def test_find_scan_health_issue_requires_marker_and_paginates():
     manual = {"number": 4, "body": "manually labeled"}
     ledger = {
         "number": 25,
-        "body": core.render_scan_health_body({"firstmate": {"consecutive_failures": 1}}),
+        "body": core.render_scan_health_body(
+            {"firstmate": {"consecutive_failures": 1}}
+        ),
     }
     calls = []
     save_rest = core.gh_rest
@@ -605,8 +689,14 @@ def test_cmd_scan_health_ledger_io_error_fails_open():
         os.environ.pop("GITHUB_REPOSITORY", None)
         os.environ.pop("WHEELHOUSE_SCAN_HEALTH_THRESHOLD", None)
         os.remove(scan_path)
-    check("cmd-health-ioerr: fails open despite threshold=1 dark repo", exit_code in (None, 0))
-    check("cmd-health-ioerr: warned about the ledger failure", "ledger update failed" in err.getvalue())
+    check(
+        "cmd-health-ioerr: fails open despite threshold=1 dark repo",
+        exit_code in (None, 0),
+    )
+    check(
+        "cmd-health-ioerr: warned about the ledger failure",
+        "ledger update failed" in err.getvalue(),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -663,7 +753,14 @@ def test_resolve_bucket_reread_catches_conflict():
     core._sleep = lambda d: None
     try:
         bucket = core._resolve_pr_bucket(
-            "owner", "demo", _pr_green(5, "UNKNOWN"), False, "pass", "green", True, False
+            "owner",
+            "demo",
+            _pr_green(5, "UNKNOWN"),
+            False,
+            "pass",
+            "green",
+            True,
+            False,
         )
     finally:
         core.gh_graphql_pr_mergeable = save_read
@@ -683,14 +780,30 @@ def test_resolve_bucket_unsettled_returns_pending():
     core._sleep = lambda d: None
     try:
         bucket = core._resolve_pr_bucket(
-            "owner", "demo", _pr_green(6, "UNKNOWN"), False, "pass", "green", True, False
+            "owner",
+            "demo",
+            _pr_green(6, "UNKNOWN"),
+            False,
+            "pass",
+            "green",
+            True,
+            False,
         )
     finally:
         core.gh_graphql_pr_mergeable = save_read
         core._sleep = save_sleep
-    check("resolve-pending: unsettled UNKNOWN returns MERGEABILITY_PENDING", bucket == core.MERGEABILITY_PENDING)
-    check("resolve-pending: it is NOT a worklist bucket", core.MERGEABILITY_PENDING not in core.NEEDS_MAINTAINER)
-    check("resolve-pending: polled the full budget", len(reads) == core.MERGEABLE_SETTLE_READS)
+    check(
+        "resolve-pending: unsettled UNKNOWN returns MERGEABILITY_PENDING",
+        bucket == core.MERGEABILITY_PENDING,
+    )
+    check(
+        "resolve-pending: it is NOT a worklist bucket",
+        core.MERGEABILITY_PENDING not in core.NEEDS_MAINTAINER,
+    )
+    check(
+        "resolve-pending: polled the full budget",
+        len(reads) == core.MERGEABLE_SETTLE_READS,
+    )
 
 
 def test_resolve_bucket_known_mergeable_no_reread():
@@ -699,11 +812,21 @@ def test_resolve_bucket_known_mergeable_no_reread():
     core.gh_graphql_pr_mergeable = lambda o, n, num: called.append(num) or "MERGEABLE"
     try:
         bucket = core._resolve_pr_bucket(
-            "owner", "demo", _pr_green(7, "MERGEABLE"), False, "pass", "green", True, False
+            "owner",
+            "demo",
+            _pr_green(7, "MERGEABLE"),
+            False,
+            "pass",
+            "green",
+            True,
+            False,
         )
     finally:
         core.gh_graphql_pr_mergeable = save_read
-    check("resolve-fast: authoritative MERGEABLE stays merge-ready", bucket == "merge-ready")
+    check(
+        "resolve-fast: authoritative MERGEABLE stays merge-ready",
+        bucket == "merge-ready",
+    )
     check("resolve-fast: no wasteful re-read for a known-mergeable PR", called == [])
 
 
@@ -714,7 +837,14 @@ def test_resolve_bucket_reread_settles_mergeable():
     core._sleep = lambda d: None
     try:
         bucket = core._resolve_pr_bucket(
-            "owner", "demo", _pr_green(8, "UNKNOWN"), False, "pass", "green", True, False
+            "owner",
+            "demo",
+            _pr_green(8, "UNKNOWN"),
+            False,
+            "pass",
+            "green",
+            True,
+            False,
         )
     finally:
         core.gh_graphql_pr_mergeable = save_read
@@ -739,7 +869,8 @@ def test_resolve_review_needed_unknown_settles_or_freezes():
                 "owner", "demo", pr, False, "pass", "none", True, False
             )
             check(
-                "resolve-review-needed: UNKNOWN settling %s -> %s" % (settled, expected),
+                "resolve-review-needed: UNKNOWN settling %s -> %s"
+                % (settled, expected),
                 bucket == expected,
             )
     finally:
@@ -751,11 +882,19 @@ def test_resolve_review_needed_unknown_settles_or_freezes():
 # build_repo integration: pagination + UNKNOWN-mergeable in the real scan
 # --------------------------------------------------------------------------- #
 def _check_run(name, conclusion="SUCCESS"):
-    return {"__typename": "CheckRun", "name": name, "conclusion": conclusion, "status": "COMPLETED"}
+    return {
+        "__typename": "CheckRun",
+        "name": name,
+        "conclusion": conclusion,
+        "status": "COMPLETED",
+    }
 
 
 def _green_rollup():
-    return {"state": "SUCCESS", "contexts": {"nodes": [_check_run("Gate"), _check_run("test")]}}
+    return {
+        "state": "SUCCESS",
+        "contexts": {"nodes": [_check_run("Gate"), _check_run("test")]},
+    }
 
 
 def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True):
@@ -782,7 +921,10 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True)
                         "statusCheckRollup": (
                             _green_rollup()
                             if has_tests
-                            else {"state": "SUCCESS", "contexts": {"nodes": [_check_run("Gate")]}}
+                            else {
+                                "state": "SUCCESS",
+                                "contexts": {"nodes": [_check_run("Gate")]},
+                            }
                         )
                     }
                 }
@@ -800,7 +942,11 @@ def _run_build_repo(
     mergeable_reads=None,
     settlement_events=None,
 ):
-    repo_cfg = {"name": "demo", "compliance_check": "Gate", "test_check_patterns": ["test"]}
+    repo_cfg = {
+        "name": "demo",
+        "compliance_check": "Gate",
+        "test_check_patterns": ["test"],
+    }
     posts = []
 
     first_page = {
@@ -813,7 +959,11 @@ def _run_build_repo(
         return {
             "defaultBranchRef": {"name": "main"},
             "pullRequests": first_page,
-            "issues": {"totalCount": 0, "pageInfo": {"hasNextPage": False}, "nodes": []},
+            "issues": {
+                "totalCount": 0,
+                "pageInfo": {"hasNextPage": False},
+                "nodes": [],
+            },
         }
 
     pr_pages = pr_pages or {}
@@ -836,7 +986,11 @@ def _run_build_repo(
     def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
         if method == "POST" and "/comments" in path:
             posts.append({"path": path, "body": (fields or {}).get("body", "")})
-            return {"id": 1, "created_at": "2026-01-01T00:00:00Z", "body": (fields or {}).get("body", "")}
+            return {
+                "id": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+                "body": (fields or {}).get("body", ""),
+            }
         return []
 
     saves = (
@@ -875,8 +1029,14 @@ def _run_build_repo(
             old_owner,
             old_repo_owner,
         ) = saves
-        os.environ.pop("OWNER", None) if old_owner is None else os.environ.__setitem__("OWNER", old_owner)
-        os.environ.pop("GITHUB_REPOSITORY_OWNER", None) if old_repo_owner is None else os.environ.__setitem__("GITHUB_REPOSITORY_OWNER", old_repo_owner)
+        os.environ.pop("OWNER", None) if old_owner is None else os.environ.__setitem__(
+            "OWNER", old_owner
+        )
+        os.environ.pop(
+            "GITHUB_REPOSITORY_OWNER", None
+        ) if old_repo_owner is None else os.environ.__setitem__(
+            "GITHUB_REPOSITORY_OWNER", old_repo_owner
+        )
     return result, items, posts
 
 
@@ -907,9 +1067,18 @@ def test_build_repo_midpage_failure_truncates():
         "nodes": [_full_pr(i) for i in range(30)],
     }
     result, items, _ = _run_build_repo(first, pr_page_raises=True)
-    check("build-truncate: repo still ok:true (partial view, not blanked)", result["ok"] is True)
-    check("build-truncate: marked truncated so reconcile won't self-heal close", result["truncated"] is True)
-    check("build-truncate: only the first page's PRs are visible", len(result["open_pr_numbers"]) == 30)
+    check(
+        "build-truncate: repo still ok:true (partial view, not blanked)",
+        result["ok"] is True,
+    )
+    check(
+        "build-truncate: marked truncated so reconcile won't self-heal close",
+        result["truncated"] is True,
+    )
+    check(
+        "build-truncate: only the first page's PRs are visible",
+        len(result["open_pr_numbers"]) == 30,
+    )
 
 
 def test_build_repo_unknown_mergeable_conflict_nudges_no_card():
@@ -933,9 +1102,17 @@ def test_build_repo_unknown_mergeable_settles_mergeable_card():
         "pageInfo": {"hasNextPage": False},
         "nodes": [_full_pr(52, mergeable="UNKNOWN")],
     }
-    result, items, posts = _run_build_repo(first, mergeable_reads=["UNKNOWN", "MERGEABLE"])
-    check("build-unknown-mergeable: merge-ready card emitted", len(items) == 1 and items[0]["bucket"] == "merge-ready")
-    check("build-unknown-mergeable: not frozen", result.get("indeterminate_pr_numbers") == [])
+    result, items, posts = _run_build_repo(
+        first, mergeable_reads=["UNKNOWN", "MERGEABLE"]
+    )
+    check(
+        "build-unknown-mergeable: merge-ready card emitted",
+        len(items) == 1 and items[0]["bucket"] == "merge-ready",
+    )
+    check(
+        "build-unknown-mergeable: not frozen",
+        result.get("indeterminate_pr_numbers") == [],
+    )
     check("build-unknown-mergeable: no nudge", posts == [])
 
 
@@ -948,10 +1125,18 @@ def test_build_repo_unknown_mergeable_unsettled_freezes():
         "pageInfo": {"hasNextPage": False},
         "nodes": [_full_pr(51, mergeable="UNKNOWN")],
     }
-    result, items, posts = _run_build_repo(first, mergeable_reads=[])  # all reads UNKNOWN
+    result, items, posts = _run_build_repo(
+        first, mergeable_reads=[]
+    )  # all reads UNKNOWN
     check("build-unknown-frozen: no worklist item emitted", items == [])
-    check("build-unknown-frozen: reported in indeterminate_pr_numbers", result["indeterminate_pr_numbers"] == [51])
-    check("build-unknown-frozen: PR stays in open_pr_numbers (still open)", 51 in result["open_pr_numbers"])
+    check(
+        "build-unknown-frozen: reported in indeterminate_pr_numbers",
+        result["indeterminate_pr_numbers"] == [51],
+    )
+    check(
+        "build-unknown-frozen: PR stays in open_pr_numbers (still open)",
+        51 in result["open_pr_numbers"],
+    )
     check("build-unknown-frozen: no nudge off an UNKNOWN reading", posts == [])
     check("build-unknown-frozen: repo scan stays ok", result["ok"] is True)
 
@@ -1003,7 +1188,10 @@ def test_build_repo_review_needed_unknown_settles_conflicting():
     }
     result, items, posts = _run_build_repo(first, mergeable_reads=["CONFLICTING"])
     check("build-review-needed-conflict: no card emitted", items == [])
-    check("build-review-needed-conflict: no frozen PR remains", result["indeterminate_pr_numbers"] == [])
+    check(
+        "build-review-needed-conflict: no frozen PR remains",
+        result["indeterminate_pr_numbers"] == [],
+    )
     check("build-review-needed-conflict: contributor was nudged once", len(posts) == 1)
 
 
@@ -1055,7 +1243,9 @@ def test_build_repo_static_conflict_never_enters_worklist():
     check("acceptance: UNKNOWN-then-CONFLICTING (2 reads) emits no card", items3 == [])
     check(
         "acceptance: conflicting PR is never frozen-indeterminate once readable",
-        r1["indeterminate_pr_numbers"] == [] and r2["indeterminate_pr_numbers"] == [] and r3["indeterminate_pr_numbers"] == [],
+        r1["indeterminate_pr_numbers"] == []
+        and r2["indeterminate_pr_numbers"] == []
+        and r3["indeterminate_pr_numbers"] == [],
     )
 
 

@@ -287,7 +287,9 @@ def test_indeterminate_pr_card_is_frozen():
         ],
     )
     check("reconcile-freeze: indeterminate card is NOT closed", calls["close"] == [])
-    check("reconcile-freeze: indeterminate card is NOT refreshed", calls["upsert"] == [])
+    check(
+        "reconcile-freeze: indeterminate card is NOT refreshed", calls["upsert"] == []
+    )
 
 
 def test_ci_approval_card_with_no_pending_run_is_consumed():

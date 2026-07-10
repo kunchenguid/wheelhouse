@@ -152,7 +152,8 @@ query($owner:String!, $name:String!, $after:String!) {
     _PR_NODE_FIELDS,
 )
 
-ISSUES_PAGE_GQL = """
+ISSUES_PAGE_GQL = (
+    """
 query($owner:String!, $name:String!, $after:String!) {
   repository(owner:$owner, name:$name) {
     issues(states:OPEN, first:%d, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
@@ -162,9 +163,12 @@ query($owner:String!, $name:String!, $after:String!) {
     }
   }
 }
-""" % ISSUE_PAGE_SIZE
+"""
+    % ISSUE_PAGE_SIZE
+)
 
-CLOSING_REFS_PAGE_GQL = """
+CLOSING_REFS_PAGE_GQL = (
+    """
 query($owner:String!, $name:String!, $number:Int!, $after:String!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
@@ -176,7 +180,9 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
     }
   }
 }
-""" % CLOSING_REFS_PAGE_SIZE
+"""
+    % CLOSING_REFS_PAGE_SIZE
+)
 
 PR_MERGEABLE_GQL = """
 query($owner:String!, $name:String!, $number:Int!) {
@@ -846,7 +852,7 @@ def _settle_mergeables(owner, name, numbers):
             next_round.append(number)
         pending = next_round
         if pending and i + 1 < MERGEABLE_SETTLE_READS:
-            _sleep(min(MERGEABLE_SETTLE_BASE * (2 ** i), MERGEABLE_SETTLE_CAP))
+            _sleep(min(MERGEABLE_SETTLE_BASE * (2**i), MERGEABLE_SETTLE_CAP))
     return values, errors
 
 
@@ -1267,9 +1273,7 @@ def _pending_record(
     }
 
 
-def _ensure_repo_label(
-    slug, name, color="fbca04", description="Managed by Wheelhouse"
-):
+def _ensure_repo_label(slug, name, color="fbca04", description="Managed by Wheelhouse"):
     try:
         gh_rest(
             "/repos/%s/labels" % slug,
@@ -3811,8 +3815,7 @@ def cmd_scan_health(scan_path):
         # No usable scan output (e.g. the scan step itself failed, which already
         # fails the job) - nothing to record.
         print(
-            "::warning::scan-health: could not read %s: %s"
-            % (scan_path, str(e)[:160]),
+            "::warning::scan-health: could not read %s: %s" % (scan_path, str(e)[:160]),
             file=sys.stderr,
         )
         return
@@ -3856,9 +3859,7 @@ def cmd_scan_health(scan_path):
         # Fail the (final) backstop step so a persistently-dark repo cannot hide
         # behind a green scheduled run. Reconcile has already run in an earlier
         # step, so failing here never skips self-healing for the healthy repos.
-        sys.exit(
-            "fleet-scan health: %d repo(s) dark past threshold" % len(alerts)
-        )
+        sys.exit("fleet-scan health: %d repo(s) dark past threshold" % len(alerts))
 
 
 # --------------------------------------------------------------------------- #
