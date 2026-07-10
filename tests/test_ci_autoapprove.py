@@ -589,20 +589,26 @@ def test_current_card_summary_is_reused_without_target_reads():
         "exploit": False,
         "reason": "risky",
     }
-    cache = {("demo", 1): {
-        "head_sha": "sha1",
-        "diff_revision": '["main","base-main"]',
-        "summary": "CACHED-SUMMARY",
-    }}
+    cache = {
+        ("demo", 1): {
+            "head_sha": "sha1",
+            "diff_revision": '["main","base-main"]',
+            "summary": "CACHED-SUMMARY",
+        }
+    }
     result, items, calls = run_build_repo(
         [needs_ci_pr()], verdict=verdict, summary_cache=cache
     )
     check("summary cache: card is still raised", len(items) == 1)
-    check("summary cache: cached body is reused",
-          items[0].get("security_summary") == "CACHED-SUMMARY")
+    check(
+        "summary cache: cached body is reused",
+        items[0].get("security_summary") == "CACHED-SUMMARY",
+    )
     check("summary cache: no target summary reads repeat", calls["summary"] == [])
-    check("summary cache: current head is recorded",
-          items[0].get("ci_security_summary_head_sha") == "sha1")
+    check(
+        "summary cache: current head is recorded",
+        items[0].get("ci_security_summary_head_sha") == "sha1",
+    )
 
 
 def test_pr_target_posture_raises_card_with_warning():
@@ -673,7 +679,9 @@ def test_suppressed_ci_card_gets_no_security_summary():
         else:
             os.environ["OWNER"] = saved_owner
     check("summary: excluded-author risky PR raises no card", items == [])
-    check("summary: summarizer not called on the suppressed path", calls["summary"] == [])
+    check(
+        "summary: summarizer not called on the suppressed path", calls["summary"] == []
+    )
 
 
 def test_ci_safety_error_raises_card():
@@ -791,9 +799,7 @@ def test_approve_noop_consumes_stale_ci_approval_card():
         [needs_ci_pr()], approve_result=("noop", "no workflow runs awaiting approval")
     )
     check("route: approve noop emits NO stale card", items == [])
-    check(
-        "route: approve noop first checked the run state", len(calls["approve"]) == 1
-    )
+    check("route: approve noop first checked the run state", len(calls["approve"]) == 1)
 
 
 def test_approve_hold_falls_back_to_card():
@@ -1148,7 +1154,10 @@ def test_approve_ci_dedup_does_not_bypass_risky_file_hold():
         SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
         safety_verdict=verdict,
     )
-    check("approve_ci: risky-file HOLD still wins despite duplicate runs", status == "hold")
+    check(
+        "approve_ci: risky-file HOLD still wins despite duplicate runs",
+        status == "hold",
+    )
     check(
         "approve_ci: HOLD short-circuits before run-list/approve calls",
         calls["approved"] == [] and calls["run_list"] == [],

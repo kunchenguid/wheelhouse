@@ -114,25 +114,34 @@ jobs:
 # --------------------------------------------------------------------------- #
 def test_exploit_workflow_surfaces_all_risky_patterns():
     s = summary_for([{"filename": WF, "status": "added"}], {WF: EXPLOIT_WF})
-    check("exploit: flags pull_request_target + PR-head checkout (pwn-request)",
-          "pull_request_target" in s and "pwn-request" in s and "PR head" in s)
+    check(
+        "exploit: flags pull_request_target + PR-head checkout (pwn-request)",
+        "pull_request_target" in s and "pwn-request" in s and "PR head" in s,
+    )
     check("exploit: flags a write token permission", "write token permission" in s)
-    check("exploit: surfaces the referenced secret NAME",
-          "`NPM_TOKEN`" in s)
-    check("exploit: flags the unpinned third-party action",
-          "evilorg/some-action@main" in s and "not pinned to a commit SHA" in s)
-    check("exploit: shows the changed file and its status",
-          ("`%s`" % WF) in s and "(added)" in s)
+    check("exploit: surfaces the referenced secret NAME", "`NPM_TOKEN`" in s)
+    check(
+        "exploit: flags the unpinned third-party action",
+        "evilorg/some-action@main" in s and "not pinned to a commit SHA" in s,
+    )
+    check(
+        "exploit: shows the changed file and its status",
+        ("`%s`" % WF) in s and "(added)" in s,
+    )
 
 
 def test_pinned_third_party_action_not_flagged():
     s = summary_for([{"filename": WF, "status": "added"}], {WF: EXPLOIT_WF})
     # The SHA-pinned action appears as a fact but is NOT in the flag list.
-    check("pinning: SHA-pinned action is marked SHA-pinned",
-          "pinned/act@1234567890123456789012345678901234567890" in s
-          and "SHA-pinned" in s)
-    check("pinning: SHA-pinned action not called out as a flag",
-          "pinned/act@1234567890123456789012345678901234567890 is not pinned" not in s)
+    check(
+        "pinning: SHA-pinned action is marked SHA-pinned",
+        "pinned/act@1234567890123456789012345678901234567890" in s
+        and "SHA-pinned" in s,
+    )
+    check(
+        "pinning: SHA-pinned action not called out as a flag",
+        "pinned/act@1234567890123456789012345678901234567890 is not pinned" not in s,
+    )
 
 
 def test_secrets_inherit_flagged():
@@ -151,26 +160,30 @@ def test_composite_action_file_is_analyzed():
     )
     path = "my-action/action.yml"
     s = summary_for([{"filename": path, "status": "added"}], {path: action})
-    check("composite: action.yml is treated as a risky changed file",
-          ("`%s`" % path) in s)
-    check("composite: unpinned third-party action inside it is flagged",
-          "thirdparty/tool@v1" in s and "not pinned to a commit SHA" in s)
-    check("composite: run steps are surfaced",
-          "Run steps: 1" in s)
+    check(
+        "composite: action.yml is treated as a risky changed file", ("`%s`" % path) in s
+    )
+    check(
+        "composite: unpinned third-party action inside it is flagged",
+        "thirdparty/tool@v1" in s and "not pinned to a commit SHA" in s,
+    )
+    check("composite: run steps are surfaced", "Run steps: 1" in s)
 
 
 def test_non_manifest_action_file_requires_manual_diff_review():
     path = ".github/actions/example/index.js"
     s = summary_for([{"filename": path, "status": "modified"}], {path: "{}"})
-    check("action code: non-manifest file fails closed",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "action code: non-manifest file fails closed", s == core.CI_SUMMARY_UNANALYZABLE
+    )
 
 
 def test_non_mapping_manifest_requires_manual_diff_review():
     path = ".github/actions/example/action.yml"
     s = summary_for([{"filename": path, "status": "modified"}], {path: "plain text"})
-    check("action manifest: scalar YAML fails closed",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "action manifest: scalar YAML fails closed", s == core.CI_SUMMARY_UNANALYZABLE
+    )
 
 
 def test_missing_or_unknown_action_runtime_requires_manual_diff_review():
@@ -180,10 +193,14 @@ def test_missing_or_unknown_action_runtime_requires_manual_diff_review():
         ("unknown", "name: incomplete\nruns:\n  using: shell\n"),
     ):
         s = summary_for([{"filename": path, "status": "modified"}], {path: action})
-        check("action manifest: %s runtime fails closed" % name,
-              "**Automated analysis incomplete - review the full diff manually.**" in s)
-        check("action manifest: %s runtime is not presented as clean" % name,
-              "Third-party actions/workflows: none (first-party only)" not in s)
+        check(
+            "action manifest: %s runtime fails closed" % name,
+            "**Automated analysis incomplete - review the full diff manually.**" in s,
+        )
+        check(
+            "action manifest: %s runtime is not presented as clean" % name,
+            "Third-party actions/workflows: none (first-party only)" not in s,
+        )
 
 
 def test_reusable_workflow_and_inherited_secrets_are_surfaced():
@@ -193,11 +210,15 @@ def test_reusable_workflow_and_inherited_secrets_are_surfaced():
         "    secrets: inherit\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("reusable workflow: unpinned called workflow is flagged",
-          "third-party reusable workflow" in s
-          and "evil/repo/.github/workflows/deploy.yml@main" in s)
-    check("reusable workflow: parsed inherited secrets are flagged",
-          "secrets: inherit" in s)
+    check(
+        "reusable workflow: unpinned called workflow is flagged",
+        "third-party reusable workflow" in s
+        and "evil/repo/.github/workflows/deploy.yml@main" in s,
+    )
+    check(
+        "reusable workflow: parsed inherited secrets are flagged",
+        "secrets: inherit" in s,
+    )
 
 
 def test_bracket_secret_reference_is_surfaced():
@@ -207,10 +228,14 @@ def test_bracket_secret_reference_is_surfaced():
         "        env:\n          TOKEN: ${{ secrets['DEPLOY_TOKEN'] }}\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("secret reference: bracket syntax surfaces the secret name",
-          "`DEPLOY_TOKEN`" in s)
-    check("secret reference: literal bracket syntax remains fully analyzed",
-          "**Automated analysis incomplete - review the full diff manually.**" not in s)
+    check(
+        "secret reference: bracket syntax surfaces the secret name",
+        "`DEPLOY_TOKEN`" in s,
+    )
+    check(
+        "secret reference: literal bracket syntax remains fully analyzed",
+        "**Automated analysis incomplete - review the full diff manually.**" not in s,
+    )
 
 
 def test_dynamic_secret_index_requires_manual_review():
@@ -222,14 +247,22 @@ def test_dynamic_secret_index_requires_manual_review():
             "          TOKEN: ${{ secrets[%s] }}\n" % expression
         )
         s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-        check("dynamic secret index: %s is surfaced" % expression,
-              "dynamic/unknown secret reference" in s)
-        check("dynamic secret index: %s fails closed" % expression,
-              "**Automated analysis incomplete - review the full diff manually.**" in s)
-        check("dynamic secret index: %s names its manual review" % expression,
-              "dynamic/unknown secret reference - review manually" in s)
-        check("dynamic secret index: %s is not reported clean" % expression,
-              "Secrets/token: none referenced" not in s)
+        check(
+            "dynamic secret index: %s is surfaced" % expression,
+            "dynamic/unknown secret reference" in s,
+        )
+        check(
+            "dynamic secret index: %s fails closed" % expression,
+            "**Automated analysis incomplete - review the full diff manually.**" in s,
+        )
+        check(
+            "dynamic secret index: %s names its manual review" % expression,
+            "dynamic/unknown secret reference - review manually" in s,
+        )
+        check(
+            "dynamic secret index: %s is not reported clean" % expression,
+            "Secrets/token: none referenced" not in s,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -242,15 +275,21 @@ def test_secret_values_are_never_echoed():
         "name: leak\non:\n  pull_request:\npermissions:\n  contents: read\n"
         "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
         "      - run: echo 'ghp_THISLOOKSLIKEASECRETVALUE0123456789abcd'\n"
-        "      - run: curl -H \"authorization: bearer sk-live-DEADBEEFdeadbeef\" x\n"
+        '      - run: curl -H "authorization: bearer sk-live-DEADBEEFdeadbeef" x\n'
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: leaky})
-    check("no-leak: token-shaped literal is not echoed",
-          "ghp_THISLOOKSLIKEASECRETVALUE0123456789abcd" not in s)
-    check("no-leak: bearer-token-shaped literal is not echoed",
-          "sk-live-DEADBEEFdeadbeef" not in s)
-    check("no-leak: verbatim run-step text is not dumped",
-          "echo '" not in s and "curl -H" not in s)
+    check(
+        "no-leak: token-shaped literal is not echoed",
+        "ghp_THISLOOKSLIKEASECRETVALUE0123456789abcd" not in s,
+    )
+    check(
+        "no-leak: bearer-token-shaped literal is not echoed",
+        "sk-live-DEADBEEFdeadbeef" not in s,
+    )
+    check(
+        "no-leak: verbatim run-step text is not dumped",
+        "echo '" not in s and "curl -H" not in s,
+    )
 
 
 def test_value_sanitizer_neutralizes_markdown_breakout():
@@ -268,83 +307,111 @@ def test_permission_job_name_is_sanitized_before_markdown_formatting():
     )
     check("sanitize: permission job label has no newlines", "\n" not in specs[0][0])
     summary = core._format_ci_security_summary(
-        [{
-            "path": WF,
-            "status": "modified",
-            "triggers": [],
-            "pr_target": False,
-            "checks_head": False,
-            "permissions": specs,
-            "perms_write": True,
-            "secrets": [],
-            "secrets_inherit": False,
-            "checkouts": [],
-            "actions": [],
-            "run_steps": 0,
-        }],
+        [
+            {
+                "path": WF,
+                "status": "modified",
+                "triggers": [],
+                "pr_target": False,
+                "checks_head": False,
+                "permissions": specs,
+                "perms_write": True,
+                "secrets": [],
+                "secrets_inherit": False,
+                "checkouts": [],
+                "actions": [],
+                "run_steps": 0,
+            }
+        ],
         True,
     )
-    check("sanitize: permission job cannot inject a Markdown heading",
-          "\n### injected" not in summary)
+    check(
+        "sanitize: permission job cannot inject a Markdown heading",
+        "\n### injected" not in summary,
+    )
     summary = core._format_ci_security_summary(
-        [{
-            "path": WF,
-            "status": "modified",
-            "triggers": [],
-            "pr_target": False,
-            "checks_head": False,
-            "permissions": [(
-                "top-level",
-                {"[click](https://example.invalid)": "[grant](https://example.invalid)"},
-            )],
-            "perms_write": False,
-            "secrets": [],
-            "secrets_inherit": False,
-            "checkouts": [],
-            "actions": [],
-            "run_steps": 0,
-        }],
+        [
+            {
+                "path": WF,
+                "status": "modified",
+                "triggers": [],
+                "pr_target": False,
+                "checks_head": False,
+                "permissions": [
+                    (
+                        "top-level",
+                        {
+                            "[click](https://example.invalid)": "[grant](https://example.invalid)"
+                        },
+                    )
+                ],
+                "perms_write": False,
+                "secrets": [],
+                "secrets_inherit": False,
+                "checkouts": [],
+                "actions": [],
+                "run_steps": 0,
+            }
+        ],
         True,
     )
-    check("sanitize: permission mapping cannot render a Markdown link",
-          "-> `[click](https://example.invalid): [grant](https://example.invalid)`" in summary)
+    check(
+        "sanitize: permission mapping cannot render a Markdown link",
+        "-> `[click](https://example.invalid): [grant](https://example.invalid)`"
+        in summary,
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Benign inputs.
 # --------------------------------------------------------------------------- #
 def test_safe_first_party_workflow_has_no_flags():
-    s = summary_for([{"filename": ".github/workflows/ci.yml", "status": "modified"}],
-                    {".github/workflows/ci.yml": SAFE_WF})
+    s = summary_for(
+        [{"filename": ".github/workflows/ci.yml", "status": "modified"}],
+        {".github/workflows/ci.yml": SAFE_WF},
+    )
     check("safe: no flags detected", "none detected by the automated scan" in s)
     check("safe: no pull_request_target flag", "pwn-request" not in s)
     check("safe: minimal permissions shown", "contents: read" in s)
 
 
 def test_checkout_without_ref_is_labeled_as_event_default():
-    s = summary_for([{"filename": ".github/workflows/ci.yml", "status": "modified"}],
-                    {".github/workflows/ci.yml": SAFE_WF})
-    check("checkout default: identifies GitHub event SHA",
-          "Checkout: event default (`GITHUB_SHA`)" in s)
-    check("checkout default: identifies contributor PR code",
-          "contributor PR code" in s)
-    check("checkout default: does not misstate the base branch",
-          "default (base branch)" not in s)
+    s = summary_for(
+        [{"filename": ".github/workflows/ci.yml", "status": "modified"}],
+        {".github/workflows/ci.yml": SAFE_WF},
+    )
+    check(
+        "checkout default: identifies GitHub event SHA",
+        "Checkout: event default (`GITHUB_SHA`)" in s,
+    )
+    check(
+        "checkout default: identifies contributor PR code", "contributor PR code" in s
+    )
+    check(
+        "checkout default: does not misstate the base branch",
+        "default (base branch)" not in s,
+    )
 
 
 def test_explicit_pr_head_checkout_ref_is_unchanged():
     s = summary_for([{"filename": WF, "status": "added"}], {WF: EXPLOIT_WF})
-    check("explicit checkout ref: identifies PR-head expression",
-          "Checkout: PR head - `${{ github.event.pull_request.head.sha }}`" in s)
+    check(
+        "explicit checkout ref: identifies PR-head expression",
+        "Checkout: PR head - `${{ github.event.pull_request.head.sha }}`" in s,
+    )
 
 
 def test_checkout_action_coordinate_is_case_insensitive():
     mixed_case = EXPLOIT_WF.replace("actions/checkout@v4", "Actions/Checkout@v4")
     s = summary_for([{"filename": WF, "status": "added"}], {WF: mixed_case})
-    check("mixed-case checkout: identifies the pwn-request pattern",
-          "pwn-request" in s and "PR head" in s)
-    check("mixed-case checkout: remains a first-party action",
-          "Actions/Checkout@v4 (NOT SHA-pinned)" not in s)
+    check(
+        "mixed-case checkout: identifies the pwn-request pattern",
+        "pwn-request" in s and "PR head" in s,
+    )
+    check(
+        "mixed-case checkout: remains a first-party action",
+        "Actions/Checkout@v4 (NOT SHA-pinned)" not in s,
+    )
 
 
 def test_same_repository_checkouts_without_ref_use_the_event_sha():
@@ -356,10 +423,14 @@ def test_same_repository_checkouts_without_ref_use_the_event_sha():
             "        with:\n          repository: %s\n" % repository
         )
         s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-        check("same repository checkout: event SHA for %s" % repository,
-              "Checkout: event default (`GITHUB_SHA`) - contributor PR code" in s)
-        check("same repository checkout: not mutable default for %s" % repository,
-              "default branch (mutable)" not in s)
+        check(
+            "same repository checkout: event SHA for %s" % repository,
+            "Checkout: event default (`GITHUB_SHA`) - contributor PR code" in s,
+        )
+        check(
+            "same repository checkout: not mutable default for %s" % repository,
+            "default branch (mutable)" not in s,
+        )
 
 
 def test_pr_target_same_repository_checkout_without_ref_uses_trusted_base():
@@ -370,13 +441,19 @@ def test_pr_target_same_repository_checkout_without_ref_uses_trusted_base():
         "        with:\n          repository: ${{ github.repository }}\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("PR target same-repository checkout: identifies trusted base default",
-          "Checkout: event default (`GITHUB_SHA`) - `pull_request_target` base branch "
-          "(trusted base code)" in s)
-    check("PR target same-repository checkout: does not call base default contributor code",
-          "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s)
-    check("PR target same-repository checkout: no explicit-head pwn-request flag",
-          "the pwn-request pattern" not in s)
+    check(
+        "PR target same-repository checkout: identifies trusted base default",
+        "Checkout: event default (`GITHUB_SHA`) - `pull_request_target` base branch "
+        "(trusted base code)" in s,
+    )
+    check(
+        "PR target same-repository checkout: does not call base default contributor code",
+        "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s,
+    )
+    check(
+        "PR target same-repository checkout: no explicit-head pwn-request flag",
+        "the pwn-request pattern" not in s,
+    )
 
 
 def test_mixed_pr_trigger_same_repository_checkout_requires_manual_review():
@@ -386,14 +463,22 @@ def test_mixed_pr_trigger_same_repository_checkout_requires_manual_review():
         "      - uses: actions/checkout@v4\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("mixed PR trigger same-repository checkout: labels default event-dependent",
-          "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s)
-    check("mixed PR trigger same-repository checkout: does not claim trusted base",
-          "`pull_request_target` base branch (trusted base code)" not in s)
-    check("mixed PR trigger same-repository checkout: does not claim contributor code",
-          "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s)
-    check("mixed PR trigger same-repository checkout: analysis fails closed",
-          "**Automated analysis incomplete - review the full diff manually.**" in s)
+    check(
+        "mixed PR trigger same-repository checkout: labels default event-dependent",
+        "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s,
+    )
+    check(
+        "mixed PR trigger same-repository checkout: does not claim trusted base",
+        "`pull_request_target` base branch (trusted base code)" not in s,
+    )
+    check(
+        "mixed PR trigger same-repository checkout: does not claim contributor code",
+        "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s,
+    )
+    check(
+        "mixed PR trigger same-repository checkout: analysis fails closed",
+        "**Automated analysis incomplete - review the full diff manually.**" in s,
+    )
 
 
 def test_unknown_trigger_same_repository_checkout_requires_manual_review():
@@ -403,10 +488,14 @@ def test_unknown_trigger_same_repository_checkout_requires_manual_review():
         "      - uses: actions/checkout@v4\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("unknown trigger same-repository checkout: labels default event-dependent",
-          "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s)
-    check("unknown trigger same-repository checkout: analysis fails closed",
-          "**Automated analysis incomplete - review the full diff manually.**" in s)
+    check(
+        "unknown trigger same-repository checkout: labels default event-dependent",
+        "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s,
+    )
+    check(
+        "unknown trigger same-repository checkout: analysis fails closed",
+        "**Automated analysis incomplete - review the full diff manually.**" in s,
+    )
 
 
 def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
@@ -417,10 +506,14 @@ def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
         "        with:\n          repository: evilorg/external-repo\n"
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("external checkout: names the mutable external default branch",
-          "default branch (mutable) of `evilorg/external-repo`" in s)
-    check("external checkout: does not claim the event SHA",
-          "event default (`GITHUB_SHA`) from `evilorg/external-repo`" not in s)
+    check(
+        "external checkout: names the mutable external default branch",
+        "default branch (mutable) of `evilorg/external-repo`" in s,
+    )
+    check(
+        "external checkout: does not claim the event SHA",
+        "event default (`GITHUB_SHA`) from `evilorg/external-repo`" not in s,
+    )
 
 
 def test_dynamic_checkout_without_ref_requires_manual_review():
@@ -432,12 +525,18 @@ def test_dynamic_checkout_without_ref_requires_manual_review():
         "        with:\n          repository: %s\n" % repository
     )
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
-    check("dynamic checkout: repository expression is shown safely",
-          "`${{ matrix.checkout_repository }}`" in s)
-    check("dynamic checkout: default ref is indeterminate",
-          "default ref cannot be determined - review manually" in s)
-    check("dynamic checkout: analysis fails closed",
-          "**Automated analysis incomplete - review the full diff manually.**" in s)
+    check(
+        "dynamic checkout: repository expression is shown safely",
+        "`${{ matrix.checkout_repository }}`" in s,
+    )
+    check(
+        "dynamic checkout: default ref is indeterminate",
+        "default ref cannot be determined - review manually" in s,
+    )
+    check(
+        "dynamic checkout: analysis fails closed",
+        "**Automated analysis incomplete - review the full diff manually.**" in s,
+    )
 
 
 def test_docker_action_manifest_surfaces_image_and_requires_manual_review():
@@ -447,12 +546,18 @@ def test_docker_action_manifest_surfaces_image_and_requires_manual_review():
         "  image: docker://ghcr.io/evilorg/tool:latest\n"
     )
     s = summary_for([{"filename": path, "status": "modified"}], {path: action})
-    check("docker action: surfaces its selected image",
-          "docker://ghcr.io/evilorg/tool:latest" in s)
-    check("docker action: analysis is prominently incomplete",
-          "**Automated analysis incomplete" in s)
-    check("docker action: does not claim a clean action set",
-          "Third-party actions/workflows: none (first-party only)" not in s)
+    check(
+        "docker action: surfaces its selected image",
+        "docker://ghcr.io/evilorg/tool:latest" in s,
+    )
+    check(
+        "docker action: analysis is prominently incomplete",
+        "**Automated analysis incomplete" in s,
+    )
+    check(
+        "docker action: does not claim a clean action set",
+        "Third-party actions/workflows: none (first-party only)" not in s,
+    )
 
 
 def test_node_action_manifest_surfaces_entrypoint_and_requires_manual_review():
@@ -460,15 +565,19 @@ def test_node_action_manifest_surfaces_entrypoint_and_requires_manual_review():
     action = "name: javascript\nruns:\n  using: node20\n  main: dist/index.js\n"
     s = summary_for([{"filename": path, "status": "modified"}], {path: action})
     check("node action: surfaces its JavaScript entrypoint", "`dist/index.js`" in s)
-    check("node action: analysis is prominently incomplete",
-          "**Automated analysis incomplete" in s)
+    check(
+        "node action: analysis is prominently incomplete",
+        "**Automated analysis incomplete" in s,
+    )
     check("node action: does not claim no flags", "**Flags:** none" not in s)
 
 
 def test_no_workflow_change_returns_empty():
     s = summary_for(
-        [{"filename": "src/app.py", "status": "modified"},
-         {"filename": "README.md", "status": "modified"}],
+        [
+            {"filename": "src/app.py", "status": "modified"},
+            {"filename": "README.md", "status": "modified"},
+        ],
         {},
     )
     check("empty: no risky file -> empty summary (no section)", s == "")
@@ -484,8 +593,10 @@ def test_file_list_read_failure_fails_closed():
         s = core.ci_security_summary("o/r", "1", "sha", 1)
     finally:
         core._list_pr_file_changes = save
-    check("fail-closed: unreadable file list -> unanalyzable note",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "fail-closed: unreadable file list -> unanalyzable note",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 def test_incomplete_file_list_without_risky_fails_closed():
@@ -493,47 +604,58 @@ def test_incomplete_file_list_without_risky_fails_closed():
     s = summary_for(
         [{"filename": "src/app.py", "status": "modified"}], {}, changed_files=5
     )
-    check("fail-closed: incomplete list + no risky seen -> unanalyzable note",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "fail-closed: incomplete list + no risky seen -> unanalyzable note",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 def test_incomplete_file_list_with_risky_file_fails_closed():
     s = summary_for(
         [{"filename": WF, "status": "modified"}], {WF: SAFE_WF}, changed_files=2
     )
-    check("fail-closed: incomplete list + risky file -> unanalyzable note",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "fail-closed: incomplete list + risky file -> unanalyzable note",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 def test_unreadable_risky_file_notes_manual_review():
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: None})
-    check("fail-closed: unreadable risky file -> unanalyzable note",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "fail-closed: unreadable risky file -> unanalyzable note",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 def test_unparseable_risky_file_notes_manual_review():
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: "a: [unterminated"})
-    check("fail-closed: unparseable risky file -> unanalyzable note",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "fail-closed: unparseable risky file -> unanalyzable note",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 def test_summary_output_is_bounded_with_manual_diff_notice():
-    actions = "\n".join(
-        "      - uses: org/action%d@main" % n for n in range(200)
-    )
+    actions = "\n".join("      - uses: org/action%d@main" % n for n in range(200))
     files = [
         {"filename": ".github/workflows/%03d.yml" % n, "status": "modified"}
         for n in range(core.CI_SUMMARY_MAX_FILES + 4)
     ]
     texts = {
-        f["filename"]: "name: x\non:\n  pull_request:\njobs:\n  a:\n    steps:\n" + actions
+        f["filename"]: "name: x\non:\n  pull_request:\njobs:\n  a:\n    steps:\n"
+        + actions
         for f in files
     }
     s = summary_for(files, texts)
-    check("bound: rendered summary has a strict character cap",
-          len(s) <= core.CI_SUMMARY_MAX_CHARS)
-    check("bound: omitted facts require manual diff review",
-          "review the full diff manually" in s)
+    check(
+        "bound: rendered summary has a strict character cap",
+        len(s) <= core.CI_SUMMARY_MAX_CHARS,
+    )
+    check(
+        "bound: omitted facts require manual diff review",
+        "review the full diff manually" in s,
+    )
 
 
 def test_never_raises_even_when_reads_throw():
@@ -545,8 +667,10 @@ def test_never_raises_even_when_reads_throw():
         s = core.ci_security_summary("o/r", "1", "sha", 1)
     finally:
         core._list_pr_file_changes = save
-    check("robust: an internal error -> unanalyzable note, never raises",
-          s == core.CI_SUMMARY_UNANALYZABLE)
+    check(
+        "robust: an internal error -> unanalyzable note, never raises",
+        s == core.CI_SUMMARY_UNANALYZABLE,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -568,9 +692,7 @@ def test_summary_is_read_only_and_never_approves():
 
         r = R()
         if "--paginate" in argv:  # the PR files list
-            r.stdout = (
-                '{"filename":"%s","status":"added"}\n' % WF
-            )
+            r.stdout = '{"filename":"%s","status":"added"}\n' % WF
         else:  # a contents read
             payload = '{"encoding":"base64","content":"%s"}' % (
                 base64.b64encode(EXPLOIT_WF.encode()).decode()
@@ -591,21 +713,22 @@ def test_summary_is_read_only_and_never_approves():
         core.subprocess.run = save_run
         core.approve_ci = save_approve
 
-    check("read-only: produced a real summary through the read path",
-          "pwn-request" in s)
+    check(
+        "read-only: produced a real summary through the read path", "pwn-request" in s
+    )
     check("read-only: at least one gh api read was issued", len(recorded) >= 1)
     all_reads = all(
         argv[:2] == ["gh", "api"]
         and not any(
-            tok in argv
-            for tok in ("-X", "--method", "-f", "-F", "--field", "--input")
+            tok in argv for tok in ("-X", "--method", "-f", "-F", "--field", "--input")
         )
         and not any(str(t).upper() in ("POST", "PUT", "PATCH", "DELETE") for t in argv)
         for argv in recorded
     )
     check("read-only: every gh call is a read (no write method/field)", all_reads)
-    check("read-only: approve_ci is never called by the summarizer",
-          approve_calls == [])
+    check(
+        "read-only: approve_ci is never called by the summarizer", approve_calls == []
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -631,23 +754,32 @@ def _ci_item(**over):
 
 
 def test_render_ci_approval_card_shows_advisory_section():
-    body = rc.render(_ci_item(security_summary="**Flags:** none\n- `ci.yml` (modified)"))[
-        "body"
-    ]
-    check("render: advisory security section heading present",
-          "### Security review (advisory)" in body)
-    check("render: framed as advisory/untrusted context",
-          "advisory, untrusted context" in body)
-    check("render: states it does NOT approve CI",
-          "does **not** approve CI" in body)
+    body = rc.render(
+        _ci_item(security_summary="**Flags:** none\n- `ci.yml` (modified)")
+    )["body"]
+    check(
+        "render: advisory security section heading present",
+        "### Security review (advisory)" in body,
+    )
+    check(
+        "render: framed as advisory/untrusted context",
+        "advisory, untrusted context" in body,
+    )
+    check("render: states it does NOT approve CI", "does **not** approve CI" in body)
     check("render: the findings body is included", "- `ci.yml` (modified)" in body)
-    check("render: decision checkboxes (the hold UI) are intact",
-          "opt:approve-ci" in body and "opt:hold" in body)
+    check(
+        "render: decision checkboxes (the hold UI) are intact",
+        "opt:approve-ci" in body and "opt:hold" in body,
+    )
     state = rc.parse_state_block(body)
-    check("render: security_summary is NOT in the state block (non-material)",
-          "security_summary" not in state)
-    check("render: card carries the current render_version",
-          state.get("render_version") == rc.CARD_RENDER_VERSION)
+    check(
+        "render: security_summary is NOT in the state block (non-material)",
+        "security_summary" not in state,
+    )
+    check(
+        "render: card carries the current render_version",
+        state.get("render_version") == rc.CARD_RENDER_VERSION,
+    )
 
 
 def test_security_summary_cache_reuses_current_card_body():
@@ -663,20 +795,31 @@ def test_security_summary_cache_reuses_current_card_body():
     cache = core.ci_security_summary_cache(
         [{"body": body, "labels": rc.card_labels(item)}]
     )
-    check("cache: current summary is available by target",
-          cache == {("firstmate", 345): {
-              "head_sha": "abc123",
-              "diff_revision": '["main","base123"]',
-              "summary": summary,
-          }})
+    check(
+        "cache: current summary is available by target",
+        cache
+        == {
+            ("firstmate", 345): {
+                "head_sha": "abc123",
+                "diff_revision": '["main","base123"]',
+                "summary": summary,
+            }
+        },
+    )
     state = rc.parse_state_block(body)
-    check("cache: summary cache markers are non-material",
-          rc.material_changed(item, state) is False)
-    check("cache: matching marker does not trigger a refresh",
-          rc.security_summary_stale(item, state) is False)
+    check(
+        "cache: summary cache markers are non-material",
+        rc.material_changed(item, state) is False,
+    )
+    check(
+        "cache: matching marker does not trigger a refresh",
+        rc.security_summary_stale(item, state) is False,
+    )
     item["ci_security_summary_version"] += 1
-    check("cache: a newer summary version triggers one refresh",
-          rc.security_summary_stale(item, state) is True)
+    check(
+        "cache: a newer summary version triggers one refresh",
+        rc.security_summary_stale(item, state) is True,
+    )
 
 
 def test_security_summary_cache_records_analyzed_empty_result():
@@ -689,12 +832,17 @@ def test_security_summary_cache_records_analyzed_empty_result():
     cache = core.ci_security_summary_cache(
         [{"body": rc.render(item)["body"], "labels": rc.card_labels(item)}]
     )
-    check("cache: empty summary result is cached",
-          cache == {("firstmate", 345): {
-              "head_sha": "abc123",
-              "diff_revision": '["main","base123"]',
-              "summary": "",
-          }})
+    check(
+        "cache: empty summary result is cached",
+        cache
+        == {
+            ("firstmate", 345): {
+                "head_sha": "abc123",
+                "diff_revision": '["main","base123"]',
+                "summary": "",
+            }
+        },
+    )
 
 
 def test_security_summary_cache_requires_verified_card_labels_and_head_marker():
@@ -706,28 +854,50 @@ def test_security_summary_cache_requires_verified_card_labels_and_head_marker():
         ci_security_summary_present=True,
     )
     body = rc.render(item)["body"]
-    check("cache: unlabelled forged state is rejected",
-          core.ci_security_summary_cache([{"body": body}]) == {})
-    check("cache: state-label target mismatch is rejected",
-          core.ci_security_summary_cache([{
-              "body": body,
-              "labels": ["repo:firstmate", "kind:ci-approval", "target:firstmate-999"],
-          }]) == {})
+    check(
+        "cache: unlabelled forged state is rejected",
+        core.ci_security_summary_cache([{"body": body}]) == {},
+    )
+    check(
+        "cache: state-label target mismatch is rejected",
+        core.ci_security_summary_cache(
+            [
+                {
+                    "body": body,
+                    "labels": [
+                        "repo:firstmate",
+                        "kind:ci-approval",
+                        "target:firstmate-999",
+                    ],
+                }
+            ]
+        )
+        == {},
+    )
     state = rc.parse_state_block(body)
     state["ci_security_summary_head_sha"] = "older-head"
     stale_marker_body = rc._replace_state_block(body, state)
-    check("cache: stale summary-head marker is rejected",
-          core.ci_security_summary_cache([{
-              "body": stale_marker_body,
-              "labels": rc.card_labels(item),
-          }]) == {})
+    check(
+        "cache: stale summary-head marker is rejected",
+        core.ci_security_summary_cache(
+            [
+                {
+                    "body": stale_marker_body,
+                    "labels": rc.card_labels(item),
+                }
+            ]
+        )
+        == {},
+    )
 
 
 def test_security_summary_cache_invalidates_base_changes_and_retargets():
-    initial = core._ci_security_summary_diff_revision({
-        "base_ref": "main",
-        "base_sha": "base-a",
-    })
+    initial = core._ci_security_summary_diff_revision(
+        {
+            "base_ref": "main",
+            "base_sha": "base-a",
+        }
+    )
     item = _ci_item(
         security_summary="cached summary",
         ci_security_summary_head_sha="abc123",
@@ -735,50 +905,66 @@ def test_security_summary_cache_invalidates_base_changes_and_retargets():
         ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
         ci_security_summary_present=True,
     )
-    cache = core.ci_security_summary_cache([{
-        "body": rc.render(item)["body"],
-        "labels": rc.card_labels(item),
-    }])
-    check("cache revision: matching base is reused",
-          core._cached_ci_security_summary(
-              cache, "firstmate", 345, "abc123", initial
-          ) == (True, "cached summary"))
+    cache = core.ci_security_summary_cache(
+        [
+            {
+                "body": rc.render(item)["body"],
+                "labels": rc.card_labels(item),
+            }
+        ]
+    )
+    check(
+        "cache revision: matching base is reused",
+        core._cached_ci_security_summary(cache, "firstmate", 345, "abc123", initial)
+        == (True, "cached summary"),
+    )
     for name, base_ref, base_sha in (
         ("base advance", "main", "base-b"),
         ("retarget", "release", "base-a"),
     ):
-        revised = core._ci_security_summary_diff_revision({
-            "base_ref": base_ref,
-            "base_sha": base_sha,
-        })
-        check("cache revision: %s misses the old summary" % name,
-              core._cached_ci_security_summary(
-                  cache, "firstmate", 345, "abc123", revised
-              ) == (False, ""))
+        revised = core._ci_security_summary_diff_revision(
+            {
+                "base_ref": base_ref,
+                "base_sha": base_sha,
+            }
+        )
+        check(
+            "cache revision: %s misses the old summary" % name,
+            core._cached_ci_security_summary(cache, "firstmate", 345, "abc123", revised)
+            == (False, ""),
+        )
         changed = dict(item, ci_security_summary_diff_revision=revised)
         old_state = rc.parse_state_block(rc.render(item)["body"])
-        check("cache revision: %s refreshes the card" % name,
-              rc.security_summary_stale(changed, old_state) is True)
+        check(
+            "cache revision: %s refreshes the card" % name,
+            rc.security_summary_stale(changed, old_state) is True,
+        )
 
 
 def test_render_scopes_section_to_ci_approval_only():
     body = rc.render(_ci_item(kind="pr-review", security_summary="X"))["body"]
-    check("render: pr-review card does not show the security section",
-          "### Security review" not in body)
+    check(
+        "render: pr-review card does not show the security section",
+        "### Security review" not in body,
+    )
 
 
 def test_render_ci_approval_without_summary_has_no_section():
     body = rc.render(_ci_item())["body"]
-    check("render: ci-approval card without a summary shows no section",
-          "### Security review" not in body)
+    check(
+        "render: ci-approval card without a summary shows no section",
+        "### Security review" not in body,
+    )
 
 
 def test_security_summary_does_not_trigger_a_refresh():
     # Two otherwise-identical items differing ONLY in security_summary must NOT
     # look materially changed, so the advisory text never churns a card.
     state = rc.parse_state_block(rc.render(_ci_item(security_summary="one"))["body"])
-    check("non-material: differing summary is not a material change",
-          rc.material_changed(_ci_item(security_summary="two"), state) is False)
+    check(
+        "non-material: differing summary is not a material change",
+        rc.material_changed(_ci_item(security_summary="two"), state) is False,
+    )
 
 
 def main():

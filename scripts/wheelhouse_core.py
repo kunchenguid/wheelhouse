@@ -2189,17 +2189,11 @@ def _is_ci_noop_cleanup_candidate(pr):
     A later conflict check and a provable rebase-nudge record are both required
     before stale cleanup can do anything for this fast CI-approval lane.
     """
-    return (
-        pr.get("bucket") == "needs-ci-approval"
-        and pr.get("cross_repo") is True
-    )
+    return pr.get("bucket") == "needs-ci-approval" and pr.get("cross_repo") is True
 
 
 def _is_ci_approval_cleanup_lane(pr):
-    return (
-        pr.get("kind") == "ci-approval"
-        or pr.get("bucket") == "needs-ci-approval"
-    )
+    return pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval"
 
 
 def _ci_noop_conflict_is_current(owner, repo, pr):
@@ -2748,11 +2742,6 @@ def build_repo(
                 "tests": tests,
                 "ci": ci,
                 "bucket": bucket,
-                # Carry the fresh authoritative mergeability so the cleanup sweep
-                # can recognize a conflicting fork PR that routes to
-                # `needs-ci-approval` (ci-noop) as a rebase-nudge cleanup target -
-                # the nudge, not the bucket, is the ask.
-                "mergeable": pr.get("mergeable"),
                 "closes": closes,
                 "head_sha": pr["headRefOid"],
                 "updated_at": pr.get("updatedAt", "") or "",
@@ -3934,15 +3923,10 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         "action_runtime": action_runtime,
         "partially_analyzed": (
             dynamic_secrets
-            or (
-                action_runtime is not None
-                and action_runtime["kind"] != "composite"
-            )
+            or (action_runtime is not None and action_runtime["kind"] != "composite")
         )
         or any(
-            _checkout_repository_indeterminate(
-                checkout["repository"], slug
-            )
+            _checkout_repository_indeterminate(checkout["repository"], slug)
             or (
                 not checkout["ref"]
                 and _checkout_repository_is_same(checkout["repository"], slug)
@@ -3960,7 +3944,9 @@ def _checkout_repository_is_same(repository, target_repository):
     return (
         not repository
         or bool(_GITHUB_REPOSITORY_EXPR_RE.match(repository))
-        or bool(target_repository and repository.casefold() == target_repository.casefold())
+        or bool(
+            target_repository and repository.casefold() == target_repository.casefold()
+        )
     )
 
 
@@ -4153,14 +4139,18 @@ def _file_fact_lines(analysis):
         using = _safe_inline(runtime["using"])
         image = _safe_inline(runtime["image"] or "not declared")
         lines.append("  - Docker action runtime: `%s`, image `%s`" % (using, image))
-        lines.append("  - Action runtime is not fully analyzed automatically - review manually")
+        lines.append(
+            "  - Action runtime is not fully analyzed automatically - review manually"
+        )
     elif runtime and runtime["kind"] == "node":
         using = _safe_inline(runtime["using"])
         main = _safe_inline(runtime["main"] or "not declared")
         lines.append(
             "  - JavaScript action runtime: `%s`, entrypoint `%s`" % (using, main)
         )
-        lines.append("  - Action runtime is not fully analyzed automatically - review manually")
+        lines.append(
+            "  - Action runtime is not fully analyzed automatically - review manually"
+        )
     elif runtime and runtime["kind"] == "unknown":
         using = _safe_inline(runtime["using"] or "not declared")
         lines.append(
@@ -4181,7 +4171,9 @@ def _file_fact_lines(analysis):
             omitted.append("third-party actions")
         lines.append("  - Third-party actions/workflows: %s" % ", ".join(parts))
     elif analysis.get("partially_analyzed"):
-        lines.append("  - Third-party actions/workflows: not fully analyzed - review manually")
+        lines.append(
+            "  - Third-party actions/workflows: not fully analyzed - review manually"
+        )
     else:
         lines.append("  - Third-party actions/workflows: none (first-party only)")
     if local:
@@ -4190,9 +4182,7 @@ def _file_fact_lines(analysis):
         if extra:
             parts += ", +%d omitted" % extra
             omitted.append("local actions")
-        lines.append(
-            "  - Local actions (contributor-controlled code): %s" % parts
-        )
+        lines.append("  - Local actions (contributor-controlled code): %s" % parts)
 
     if analysis["run_steps"]:
         lines.append(
@@ -4243,7 +4233,9 @@ def _format_ci_security_summary(analyses, complete, omitted_files=0):
 
     lines = []
     if incomplete:
-        lines.append("**Automated analysis incomplete - review the full diff manually.**")
+        lines.append(
+            "**Automated analysis incomplete - review the full diff manually.**"
+        )
     elif shown_flags:
         lines.append("**Flags (most-severe first):**")
         lines.extend("- %s" % f for f in shown_flags)
@@ -4355,7 +4347,12 @@ def ci_security_summary_cache(cards):
         number = state.get("number")
         head_sha = state.get("head_sha")
         diff_revision = state.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
-        if not repo or not head_sha or not isinstance(diff_revision, str) or not diff_revision:
+        if (
+            not repo
+            or not head_sha
+            or not isinstance(diff_revision, str)
+            or not diff_revision
+        ):
             continue
         try:
             key = (str(repo), int(number))
