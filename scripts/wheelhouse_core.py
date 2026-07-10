@@ -3804,11 +3804,26 @@ def _ci_summary_file_kind(path):
     return None
 
 
+def _action_runtime(doc, file_kind):
+    if file_kind != "action":
+        return None
+    runs = doc.get("runs")
+    if not isinstance(runs, dict):
+        return None
+    using = str(runs.get("using") or "").strip()
+    if using.lower() == "docker":
+        return {"using": using, "image": str(runs.get("image") or "")}
+    if using.lower().startswith("node"):
+        return {"using": using, "main": str(runs.get("main") or "")}
+    return None
+
+
 def _analyze_ci_file(slug, path, head_sha, status, owner):
     """Deterministic, read-only findings for ONE changed workflow/action file at
     the PR head. Returns a facts dict; on read/parse failure returns a dict with
     `unreadable`/`unparsed` set so the caller can fail closed for that file."""
-    if _ci_summary_file_kind(path) is None:
+    file_kind = _ci_summary_file_kind(path)
+    if file_kind is None:
         return {"path": path, "status": status, "unanalyzable": True}
     text = _fetch_file_text(slug, path, head_sha)
     if text is None:
@@ -3822,6 +3837,7 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
     if not isinstance(doc, dict):
         return {"path": path, "status": status, "unparsed": True}
 
+    action_runtime = _action_runtime(doc, file_kind)
     triggers = sorted(_on_triggers(doc))
     perms = _permission_specs(doc)
     actions = []
@@ -3880,13 +3896,17 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         "checkouts": checkouts,
         "actions": actions,
         "run_steps": run_steps,
+        "action_runtime": action_runtime,
+        "partially_analyzed": bool(action_runtime),
     }
 
 
-def _checkout_ref_label(ref):
+def _checkout_ref_label(ref, repository=""):
     """A human label for a checkout `ref` input. Flags a PR-head ref (the
     pwn-request source) without echoing anything but the expression itself."""
     if not ref:
+        if repository:
+            return "default branch (mutable) of `%s`" % _safe_inline(repository)
         return "event default (`GITHUB_SHA`)"
     if _PR_HEAD_REF_RE.search(ref):
         return "PR head - `%s`" % _safe_inline(ref)
@@ -3998,8 +4018,8 @@ def _file_fact_lines(analysis):
         counts = []  # preserve order, collapse identical labels with a count
         shown, extra = _summary_values(analysis["checkouts"])
         for co in shown:
-            label = _checkout_ref_label(co["ref"])
-            if co["repository"]:
+            label = _checkout_ref_label(co["ref"], co["repository"])
+            if co["repository"] and co["ref"]:
                 label += " from `%s`" % _safe_inline(co["repository"])
             for entry in counts:
                 if entry[0] == label:
@@ -4016,6 +4036,19 @@ def _file_fact_lines(analysis):
     else:
         lines.append("  - Checkout: no explicit `actions/checkout` step")
 
+    runtime = analysis.get("action_runtime")
+    if runtime:
+        using = _safe_inline(runtime["using"])
+        if "image" in runtime:
+            image = _safe_inline(runtime["image"] or "not declared")
+            lines.append("  - Docker action runtime: `%s`, image `%s`" % (using, image))
+        else:
+            main = _safe_inline(runtime["main"] or "not declared")
+            lines.append(
+                "  - JavaScript action runtime: `%s`, entrypoint `%s`" % (using, main)
+            )
+        lines.append("  - Action runtime is not fully analyzed automatically - review manually")
+
     third = [a for a in analysis["actions"] if a["category"] in ("third", "docker")]
     local = [a for a in analysis["actions"] if a["category"] == "local"]
     if third:
@@ -4028,6 +4061,8 @@ def _file_fact_lines(analysis):
             parts.append("+%d omitted" % extra)
             omitted.append("third-party actions")
         lines.append("  - Third-party actions/workflows: %s" % ", ".join(parts))
+    elif analysis.get("partially_analyzed"):
+        lines.append("  - Third-party actions/workflows: not fully analyzed - review manually")
     else:
         lines.append("  - Third-party actions/workflows: none (first-party only)")
     if local:
@@ -4078,7 +4113,10 @@ def _format_ci_security_summary(analyses, complete, omitted_files=0):
         if not (a.get("unreadable") or a.get("unparsed") or a.get("unanalyzable")):
             flags.extend(_summary_flags(a))
     incomplete = not complete or any(
-        a.get("unreadable") or a.get("unparsed") or a.get("unanalyzable")
+        a.get("unreadable")
+        or a.get("unparsed")
+        or a.get("unanalyzable")
+        or a.get("partially_analyzed")
         for a in analyses
     )
     shown_flags = flags[:CI_SUMMARY_MAX_FLAGS]

@@ -274,6 +274,45 @@ def test_checkout_without_ref_is_labeled_as_event_default():
           "default (base branch)" not in s)
 
 
+def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
+    wf = (
+        "name: external checkout\non:\n  pull_request:\njobs:\n  check:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          repository: evilorg/external-repo\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("external checkout: names the mutable external default branch",
+          "default branch (mutable) of `evilorg/external-repo`" in s)
+    check("external checkout: does not claim the event SHA",
+          "event default (`GITHUB_SHA`) from `evilorg/external-repo`" not in s)
+
+
+def test_docker_action_manifest_surfaces_image_and_requires_manual_review():
+    path = ".github/actions/container/action.yml"
+    action = (
+        "name: container\nruns:\n  using: docker\n"
+        "  image: docker://ghcr.io/evilorg/tool:latest\n"
+    )
+    s = summary_for([{"filename": path, "status": "modified"}], {path: action})
+    check("docker action: surfaces its selected image",
+          "docker://ghcr.io/evilorg/tool:latest" in s)
+    check("docker action: analysis is prominently incomplete",
+          "**Automated analysis incomplete" in s)
+    check("docker action: does not claim a clean action set",
+          "Third-party actions/workflows: none (first-party only)" not in s)
+
+
+def test_node_action_manifest_surfaces_entrypoint_and_requires_manual_review():
+    path = ".github/actions/javascript/action.yml"
+    action = "name: javascript\nruns:\n  using: node20\n  main: dist/index.js\n"
+    s = summary_for([{"filename": path, "status": "modified"}], {path: action})
+    check("node action: surfaces its JavaScript entrypoint", "`dist/index.js`" in s)
+    check("node action: analysis is prominently incomplete",
+          "**Automated analysis incomplete" in s)
+    check("node action: does not claim no flags", "**Flags:** none" not in s)
+
+
 def test_no_workflow_change_returns_empty():
     s = summary_for(
         [{"filename": "src/app.py", "status": "modified"},
@@ -555,6 +594,9 @@ def main():
     test_permission_job_name_is_sanitized_before_markdown_formatting()
     test_safe_first_party_workflow_has_no_flags()
     test_checkout_without_ref_is_labeled_as_event_default()
+    test_external_checkout_without_ref_is_labeled_as_mutable_default_branch()
+    test_docker_action_manifest_surfaces_image_and_requires_manual_review()
+    test_node_action_manifest_surfaces_entrypoint_and_requires_manual_review()
     test_no_workflow_change_returns_empty()
     test_file_list_read_failure_fails_closed()
     test_incomplete_file_list_without_risky_fails_closed()

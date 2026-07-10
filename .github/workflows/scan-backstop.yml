@@ -53,10 +53,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api --paginate --slurp \
+          if ! gh api --paginate --slurp \
             "repos/{owner}/{repo}/issues?state=open&per_page=100" \
             | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
-            > cards.json
+            > cards.json.tmp; then
+            echo "::warning::Could not read the optional CI security-summary cache; scanning without it"
+            rm -f cards.json.tmp
+            printf '[]\n' > cards.json
+          else
+            mv cards.json.tmp cards.json
+          fi
 
       # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
       # runs, may post rebase nudges, and may remind or close stale
