@@ -56,38 +56,35 @@ def test_every_repo_entry_is_well_formed():
             continue
 
         name = entry.get("name")
-        valid_name = (
-            isinstance(name, str)
-            and bool(name)
-            and name == name.strip()
-        )
+        valid_name = isinstance(name, str) and bool(name) and name == name.strip()
         check("%s: name is a trimmed non-empty str" % label, valid_name)
         if valid_name:
-            check("%s: loader preserves the entry" % label,
-                  repos.get(name) == entry)
+            check("%s: loader preserves the entry" % label, repos.get(name) == entry)
         # compliance_check is either absent/null (no gate) or a non-empty string
         # naming an exact required check. Never an empty string or other type.
         comp = entry.get("compliance_check")
-        check("%s: compliance_check is None or a trimmed non-empty str" % label,
-              comp is None or (
-                  isinstance(comp, str) and bool(comp) and comp == comp.strip()
-              ))
+        check(
+            "%s: compliance_check is None or a trimmed non-empty str" % label,
+            comp is None
+            or (isinstance(comp, str) and bool(comp) and comp == comp.strip()),
+        )
         # test_check_patterns, when present, is a list of non-empty strings.
         pats = entry.get("test_check_patterns")
-        ok_pats = (
-            pats is None
-            or (isinstance(pats, list)
-                and all(
-                    isinstance(p, str) and bool(p) and p == p.strip()
-                    for p in pats
-                ))
+        ok_pats = pats is None or (
+            isinstance(pats, list)
+            and all(isinstance(p, str) and bool(p) and p == p.strip() for p in pats)
         )
-        check("%s: test_check_patterns is a list of trimmed non-empty strs (or unset)" % label,
-              ok_pats)
+        check(
+            "%s: test_check_patterns is a list of trimmed non-empty strs (or unset)"
+            % label,
+            ok_pats,
+        )
         # merge_method, when present, is one of the methods the executor accepts.
         mm = entry.get("merge_method")
-        check("%s: merge_method is unset or squash|merge|rebase" % label,
-              mm is None or mm in ("squash", "merge", "rebase"))
+        check(
+            "%s: merge_method is unset or squash|merge|rebase" % label,
+            mm is None or mm in ("squash", "merge", "rebase"),
+        )
 
 
 def test_repo_names_are_unique():
@@ -103,9 +100,14 @@ def test_repo_names_are_unique():
         and entry["name"].strip()
     ]
     folded_names = [name.casefold() for name in names]
-    check("no case-insensitive duplicate repo names in the file",
-          len(folded_names) == len(set(folded_names)))
-    check("mapping keeps every raw repo entry", len(entries) == len(core.load_config()["repos"]))
+    check(
+        "no case-insensitive duplicate repo names in the file",
+        len(folded_names) == len(set(folded_names)),
+    )
+    check(
+        "mapping keeps every raw repo entry",
+        len(entries) == len(core.load_config()["repos"]),
+    )
 
 
 def main():
