@@ -95,7 +95,7 @@ STATUS_CONTEXTS_PAGE_SIZE = 100
 _PR_NODE_FIELDS = """
         number title isDraft updatedAt changedFiles isCrossRepository mergeable
         author { login __typename }
-        headRefName headRefOid baseRefName
+        headRefName headRefOid baseRefName baseRefOid
         headRepository { name owner { login } }
         baseRepository { name owner { login } }
         labels(first:%d){ totalCount pageInfo { hasNextPage } nodes{ name } }
@@ -2755,6 +2755,7 @@ def build_repo(
                 "updated_at": pr.get("updatedAt", "") or "",
                 "changed_files": pr.get("changedFiles"),
                 "base_ref": pr.get("baseRefName"),
+                "base_sha": pr.get("baseRefOid"),
                 "cross_repo": cross_repo,
                 # Bulk GraphQL mergeable - used only by the ci-approval noop
                 # conflict-nudge path (needs-rebase already resolved via bucket).
@@ -3596,6 +3597,9 @@ _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_-]*)")
 _SECRET_BRACKET_REF_RE = re.compile(
     r"secrets\s*\[\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"]\s*\]"
 )
+_SECRET_DYNAMIC_BRACKET_REF_RE = re.compile(
+    r"secrets\s*\[\s*(?!['\"][A-Za-z_][A-Za-z0-9_-]*['\"]\s*\])"
+)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _GITHUB_REPOSITORY_EXPR_RE = re.compile(
     r"^\$\{\{\s*github\.repository\s*\}\}$", re.IGNORECASE
@@ -3606,6 +3610,7 @@ CI_SUMMARY_MAX_VALUES = 16
 CI_SUMMARY_MAX_CHARS = 12000
 CI_SECURITY_SUMMARY_VERSION = 1
 CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
+CI_SECURITY_SUMMARY_DIFF_FIELD = "ci_security_summary_diff_revision"
 CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
 CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 
@@ -3714,6 +3719,10 @@ def _secret_names(text):
     return sorted(
         set(_SECRET_REF_RE.findall(text)) | set(_SECRET_BRACKET_REF_RE.findall(text))
     )
+
+
+def _has_dynamic_secret_reference(text):
+    return bool(_SECRET_DYNAMIC_BRACKET_REF_RE.search(text))
 
 
 def _secrets_inherit(doc):
@@ -3859,6 +3868,8 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
     action_runtime = _action_runtime(doc, file_kind)
     triggers = sorted(_on_triggers(doc))
     perms = _permission_specs(doc)
+    secrets = _secret_names(text)
+    dynamic_secrets = _has_dynamic_secret_reference(text)
     actions = []
     checkouts = []
     run_steps = 0
@@ -3911,15 +3922,19 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         "checks_head": _checks_out_pr_head(doc),
         "permissions": perms,
         "perms_write": any(_permission_has_write(s) for _, s in perms),
-        "secrets": _secret_names(text),
+        "secrets": secrets,
+        "dynamic_secrets": dynamic_secrets,
         "secrets_inherit": _secrets_inherit(doc),
         "checkouts": checkouts,
         "actions": actions,
         "run_steps": run_steps,
         "action_runtime": action_runtime,
         "partially_analyzed": (
-            action_runtime is not None
-            and action_runtime["kind"] != "composite"
+            dynamic_secrets
+            or (
+                action_runtime is not None
+                and action_runtime["kind"] != "composite"
+            )
         )
         or any(
             _checkout_repository_indeterminate(
@@ -4081,16 +4096,25 @@ def _file_fact_lines(analysis):
     else:
         lines.append("  - Permissions: not set (inherits the repo default)")
 
-    if analysis["secrets"] or analysis["secrets_inherit"]:
+    if (
+        analysis["secrets"]
+        or analysis["secrets_inherit"]
+        or analysis.get("dynamic_secrets")
+    ):
         shown, extra = _summary_values(analysis["secrets"])
         names = ", ".join("`%s`" % _safe_inline(s) for s in shown)
-        detail = names or "referenced"
+        detail = names
         if extra:
             detail += " (+%d omitted)" % extra
             omitted.append("secret names")
+        if analysis.get("dynamic_secrets"):
+            detail += (", " if detail else "") + "dynamic/unknown secret reference"
         if analysis["secrets_inherit"]:
-            detail += (", " if names else "") + "`secrets: inherit`"
-        lines.append("  - Secrets/token: %s" % detail)
+            detail += (", " if detail else "") + "`secrets: inherit`"
+        lines.append(
+            "  - Secrets/token: %s%s"
+            % (detail, " - review manually" if analysis.get("dynamic_secrets") else "")
+        )
     else:
         lines.append("  - Secrets/token: none referenced")
 
@@ -4300,6 +4324,14 @@ def _security_summary_from_card_body(body):
     return summary or None
 
 
+def _ci_security_summary_diff_revision(pr):
+    base_ref = str(pr.get("base_ref") or "").strip()
+    base_sha = str(pr.get("base_sha") or "").strip()
+    if not base_ref or not base_sha:
+        return ""
+    return json.dumps([base_ref, base_sha], separators=(",", ":"))
+
+
 def ci_security_summary_cache(cards):
     cache = {}
     for card in cards or []:
@@ -4314,7 +4346,8 @@ def ci_security_summary_cache(cards):
         repo = state.get("repo")
         number = state.get("number")
         head_sha = state.get("head_sha")
-        if not repo or not head_sha:
+        diff_revision = state.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+        if not repo or not head_sha or not isinstance(diff_revision, str) or not diff_revision:
             continue
         try:
             key = (str(repo), int(number))
@@ -4335,13 +4368,22 @@ def ci_security_summary_cache(cards):
             continue
         if not present:
             summary = ""
-        cache[key] = {"head_sha": str(head_sha), "summary": summary}
+        cache[key] = {
+            "head_sha": str(head_sha),
+            "diff_revision": diff_revision,
+            "summary": summary,
+        }
     return cache
 
 
-def _cached_ci_security_summary(cache, repo, pr, head_sha):
+def _cached_ci_security_summary(cache, repo, pr, head_sha, diff_revision):
     entry = (cache or {}).get((repo, int(pr)))
-    if entry and entry.get("head_sha") == (head_sha or ""):
+    if (
+        entry
+        and diff_revision
+        and entry.get("head_sha") == (head_sha or "")
+        and entry.get("diff_revision") == diff_revision
+    ):
         return (True, entry.get("summary") or "")
     return (False, "")
 
@@ -4351,8 +4393,9 @@ def _attach_ci_security_summary(item, slug, pr, cache=None):
     item. Display-only: it never approves, never writes, and never affects
     routing or the hold. A failure falls back to the manual-review note."""
     head_sha = pr.get("head_sha", "") or ""
+    diff_revision = _ci_security_summary_diff_revision(pr)
     cached, summary = _cached_ci_security_summary(
-        cache, item.get("repo", ""), pr["number"], head_sha
+        cache, item.get("repo", ""), pr["number"], head_sha, diff_revision
     )
     if not cached:
         try:
@@ -4367,6 +4410,7 @@ def _attach_ci_security_summary(item, slug, pr, cache=None):
             )
             summary = CI_SUMMARY_UNANALYZABLE
     item[CI_SECURITY_SUMMARY_HEAD_FIELD] = head_sha
+    item[CI_SECURITY_SUMMARY_DIFF_FIELD] = diff_revision
     item[CI_SECURITY_SUMMARY_VERSION_FIELD] = CI_SECURITY_SUMMARY_VERSION
     item[CI_SECURITY_SUMMARY_PRESENT_FIELD] = bool(summary)
     if summary:

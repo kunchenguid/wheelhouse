@@ -165,6 +165,7 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # the card issue's own updatedAt for `sort:updated-desc`.
 ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
 CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
+CI_SECURITY_SUMMARY_DIFF_FIELD = "ci_security_summary_diff_revision"
 CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
 CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 
@@ -377,6 +378,9 @@ def security_summary_stale(item, state):
         (state or {}).get(CI_SECURITY_SUMMARY_VERSION_FIELD) != expected
         or (state or {}).get(CI_SECURITY_SUMMARY_HEAD_FIELD)
         != (item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or "")
+        or not item.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+        or (state or {}).get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+        != item.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
     )
 
 
@@ -1082,6 +1086,9 @@ def render(item, held=False):
     if kind == "ci-approval" and CI_SECURITY_SUMMARY_VERSION_FIELD in item:
         state[CI_SECURITY_SUMMARY_HEAD_FIELD] = (
             item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or ""
+        )
+        state[CI_SECURITY_SUMMARY_DIFF_FIELD] = (
+            item.get(CI_SECURITY_SUMMARY_DIFF_FIELD) or ""
         )
         state[CI_SECURITY_SUMMARY_VERSION_FIELD] = item[
             CI_SECURITY_SUMMARY_VERSION_FIELD

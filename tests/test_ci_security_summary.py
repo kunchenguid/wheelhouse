@@ -209,6 +209,27 @@ def test_bracket_secret_reference_is_surfaced():
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
     check("secret reference: bracket syntax surfaces the secret name",
           "`DEPLOY_TOKEN`" in s)
+    check("secret reference: literal bracket syntax remains fully analyzed",
+          "**Automated analysis incomplete - review the full diff manually.**" not in s)
+
+
+def test_dynamic_secret_index_requires_manual_review():
+    for expression in ("inputs.secret_name", "github.event.X"):
+        wf = (
+            "name: target\non:\n  pull_request:\njobs:\n  deploy:\n"
+            "    steps:\n      - run: echo ok\n"
+            "        env:\n"
+            "          TOKEN: ${{ secrets[%s] }}\n" % expression
+        )
+        s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+        check("dynamic secret index: %s is surfaced" % expression,
+              "dynamic/unknown secret reference" in s)
+        check("dynamic secret index: %s fails closed" % expression,
+              "**Automated analysis incomplete - review the full diff manually.**" in s)
+        check("dynamic secret index: %s names its manual review" % expression,
+              "dynamic/unknown secret reference - review manually" in s)
+        check("dynamic secret index: %s is not reported clean" % expression,
+              "Secrets/token: none referenced" not in s)
 
 
 # --------------------------------------------------------------------------- #
@@ -634,6 +655,7 @@ def test_security_summary_cache_reuses_current_card_body():
     item = _ci_item(
         security_summary=summary,
         ci_security_summary_head_sha="abc123",
+        ci_security_summary_diff_revision='["main","base123"]',
         ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
         ci_security_summary_present=True,
     )
@@ -642,7 +664,11 @@ def test_security_summary_cache_reuses_current_card_body():
         [{"body": body, "labels": rc.card_labels(item)}]
     )
     check("cache: current summary is available by target",
-          cache == {("firstmate", 345): {"head_sha": "abc123", "summary": summary}})
+          cache == {("firstmate", 345): {
+              "head_sha": "abc123",
+              "diff_revision": '["main","base123"]',
+              "summary": summary,
+          }})
     state = rc.parse_state_block(body)
     check("cache: summary cache markers are non-material",
           rc.material_changed(item, state) is False)
@@ -656,6 +682,7 @@ def test_security_summary_cache_reuses_current_card_body():
 def test_security_summary_cache_records_analyzed_empty_result():
     item = _ci_item(
         ci_security_summary_head_sha="abc123",
+        ci_security_summary_diff_revision='["main","base123"]',
         ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
         ci_security_summary_present=False,
     )
@@ -663,13 +690,18 @@ def test_security_summary_cache_records_analyzed_empty_result():
         [{"body": rc.render(item)["body"], "labels": rc.card_labels(item)}]
     )
     check("cache: empty summary result is cached",
-          cache == {("firstmate", 345): {"head_sha": "abc123", "summary": ""}})
+          cache == {("firstmate", 345): {
+              "head_sha": "abc123",
+              "diff_revision": '["main","base123"]',
+              "summary": "",
+          }})
 
 
 def test_security_summary_cache_requires_verified_card_labels_and_head_marker():
     item = _ci_item(
         security_summary="untrusted summary",
         ci_security_summary_head_sha="abc123",
+        ci_security_summary_diff_revision='["main","base123"]',
         ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
         ci_security_summary_present=True,
     )
@@ -689,6 +721,44 @@ def test_security_summary_cache_requires_verified_card_labels_and_head_marker():
               "body": stale_marker_body,
               "labels": rc.card_labels(item),
           }]) == {})
+
+
+def test_security_summary_cache_invalidates_base_changes_and_retargets():
+    initial = core._ci_security_summary_diff_revision({
+        "base_ref": "main",
+        "base_sha": "base-a",
+    })
+    item = _ci_item(
+        security_summary="cached summary",
+        ci_security_summary_head_sha="abc123",
+        ci_security_summary_diff_revision=initial,
+        ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
+        ci_security_summary_present=True,
+    )
+    cache = core.ci_security_summary_cache([{
+        "body": rc.render(item)["body"],
+        "labels": rc.card_labels(item),
+    }])
+    check("cache revision: matching base is reused",
+          core._cached_ci_security_summary(
+              cache, "firstmate", 345, "abc123", initial
+          ) == (True, "cached summary"))
+    for name, base_ref, base_sha in (
+        ("base advance", "main", "base-b"),
+        ("retarget", "release", "base-a"),
+    ):
+        revised = core._ci_security_summary_diff_revision({
+            "base_ref": base_ref,
+            "base_sha": base_sha,
+        })
+        check("cache revision: %s misses the old summary" % name,
+              core._cached_ci_security_summary(
+                  cache, "firstmate", 345, "abc123", revised
+              ) == (False, ""))
+        changed = dict(item, ci_security_summary_diff_revision=revised)
+        old_state = rc.parse_state_block(rc.render(item)["body"])
+        check("cache revision: %s refreshes the card" % name,
+              rc.security_summary_stale(changed, old_state) is True)
 
 
 def test_render_scopes_section_to_ci_approval_only():
@@ -721,6 +791,7 @@ def main():
     test_missing_or_unknown_action_runtime_requires_manual_diff_review()
     test_reusable_workflow_and_inherited_secrets_are_surfaced()
     test_bracket_secret_reference_is_surfaced()
+    test_dynamic_secret_index_requires_manual_review()
     test_secret_values_are_never_echoed()
     test_value_sanitizer_neutralizes_markdown_breakout()
     test_permission_job_name_is_sanitized_before_markdown_formatting()
@@ -749,6 +820,7 @@ def main():
     test_security_summary_cache_reuses_current_card_body()
     test_security_summary_cache_records_analyzed_empty_result()
     test_security_summary_cache_requires_verified_card_labels_and_head_marker()
+    test_security_summary_cache_invalidates_base_changes_and_retargets()
     test_render_scopes_section_to_ci_approval_only()
     test_render_ci_approval_without_summary_has_no_section()
     test_security_summary_does_not_trigger_a_refresh()

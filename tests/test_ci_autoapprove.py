@@ -385,6 +385,7 @@ def pr_node(number, status_rollup, draft=False, base_ref="main", cross_repo=True
         "headRefName": "feature-%d" % number,
         "headRefOid": "sha%d" % number,
         "baseRefName": base_ref,
+        "baseRefOid": "base-%s" % base_ref,
         "headRepository": {"name": "demo-fork", "owner": {"login": "forker"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"nodes": []},
@@ -588,7 +589,11 @@ def test_current_card_summary_is_reused_without_target_reads():
         "exploit": False,
         "reason": "risky",
     }
-    cache = {("demo", 1): {"head_sha": "sha1", "summary": "CACHED-SUMMARY"}}
+    cache = {("demo", 1): {
+        "head_sha": "sha1",
+        "diff_revision": '["main","base-main"]',
+        "summary": "CACHED-SUMMARY",
+    }}
     result, items, calls = run_build_repo(
         [needs_ci_pr()], verdict=verdict, summary_cache=cache
     )
