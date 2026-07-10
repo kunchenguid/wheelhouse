@@ -318,7 +318,7 @@ jobs:
                 printf '\n\n[diff truncated after %s bytes]\n' "$diff_limit_bytes"
               elif { [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; } || [ "$head_status" -ne 0 ]; then
                 echo "(could not fetch diff)"
-              elif [ "$diff_size" -eq 0 ] || grep -Eq '^(Binary files .+ differ|GIT binary patch|Binary file .+ has changed)$|(^|[+-])version https://git-lfs\.github\.com/spec/v1$|(^|[+-])Subproject commit [0-9A-Fa-f]{7,64}(-dirty)?$' "$diff_raw"; then
+              elif [ "$diff_size" -eq 0 ] || grep -Eq '^(Binary files .+ differ|GIT binary patch|Binary file .+ has changed)$|(^|[-+[:blank:]])version https://git-lfs\.github\.com/spec/v1$|(^|[+-])Subproject commit [0-9A-Fa-f]{7,64}(-dirty)?$' "$diff_raw"; then
                 cat "$diff_raw"
                 printf '\n\n[diff contains binary, LFS, or submodule data unavailable for auto-merge assessment]\n'
               else

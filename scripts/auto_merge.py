@@ -356,6 +356,13 @@ def _card_label_names(card):
     return names
 
 
+def _card_comment_count(card):
+    comments = (card or {}).get("comments")
+    if not isinstance(comments, list):
+        return None
+    return len(comments)
+
+
 def _card_author_login(card):
     author = (card or {}).get("author")
     if isinstance(author, dict):
@@ -454,6 +461,7 @@ def _card_index(cards):
             "labels": labels,
             "body": card.get("body") or "",
             "updated_at": render_card.card_updated_at(card),
+            "comment_count": _card_comment_count(card),
         }
     for key in duplicate_keys:
         index.pop(key, None)
@@ -688,6 +696,12 @@ def _current_claim_matches(expected, current, repo, number):
         return (False, "card body changed")
     if current_entry["state"] != expected.get("state"):
         return (False, "card state changed")
+    expected_comment_count = expected.get("comment_count")
+    current_comment_count = current_entry.get("comment_count")
+    if expected_comment_count is None or current_comment_count is None:
+        return (False, "card comment activity is unavailable")
+    if current_comment_count != expected_comment_count:
+        return (False, "card comment activity changed after the claim")
     if not _card_is_claimed(current_entry["labels"]):
         return (False, "card claim is no longer current")
     if _card_has_pending_decision(current_entry["labels"]):
@@ -728,6 +742,7 @@ def claim_cards(scan, cards):
                 or not render_card.is_refreshable(current_entry["labels"])
                 or current_entry["state"] != expected["state"]
                 or current_entry.get("updated_at") != expected.get("updated_at")
+                or current_entry.get("comment_count") is None
                 or _card_has_pending_decision(current_entry["labels"])
                 or _selected_card_option(current.get("body"))
                 or not verdict_ok
@@ -757,6 +772,8 @@ def claim_cards(scan, cards):
                 not claimed_entry
                 or not render_card.issue_is_open(claimed_card)
                 or claimed_entry["state"] != expected["state"]
+                or claimed_entry.get("comment_count")
+                != current_entry.get("comment_count")
                 or not _card_is_claimed(claimed_entry["labels"])
                 or _card_has_pending_decision(claimed_entry["labels"])
                 or _selected_card_option(claimed_card.get("body"))

@@ -1311,7 +1311,7 @@ def get_card(number):
             "view",
             str(number),
             "--json",
-            "number,body,labels,state,updatedAt,author",
+            "number,body,labels,state,updatedAt,author,comments",
         ],
         check=False,
     )

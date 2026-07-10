@@ -153,6 +153,7 @@ def make_card(
         "labels": [{"name": n} for n in labels],
         "author": author,
         "updatedAt": "2026-07-10T00:00:00Z",
+        "comments": [],
     }
 
 
@@ -964,6 +965,68 @@ def test_claim_rechecks_owner_selection_after_locking():
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
 
 
+def test_claim_rechecks_owner_comment_activity_after_locking():
+    _, items, _ = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    current = dict(initial, state="OPEN")
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+    }
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: None
+
+    def edit(args, check=False):
+        if "--add-label" in args:
+            current["labels"] += [
+                {"name": "processing"},
+                {"name": am.AUTO_MERGE_CLAIM_LABEL},
+            ]
+            current["comments"] = [{"id": "owner-hold"}]
+        elif "--remove-label" in args:
+            remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
+            current["labels"] = [label for label in current["labels"]
+                                 if label.get("name") not in remove]
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    render_card._gh = edit
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        claims = am.claim_cards({"items": items}, [initial])
+        labels = am._card_label_names(current)
+        check(
+            "claim: post-lock owner comment cancels the claim",
+            claims == [] and "processing" not in labels
+            and am.AUTO_MERGE_CLAIM_LABEL not in labels,
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
 def test_claim_requires_fresh_verdict_before_locking_card():
     _, items, _ = default_world()
     initial = make_card(
@@ -1049,6 +1112,10 @@ def test_validate_claimed_card_rejects_pending_decisions_and_newer_activity():
     try:
         for label, current_change in (
             ("newer card activity", lambda card: card.update({"updatedAt": "2026-07-10T00:01:00Z"})),
+            (
+                "same-second card comment",
+                lambda card: card.update({"comments": [{"id": "owner-hold"}]}),
+            ),
             (
                 "decision label",
                 lambda card: card["labels"].append({"name": "decision:hold"}),
@@ -1194,6 +1261,56 @@ def test_G7_card_activity_after_claim_holds_and_releases_claim():
         "G7: later card activity is queued for claim release",
         payload["releases"] == [{"card_issue": 101}],
     )
+
+
+def test_G7_same_second_card_comment_after_claim_holds_and_releases_claim():
+    w, items, cards = default_world(head="uc" * 20)
+    changed = dict(cards[0], comments=[{"id": "owner-hold"}])
+    w.card_seq = {"101": [changed]}
+    payload, _ = run_act(w, items, cards)
+    check("G7: same-second card comment holds", not payload["merges"])
+    check("G7: same-second card comment does not call merge", not w.do_merge_calls)
+    check(
+        "G7: same-second card comment is queued for claim release",
+        payload["releases"] == [{"card_issue": 101}],
+    )
+
+
+def test_card_reader_includes_comment_activity():
+    saved = render_card._gh
+    calls = []
+
+    def read(args, check=False):
+        calls.append(args)
+        return type(
+            "R",
+            (),
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "number": 101,
+                        "body": "Card",
+                        "labels": [],
+                        "state": "OPEN",
+                        "updatedAt": "2026-07-10T00:00:00Z",
+                        "author": {"login": am.CARD_AUTOMATION_AUTHOR},
+                        "comments": [{"id": "owner-hold"}],
+                    }
+                ),
+            },
+        )()
+
+    render_card._gh = read
+    try:
+        card = render_card.get_card(101)
+        check(
+            "claim: card reads include comment activity",
+            calls and any("comments" in str(arg) for arg in calls[0])
+            and card.get("comments") == [{"id": "owner-hold"}],
+        )
+    finally:
+        render_card._gh = saved
 
 
 def test_G7_card_read_uses_dedicated_default_token():
@@ -2070,9 +2187,10 @@ def test_triage_rejects_lfs_and_submodule_diff_markers():
     pattern = match.group(1) if match else ""
     for label, diff in (
         (
-            "LFS pointer",
-            "+version https://git-lfs.github.com/spec/v1\n"
-            "+oid sha256:0123456789abcdef\n+",
+            "LFS pointer context line",
+            " version https://git-lfs.github.com/spec/v1\n"
+            "-oid sha256:0123456789abcdef\n"
+            "+oid sha256:fedcba9876543210\n",
         ),
         (
             "submodule gitlink",
