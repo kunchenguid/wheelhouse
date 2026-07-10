@@ -83,6 +83,7 @@ LEDGER_LABEL = "wheelhouse:auto-merge-log"
 LEDGER_TITLE = "Wheelhouse auto-merge log (automated)"
 # Keep the stored history bounded so the ledger body cannot grow without limit.
 LEDGER_ENTRY_CAP = 200
+LEDGER_MAX_BODY_BYTES = 60000
 _LEDGER_RE = re.compile(
     r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(LEDGER_MARKER), re.S
 )
@@ -342,6 +343,20 @@ def _selected_card_option(body):
     )
 
 
+def _fresh_verdict_for_head(state, head_sha):
+    state = state if isinstance(state, dict) else {}
+    head_sha = str(head_sha or "")
+    if not head_sha:
+        return (False, "", "current head SHA is unavailable")
+    if state.get("triage_status") != "succeeded":
+        return (False, "", "no successful auto-triage verdict on the card")
+    if str(state.get("triaged_sha") or "") != head_sha:
+        return (False, "", "behavior verdict is stale (not for the current head SHA)")
+    if str(state.get("head_sha") or "") != head_sha:
+        return (False, "", "card head SHA is not current")
+    return verdict_eligible(state.get("automerge_verdict"))
+
+
 def _card_index(cards):
     """Map (target_repo, target_number) -> {issue, state, labels} for every
     pr-review card, so a scan worklist item can find its persisted behavior
@@ -369,6 +384,7 @@ def _card_index(cards):
             "issue": card.get("number"),
             "state": state,
             "labels": labels,
+            "body": card.get("body") or "",
         }
     for key in duplicate_keys:
         index.pop(key, None)
@@ -438,19 +454,13 @@ def evaluate_candidate(
         return hold("G1 card is still held (auto-triage has not published it)")
     if not _card_is_claimed(card_entry.get("labels") or set()):
         return hold("G1 card is not a current auto-merge claim")
-    if state.get("triage_status") != "succeeded":
-        return hold("G6 no successful auto-triage verdict on the card")
-    if str(state.get("triaged_sha") or "") != head_sha or not head_sha:
-        return hold("G6 behavior verdict is stale (not for the current head SHA)")
-    if str(state.get("head_sha") or "") != head_sha:
-        return hold("G1 card head SHA is not current")
-    verdict = state.get("automerge_verdict")
-    v_ok, behavior_class, v_reason = verdict_eligible(verdict)
+    v_ok, behavior_class, v_reason = _fresh_verdict_for_head(state, head_sha)
     # G6 is a free/cheap check on already-persisted state, so run it before the
     # cached VISION read and the live target reads below (an ineligible fresh
     # verdict holds without spending any API calls).
     if not v_ok:
         return hold("G6 %s" % v_reason)
+    verdict = state.get("automerge_verdict")
 
     vision_present, vision_sha = vision_on_default_branch(slug)
     if not vision_present:
@@ -584,6 +594,23 @@ def recover_stale_card_claims(cards):
     return recovered
 
 
+def _current_claim_matches(expected, current, repo, number):
+    if not current or not render_card.issue_is_open(current):
+        return (False, "card is no longer open")
+    current_entry = _card_index([current]).get((repo, number))
+    if not current_entry:
+        return (False, "card is no longer a trusted pr-review card")
+    if current_entry["body"] != expected.get("body", ""):
+        return (False, "card body changed")
+    if current_entry["state"] != expected.get("state"):
+        return (False, "card state changed")
+    if not _card_is_claimed(current_entry["labels"]):
+        return (False, "card claim is no longer current")
+    if _selected_card_option(current_entry["body"]):
+        return (False, "an owner selected a card option")
+    return (True, "")
+
+
 def claim_cards(scan, cards):
     cfg = core.load_config()
     global_auto_merge = cfg["auto_merge"]
@@ -606,12 +633,16 @@ def claim_cards(scan, cards):
         try:
             current = render_card.get_card(expected["issue"])
             current_entry = _card_index([current]).get((repo, number))
+            verdict_ok, _, _ = _fresh_verdict_for_head(
+                (current_entry or {}).get("state"), item.get("head_sha")
+            )
             if (
                 not current_entry
                 or not render_card.issue_is_open(current)
                 or not render_card.is_refreshable(current_entry["labels"])
                 or current_entry["state"] != expected["state"]
                 or _selected_card_option(current.get("body"))
+                or not verdict_ok
             ):
                 continue
             render_card.ensure_labels(["processing", AUTO_MERGE_CLAIM_LABEL])
@@ -631,12 +662,16 @@ def claim_cards(scan, cards):
                 continue
             claimed_card = render_card.get_card(expected["issue"])
             claimed_entry = _card_index([claimed_card]).get((repo, number))
+            claimed_verdict_ok, _, _ = _fresh_verdict_for_head(
+                (claimed_entry or {}).get("state"), item.get("head_sha")
+            )
             if (
                 not claimed_entry
                 or not render_card.issue_is_open(claimed_card)
                 or claimed_entry["state"] != expected["state"]
                 or not _card_is_claimed(claimed_entry["labels"])
                 or _selected_card_option(claimed_card.get("body"))
+                or not claimed_verdict_ok
             ):
                 _release_card_claim(expected["issue"])
                 continue
@@ -677,14 +712,10 @@ def validate_claimed_cards(cards):
         issue = expected.get("issue")
         try:
             current = render_card.get_card(issue)
-            current_entry = _card_index([current]).get((repo, number))
-            if (
-                current_entry
-                and render_card.issue_is_open(current)
-                and current_entry["state"] == expected["state"]
-                and _card_is_claimed(current_entry["labels"])
-                and not _selected_card_option(current.get("body"))
-            ):
+            current_matches, _ = _current_claim_matches(
+                expected, current, repo, number
+            )
+            if current_matches:
                 validated.append(current)
                 continue
             _release_card_claim(issue)
@@ -720,7 +751,7 @@ def cmd_validate(cards_path):
 # --------------------------------------------------------------------------- #
 # G7: act (live re-check immediately before merging, then do_merge)
 # --------------------------------------------------------------------------- #
-def act_merge(owner, repo, number, head_sha, vision_sha):
+def act_merge(owner, repo, number, head_sha, vision_sha, expected_card):
     """G7. Immediately re-read head SHA + mergeability + clean merge state, then
     call the existing do_merge (which does its own head re-check and runs on the
     ambient FLEET_TOKEN with the unchanged owner-safety / thank-you model).
@@ -746,6 +777,12 @@ def act_merge(owner, repo, number, head_sha, vision_sha):
     mc_ok, mc_reason = mergeable_clean(pr)
     if not mc_ok:
         return ("held", "final re-check: %s" % mc_reason, "")
+    current_card = render_card.get_card(expected_card.get("issue"))
+    card_ok, card_reason = _current_claim_matches(
+        expected_card, current_card, repo, str(number)
+    )
+    if not card_ok:
+        return ("held", "final card re-check: %s" % card_reason, "")
 
     message, terminal = apply_decision.do_merge(owner, repo, number, head_sha)
     if terminal == "resolved" and message.startswith("Merged "):
@@ -843,6 +880,7 @@ def act_on_scan(scan, cards):
                 item["number"],
                 result["head_sha"],
                 result["audit"]["vision_sha"],
+                card_entry,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
             outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")
@@ -960,13 +998,25 @@ def _ledger_entry(record):
     }
 
 
-def append_ledger_entries(prev, records, cap=LEDGER_ENTRY_CAP):
+def append_ledger_entries(
+    prev,
+    records,
+    cap=LEDGER_ENTRY_CAP,
+    max_body_bytes=LEDGER_MAX_BODY_BYTES,
+    updated_at="",
+):
     """Pure ledger update: previous entries + this run's records, newest last,
     capped to the most recent `cap`."""
     prev = prev if isinstance(prev, list) else []
     combined = list(prev) + [_ledger_entry(r) for r in records or []]
     if cap and len(combined) > cap:
         combined = combined[-cap:]
+    while (
+        combined
+        and len(render_ledger_body(combined, updated_at).encode("utf-8"))
+        > max_body_bytes
+    ):
+        combined.pop(0)
     return combined
 
 
@@ -1077,8 +1127,9 @@ def append_to_ledger(records):
         slug = core._this_repo_slug()
         issue = _find_ledger_issue(slug)
         prev = parse_ledger(issue.get("body") if issue else None)
-        entries = append_ledger_entries(prev, records)
-        body = render_ledger_body(entries, _now())
+        updated_at = _now()
+        entries = append_ledger_entries(prev, records, updated_at=updated_at)
+        body = render_ledger_body(entries, updated_at)
         if issue and issue.get("number"):
             core.gh_rest(
                 "repos/%s/issues/%s" % (slug, issue["number"]),

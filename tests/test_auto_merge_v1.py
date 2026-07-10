@@ -201,6 +201,7 @@ def run_act(world, items, cards, has_token=True):
         "live": am.live_pr,
         "files": core._list_pr_files,
         "domerge": apply_decision.do_merge,
+        "get_card": render_card.get_card,
         "cfg": core.load_config,
         "maint": core.maintainers,
         "owner": core.get_owner,
@@ -221,6 +222,15 @@ def run_act(world, items, cards, has_token=True):
     }
     core.maintainers = lambda: set(world.maintainers)
     core.get_owner = lambda: world.owner
+    cards_by_number = {str(card["number"]): card for card in cards}
+
+    def get_card(number):
+        sequence = getattr(world, "card_seq", {}).get(str(number))
+        if sequence:
+            return sequence.pop(0) if len(sequence) > 1 else sequence[0]
+        return cards_by_number.get(str(number))
+
+    render_card.get_card = get_card
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true" if has_token else "false"
     scan = {
         "repos": {
@@ -241,6 +251,7 @@ def run_act(world, items, cards, has_token=True):
         am.live_pr = saved["live"]
         core._list_pr_files = saved["files"]
         apply_decision.do_merge = saved["domerge"]
+        render_card.get_card = saved["get_card"]
         core.load_config = saved["cfg"]
         core.maintainers = saved["maint"]
         core.get_owner = saved["owner"]
@@ -317,6 +328,15 @@ def test_exclusions_cover_every_category():
         ("src/auth.py", "authentication"),
         ("src/authentication.py", "authentication"),
         ("src/security.py", "security"),
+        ("pom.xml", "dependency"),
+        ("build.gradle", "dependency"),
+        ("build.gradle.kts", "dependency"),
+        ("settings.gradle", "dependency"),
+        ("settings.gradle.kts", "dependency"),
+        (".gitmodules", "dependency"),
+        ("scripts/migrate.py", "migration"),
+        ("scripts/migrate_data.py", "migration"),
+        ("tools/migrate.py", "migration"),
     ):
         check(
             "exclusion: component filename %s is held" % path,
@@ -765,6 +785,53 @@ def test_claim_rechecks_owner_selection_after_locking():
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
 
 
+def test_claim_requires_fresh_verdict_before_locking_card():
+    _, items, _ = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=None,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    current = dict(initial, state="OPEN")
+    calls = []
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+    }
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
+    render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        claims = am.claim_cards({"items": items}, [initial])
+        check(
+            "claim: a successful triage without a verdict leaves no claim churn",
+            claims == [] and calls == [],
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
 def test_validate_claimed_card_rechecks_owner_selection_before_acting():
     claimed = make_card(101, "fmt", 5, "vc" * 20, automerge_verdict=ELIGIBLE_A)
     current = dict(claimed, state="OPEN")
@@ -852,6 +919,20 @@ def test_G7_escape_hatch_appears_before_acting_holds():
     w.set_pr("owner/fmt", 5, [good, tagged])
     payload, _ = run_act(w, items, cards)
     check("G7: escape hatch appearing before acting holds", not payload["merges"])
+
+
+def test_G7_card_changed_before_acting_holds_and_releases_claim():
+    w, items, cards = default_world(head="cc" * 20)
+    changed = dict(cards[0])
+    changed["body"] += "\n- [x] Hold <!-- opt:hold -->"
+    w.card_seq = {"101": [changed]}
+    payload, _ = run_act(w, items, cards)
+    check("G7: card changed before acting holds", not payload["merges"])
+    check("G7: card change before acting does not call merge", not w.do_merge_calls)
+    check(
+        "G7: card change is queued for default-token claim release",
+        payload["releases"] == [{"card_issue": 101}],
+    )
 
 
 def test_vision_is_rechecked_per_candidate_and_before_acting():
@@ -1154,7 +1235,31 @@ def test_ledger_parse_append_render_and_cap():
     # Cap keeps only the most recent entries.
     many = [_merge_record(n) for n in range(300)]
     capped = am.append_ledger_entries([], many, cap=am.LEDGER_ENTRY_CAP)
-    check("ledger: stored history is capped", len(capped) == am.LEDGER_ENTRY_CAP)
+    check(
+        "ledger: stored history is bounded by count and serialized size",
+        capped
+        and len(capped) <= am.LEDGER_ENTRY_CAP
+        and capped[-1]["number"] == "299"
+        and len(am.render_ledger_body(capped).encode("utf-8"))
+        <= am.LEDGER_MAX_BODY_BYTES,
+    )
+    oversized = []
+    for n in range(12):
+        record = _merge_record(n)
+        record["gates"] = {"detail": "x" * 20000}
+        oversized.append(record)
+    byte_capped = am.append_ledger_entries([], oversized)
+    byte_body = am.render_ledger_body(byte_capped, "2026-07-10T00:00:00Z")
+    check(
+        "ledger: serialized body stays within the GitHub-safe byte cap",
+        len(byte_body.encode("utf-8")) <= am.LEDGER_MAX_BODY_BYTES,
+    )
+    check(
+        "ledger: byte cap trims oldest records first",
+        byte_capped
+        and byte_capped[-1]["number"] == "11"
+        and len(byte_capped) < len(oversized),
+    )
 
 
 def test_audit_comment_explains_why_it_qualified():
@@ -1372,6 +1477,13 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         and '"$VISION_SIZE" -le "$vision_limit_bytes"' in text
         and '"$vision_bytes" = "$VISION_SIZE"' in text
         and 'head -c "$vision_limit_bytes" > vision.md' not in text,
+    )
+    check(
+        "triage: binary diff input suppresses auto-merge verdict storage",
+        "Binary files .+ differ" in text
+        and "GIT binary patch" in text
+        and '"$diff_size" -eq 0' in text
+        and "binary data unavailable for auto-merge assessment" in text,
     )
 
 

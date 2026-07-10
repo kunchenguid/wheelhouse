@@ -3391,6 +3391,12 @@ _AM_EXCLUDE_SUFFIXES = {
         "composer.lock",
         "gopkg.toml",
         "gopkg.lock",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        ".gitmodules",
     ),
     "release": (
         "release-please-config.json",
@@ -3439,6 +3445,7 @@ _AM_EXCLUDE_PATH_COMPONENTS = {
     "authentication": re.compile(
         r"(?:^|/)(?:auth|authentication|authorization|authn|authz)(?:[._/-]|$)"
     ),
+    "migration": re.compile(r"(?:^|/)(?:scripts/)?migrate[^/]*\.py$"),
 }
 
 
