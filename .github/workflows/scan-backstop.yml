@@ -47,7 +47,9 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
-      # Current open cards in THIS repo - default token.
+      # Current open cards in THIS repo - default token. This also supplies the
+      # optional, read-only CI security-summary cache; an unreadable list falls
+      # back to an empty cache so the fleet scan still runs and re-analyzes.
       - name: List open cards
         env:
           GH_TOKEN: ${{ github.token }}

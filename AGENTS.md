@@ -842,13 +842,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   value is code-wrapped (`_safe_inline`) so it cannot break out of the card's
   markdown. It FAILS CLOSED: any read/parse failure yields
   `CI_SUMMARY_UNANALYZABLE` ("review the diff manually") and NEVER raises, so the
-  card still holds. `security_summary` is a non-material display field (like
-  `warning`): never in `MATERIAL_FIELDS`/the state block, but derived from
-  `head_sha` (material for ci-approval), so a head move refreshes it; existing
-  cards pick it up once via the `CARD_RENDER_VERSION` 5 -> 6 bump. It runs on the
-  `ok:true` success path only, and only for contributor-authored HOLD cards
-  (owner/maintainer/bot ci-approval PRs are approved or suppressed with no card,
-  so the summarizer is never consulted). See `tests/test_ci_security_summary.py`.
+  card still holds. The rendered `security_summary` string is a non-material display field (like `warning`): it never enters `MATERIAL_FIELDS`, while the state block carries only non-material cache metadata (head SHA, base-diff revision, summary format version, and whether a section is present).
+  The scan cache reuses that rendered section only when its validated card labels, head SHA, and `[base_ref,base_sha]` diff revision still match, so a base move invalidates it even if the PR head does not change.
+  `scan-backstop` reads this cache under the default card token before the cross-repo scan; a card-list or cache-read failure fails open to an empty cache and re-analyzes instead of skipping the fleet scan.
+  A cache metadata mismatch triggers a pure-card refresh through `security_summary_stale`; existing cards otherwise pick up the section once via the `CARD_RENDER_VERSION` 5 -> 6 bump.
+  It runs on the `ok:true` success path only, and only for contributor-authored HOLD cards (owner/maintainer/bot ci-approval PRs are approved or suppressed with no card, so the summarizer is never consulted).
+  See `tests/test_ci_security_summary.py`.
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`
   also listens for the legacy `triage-item` (`types: [wheelhouse-item,
   triage-item]`). It is a cross-repo wire contract: source repos onboarded before

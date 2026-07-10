@@ -32,6 +32,9 @@ passing it lets Wheelhouse reflect target activity onto the card issue's own
 updated time for GitHub's recently-updated queue sort. The same eligibility gates
 decide whether render_card.py creates a brand-new card as a held
 `pending-triage` placeholder before that first auto-triage attempt.
+The dispatch path deliberately does not provide the scan-only CI-approval
+Security review; `wheelhouse_core.build_repo` produces that deterministic,
+read-only context only for a scan-created contributor HOLD card.
 """
 
 import json

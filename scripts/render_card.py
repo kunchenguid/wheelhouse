@@ -369,6 +369,10 @@ def held_publish_needed(item, state, has_token):
 
 
 def security_summary_stale(item, state):
+    """True when a scan-supplied CI security-summary cache entry needs a
+    pure-card re-render because its format, PR head, or base-diff revision
+    changed. The rendered summary itself is deliberately not compared here: it
+    is display-only card-body content, never a material decision input."""
     if item.get("kind") != "ci-approval":
         return False
     expected = item.get(CI_SECURITY_SUMMARY_VERSION_FIELD)

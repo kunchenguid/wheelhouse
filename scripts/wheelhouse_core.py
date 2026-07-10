@@ -2581,6 +2581,9 @@ def build_repo(
     fire-once-per-head rebase nudge used for `needs-rebase` is posted before the
     PR is dropped from the worklist - still no decision card and no bucket rewrite
     (ci-approval stays independent of mergeability for classification).
+    `ci_security_summary_cache` is a best-effort, card-side display cache for
+    contributor CI-approval HOLD cards. It only avoids redundant read-only
+    analysis and never affects safety, routing, approval, or target writes.
     Conflicted PR-review candidates become `needs-rebase`: no decision card is
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
@@ -4333,6 +4336,11 @@ def _ci_security_summary_diff_revision(pr):
 
 
 def ci_security_summary_cache(cards):
+    """Build a best-effort cache of verified current CI summary sections from
+    Wheelhouse cards. The cache key includes the card's target labels, head SHA,
+    base-diff revision, and summary version so stale or user-lookalike cards are
+    ignored. Cache misses merely re-run the read-only analysis; they never
+    influence CI approval or scan routing."""
     cache = {}
     for card in cards or []:
         state = parse_state_block(card.get("body", ""))
