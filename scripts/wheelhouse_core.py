@@ -4071,7 +4071,7 @@ def _file_fact_lines(analysis):
     if analysis["permissions"]:
         shown, extra = _summary_values(analysis["permissions"])
         perms = "; ".join(
-            "%s -> %s" % (label, _safe_inline(_format_permission(spec)))
+            "%s -> `%s`" % (label, _safe_inline(_format_permission(spec)))
             for label, spec in shown
         )
         if extra:

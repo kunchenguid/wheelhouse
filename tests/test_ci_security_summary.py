@@ -265,6 +265,28 @@ def test_permission_job_name_is_sanitized_before_markdown_formatting():
     )
     check("sanitize: permission job cannot inject a Markdown heading",
           "\n### injected" not in summary)
+    summary = core._format_ci_security_summary(
+        [{
+            "path": WF,
+            "status": "modified",
+            "triggers": [],
+            "pr_target": False,
+            "checks_head": False,
+            "permissions": [(
+                "top-level",
+                {"[click](https://example.invalid)": "[grant](https://example.invalid)"},
+            )],
+            "perms_write": False,
+            "secrets": [],
+            "secrets_inherit": False,
+            "checkouts": [],
+            "actions": [],
+            "run_steps": 0,
+        }],
+        True,
+    )
+    check("sanitize: permission mapping cannot render a Markdown link",
+          "-> `[click](https://example.invalid): [grant](https://example.invalid)`" in summary)
 
 
 # --------------------------------------------------------------------------- #
