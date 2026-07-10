@@ -81,8 +81,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   `wheelhouse:keep-open`, and hidden JSON markers in target comments carry the
   provable ask/reminder/close records.
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
-  (tick/slash/**plain-English** -> act on target -> consume terminal cards or
-  leave non-terminal cards open), `scan-backstop`
+  (tick/slash/**plain-English** -> act on target -> consume resolved cards,
+  block failed actions, or leave non-terminal cards open), `scan-backstop`
   (hourly scan -> deterministic target-side cleanup plus reconcile:
   create/refresh/activity-reflect/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a

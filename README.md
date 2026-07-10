@@ -7,7 +7,8 @@ Every issue in this repo is one pending decision about the repositories you main
 The scheduled scan keeps the queue focused on other people's work: PRs and issues authored by the repo owner, the configured maintainer, or bots stay out of the scan-built worklist, while missing author metadata fails open.
 PR-review candidates that GitHub reports as merge-conflicted leave the maintainer worklist until the contributor rebases or merges the base branch and pushes a mergeable head.
 If GitHub is still calculating mergeability after a base-branch update, Wheelhouse waits for a conclusive answer without changing that PR's card membership.
-You drive cards by ticking a checkbox, replying with a slash-command, or replying in plain English; a workflow executes your call on the real repo and closes the card when the action is terminal.
+You drive cards by ticking a checkbox, replying with a slash-command, or replying in plain English; a workflow executes your call on the real repo and closes the card after a successful resolving action.
+If an action fails, Wheelhouse leaves the card open and marks it `blocked` for manual follow-up.
 No server, no database, no bot to host - just this repo and a small set of secrets.
 
 Fork it, edit one config file, add one required secret, and you have your own Wheelhouse.
@@ -18,7 +19,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ## How it works
 
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
-- **Labels carry state:** `needs-decision` (in the queue), `pending-triage` (first auto-triage attempt is still publishing), `processing` (a handler is acting), `resolved`, `blocked`, plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
+- **Labels carry state:** `needs-decision` (in the queue), `pending-triage` (first auto-triage attempt is still publishing), `processing` (a handler is acting), `resolved` (a successful resolving action consumed the card), `blocked` (a manual hold or failed action needs follow-up), plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
 - **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
   When successful auto triage returns a fresh structured recommendation, the card shows an *Accept recommendation* checkbox and hides the older top-level recommended-action text so there is one primary recommendation surface.
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
@@ -229,7 +230,8 @@ Two ways for items to enter the queue, and you can use either or both:
 
 1. In this repo, open the **Actions** tab ▸ **scan-backstop** ▸ **Run workflow**.
 2. Watch the run. Within a minute, decision-card issues should appear, refresh, or move upward in Recently updated sort for anything in your fleet that needs your call.
-3. Tick a consuming decision checkbox on one card and confirm the action lands on the target repo and the card closes.
+3. Tick a consuming decision checkbox on one card and confirm a successful resolving action lands on the target repo and closes the card.
+   A failed action instead leaves the card open with the `blocked` label for manual follow-up.
    If the card is still labeled `pending-triage`, wait for the triage result or unavailable note to publish the checkboxes first.
 
 If nothing appears, see [Troubleshooting](#troubleshooting).
@@ -243,7 +245,8 @@ You drive the queue three ways - whichever fits the decision:
   A newly created eligible card may first show `pending-triage` and a placeholder instead of decision boxes; decide after the `Triage` section or unavailable note appears and the boxes publish.
   A fresh successful structured recommendation can prepend *Accept recommendation* to the decision boxes; ticking it maps the recommendation to the same deterministic action that a checkbox or slash-command would have used.
   Auto triage itself is still advisory: it gives you context before deciding and never acts without your tick.
-- **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*). Tick exactly one; the handler executes it and closes the card.
+- **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*).
+  Tick exactly one; a successful resolving action closes the card, while `/hold` and failed actions remain open and `blocked` for manual follow-up.
   *Accept recommendation*, when present, is also a checkbox, but it only appears for fresh successful structured auto-triage recommendations on PR-review and issue-triage cards.
   It never appears on CI-approval cards or maps to `/approve-ci`.
   If the accepted recommendation is a non-terminal action such as `comment`, `request-changes`, or `investigate`, the card stays open just as it would for that direct action.
@@ -267,7 +270,7 @@ You drive the queue three ways - whichever fits the decision:
 - **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
-    It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card for a terminal decision like merge/close/decline, or leaving it open for a non-terminal one like comment/request-changes.
+    It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card after a successful terminal decision like merge/close/decline, leaving it open for a non-terminal one like comment/request-changes, or marking it `blocked` when the action fails.
   - **Answers** when you're asking - "why is this safe to merge?", "what's the risk here?".
     It reads the target (diff/issue) and replies on the card, and **leaves the card open** so you can keep the thread going.
     If `READONLY_TOKEN` is configured, answer mode can also use read-only search across the target repo and configured fleet repos for related, duplicate, or superseding work.
@@ -281,7 +284,8 @@ You drive the queue three ways - whichever fits the decision:
   A comment that starts with `/` is always treated as a slash-command, never sent to Claude.
   If Claude can't form a useful result, it asks you to rephrase or use a slash-command.
 
-An item is **consumed** when the handler closes its card after acting; the card is labeled `resolved` (or `blocked` for a hold) for audit.
+An item is **consumed** when the handler closes its card after a successful resolving action; the card is labeled `resolved` for audit.
+A `/hold` or a failed action leaves the card open with the `blocked` label for manual follow-up.
 For the "what changed most recently?" view, use the Issues list sorted by Recently updated, or bookmark `https://github.com/<owner>/<wheelhouse-repo>/issues?q=is%3Aissue%20is%3Aopen%20label%3Aneeds-decision%20sort%3Aupdated-desc`.
 Wheelhouse bumps a pure pending card's own updated time when the target PR or issue's GitHub `updatedAt` advances, so recently active targets rise to the top.
 That signal is target-level GitHub activity and may include owner, maintainer, or bot activity.
@@ -304,6 +308,8 @@ After a base-branch push, GitHub can temporarily report a PR's mergeability as `
 Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive value before changing its worklist membership.
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
 If an open target no longer needs a maintainer decision, its pure pending card is closed too.
+An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a failed action stays visible.
+If that target is genuinely merged or closed, the scheduled backstop still hard-closes the `blocked` card.
 That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after a successful scan.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
 Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card.
@@ -434,7 +440,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Wheelhouse aggregates duplicate compliance contexts worst-wins and treats GitHub rollup `FAILURE` or `ERROR` as compliance failure, so also check for a cancelled duplicate run or an untracked required check in the PR's Checks tab.
   Run the `checks` helper (step 2) to see the real names, and the scan logs surface a config warning when a gate-like check is present but unconfigured.
 - **A decision didn't execute.**
-  Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo. The card stays open with an error comment when an action fails.
+  Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo.
+  The card stays open with an error comment and the `blocked` label when an action fails, so it remains visible for manual follow-up instead of being soft-closed when an open target leaves the worklist.
+  It still closes automatically if that target is later genuinely merged or closed.
   A `/merge` refused with a "head moved" note is working as intended - the PR changed after the card was rendered, so re-scan before merging.
   A `/request-changes` refused for a moved head leaves the card pending; the next scan refreshes it to the new code automatically, then you can re-review and request changes again if needed.
   A `/request-changes` refused because it is your own PR is also working as intended - GitHub does not allow self-review, and scan-built queues normally filter those PRs out.
@@ -498,7 +506,7 @@ wheelhouse.config.yml          the one file you edit
   wheelhouse-decision.yml      schema for machine-rendered card decisions (held cards intentionally render no checkboxes)
 .github/workflows/
   ingest.yml                   repository_dispatch / manual -> create, refresh, or activity-reflect a decision card
-  decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
+  decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close resolved cards or block failed actions
   scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
