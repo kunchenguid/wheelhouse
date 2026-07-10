@@ -861,6 +861,46 @@ def _settle_mergeable(owner, name, number):
     return values[number]
 
 
+def _settlement_failure_result(
+    slug,
+    name,
+    prs,
+    issues,
+    numbers,
+    settled_mergeables,
+    settlement_errors,
+    truncated,
+    indeterminate_numbers=(),
+):
+    if not settlement_errors:
+        return None
+    indeterminate = set(indeterminate_numbers)
+    indeterminate.update(
+        number
+        for number in numbers
+        if not _mergeable_is_conclusive(settled_mergeables.get(number))
+    )
+    failed_numbers = sorted(settlement_errors)
+    failed_reason = settlement_errors[failed_numbers[0]]
+    return {
+        "name": name,
+        "ok": False,
+        "warning": (
+            "%s scan failed: mergeability settlement query failed for "
+            "PR(s) %s: %s"
+            % (
+                slug,
+                ", ".join("#%s" % number for number in failed_numbers),
+                failed_reason[:160],
+            )
+        ),
+        "open_pr_numbers": [pr["number"] for pr in prs],
+        "open_issue_numbers": [it["number"] for it in issues],
+        "indeterminate_pr_numbers": sorted(indeterminate),
+        "truncated": truncated,
+    }
+
+
 def _resolve_pr_bucket(
     owner,
     name,
@@ -2288,13 +2328,18 @@ def _auto_approve_or_card(
 ):
     """For one `needs-ci-approval` PR, decide auto-approve vs card.
 
-    Returns (handled, card_note, log_note) where:
+    Returns (handled, card_note, log_note, approve_status) where:
       * handled=True  -> the run was auto-approved OR there is no pending run to
         approve; emit NO card. `card_note` is unused (None) and `log_note` is
         the audit line for the scan-step `::notice::`.
       * handled=False -> return a card fallback; `card_note` is the safety warning
         to surface on the card body (may be "", left EXACTLY as before), and
         `log_note` is the per-PR outcome line for the scan-step `::warning::`.
+      * approve_status is the `approve_ci` status string when an approve was
+        attempted (`approved` / `noop` / `hold` / `error`), else None. Callers
+        use a `noop` status plus settled CONFLICTING mergeability to post the
+        existing rebase nudge before dropping the PR from the worklist - the
+        bucket stays `needs-ci-approval` (never rewritten to `needs-rebase`).
     `log_note` ALWAYS carries the `ci_safety` verdict `reason`, plus - when an
     approve was attempted - the `approve_ci` `status` + `message`. That is what
     makes a silent approve failure (`error`/`hold`) impossible to hide in
@@ -2312,12 +2357,18 @@ def _auto_approve_or_card(
         except Exception as e:  # an approve that throws must fall back to a card
             status, message = ("error", "auto-approve raised: %s" % str(e)[:160])
         if status == "approved":
-            return (True, None, "auto-approved (%s): %s" % (reason, message))
+            return (
+                True,
+                None,
+                "auto-approved (%s): %s" % (reason, message),
+                status,
+            )
         if status == "noop":
             return (
                 True,
                 None,
                 "verdict safe (%s); approve_ci noop: %s" % (reason, message),
+                status,
             )
         # hold / error -> fall through to caller fallback (fail-closed), keeping the why.
         card_note = "auto-approve did not complete (%s: %s)" % (status, message)
@@ -2325,14 +2376,32 @@ def _auto_approve_or_card(
         if safety_note:
             card_note += "; " + safety_note
         log_note = "verdict safe (%s); approve_ci %s: %s" % (reason, status, message)
-        return (False, card_note, log_note)
+        return (False, card_note, log_note, status)
     # Auto-approve disabled, or an unsafe verdict -> caller fallback; no approve attempted.
     log_note = "verdict %s (%s); not auto-approved%s" % (
         "safe" if verdict["safe"] else "unsafe",
         reason,
         "" if auto_enabled else " (auto-approve disabled)",
     )
-    return (False, _ci_safety_note(verdict), log_note)
+    return (False, _ci_safety_note(verdict), log_note, None)
+
+
+def _mergeable_for_ci_noop_nudge(pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET):
+    """Conclusive mergeability for a consumed ci-approval noop, or None.
+
+    Only an authoritative CONFLICTING value may trigger the rebase nudge.
+    An explicit UNKNOWN uses the caller's batched settlement result; if it
+    never settles, return None with no nudge. Settlement errors are handled
+    before this helper runs and make the repo result unhealthy. Missing/None
+    mergeable keeps classify's fail-open and does not invent a conflict."""
+    mergeable = pr.get("mergeable")
+    if _mergeable_is_conclusive(mergeable):
+        return mergeable
+    if not _mergeable_is_unknown(mergeable):
+        return None
+    if _mergeable_is_conclusive(settled_mergeable):
+        return settled_mergeable
+    return None
 
 
 def build_repo(
@@ -2370,7 +2439,11 @@ def build_repo(
     FLEET_TOKEN scan context), or verified as having no pending run, and emits NO
     card; risky/uncertain contributor PRs still become cards while excluded-author
     PRs only log suppressed-card warnings. Each handled ci-approval PR also emits
-    exactly one stderr notice/warning outcome line.
+    exactly one stderr notice/warning outcome line. When the handled path is a
+    verified `approve_ci` noop and settled mergeability is CONFLICTING, the same
+    fire-once-per-head rebase nudge used for `needs-rebase` is posted before the
+    PR is dropped from the worklist - still no decision card and no bucket rewrite
+    (ci-approval stays independent of mergeability for classification).
     Conflicted PR-review candidates become `needs-rebase`: no decision card is
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
@@ -2475,32 +2548,19 @@ def build_repo(
     settled_mergeables, settlement_errors = _settle_mergeables(
         owner, name, settle_numbers
     )
-    if settlement_errors:
-        indeterminate = sorted(
-            number
-            for number in settle_numbers
-            if not _mergeable_is_conclusive(settled_mergeables.get(number))
-        )
-        failed_numbers = sorted(settlement_errors)
-        failed_reason = settlement_errors[failed_numbers[0]]
+    settlement_failure = _settlement_failure_result(
+        slug,
+        name,
+        prs,
+        issues,
+        settle_numbers,
+        settled_mergeables,
+        settlement_errors,
+        pr_truncated or issue_truncated,
+    )
+    if settlement_failure:
         return (
-            {
-                "name": name,
-                "ok": False,
-                "warning": (
-                    "%s scan failed: mergeability settlement query failed for "
-                    "PR(s) %s: %s"
-                    % (
-                        slug,
-                        ", ".join("#%s" % number for number in failed_numbers),
-                        failed_reason[:160],
-                    )
-                ),
-                "open_pr_numbers": [pr["number"] for pr in prs],
-                "open_issue_numbers": [it["number"] for it in issues],
-                "indeterminate_pr_numbers": indeterminate,
-                "truncated": pr_truncated or issue_truncated,
-            },
+            settlement_failure,
             [],
         )
     for pr, author, comp, tests, ci, cross_repo in pr_contexts:
@@ -2554,6 +2614,9 @@ def build_repo(
                 "changed_files": pr.get("changedFiles"),
                 "base_ref": pr.get("baseRefName"),
                 "cross_repo": cross_repo,
+                # Bulk GraphQL mergeable - used only by the ci-approval noop
+                # conflict-nudge path (needs-rebase already resolved via bucket).
+                "mergeable": pr.get("mergeable"),
             }
         )
         if bucket == "needs-rebase" and not author_excluded:
@@ -2585,6 +2648,7 @@ def build_repo(
     default_posture = None
 
     items = []
+    ci_noop_nudge_candidates = []
     for pr in enriched:
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
@@ -2644,7 +2708,7 @@ def build_repo(
                     default_posture = repo_pr_target_posture(slug)
                 posture = default_posture
             approve_enabled = auto_enabled or author_excluded
-            handled, card_note, log_note = _auto_approve_or_card(
+            handled, card_note, log_note, approve_status = _auto_approve_or_card(
                 owner,
                 name,
                 pr["number"],
@@ -2658,6 +2722,8 @@ def build_repo(
                     % (name, pr["number"], _workflow_command_text(log_note)),
                     file=sys.stderr,
                 )
+                if approve_status == "noop" and not author_excluded:
+                    ci_noop_nudge_candidates.append(pr)
                 continue  # provably safe (or nothing to approve) -> NO card
             # Log exactly one per-PR outcome line so a silent approve failure
             # can never hide in the scan log. The card body itself is unchanged
@@ -2678,6 +2744,38 @@ def build_repo(
                 item["warning"] = card_note
 
         items.append(item)
+
+    ci_noop_unknown_numbers = [
+        pr["number"]
+        for pr in ci_noop_nudge_candidates
+        if _mergeable_is_unknown(pr.get("mergeable"))
+    ]
+    ci_noop_settled_mergeables = {}
+    ci_noop_settlement_errors = {}
+    if ci_noop_unknown_numbers:
+        ci_noop_settled_mergeables, ci_noop_settlement_errors = _settle_mergeables(
+            owner, name, ci_noop_unknown_numbers
+        )
+    ci_noop_settlement_failure = _settlement_failure_result(
+        slug,
+        name,
+        enriched,
+        issues,
+        ci_noop_unknown_numbers,
+        ci_noop_settled_mergeables,
+        ci_noop_settlement_errors,
+        pr_truncated or issue_truncated or not closing_scan_complete,
+        (pr["number"] for pr in enriched if pr["bucket"] == MERGEABILITY_PENDING),
+    )
+    if ci_noop_settlement_failure:
+        return (ci_noop_settlement_failure, [])
+    for pr in ci_noop_nudge_candidates:
+        mergeable = _mergeable_for_ci_noop_nudge(
+            pr,
+            ci_noop_settled_mergeables.get(pr["number"], _MERGEABLE_SETTLEMENT_UNSET),
+        )
+        if _mergeable_is_conflicting(mergeable):
+            _maybe_nudge_rebase(slug, name, pr, maintainer_logins, arm_cleanup=False)
 
     if card_issues:
         if pr_truncated or not closing_scan_complete:
