@@ -2169,22 +2169,15 @@ def _close_pending_target(slug, number, record, now):
 
 
 def _pr_conflicting_for_cleanup(pr):
-    """True when a scanned PR is a provably-conflicting fork PR whose rebase
-    nudge is a valid cleanup ask this scan.
-
-    A `needs-rebase` bucket is authoritative (assigned only after mergeability is
-    settled, so it survives the UNKNOWN->CONFLICTING poll). A fork PR that routes
-    to `needs-ci-approval` because the repo has no CI workflows still gets a
-    deterministic rebase nudge when it is conflicting, but classify never rewrites
-    `needs-ci-approval` to `needs-rebase`. The nudge - not the bucket - is the
-    ask, so honor a fresh authoritative CONFLICTING `mergeable` on such a PR too,
-    letting the already-nudged ci-noop backlog enter the reminder-then-close
-    clock. Only an authoritative CONFLICTING counts (UNKNOWN/MERGEABLE/None do
-    not), so a resolved or unproven PR is never treated as conflicting - the
-    close path stays fail-closed on current conflict."""
+    """True when a scanned PR has an in-scope rebase-nudge cleanup ask.
+    """
     if pr.get("bucket") == "needs-rebase":
         return True
-    return _mergeable_is_conflicting(pr.get("mergeable"))
+    return (
+        pr.get("bucket") == "needs-ci-approval"
+        and pr.get("cross_repo") is True
+        and _mergeable_is_conflicting(pr.get("mergeable"))
+    )
 
 
 def _active_pending_ask_kinds(pr):

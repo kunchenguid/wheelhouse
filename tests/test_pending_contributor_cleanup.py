@@ -283,6 +283,7 @@ def enriched_pr(
     author_excluded=False,
     mergeable=None,
     kind=None,
+    cross_repo=None,
 ):
     node = {
         "number": 7,
@@ -295,6 +296,8 @@ def enriched_pr(
         node["mergeable"] = mergeable
     if kind is not None:
         node["kind"] = kind
+    if cross_repo is not None:
+        node["cross_repo"] = cross_repo
     return node
 
 
@@ -1092,7 +1095,7 @@ def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
     closed = run(
         fake,
         enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
-                    mergeable="CONFLICTING"),
+                    mergeable="CONFLICTING", cross_repo=True),
         now_days=14,
     )
     labels = [item["name"] for item in fake.issue["labels"]]
@@ -1113,21 +1116,23 @@ def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
     closed = run(
         fake,
         enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
-                    mergeable="CONFLICTING"),
+                    mergeable="CONFLICTING", cross_repo=True),
         now_days=14,
     )
     check("ci-noop: nudged conflicting ci-approval PR closes on the later scan",
           closed == {7})
 
 
-def test_ci_approval_pr_without_fresh_conflict_stays_out_of_scope():
-    # The same nudge, but the PR is not authoritatively CONFLICTING this scan
-    # (resolved, mergeable, or still recomputing): the fast security-gate lane is
-    # out of scope, so nothing is read and nothing is closed - the close path is
-    # fail-closed on a fresh, authoritative conflict.
+def test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope():
     marker = core._rebase_nudge_marker("sha1")
     legacy_record = rebase_record(source_id=201)
-    for mergeable in (None, "MERGEABLE", "UNKNOWN"):
+    for mergeable, cross_repo in (
+        (None, True),
+        ("MERGEABLE", True),
+        ("UNKNOWN", True),
+        ("CONFLICTING", False),
+        ("CONFLICTING", None),
+    ):
         fake = FakeGitHub(
             issue_obj=issue([]),
             comments=[
@@ -1139,13 +1144,37 @@ def test_ci_approval_pr_without_fresh_conflict_stays_out_of_scope():
         closed = run(
             fake,
             enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
-                        mergeable=mergeable),
+                        mergeable=mergeable, cross_repo=cross_repo),
             now_days=14,
         )
-        check("ci-noop: non-conflicting ci-approval PR (%s) is not closed"
-              % mergeable, closed == set())
-        check("ci-noop: non-conflicting ci-approval PR (%s) performs no reads"
-              % mergeable, fake.calls == [])
+        label = "mergeable=%s cross_repo=%s" % (mergeable, cross_repo)
+        check("ci-noop: unproven ci-approval PR (%s) is not closed"
+              % label, closed == set())
+        check("ci-noop: unproven ci-approval PR (%s) performs no reads"
+              % label, fake.calls == [])
+
+
+def test_conflicting_non_ci_noop_lanes_stay_out_of_scope():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    for bucket in ("fix-tests", "draft", "needs-reraise"):
+        fake = FakeGitHub(
+            issue_obj=issue([]),
+            comments=[
+                comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+                reminder_comment(legacy_record),
+            ],
+            reviews=[],
+        )
+        closed = run(
+            fake,
+            enriched_pr(
+                labels=[], bucket=bucket, mergeable="CONFLICTING", cross_repo=True
+            ),
+            now_days=14,
+        )
+        check("scope: conflicting %s PR is not closed" % bucket, closed == set())
+        check("scope: conflicting %s PR performs no reads" % bucket, fake.calls == [])
 
 
 def test_widened_ci_noop_respects_keep_open():
@@ -1162,7 +1191,7 @@ def test_widened_ci_noop_respects_keep_open():
     closed = run(
         fake,
         enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
-                    mergeable="CONFLICTING"),
+                    mergeable="CONFLICTING", cross_repo=True),
         now_days=14,
     )
     check("ci-noop: keep-open opt-out blocks the widened ci-approval close",
@@ -1208,7 +1237,8 @@ def main():
     test_widened_backlog_respects_keep_open()
     test_widened_backlog_contributor_activity_fails_open()
     test_widened_ci_noop_conflicting_pr_reminds_then_closes()
-    test_ci_approval_pr_without_fresh_conflict_stays_out_of_scope()
+    test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope()
+    test_conflicting_non_ci_noop_lanes_stay_out_of_scope()
     test_widened_ci_noop_respects_keep_open()
     print()
     if _failures:
