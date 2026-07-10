@@ -78,6 +78,109 @@ repos:
     compliance_check: "PR must be raised via no-mistakes"
     test_check_patterns: ["build-and-test"]
 
+  # ===========================================================================
+  # Fleet expansion (2026-07-10): 15 more owned repos brought under Wheelhouse.
+  # Each entry's CI shape below was verified against that repo's LIVE workflow
+  # files AND Actions run history on 2026-07-10 - the exact rendered job/check
+  # names (including matrix legs), and whether the no-mistakes contribution gate
+  # actually runs on PRs to the repo's default branch. merge_method is omitted
+  # throughout, so each defaults to squash, like the entries above.
+  # ===========================================================================
+
+  # -- These DO enforce the no-mistakes contribution gate: a
+  #    `no-mistakes-required.yml` workflow runs the job named exactly
+  #    "PR must be raised via no-mistakes" on PRs to their default branch
+  #    (confirmed live). Each also runs a `guard-generated-files.yml` check
+  #    ("Generated files must not be ...") and release-please; Wheelhouse ignores
+  #    both for classification (neither the compliance gate nor a test check).
+  - name: autopreso
+    # ci.yml ("CI") runs a single `test` job (Node typecheck/test/build).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["test"]
+
+  - name: baby-menu
+    # ci.yml ("ci") runs one job rendered as `typecheck / test / build`.
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["typecheck / test / build"]
+
+  - name: tasks-axi
+    # ci.yml runs a `build-and-test` matrix (ubuntu/macos/windows-latest).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  - name: quota-axi
+    # ci.yml runs a single `build-and-test` job.
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  - name: short-pipe
+    # ci.yml ("CI") runs a single job named `Validate`.
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["Validate"]
+
+  - name: trial-by-combat
+    # ci.yml ("CI") runs a single `ci` job (the only non-gate check on a PR).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["ci"]
+
+  - name: justroll
+    # ci.yml runs a `build-and-test` matrix (ubuntu/macos-latest).
+    compliance_check: "PR must be raised via no-mistakes"
+    test_check_patterns: ["build-and-test"]
+
+  # -- These have CI but NO no-mistakes contribution gate, so compliance_check is
+  #    null: a PR is never withheld waiting on a gate that does not exist (a
+  #    GitHub rollup FAILURE/ERROR still fails closed). test_check_patterns match
+  #    each repo's real CI test-job check names.
+  - name: treehouse
+    # No no-mistakes gate. ci.yml ("CI") runs a Go `test` matrix
+    # (ubuntu/macos/windows-latest); its separate `check` job is a gofmt/vet gate
+    # we skip, mirroring how no-mistakes' own format/vet `check` job is excluded.
+    compliance_check: null
+    test_check_patterns: ["test"]
+
+  - name: presize
+    # No no-mistakes gate. build.yml ("build") runs a `build` matrix rendered as
+    # `build (ubuntu, 16.x)`.
+    compliance_check: null
+    test_check_patterns: ["build"]
+
+  - name: org-bench
+    # No no-mistakes gate. ci.yml ("CI") runs a single `validate` job.
+    compliance_check: null
+    test_check_patterns: ["validate"]
+
+  - name: comment-repl.nvim
+    # No no-mistakes gate. lint_test.yml runs a `test` matrix (nvim stable/
+    # nightly) plus a `stylua` lint job (lint excluded from the test signal). No
+    # Actions run history yet; check names read from the workflow file.
+    compliance_check: null
+    test_check_patterns: ["test"]
+
+  # -- These have no CI workflows at all (no `.github/workflows`). No compliance
+  #    gate and no test checks exist, so both are left null/empty; such a repo's
+  #    PRs simply surface for review without a tests-green signal.
+  - name: dotfiles
+    # No CI. Its only workflow (close-prs.yml) auto-comments and closes non-owner
+    # PRs via pull_request_target; it is not a merge gate or a test check.
+    compliance_check: null
+    test_check_patterns: []
+
+  - name: dotfiles-mac-nix
+    # No CI workflows at all.
+    compliance_check: null
+    test_check_patterns: []
+
+  - name: superpowers-bench
+    # No CI workflows at all. Default branch is `master`.
+    compliance_check: null
+    test_check_patterns: []
+
+  - name: programbench-bench
+    # No CI workflows at all.
+    compliance_check: null
+    test_check_patterns: []
+
 # Optional GitHub login allowed to drive decisions, in addition to the repo
 # owner. The scheduled scan also treats this login as "your work" and skips
 # cards for PRs/issues it authored. Leave empty to use only the repository owner
