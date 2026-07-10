@@ -202,13 +202,19 @@ def run_build_repo(
         calls["approve"].append((owner, name, pr, posture, strict))
         return approve_result
 
-    def fake_settle(owner, name, number):
-        calls["settle"].append((owner, name, number))
-        if settle_mergeable is None:
-            return "UNKNOWN"
-        if callable(settle_mergeable):
-            return settle_mergeable(owner, name, number)
-        return settle_mergeable
+    def fake_settle_many(owner, name, numbers):
+        numbers = list(dict.fromkeys(numbers))
+        if numbers:
+            calls["settle"].append((owner, name, numbers))
+        values = {}
+        for number in numbers:
+            if settle_mergeable is None:
+                values[number] = "UNKNOWN"
+            elif callable(settle_mergeable):
+                values[number] = settle_mergeable(owner, name, number)
+            else:
+                values[number] = settle_mergeable
+        return values, {}
 
     save = (
         core.gh_graphql,
@@ -217,7 +223,7 @@ def run_build_repo(
         core.repo_pr_target_posture,
         core.ci_safety,
         core.approve_ci,
-        core._settle_mergeable,
+        core._settle_mergeables,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -231,7 +237,7 @@ def run_build_repo(
     }
     core.ci_safety = fake_ci_safety
     core.approve_ci = fake_approve
-    core._settle_mergeable = fake_settle
+    core._settle_mergeables = fake_settle_many
     os.environ["OWNER"] = "owner"
     os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
     err = io.StringIO()
@@ -259,7 +265,7 @@ def run_build_repo(
             core.repo_pr_target_posture,
             core.ci_safety,
             core.approve_ci,
-            core._settle_mergeable,
+            core._settle_mergeables,
             old_owner,
             old_repo_owner,
         ) = save
@@ -482,6 +488,26 @@ def test_ci_noop_unknown_settles_conflicting_then_nudges():
         "ci-noop-settled: marker is head-specific",
         core._rebase_nudge_marker("sha329") in (calls["posts"][0]["body"] if calls["posts"] else ""),
     )
+
+
+def test_ci_noop_unknown_mergeables_settle_in_one_batch():
+    prs = [
+        pr_node(332, status_rollup=None, mergeable="UNKNOWN", cross_repo=True),
+        pr_node(333, status_rollup=None, mergeable="UNKNOWN", cross_repo=True),
+    ]
+    result, items, calls = run_build_repo(
+        prs,
+        auto_approve_ci=True,
+        approve_result=("noop", "no workflow runs awaiting approval"),
+        settle_mergeable=lambda owner, name, number: "CONFLICTING",
+    )
+    check("ci-noop-batch: scan stays ok", result["ok"] is True)
+    check("ci-noop-batch: emits NO cards", items == [])
+    check(
+        "ci-noop-batch: settles every unknown noop candidate together",
+        calls["settle"] == [("owner", "demo", [332, 333])],
+    )
+    check("ci-noop-batch: nudges every settled conflict", len(calls["posts"]) == 2)
 
 
 def test_ci_noop_mergeable_fork_does_not_nudge():
@@ -718,6 +744,7 @@ def main():
     test_ci_noop_conflicting_fork_nudges_once_per_head()
     test_ci_noop_unknown_mergeable_does_not_nudge()
     test_ci_noop_unknown_settles_conflicting_then_nudges()
+    test_ci_noop_unknown_mergeables_settle_in_one_batch()
     test_ci_noop_mergeable_fork_does_not_nudge()
     test_ci_approved_with_workflows_does_not_nudge_on_conflict()
     test_rebase_nudge_body_is_contributor_plain_language()

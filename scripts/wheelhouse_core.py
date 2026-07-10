@@ -2346,25 +2346,23 @@ def _auto_approve_or_card(
     return (False, _ci_safety_note(verdict), log_note, None)
 
 
-def _mergeable_for_ci_noop_nudge(owner, name, pr):
+def _mergeable_for_ci_noop_nudge(
+    pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET
+):
     """Conclusive mergeability for a consumed ci-approval noop, or None.
 
     Only an authoritative CONFLICTING value may trigger the rebase nudge.
-    An explicit UNKNOWN is settled once (same poll as the merge-ready path);
-    if it never settles, or settlement errors, return None so the scan fails
-    open with no nudge. Missing/None mergeable keeps classify's fail-open and
-    does not invent a conflict."""
+    An explicit UNKNOWN uses the caller's batched settlement result; if it
+    never settles, or settlement errors, return None so the scan fails open
+    with no nudge. Missing/None mergeable keeps classify's fail-open and does
+    not invent a conflict."""
     mergeable = pr.get("mergeable")
-    if _mergeable_is_conflicting(mergeable) or _mergeable_is_mergeable(mergeable):
+    if _mergeable_is_conclusive(mergeable):
         return mergeable
     if not _mergeable_is_unknown(mergeable):
         return None
-    try:
-        settled = _settle_mergeable(owner, name, pr["number"])
-    except Exception:
-        return None
-    if _mergeable_is_conclusive(settled):
-        return settled
+    if _mergeable_is_conclusive(settled_mergeable):
+        return settled_mergeable
     return None
 
 
@@ -2625,6 +2623,7 @@ def build_repo(
     default_posture = None
 
     items = []
+    ci_noop_nudge_candidates = []
     for pr in enriched:
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
@@ -2698,22 +2697,8 @@ def build_repo(
                     % (name, pr["number"], _workflow_command_text(log_note)),
                     file=sys.stderr,
                 )
-                # approve_ci noop (nothing awaiting approval - typically no
-                # workflows on a fork PR with null statusCheckRollup) still
-                # emits NO card, but must not silently swallow a provable
-                # merge conflict: post the same fire-once-per-head rebase
-                # nudge the needs-rebase path uses. Bucket stays
-                # needs-ci-approval; approve/UNKNOWN semantics are unchanged.
-                if (
-                    approve_status == "noop"
-                    and not author_excluded
-                    and _mergeable_is_conflicting(
-                        _mergeable_for_ci_noop_nudge(owner, name, pr)
-                    )
-                ):
-                    _maybe_nudge_rebase(
-                        slug, name, pr, maintainer_logins, arm_rebase_cleanup
-                    )
+                if approve_status == "noop" and not author_excluded:
+                    ci_noop_nudge_candidates.append(pr)
                 continue  # provably safe (or nothing to approve) -> NO card
             # Log exactly one per-PR outcome line so a silent approve failure
             # can never hide in the scan log. The card body itself is unchanged
@@ -2734,6 +2719,28 @@ def build_repo(
                 item["warning"] = card_note
 
         items.append(item)
+
+    ci_noop_unknown_numbers = [
+        pr["number"]
+        for pr in ci_noop_nudge_candidates
+        if _mergeable_is_unknown(pr.get("mergeable"))
+    ]
+    ci_noop_settled_mergeables = {}
+    if ci_noop_unknown_numbers:
+        ci_noop_settled_mergeables, _ = _settle_mergeables(
+            owner, name, ci_noop_unknown_numbers
+        )
+    for pr in ci_noop_nudge_candidates:
+        mergeable = _mergeable_for_ci_noop_nudge(
+            pr,
+            ci_noop_settled_mergeables.get(
+                pr["number"], _MERGEABLE_SETTLEMENT_UNSET
+            ),
+        )
+        if _mergeable_is_conflicting(mergeable):
+            _maybe_nudge_rebase(
+                slug, name, pr, maintainer_logins, arm_rebase_cleanup
+            )
 
     if card_issues:
         if pr_truncated or not closing_scan_complete:
