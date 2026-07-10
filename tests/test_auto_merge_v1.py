@@ -58,6 +58,7 @@ ELIGIBLE_A = {
     "aligns_with_vision": True,
     "changes_existing_or_default_behavior": False,
     "recommend_merge": True,
+    "vision_sha": "vsha",
 }
 ELIGIBLE_B = dict(ELIGIBLE_A, behavior_class="B")
 ELIGIBLE_C = dict(
@@ -106,6 +107,7 @@ def make_card(
     held=False,
     kind="pr-review",
     labels=None,
+    author=am.CARD_AUTOMATION_AUTHOR,
 ):
     state = {
         "repo": repo,
@@ -121,11 +123,22 @@ def make_card(
         state["automerge_verdict"] = automerge_verdict
     body = "Card\n\n<!-- wheelhouse-state: %s -->" % json.dumps(state)
     if labels is None:
-        labels = ["needs-decision"] + (["pending-triage"] if held else [])
+        labels = [
+            "needs-decision",
+            "repo:%s" % repo,
+            "kind:%s" % kind,
+            "priority:med",
+            "target:%s-%s" % (repo, number),
+        ]
+        if held:
+            labels.append("pending-triage")
+        else:
+            labels.extend(["processing", am.AUTO_MERGE_CLAIM_LABEL])
     return {
         "number": card_issue,
         "body": body,
         "labels": [{"name": n} for n in labels],
+        "author": author,
         "updated_at": "",
     }
 
@@ -171,7 +184,7 @@ class World:
         )
 
 
-def run_act(world, items, cards):
+def run_act(world, items, cards, has_token=True):
     """Install stubs, run act_on_scan, capture stderr, restore. Returns
     (payload, stderr_text)."""
     saved = {
@@ -183,6 +196,7 @@ def run_act(world, items, cards):
         "cfg": core.load_config,
         "maint": core.maintainers,
         "owner": core.get_owner,
+        "token": os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN"),
     }
     am.vision_on_default_branch = lambda slug: world.vision.get(
         slug.split("/")[-1], (False, "")
@@ -201,6 +215,7 @@ def run_act(world, items, cards):
     }
     core.maintainers = lambda: set(world.maintainers)
     core.get_owner = lambda: world.owner
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true" if has_token else "false"
     scan = {
         "repos": {
             it["repo"]: world.repos_scan.get(it["repo"], {"ok": True})
@@ -223,6 +238,10 @@ def run_act(world, items, cards):
         core.load_config = saved["cfg"]
         core.maintainers = saved["maint"]
         core.get_owner = saved["owner"]
+        if saved["token"] is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = saved["token"]
     return payload, buf.getvalue()
 
 
@@ -564,6 +583,110 @@ def test_G1_non_pure_card_holds():
         check("G1: %s card -> no merge" % lbl, not w.do_merge_calls)
 
 
+def test_G1_rejects_untrusted_or_unmanaged_card():
+    w, items, cards = default_world()
+    cards[0]["author"] = "contributor"
+    payload, _ = run_act(w, items, cards)
+    check("G1: contributor-authored forged card holds", not payload["merges"])
+
+    w2, items2, cards2 = default_world()
+    cards2[0]["labels"] = [{"name": "needs-decision"}]
+    payload2, _ = run_act(w2, items2, cards2)
+    check("G1: card without managed target labels holds", not payload2["merges"])
+
+
+def test_claim_rechecks_and_locks_current_card():
+    w, items, cards = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    current = dict(initial)
+    current["state"] = "OPEN"
+    calls = []
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    saved = {"get": render_card.get_card, "ensure": render_card.ensure_labels,
+             "gh": render_card._gh, "cfg": core.load_config}
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+
+    def claim(args, check=False):
+        calls.append(("edit", args))
+        current["labels"] += [
+            {"name": "processing"},
+            {"name": am.AUTO_MERGE_CLAIM_LABEL},
+        ]
+        return type("R", (), {"returncode": 0})()
+
+    render_card._gh = claim
+    scan = {"items": items}
+    try:
+        claims = am.claim_cards(scan, [initial])
+        check(
+            "claim: current card is re-read and locked",
+            len(claims) == 1
+            and "processing" in am._card_label_names(claims[0])
+            and am.AUTO_MERGE_CLAIM_LABEL in am._card_label_names(claims[0]),
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
+def test_claim_rejects_changed_decision_card():
+    w, items, cards = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    current = dict(initial)
+    current["state"] = "OPEN"
+    current["body"] += "\n- [x] Hold <!-- opt:hold -->"
+    saved = {"get": render_card.get_card, "cfg": core.load_config}
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        claims = am.claim_cards({"items": items}, [initial])
+        check("claim: changed decision card is not claimed", claims == [])
+    finally:
+        render_card.get_card = saved["get"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
 # --------------------------------------------------------------------------- #
 # G7: live head + merge-state re-check immediately before acting
 # --------------------------------------------------------------------------- #
@@ -603,6 +726,37 @@ def test_escape_hatch_label_holds():
     payload, _ = run_act(w, items, cards)
     check("kill: wheelhouse:no-auto-merge label holds",
           "escape hatch" in _held_reason(payload))
+
+
+def test_G6_token_kill_switch_holds():
+    w, items, cards = default_world()
+    payload, _ = run_act(w, items, cards, has_token=False)
+    check("G6: absent triage token holds persisted verdict", "TOKEN" in _held_reason(payload))
+
+
+def test_G6_vision_revision_mismatch_holds():
+    w, items, cards = default_world(verdict=dict(ELIGIBLE_A, vision_sha="old"))
+    payload, _ = run_act(w, items, cards)
+    check("G6: stale VISION.md revision holds", "VISION.md revision" in _held_reason(payload))
+
+
+def test_triage_persists_trusted_vision_revision():
+    item = make_item("fmt", 5, "vv" * 20)
+    triage = {
+        "summary": "A focused change.",
+        "product_implications": "No broad behavior change.",
+        "recommended_next_step": "merge - narrow and safe.",
+        "automerge": ELIGIBLE_A,
+    }
+    body = render_card.body_with_triage_result(
+        render_card.render(item)["body"], item["head_sha"], triage=triage,
+        vision_sha="trusted-vision-sha",
+    )
+    verdict = core.parse_state_block(body).get("automerge_verdict")
+    check(
+        "triage: persists the trusted VISION.md revision with verdict",
+        verdict and verdict.get("vision_sha") == "trusted-vision-sha",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -794,13 +948,15 @@ def test_audit_comment_explains_why_it_qualified():
 
 
 def test_record_cli_resolves_card_and_appends_ledger():
-    calls = {"ledger": [], "resolved": []}
+    calls = {"ledger": [], "resolved": [], "released": []}
     saved = {
         "ledger": am.append_to_ledger,
+        "release": am.release_card_claim,
         "get": render_card.get_card,
         "close": render_card.close_card,
     }
     am.append_to_ledger = lambda records: calls["ledger"].extend(records)
+    am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
     render_card.get_card = lambda n: {"state": "OPEN", "labels": []}
     render_card.close_card = lambda n, msg, label="resolved": calls["resolved"].append(
         (n, label)
@@ -814,9 +970,11 @@ def test_record_cli_resolves_card_and_appends_ledger():
         am.cmd_record(tmp)
         check("record: ledger got the merge", len(calls["ledger"]) == 1)
         check("record: card resolved+closed", calls["resolved"] == [(101, "resolved")])
+        check("record: merged card claim is released", calls["released"] == [101])
     finally:
         os.unlink(tmp)
         am.append_to_ledger = saved["ledger"]
+        am.release_card_claim = saved["release"]
         render_card.get_card = saved["get"]
         render_card.close_card = saved["close"]
 
@@ -879,17 +1037,35 @@ def test_scan_backstop_wiring_and_token_discipline():
     doc = yaml.safe_load(_read(".github/workflows/scan-backstop.yml"))
     steps = doc["jobs"]["reconcile"]["steps"]
     by_name = {s.get("name"): s for s in steps if isinstance(s, dict)}
+    listed = by_name.get("List open cards")
+    claim = by_name.get("Claim auto-merge decision cards")
     act = by_name.get("Auto-merge eligible PRs")
     rec = by_name.get("Record auto-merges")
     check("wiring: auto-merge act step exists", act is not None)
+    check("wiring: card list records card author provenance",
+          listed and "author: (.user.login" in listed.get("run", ""))
+    check("wiring: current cards are claimed before auto-merge", claim is not None)
     check("wiring: record step exists", rec is not None)
     check(
         "wiring: the MERGE runs on FLEET_TOKEN (cross-repo write)",
         act and "FLEET_TOKEN" in (act.get("env") or {}).get("GH_TOKEN", ""),
     )
     check(
-        "wiring: act runs auto_merge.py act on scan.json + cards.json",
-        act and "auto_merge.py act scan.json cards.json" in act.get("run", ""),
+        "wiring: claim runs under github.token before the FLEET_TOKEN act",
+        claim
+        and "github.token" in (claim.get("env") or {}).get("GH_TOKEN", "")
+        and "auto_merge.py claim scan.json cards.json" in claim.get("run", ""),
+    )
+    check(
+        "wiring: act consumes only freshly claimed cards",
+        act and "auto_merge.py act scan.json automerge-claims.json" in act.get("run", ""),
+    )
+    check(
+        "wiring: absent triage token disables both claim and act",
+        claim
+        and act
+        and "CLAUDE_CODE_OAUTH_TOKEN != ''" in (claim.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", "")
+        and "CLAUDE_CODE_OAUTH_TOKEN != ''" in (act.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", ""),
     )
     check(
         "wiring: the AUDIT record runs on github.token (this-repo bookkeeping)",
@@ -904,9 +1080,25 @@ def test_scan_backstop_wiring_and_token_discipline():
     order = [s.get("name") for s in steps if isinstance(s, dict)]
     check(
         "wiring: order is act -> reconcile -> record",
-        order.index("Auto-merge eligible PRs")
+        order.index("Claim auto-merge decision cards")
+        < order.index("Auto-merge eligible PRs")
         < order.index("Reconcile the queue")
         < order.index("Record auto-merges"),
+    )
+    handler = yaml.safe_load(_read(".github/workflows/decision-handler.yml"))
+    handler_steps = handler["jobs"]["handle"]["steps"]
+    handler_by_name = {s.get("name") or s.get("id"): s for s in handler_steps
+                       if isinstance(s, dict)}
+    current = handler_by_name.get("current-card")
+    check(
+        "wiring: manual decisions share the auto-merge concurrency lock",
+        handler.get("concurrency", {}).get("group") == "wheelhouse-backstop",
+    )
+    check(
+        "wiring: manual target actions re-read claim state before execution",
+        current
+        and "wheelhouse:auto-merge-claim" in current.get("run", "")
+        and "steps.current-card.outputs.allowed == 'true'" in json.dumps(handler_steps),
     )
 
 
@@ -931,6 +1123,10 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     check(
         "triage: the VISION policy is labeled TRUSTED owner-authored (not head)",
         "TRUSTED owner-authored policy" in text,
+    )
+    check(
+        "triage: binds verdict storage to the fetched VISION.md SHA",
+        "vision_sha=$VISION_SHA" in text and "--vision-sha \"$VISION_SHA\"" in text,
     )
 
 

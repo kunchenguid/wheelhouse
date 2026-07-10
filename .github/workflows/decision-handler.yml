@@ -24,9 +24,8 @@ permissions:
   contents: read
   issues: write
 
-# Serialize all handling of one card so concurrent ticks/comments can't race.
 concurrency:
-  group: wheelhouse-${{ github.event.issue.number }}
+  group: wheelhouse-backstop
   cancel-in-progress: false
 
 jobs:
@@ -350,8 +349,30 @@ jobs:
             "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
 
       # --- Act on the target (shared by every entry point) -------------------
-      - name: Mark processing
+      - id: current-card
         if: ${{ steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          card="$(gh issue view "$ISSUE" --json state,labels)"
+          allowed=false
+          if jq -e '
+            [.labels[].name] as $labels
+            | .state == "OPEN"
+            and ($labels | index("needs-decision") != null)
+            and ($labels | index("processing") == null)
+            and ($labels | index("resolved") == null)
+            and ($labels | index("blocked") == null)
+            and ($labels | index("wheelhouse:auto-merge-claim") == null)
+          ' <<<"$card" >/dev/null; then
+            allowed=true
+          fi
+          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
+
+      - name: Mark processing
+        if: ${{ (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: add
@@ -363,7 +384,7 @@ jobs:
       # Execute writes to the TARGET repo under FLEET_TOKEN. The NL fetch above
       # may also use FLEET_TOKEN, but only for read-only target context.
       - id: execute
-        if: ${{ steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action' }}
+        if: ${{ (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -407,7 +428,7 @@ jobs:
 
       # --- Finalize the card (this repo, default token; never re-triggers) ----
       - name: Comment result on card
-        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') }}
+        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
@@ -421,7 +442,7 @@ jobs:
         run: gh issue comment "$ISSUE" --body "${MESSAGE:-No actionable result.}" || true
 
       - name: Clear processing label
-        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') }}
+        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: remove
@@ -430,7 +451,7 @@ jobs:
           labels: processing
 
       - name: Resolve card label
-        if: ${{ always() && steps.execute.outputs.terminal_state == 'resolved' }}
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.terminal_state == 'resolved' }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: add
@@ -443,7 +464,7 @@ jobs:
         # Treat terminal_state == 'error' like 'blocked' so a failed decision
         # becomes a durable open blocked card. Reconcile's is_refreshable guard
         # then skips soft self-heal (card #447 silent false-close).
-        if: ${{ always() && (steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && (steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: add
@@ -453,7 +474,7 @@ jobs:
           labels: blocked
 
       - name: Drop needs-decision on terminal
-        if: ${{ always() && (steps.execute.outputs.terminal_state == 'resolved' || steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && (steps.execute.outputs.terminal_state == 'resolved' || steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: remove
@@ -462,7 +483,7 @@ jobs:
           labels: needs-decision
 
       - name: Close resolved card
-        if: ${{ always() && steps.execute.outputs.terminal_state == 'resolved' }}
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.terminal_state == 'resolved' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}

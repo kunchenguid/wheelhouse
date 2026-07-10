@@ -320,17 +320,21 @@ jobs:
           # policy (not contributor free-text). When absent, the auto-merge
           # assessment is skipped entirely and the executor holds on G0.
           VISION_PRESENT=false
+          VISION_SHA=""
           if [ "$KIND" = "pr-review" ]; then
             vision_limit_bytes=40000
             # Presence is decided by whether we actually wrote non-empty content
             # (not the pipeline exit): a 404 leaves vision.md empty, and a large
             # VISION.md that trips head's SIGPIPE must still count as present.
-            set +e
-            GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/contents/VISION.md" \
-              --jq '.content' 2>/dev/null | base64 -d 2>/dev/null \
-              | head -c "$vision_limit_bytes" > vision.md
-            set -e
-            if [ -s vision.md ]; then
+            if GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/contents/VISION.md" \
+              > vision.json 2>/dev/null; then
+              VISION_SHA="$(jq -r 'if type == "object" and .type == "file" and (.sha | type == "string") then .sha else empty end' vision.json)"
+              set +e
+              jq -r '.content // empty' vision.json | base64 -d 2>/dev/null \
+                | head -c "$vision_limit_bytes" > vision.md
+              set -e
+            fi
+            if [ -s vision.md ] && [ -n "$VISION_SHA" ]; then
               VISION_PRESENT=true
             fi
           fi
@@ -438,6 +442,7 @@ jobs:
             echo "prompt<<$delimiter"
             cat prompt.txt
             echo "$delimiter"
+            echo "vision_sha=$VISION_SHA"
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
@@ -522,6 +527,7 @@ jobs:
           HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
           HEAD_MESSAGE: ${{ steps.verify_head.outputs.message }}
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
+          VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -565,6 +571,7 @@ jobs:
               "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
+                --vision-sha "$VISION_SHA" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}"
           fi
 

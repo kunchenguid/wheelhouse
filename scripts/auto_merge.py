@@ -72,6 +72,8 @@ MAX_CHANGED_LINES = 1000
 #   C = new feature strictly opt-in and disabled by default
 # Any change to existing/default behavior that is not one of these is ineligible.
 ELIGIBLE_BEHAVIOR_CLASSES = ("A", "B", "C")
+CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
+AUTO_MERGE_CLAIM_LABEL = "wheelhouse:auto-merge-claim"
 
 # Durable audit ledger (mirrors the scan-health ledger: a dedicated CLOSED issue
 # in THIS cards repo carrying a hidden marker; state lives in GitHub, not disk).
@@ -170,6 +172,10 @@ def _pr_label_names(pr):
         elif isinstance(label, str):
             names.add(label)
     return names
+
+
+def auto_merge_triage_available():
+    return os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", "").lower() == "true"
 
 
 # --------------------------------------------------------------------------- #
@@ -287,11 +293,51 @@ def _card_label_names(card):
     return names
 
 
+def _card_author_login(card):
+    author = (card or {}).get("author")
+    if isinstance(author, dict):
+        author = author.get("login")
+    return str(author or "").strip()
+
+
+def _trusted_card(card, state, labels):
+    repo = str((state or {}).get("repo") or "").strip()
+    number = str((state or {}).get("number") or "").strip()
+    required = {
+        "needs-decision",
+        "repo:%s" % repo,
+        "kind:pr-review",
+        "target:%s-%s" % (repo, number),
+    }
+    return (
+        _card_author_login(card) == CARD_AUTOMATION_AUTHOR
+        and bool(repo)
+        and bool(number)
+        and required.issubset(labels)
+        and any(label.startswith("priority:") for label in labels)
+    )
+
+
+def _card_is_claimed(labels):
+    names = set(labels or ())
+    return (
+        {"needs-decision", "processing", AUTO_MERGE_CLAIM_LABEL}.issubset(names)
+        and names.isdisjoint({"resolved", "blocked"})
+    )
+
+
+def _selected_card_option(body):
+    return bool(
+        re.search(r"(?m)^\s*[-*]\s+\[[xX]\].*<!--\s*opt:[^>]+-->", body or "")
+    )
+
+
 def _card_index(cards):
     """Map (target_repo, target_number) -> {issue, state, labels} for every
     pr-review card, so a scan worklist item can find its persisted behavior
     verdict. `cards` is the cards.json list ({number, body, labels, ...})."""
     index = {}
+    duplicate_keys = set()
     for card in cards or []:
         if not isinstance(card, dict):
             continue
@@ -302,11 +348,20 @@ def _card_index(cards):
         number = str(state.get("number") or "").strip()
         if not repo or not number:
             continue
-        index[(repo, number)] = {
+        labels = _card_label_names(card)
+        if not _trusted_card(card, state, labels):
+            continue
+        key = (repo, number)
+        if key in index:
+            duplicate_keys.add(key)
+            continue
+        index[key] = {
             "issue": card.get("number"),
             "state": state,
-            "labels": _card_label_names(card),
+            "labels": labels,
         }
+    for key in duplicate_keys:
+        index.pop(key, None)
     return index
 
 
@@ -363,22 +418,23 @@ def evaluate_candidate(
     # G0a: repo opted in.
     if not core._auto_merge_enabled(repo_cfg, global_auto_merge):
         return hold("G0 auto_merge not enabled for %s" % repo)
+    if not auto_merge_triage_available():
+        return hold("G6 CLAUDE_CODE_OAUTH_TOKEN is unavailable")
 
     # G1: a persisted pr-review card with a fresh, successful behavior verdict.
     if not card_entry:
         return hold("G1 no pr-review decision card found for %s#%s" % (repo, number))
     state = card_entry.get("state") or {}
-    # Only a PURE needs-decision card may auto-merge: a card already
-    # processing/resolved/blocked is mid-manual-decision (or consumed), so never
-    # race it - the same purity rule the refresh path uses.
-    if not render_card.is_refreshable(card_entry.get("labels") or set()):
-        return hold("G1 card is not a pure needs-decision card")
     if state.get("held"):
         return hold("G1 card is still held (auto-triage has not published it)")
+    if not _card_is_claimed(card_entry.get("labels") or set()):
+        return hold("G1 card is not a current auto-merge claim")
     if state.get("triage_status") != "succeeded":
         return hold("G6 no successful auto-triage verdict on the card")
     if str(state.get("triaged_sha") or "") != head_sha or not head_sha:
         return hold("G6 behavior verdict is stale (not for the current head SHA)")
+    if str(state.get("head_sha") or "") != head_sha:
+        return hold("G1 card head SHA is not current")
     verdict = state.get("automerge_verdict")
     v_ok, behavior_class, v_reason = verdict_eligible(verdict)
     # G6 is a free/cheap check on already-persisted state, so run it before the
@@ -393,6 +449,8 @@ def evaluate_candidate(
     vision_present, vision_sha = vision_cache[repo]
     if not vision_present:
         return hold("G0 no committed VISION.md on %s default branch" % repo)
+    if str((verdict or {}).get("vision_sha") or "") != vision_sha:
+        return hold("G6 behavior verdict is not for the current VISION.md revision")
     result["audit"]["vision_sha"] = vision_sha
 
     # Gather live PR state once (used by G2/G3/G4/G5); a final fresh re-read
@@ -468,6 +526,104 @@ def evaluate_candidate(
     return result
 
 
+def _release_card_claim(number):
+    render_card._gh(
+        [
+            "issue",
+            "edit",
+            str(number),
+            "--remove-label",
+            "processing",
+            "--remove-label",
+            AUTO_MERGE_CLAIM_LABEL,
+        ],
+        check=False,
+    )
+
+
+def claim_cards(scan, cards):
+    cfg = core.load_config()
+    global_auto_merge = cfg["auto_merge"]
+    index = _card_index(cards)
+    claimed = []
+    if not auto_merge_triage_available():
+        return claimed
+    for item in (scan or {}).get("items") or []:
+        if item.get("kind") != "pr-review" or item.get("bucket") != "merge-ready":
+            continue
+        repo = item.get("repo")
+        number = str(item.get("number") or "")
+        repo_cfg = (cfg["repos"] or {}).get(repo, {})
+        if not core._auto_merge_enabled(repo_cfg, global_auto_merge):
+            continue
+        expected = index.get((repo, number))
+        if not expected:
+            continue
+        try:
+            current = render_card.get_card(expected["issue"])
+            current_entry = _card_index([current]).get((repo, number))
+            if (
+                not current_entry
+                or not render_card.issue_is_open(current)
+                or not render_card.is_refreshable(current_entry["labels"])
+                or current_entry["state"] != expected["state"]
+                or _selected_card_option(current.get("body"))
+            ):
+                continue
+            render_card.ensure_labels(["processing", AUTO_MERGE_CLAIM_LABEL])
+            claim = render_card._gh(
+                [
+                    "issue",
+                    "edit",
+                    str(expected["issue"]),
+                    "--add-label",
+                    "processing",
+                    "--add-label",
+                    AUTO_MERGE_CLAIM_LABEL,
+                ],
+                check=False,
+            )
+            if claim.returncode != 0:
+                continue
+            claimed_card = render_card.get_card(expected["issue"])
+            claimed_entry = _card_index([claimed_card]).get((repo, number))
+            if (
+                not claimed_entry
+                or not render_card.issue_is_open(claimed_card)
+                or claimed_entry["state"] != expected["state"]
+                or not _card_is_claimed(claimed_entry["labels"])
+            ):
+                _release_card_claim(expected["issue"])
+                continue
+            claimed.append(claimed_card)
+        except Exception as e:
+            print(
+                "::warning::wheelhouse auto-merge could not claim %s#%s: %s"
+                % (repo, number, str(e)[:160]),
+                file=sys.stderr,
+            )
+    return claimed
+
+
+def cmd_claim(scan_path, cards_path):
+    scan = _load_json(scan_path, {})
+    cards = _load_json(cards_path, [])
+    if not isinstance(cards, list):
+        cards = []
+    claimed = claim_cards(scan, cards)
+    out_path = os.environ.get("WHEELHOUSE_AUTOMERGE_CLAIMS", "automerge-claims.json")
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(claimed, f, indent=2)
+    except OSError as e:
+        print(
+            "::warning::wheelhouse auto-merge could not write claims: %s"
+            % str(e)[:160],
+            file=sys.stderr,
+        )
+    print("wheelhouse auto-merge: %d card claim(s)" % len(claimed))
+
+
 # --------------------------------------------------------------------------- #
 # G7: act (live re-check immediately before merging, then do_merge)
 # --------------------------------------------------------------------------- #
@@ -524,6 +680,11 @@ def act_on_scan(scan, cards):
 
     merges = []
     holds = []
+    releases = [
+        {"card_issue": entry["issue"]}
+        for entry in index.values()
+        if _card_is_claimed(entry.get("labels"))
+    ]
     for item in (scan or {}).get("items") or []:
         if item.get("kind") != "pr-review" or item.get("bucket") != "merge-ready":
             continue
@@ -628,6 +789,7 @@ def act_on_scan(scan, cards):
         "owner": owner,
         "merges": merges,
         "holds": holds,
+        "releases": releases,
     }
 
 
@@ -884,15 +1046,35 @@ def resolve_card(record):
         )
 
 
+def release_card_claim(record):
+    card = record.get("card_issue")
+    if not card:
+        return
+    try:
+        _release_card_claim(card)
+    except Exception as e:
+        print(
+            "::warning::wheelhouse auto-merge could not release card #%s: %s"
+            % (card, str(e)[:200]),
+            file=sys.stderr,
+        )
+
+
 def cmd_record(results_path):
     payload = _load_json(results_path, {})
     records = (payload or {}).get("merges") or []
-    if not records:
+    releases = (payload or {}).get("releases") or []
+    if not records and not releases:
         print("wheelhouse auto-merge record: no auto-merges to record")
         return
     append_to_ledger(records)
     for record in records:
         resolve_card(record)
+        release_card_claim(record)
+    resolved_cards = {record.get("card_issue") for record in records}
+    for record in releases:
+        if record.get("card_issue") not in resolved_cards:
+            release_card_claim(record)
     print("wheelhouse auto-merge record: recorded %d auto-merge(s)" % len(records))
 
 
@@ -911,7 +1093,9 @@ def _load_json(path, default):
 
 
 def main():
-    if len(sys.argv) >= 4 and sys.argv[1] == "act":
+    if len(sys.argv) >= 4 and sys.argv[1] == "claim":
+        cmd_claim(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "act":
         cmd_act(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3 and sys.argv[1] == "record":
         cmd_record(sys.argv[2])

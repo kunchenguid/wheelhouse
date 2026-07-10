@@ -1005,7 +1005,9 @@ def body_with_triage_queued(body, item):
     return _replace_state_block(clean, new_state)
 
 
-def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
+def body_with_triage_result(
+    body, revision, triage=None, error=None, owner="", vision_sha=""
+):
     state = parse_state_block(body)
     kind = (state or {}).get("kind") if state else None
     if (
@@ -1030,6 +1032,11 @@ def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
     automerge_verdict = (
         (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
     )
+    if automerge_verdict and vision_sha:
+        automerge_verdict = dict(automerge_verdict)
+        automerge_verdict["vision_sha"] = vision_sha
+    else:
+        automerge_verdict = None
     new_state = _state_with_triage(
         state,
         revision,
@@ -1294,7 +1301,13 @@ def find_card(marker):
 
 def get_card(number):
     r = _gh(
-        ["issue", "view", str(number), "--json", "number,body,labels,state,updatedAt"],
+        [
+            "issue",
+            "view",
+            str(number),
+            "--json",
+            "number,body,labels,state,updatedAt,author",
+        ],
         check=False,
     )
     if r.returncode != 0:
@@ -1424,7 +1437,9 @@ def publish_dispatch_failure(number, revision, message, owner=""):
     return False
 
 
-def update_card_triage(number, revision, triage=None, error=None, owner=""):
+def update_card_triage(
+    number, revision, triage=None, error=None, owner="", vision_sha=""
+):
     """Attach a completed auto-triage attempt's result to its card.
 
     If the card is still HELD, this ALSO publishes it in the same edit: the
@@ -1463,7 +1478,12 @@ def update_card_triage(number, revision, triage=None, error=None, owner=""):
         remove_labels.append(HOLD_LABEL)
 
     new_body = body_with_triage_result(
-        body, revision, triage=triage, error=error, owner=owner
+        body,
+        revision,
+        triage=triage,
+        error=error,
+        owner=owner,
+        vision_sha=vision_sha,
     )
     if new_body == body and not held:
         return False
@@ -1740,6 +1760,7 @@ def main():
     ta.add_argument("--issue", required=True)
     ta.add_argument("--revision", required=True)
     ta.add_argument("--execution-file", required=True)
+    ta.add_argument("--vision-sha", default="")
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
@@ -1794,7 +1815,11 @@ def main():
         triage = parse_triage_json(result_text)
         if triage:
             if update_card_triage(
-                args.issue, args.revision, triage=triage, owner=owner
+                args.issue,
+                args.revision,
+                triage=triage,
+                owner=owner,
+                vision_sha=args.vision_sha,
             ):
                 print("updated auto triage on card #%s" % args.issue)
             else:

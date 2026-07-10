@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           if ! gh api --paginate --slurp \
             "repos/{owner}/{repo}/issues?state=open&per_page=100" \
-            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
+            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), author: (.user.login // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
             > cards.json.tmp; then
             echo "::warning::Could not read the optional CI security-summary cache; scanning without it"
             rm -f cards.json.tmp
@@ -76,6 +76,13 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/wheelhouse_core.py scan --cards cards.json > scan.json
 
+      - name: Claim auto-merge decision cards
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: python scripts/auto_merge.py claim scan.json cards.json
+
       # Scan-time auto-merge (default OFF; strict subset of the manual merge
       # gate). Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
       # it reads the persisted per-card behavior verdict from cards.json (a local
@@ -87,7 +94,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: python scripts/auto_merge.py act scan.json cards.json
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: python scripts/auto_merge.py act scan.json automerge-claims.json
 
       # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.
