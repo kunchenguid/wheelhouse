@@ -2784,7 +2784,7 @@ def build_repo(
         )
         if _mergeable_is_conflicting(mergeable):
             _maybe_nudge_rebase(
-                slug, name, pr, maintainer_logins, arm_rebase_cleanup
+                slug, name, pr, maintainer_logins, arm_cleanup=False
             )
 
     if card_issues:

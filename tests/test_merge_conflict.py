@@ -467,6 +467,18 @@ def test_ci_noop_conflicting_fork_nudges_once_per_head():
         "ci-noop-conflict: settle not needed when bulk mergeable is conclusive",
         calls1["settle"] == [],
     )
+    _, cleanup_items, cleanup_calls = run_build_repo(
+        [pr],
+        auto_approve_ci=True,
+        approve_result=("noop", "no workflow runs awaiting approval"),
+        pending_contributor_cleanup=True,
+        comments_by_pr={},
+    )
+    check("ci-noop-conflict: cleanup-enabled path emits no card", cleanup_items == [])
+    check(
+        "ci-noop-conflict: cleanup state is not armed",
+        cleanup_calls["patches"] == [] and cleanup_calls["labels"] == [],
+    )
 
 
 def test_ci_noop_unknown_mergeable_does_not_nudge():
