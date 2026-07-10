@@ -554,16 +554,21 @@ def _stale_pr_head_result(repo, number, expected, current, action):
     return None
 
 
-def do_merge(owner, repo, number, head_sha):
+def do_merge(owner, repo, number, head_sha, return_merge_commit=False):
+    def outcome(message, terminal, merge_commit=""):
+        if return_merge_commit:
+            return (message, terminal, merge_commit)
+        return (message, terminal)
+
     slug = "%s/%s" % (owner, repo)
     pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
     if pr.get("merged"):
-        return (
+        return outcome(
             "Target %s#%s is already merged - nothing to do." % (repo, number),
             "resolved",
         )
     if pr.get("state") != "open":
-        return (
+        return outcome(
             "Target %s#%s is not open (%s) - consuming card."
             % (repo, number, pr.get("state")),
             "resolved",
@@ -571,13 +576,13 @@ def do_merge(owner, repo, number, head_sha):
     current = (pr.get("head") or {}).get("sha", "")
     stale = _stale_pr_head_result(repo, number, head_sha, current, "merging")
     if stale:
-        return stale
+        return outcome(*stale)
     method = _merge_method(repo)
     try:
         fields = {"merge_method": method}
         if head_sha:
             fields["sha"] = head_sha
-        core.gh_rest(
+        merge_result = core.gh_rest(
             "/repos/%s/pulls/%s/merge" % (slug, number),
             method="PUT",
             fields=fields,
@@ -585,16 +590,19 @@ def do_merge(owner, repo, number, head_sha):
     except RuntimeError as e:
         detail = str(e)[:200]
         if "conflict" in detail.lower():
-            return (
+            return outcome(
                 "Merge of %s#%s failed because the PR has a merge conflict. "
                 "The contributor must rebase or merge the base branch, resolve "
                 "the conflict, and push before this can be merged. (%s)"
                 % (repo, number, detail),
                 "error",
             )
-        return ("Merge of %s#%s failed: %s" % (repo, number, detail), "error")
+        return outcome("Merge of %s#%s failed: %s" % (repo, number, detail), "error")
     _thank_contributor(owner, repo, number, pr)
-    return ("Merged %s#%s (%s)." % (repo, number, method), "resolved")
+    merge_commit = (
+        str(merge_result.get("sha") or "") if isinstance(merge_result, dict) else ""
+    )
+    return outcome("Merged %s#%s (%s)." % (repo, number, method), "resolved", merge_commit)
 
 
 def do_approve_ci(owner, repo, number):

@@ -94,6 +94,7 @@ LEDGER_MAX_BODY_BYTES = 60000
 _LEDGER_RE = re.compile(
     r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(LEDGER_MARKER), re.S
 )
+_GIT_OBJECT_ID_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +302,35 @@ def mergeable_clean(pr):
     if state != "clean":
         return (False, "live merge state is %r (need CLEAN)" % (state or "<none>"))
     return (True, "MERGEABLE and CLEAN")
+
+
+def immutable_compare_files(slug, base_sha, head_sha, expected_count):
+    base_sha = str(base_sha or "").strip()
+    head_sha = str(head_sha or "").strip()
+    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha) or not _GIT_OBJECT_ID_RE.fullmatch(head_sha):
+        return ([], False, False)
+    try:
+        comparison = core.gh_rest(
+            "/repos/%s/compare/%s...%s" % (slug, base_sha, head_sha)
+        )
+    except RuntimeError:
+        return ([], False, False)
+    if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
+        return ([], False, False)
+    files = []
+    for changed in comparison["files"]:
+        if not isinstance(changed, dict):
+            return ([], False, False)
+        filename = str(changed.get("filename") or "").strip()
+        if not filename:
+            return ([], False, False)
+        files.append(filename)
+    try:
+        count = int(expected_count)
+    except (TypeError, ValueError):
+        return ([], False, False)
+    complete = count >= 0 and len(files) == count and len(set(files)) == len(files)
+    return (files, True, complete)
 
 
 # --------------------------------------------------------------------------- #
@@ -519,6 +549,10 @@ def evaluate_candidate(
             "head moved since scan (scan %s, live %s)"
             % (head_sha[:8] or "<none>", live_head[:8] or "<none>")
         )
+    base_sha = str((pr.get("base") or {}).get("sha") or "")
+    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha):
+        return hold("G2 live PR base SHA is unavailable")
+    result["base_sha"] = base_sha
 
     # G3: returning contributor (non-bot human, >= 1 prior same-repo merge).
     author = _pr_author_login(pr)
@@ -534,8 +568,8 @@ def evaluate_candidate(
     result["gates"]["returning_contributor"] = True
 
     # G2: unconditional file exclusions (fail closed if the list is unreadable).
-    files, files_ok, complete = core._list_pr_files(
-        slug, number, pr.get("changed_files")
+    files, files_ok, complete = immutable_compare_files(
+        slug, base_sha, head_sha, pr.get("changed_files")
     )
     if not files_ok or not complete:
         return hold("G2 could not list all changed files (failing closed)")
@@ -791,7 +825,7 @@ def cmd_validate(cards_path):
 # --------------------------------------------------------------------------- #
 # G7: act (live re-check immediately before merging, then do_merge)
 # --------------------------------------------------------------------------- #
-def act_merge(owner, repo, number, head_sha, vision_sha, expected_card):
+def act_merge(owner, repo, number, head_sha, vision_sha, base_sha, expected_card):
     """G7. Immediately re-read head SHA + mergeability + clean merge state, then
     call the existing do_merge (which does its own head re-check and runs on the
     ambient FLEET_TOKEN with the unchanged owner-safety / thank-you model).
@@ -812,6 +846,9 @@ def act_merge(owner, repo, number, head_sha, vision_sha, expected_card):
     live_head = str((pr.get("head") or {}).get("sha") or "")
     if not live_head or live_head != head_sha:
         return ("held", "head moved immediately before acting", "")
+    live_base = str((pr.get("base") or {}).get("sha") or "")
+    if not live_base or live_base != base_sha:
+        return ("held", "base changed immediately before acting", "")
     if core.NO_AUTO_MERGE_LABEL in _pr_label_names(pr):
         return ("held", "escape hatch label appeared before acting", "")
     mc_ok, mc_reason = mergeable_clean(pr)
@@ -824,10 +861,18 @@ def act_merge(owner, repo, number, head_sha, vision_sha, expected_card):
     if not card_ok:
         return ("held", "final card re-check: %s" % card_reason, "")
 
-    message, terminal = apply_decision.do_merge(owner, repo, number, head_sha)
+    message, terminal, merge_commit = apply_decision.do_merge(
+        owner, repo, number, head_sha, return_merge_commit=True
+    )
     if terminal == "resolved" and message.startswith("Merged "):
-        merged = live_pr(slug, number) or {}
-        return ("merged", message, str(merged.get("merge_commit_sha") or ""))
+        merge_commit = str(merge_commit or "").strip()
+        if not _GIT_OBJECT_ID_RE.fullmatch(merge_commit):
+            return (
+                "post-merge-error",
+                "merge endpoint did not return a merge commit SHA for audit",
+                "",
+            )
+        return ("merged", message, merge_commit)
     if terminal == "resolved":
         # do_merge saw already-merged / not-open (a race) - not our merge.
         return ("held", message, "")
@@ -853,6 +898,7 @@ def act_on_scan(scan, cards):
     index = _card_index(cards)
     merges = []
     holds = []
+    post_merge_errors = []
     releases = [
         {"card_issue": entry["issue"]}
         for entry in index.values()
@@ -920,6 +966,7 @@ def act_on_scan(scan, cards):
                 item["number"],
                 result["head_sha"],
                 result["audit"]["vision_sha"],
+                result["base_sha"],
                 card_entry,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
@@ -960,6 +1007,8 @@ def act_on_scan(scan, cards):
                 {"repo": repo, "number": number, "hold_reason": "%s: %s"
                  % (outcome, detail)}
             )
+            if outcome == "post-merge-error":
+                post_merge_errors.append("%s#%s: %s" % (repo, number, detail))
 
     return {
         "generated_at": _now(),
@@ -967,6 +1016,7 @@ def act_on_scan(scan, cards):
         "merges": merges,
         "holds": holds,
         "releases": releases,
+        "post_merge_errors": post_merge_errors,
     }
 
 
@@ -998,6 +1048,10 @@ def cmd_act(scan_path, cards_path):
         "wheelhouse auto-merge: %d merged, %d held"
         % (len(payload["merges"]), len(payload["holds"]))
     )
+    if payload.get("post_merge_errors"):
+        for error in payload["post_merge_errors"]:
+            print("::error::wheelhouse auto-merge audit handoff failed: %s" % error, file=sys.stderr)
+        raise RuntimeError("could not record one or more completed auto-merges")
 
 
 # --------------------------------------------------------------------------- #

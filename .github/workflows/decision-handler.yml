@@ -355,13 +355,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
+          TRIGGER_BODY: ${{ github.event.issue.body }}
+          TRIGGER_UPDATED_AT: ${{ github.event.issue.updated_at }}
         run: |
           set -euo pipefail
-          card="$(gh issue view "$ISSUE" --json state,labels)"
+          card="$(gh issue view "$ISSUE" --json state,labels,body,updatedAt)"
           allowed=false
-          if jq -e '
+          if [ -n "$TRIGGER_UPDATED_AT" ] && jq -e \
+            --arg trigger_body "$TRIGGER_BODY" \
+            --arg trigger_updated_at "$TRIGGER_UPDATED_AT" '
             [.labels[].name] as $labels
-            | .state == "OPEN"
+            | (.body // "") == $trigger_body
+            and (.updatedAt // "") == $trigger_updated_at
+            and .state == "OPEN"
             and ($labels | index("needs-decision") != null)
             and ($labels | index("processing") == null)
             and ($labels | index("resolved") == null)

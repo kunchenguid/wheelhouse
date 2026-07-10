@@ -82,10 +82,12 @@ def make_pr(
     labels=None,
     merged=False,
     state="open",
+    base="b1" * 20,
     merge_commit_sha="mc" * 20,
 ):
     return {
         "head": {"sha": head},
+        "base": {"sha": base},
         "mergeable": mergeable,
         "mergeable_state": mergeable_state,
         "additions": additions,
@@ -173,9 +175,11 @@ class World:
         self.vision_seq = {}
         self.merged_authors = {}  # (slug, author) -> bool
         self.pr_seq = {}  # (slug, str(number)) -> [pr, ...]
+        self.last_pr = {}
         self.files = {}  # (slug, str(number)) -> (files, ok, complete)
         self.do_merge_calls = []
         self.do_merge_returns = {}  # (repo, number) -> (message, terminal)
+        self.merge_commits = {}  # (repo, number) -> merge endpoint sha
 
     def set_pr(self, slug, number, prs):
         self.pr_seq[(slug, str(number))] = prs if isinstance(prs, list) else [prs]
@@ -184,7 +188,9 @@ class World:
         seq = self.pr_seq.get((slug, str(number)))
         if not seq:
             return None
-        return seq.pop(0) if len(seq) > 1 else seq[0]
+        pr = seq.pop(0) if len(seq) > 1 else seq[0]
+        self.last_pr[(slug, str(number))] = pr
+        return pr
 
     def vision_on_default_branch(self, slug):
         repo = slug.split("/")[-1]
@@ -193,11 +199,25 @@ class World:
             return seq.pop(0) if len(seq) > 1 else seq[0]
         return self.vision.get(repo, (False, ""))
 
-    def do_merge(self, owner, repo, number, head):
+    def immutable_compare_files(self, slug, base, head, expected):
+        for (pr_slug, number), pr in self.last_pr.items():
+            if pr_slug != slug:
+                continue
+            if (
+                str((pr.get("base") or {}).get("sha") or "") == base
+                and str((pr.get("head") or {}).get("sha") or "") == head
+            ):
+                return self.files.get((slug, number), ([], True, True))
+        return ([], False, False)
+
+    def do_merge(self, owner, repo, number, head, return_merge_commit=False):
         self.do_merge_calls.append((owner, repo, number, head))
-        return self.do_merge_returns.get(
+        result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
         )
+        if return_merge_commit:
+            return (*result, self.merge_commits.get((repo, str(number)), "c" * 40))
+        return result
 
 
 def run_act(world, items, cards, has_token=True):
@@ -207,7 +227,7 @@ def run_act(world, items, cards, has_token=True):
         "vision": am.vision_on_default_branch,
         "prior": am.has_prior_merged_pr,
         "live": am.live_pr,
-        "files": core._list_pr_files,
+        "compare": am.immutable_compare_files,
         "domerge": apply_decision.do_merge,
         "get_card": render_card.get_card,
         "cfg": core.load_config,
@@ -220,9 +240,7 @@ def run_act(world, items, cards, has_token=True):
         (slug, author), False
     )
     am.live_pr = world.live_pr
-    core._list_pr_files = lambda slug, pr, expected=None: world.files.get(
-        (slug, str(pr)), ([], True, True)
-    )
+    am.immutable_compare_files = world.immutable_compare_files
     apply_decision.do_merge = world.do_merge
     core.load_config = lambda: {
         "auto_merge": world.global_auto_merge,
@@ -257,7 +275,7 @@ def run_act(world, items, cards, has_token=True):
         am.vision_on_default_branch = saved["vision"]
         am.has_prior_merged_pr = saved["prior"]
         am.live_pr = saved["live"]
-        core._list_pr_files = saved["files"]
+        am.immutable_compare_files = saved["compare"]
         apply_decision.do_merge = saved["domerge"]
         render_card.get_card = saved["get_card"]
         core.load_config = saved["cfg"]
@@ -560,6 +578,41 @@ def test_G2_unreadable_file_list_fails_closed():
     w.files[("owner/fmt", "5")] = ([], False, False)  # gh could not list files
     payload, _ = run_act(w, items, cards)
     check("G2: unreadable file list holds", "G2" in _held_reason(payload))
+
+
+def test_G2_uses_complete_immutable_base_head_comparison():
+    saved = core.gh_rest
+    calls = []
+    base = "a" * 40
+    head = "b" * 40
+
+    def gh_rest(path, **kwargs):
+        calls.append(path)
+        return {"files": [{"filename": "src/safe.py"}]}
+
+    core.gh_rest = gh_rest
+    try:
+        files, ok, complete = am.immutable_compare_files("owner/fmt", base, head, 1)
+        check(
+            "G2: changed paths use the immutable base...head comparison",
+            files == ["src/safe.py"]
+            and ok
+            and complete
+            and calls == ["/repos/owner/fmt/compare/%s...%s" % (base, head)],
+        )
+        _, ok, complete = am.immutable_compare_files("owner/fmt", base, head, 2)
+        check("G2: incomplete immutable file list holds", ok and not complete)
+        _, ok, complete = am.immutable_compare_files("owner/fmt", "not-a-sha", head, 1)
+        check("G2: invalid immutable comparison inputs hold", not ok and not complete)
+    finally:
+        core.gh_rest = saved
+
+
+def test_G2_missing_live_base_sha_holds():
+    w, items, cards = default_world(head="ba" * 20)
+    w.set_pr("owner/fmt", 5, make_pr(head="ba" * 20, base=""))
+    payload, _ = run_act(w, items, cards)
+    check("G2: missing live base SHA holds", "G2" in _held_reason(payload))
 
 
 def test_G4_not_mergeable_or_not_clean_holds():
@@ -999,6 +1052,31 @@ def test_G7_escape_hatch_appears_before_acting_holds():
     w.set_pr("owner/fmt", 5, [good, tagged])
     payload, _ = run_act(w, items, cards)
     check("G7: escape hatch appearing before acting holds", not payload["merges"])
+
+
+def test_G7_base_changed_before_acting_holds():
+    w, items, cards = default_world(head="bd" * 20)
+    good = make_pr(head="bd" * 20, base="a1" * 20)
+    moved = make_pr(head="bd" * 20, base="b2" * 20)
+    w.set_pr("owner/fmt", 5, [good, moved])
+    payload, _ = run_act(w, items, cards)
+    check("G7: base moved before acting holds", not payload["merges"])
+    check("G7: base moved -> no merge call", not w.do_merge_calls)
+
+
+def test_post_merge_missing_endpoint_sha_fails_audit_handoff():
+    for bad_sha in ("", "not-a-sha"):
+        w, items, cards = default_world(head="ms" * 20)
+        w.merge_commits[("fmt", "5")] = bad_sha
+        payload, _ = run_act(w, items, cards)
+        check(
+            "audit: invalid merge endpoint SHA is never recorded",
+            not payload["merges"],
+        )
+        check(
+            "audit: invalid merge endpoint SHA fails the post-merge handoff",
+            payload["post_merge_errors"] and payload["releases"] == [{"card_issue": 101}],
+        )
 
 
 def test_G7_card_changed_before_acting_holds_and_releases_claim():
@@ -1616,6 +1694,48 @@ def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
         am.append_to_ledger = saved["ledger"]
 
 
+def test_missing_merge_sha_fails_act_after_persisting_claim_releases():
+    saved = {
+        "act": am.act_on_scan,
+        "result_env": os.environ.get("WHEELHOUSE_AUTOMERGE_RESULTS"),
+    }
+    payload = {
+        "merges": [],
+        "holds": [],
+        "releases": [{"card_issue": 101}],
+        "post_merge_errors": ["fmt#5: merge endpoint returned no SHA"],
+    }
+    am.act_on_scan = lambda scan, cards: payload
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            scan_path = os.path.join(directory, "scan.json")
+            cards_path = os.path.join(directory, "cards.json")
+            results_path = os.path.join(directory, "automerge.json")
+            for path, data in ((scan_path, {}), (cards_path, [])):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            os.environ["WHEELHOUSE_AUTOMERGE_RESULTS"] = results_path
+            failed = False
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                try:
+                    am.cmd_act(scan_path, cards_path)
+                except RuntimeError:
+                    failed = True
+            with open(results_path, encoding="utf-8") as f:
+                written = json.load(f)
+            check(
+                "audit: missing merge SHA writes claim releases then fails loudly",
+                failed and written == payload and "::error::" in stderr.getvalue(),
+            )
+    finally:
+        am.act_on_scan = saved["act"]
+        if saved["result_env"] is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_RESULTS", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_RESULTS"] = saved["result_env"]
+
+
 # --------------------------------------------------------------------------- #
 # non-candidates: only merge-ready pr-review items are considered
 # --------------------------------------------------------------------------- #
@@ -1732,6 +1852,10 @@ def test_scan_backstop_wiring_and_token_discipline():
         "wiring: manual target actions re-read claim state before execution",
         current
         and "wheelhouse:auto-merge-claim" in current.get("run", "")
+        and "TRIGGER_BODY" in (current.get("env") or {})
+        and "TRIGGER_UPDATED_AT" in (current.get("env") or {})
+        and "body,updatedAt" in current.get("run", "")
+        and "trigger_updated_at" in current.get("run", "")
         and "steps.current-card.outputs.allowed == 'true'" in json.dumps(handler_steps),
     )
 
@@ -1781,6 +1905,12 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         and "GIT binary patch" in text
         and '"$diff_size" -eq 0' in text
         and "binary data unavailable for auto-merge assessment" in text,
+    )
+    check(
+        "triage: behavior verdict diff is fetched from immutable base and dispatched head SHAs",
+        "repos/$SLUG/compare/$base_sha...$HEAD_SHA" in text
+        and "HEAD_SHA: ${{ steps.resolve.outputs.revision }}" in text
+        and 'gh pr diff "$NUMBER"' not in text,
     )
 
 

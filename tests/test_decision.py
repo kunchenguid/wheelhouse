@@ -901,6 +901,7 @@ def patch_core(**attrs):
 def fake_gh_rest(
     pr,
     merge_error=None,
+    merge_response=None,
     comment_error=None,
     calls=None,
     review_submitted_at="2026-01-01T00:00:00Z",
@@ -921,7 +922,7 @@ def fake_gh_rest(
         if method == "PUT":
             if merge_error:
                 raise RuntimeError(merge_error)
-            return {}
+            return {} if merge_response is None else merge_response
         if method == "POST":
             if comment_error:
                 raise RuntimeError(comment_error)
@@ -1002,6 +1003,20 @@ def test_thank_on_merge_posts_after_successful_merge():
     m = merge_puts(calls)
     check("merge: API precondition binds the expected head SHA",
           len(m) == 1 and m[0]["fields"].get("sha") == "abc123")
+
+
+def test_auto_merge_receives_sha_from_successful_merge_response():
+    merge_sha = "d" * 40
+    fake, _ = fake_gh_rest(open_pr(), merge_response={"sha": merge_sha})
+    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
+                    maintainers=lambda: {"owner-login"}):
+        message, terminal, returned_sha = ad.do_merge(
+            "owner-login", "target-repo", 5, "abc123", return_merge_commit=True
+        )
+    check(
+        "merge: auto-merge receives the endpoint merge commit SHA",
+        terminal == "resolved" and "Merged" in message and returned_sha == merge_sha,
+    )
 
 
 def test_thank_on_merge_disabled_globally():
@@ -1813,6 +1828,7 @@ def main():
     test_request_changes_route_decision()
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()
+    test_auto_merge_receives_sha_from_successful_merge_response()
     test_thank_on_merge_disabled_globally()
     test_thank_on_merge_disabled_per_repo()
     test_thank_on_merge_skips_non_success_outcomes()

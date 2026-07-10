@@ -271,6 +271,7 @@ jobs:
           NUMBER: ${{ steps.resolve.outputs.number }}
           SLUG: ${{ steps.resolve.outputs.slug }}
           KIND: ${{ steps.resolve.outputs.kind }}
+          HEAD_SHA: ${{ steps.resolve.outputs.revision }}
           READONLY_SEARCH_ENABLED: ${{ steps.readonly.outputs.enabled }}
         run: |
           set -euo pipefail
@@ -293,14 +294,24 @@ jobs:
               DIFF_COMPLETE=false
               diff_limit_bytes=120000
               diff_raw="diff.raw"
-              set +e
-              GH_TOKEN="$FLEET_TOKEN" gh pr diff "$NUMBER" -R "$SLUG" \
-                | head -c "$((diff_limit_bytes + 1))" > "$diff_raw"
-              pipe_status=("${PIPESTATUS[@]}")
-              diff_status=${pipe_status[0]}
-              head_status=${pipe_status[1]}
+              base_sha="$(GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/pulls/$NUMBER" --jq '.base.sha // empty' 2>/dev/null || true)"
+              if printf '%s' "$base_sha" | grep -Eq '^[0-9A-Fa-f]{7,64}$' \
+                && printf '%s' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{7,64}$'; then
+                set +e
+                GH_TOKEN="$FLEET_TOKEN" gh api \
+                  -H 'Accept: application/vnd.github.v3.diff' \
+                  "repos/$SLUG/compare/$base_sha...$HEAD_SHA" \
+                  | head -c "$((diff_limit_bytes + 1))" > "$diff_raw"
+                pipe_status=("${PIPESTATUS[@]}")
+                diff_status=${pipe_status[0]}
+                head_status=${pipe_status[1]}
+                set -e
+              else
+                printf '(could not fetch immutable diff)\n' > "$diff_raw"
+                diff_status=1
+                head_status=0
+              fi
               diff_size="$(wc -c < "$diff_raw" | tr -d '[:space:]')"
-              set -e
               if [ "$diff_size" -gt "$diff_limit_bytes" ]; then
                 head -c "$diff_limit_bytes" "$diff_raw"
                 printf '\n\n[diff truncated after %s bytes]\n' "$diff_limit_bytes"
