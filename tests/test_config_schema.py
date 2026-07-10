@@ -68,8 +68,10 @@ def test_every_repo_entry_is_well_formed():
         # compliance_check is either absent/null (no gate) or a non-empty string
         # naming an exact required check. Never an empty string or other type.
         comp = entry.get("compliance_check")
-        check("%s: compliance_check is None or a non-empty str" % label,
-              comp is None or (isinstance(comp, str) and bool(comp.strip())))
+        check("%s: compliance_check is None or a trimmed non-empty str" % label,
+              comp is None or (
+                  isinstance(comp, str) and bool(comp) and comp == comp.strip()
+              ))
         # test_check_patterns, when present, is a list of non-empty strings.
         pats = entry.get("test_check_patterns")
         ok_pats = (
