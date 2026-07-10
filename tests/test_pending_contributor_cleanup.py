@@ -276,14 +276,26 @@ def patch_rest(fake):
         core.gh_graphql_pr_user_content_edits_page = old_edits
 
 
-def enriched_pr(labels=None, bucket="review-needed", head="sha1", author_excluded=False):
-    return {
+def enriched_pr(
+    labels=None,
+    bucket="review-needed",
+    head="sha1",
+    author_excluded=False,
+    mergeable=None,
+    kind=None,
+):
+    node = {
         "number": 7,
         "labels": labels if labels is not None else [core.PENDING_CONTRIBUTOR_LABEL],
         "bucket": bucket,
         "head_sha": head,
         "author_excluded": author_excluded,
     }
+    if mergeable is not None:
+        node["mergeable"] = mergeable
+    if kind is not None:
+        node["kind"] = kind
+    return node
 
 
 def run(fake, pr_node=None, now_days=0):
@@ -1066,6 +1078,97 @@ def test_widened_backlog_contributor_activity_fails_open():
           closed == set())
 
 
+def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
+    # A ci-noop fork PR: no CI so it routes to needs-ci-approval, but it is
+    # CONFLICTING and got a rebase nudge (sibling opportunity #3, which
+    # deliberately does not arm). The nudge - not the bucket - is the ask, so it
+    # must enter the two-phase reminder-then-close clock from the nudge evidence.
+    marker = core._rebase_nudge_marker("sha1")
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[comment("please rebase\n\n" + marker, ts(), OWNER, 201)],
+        reviews=[],
+    )
+    closed = run(
+        fake,
+        enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
+                    mergeable="CONFLICTING"),
+        now_days=14,
+    )
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("ci-noop: nudged conflicting ci-approval PR reminds first",
+          closed == set())
+    check("ci-noop: reminder arms pending label for the later close",
+          core.PENDING_CONTRIBUTOR_LABEL in labels)
+
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+    )
+    closed = run(
+        fake,
+        enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
+                    mergeable="CONFLICTING"),
+        now_days=14,
+    )
+    check("ci-noop: nudged conflicting ci-approval PR closes on the later scan",
+          closed == {7})
+
+
+def test_ci_approval_pr_without_fresh_conflict_stays_out_of_scope():
+    # The same nudge, but the PR is not authoritatively CONFLICTING this scan
+    # (resolved, mergeable, or still recomputing): the fast security-gate lane is
+    # out of scope, so nothing is read and nothing is closed - the close path is
+    # fail-closed on a fresh, authoritative conflict.
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    for mergeable in (None, "MERGEABLE", "UNKNOWN"):
+        fake = FakeGitHub(
+            issue_obj=issue([]),
+            comments=[
+                comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+                reminder_comment(legacy_record),
+            ],
+            reviews=[],
+        )
+        closed = run(
+            fake,
+            enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
+                        mergeable=mergeable),
+            now_days=14,
+        )
+        check("ci-noop: non-conflicting ci-approval PR (%s) is not closed"
+              % mergeable, closed == set())
+        check("ci-noop: non-conflicting ci-approval PR (%s) performs no reads"
+              % mergeable, fake.calls == [])
+
+
+def test_widened_ci_noop_respects_keep_open():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([core.PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[],
+    )
+    closed = run(
+        fake,
+        enriched_pr(labels=[], bucket="needs-ci-approval", kind="ci-approval",
+                    mergeable="CONFLICTING"),
+        now_days=14,
+    )
+    check("ci-noop: keep-open opt-out blocks the widened ci-approval close",
+          closed == set())
+
+
 def main():
     test_config_defaults_off_and_per_repo_override()
     test_no_action_before_reminder_threshold()
@@ -1104,6 +1207,9 @@ def main():
     test_widened_backlog_nudged_pr_reminds_then_closes()
     test_widened_backlog_respects_keep_open()
     test_widened_backlog_contributor_activity_fails_open()
+    test_widened_ci_noop_conflicting_pr_reminds_then_closes()
+    test_ci_approval_pr_without_fresh_conflict_stays_out_of_scope()
+    test_widened_ci_noop_respects_keep_open()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

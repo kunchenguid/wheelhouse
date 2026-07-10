@@ -2168,9 +2168,28 @@ def _close_pending_target(slug, number, record, now):
     _patch_pending_target_closed(slug, number)
 
 
+def _pr_conflicting_for_cleanup(pr):
+    """True when a scanned PR is a provably-conflicting fork PR whose rebase
+    nudge is a valid cleanup ask this scan.
+
+    A `needs-rebase` bucket is authoritative (assigned only after mergeability is
+    settled, so it survives the UNKNOWN->CONFLICTING poll). A fork PR that routes
+    to `needs-ci-approval` because the repo has no CI workflows still gets a
+    deterministic rebase nudge when it is conflicting, but classify never rewrites
+    `needs-ci-approval` to `needs-rebase`. The nudge - not the bucket - is the
+    ask, so honor a fresh authoritative CONFLICTING `mergeable` on such a PR too,
+    letting the already-nudged ci-noop backlog enter the reminder-then-close
+    clock. Only an authoritative CONFLICTING counts (UNKNOWN/MERGEABLE/None do
+    not), so a resolved or unproven PR is never treated as conflicting - the
+    close path stays fail-closed on current conflict."""
+    if pr.get("bucket") == "needs-rebase":
+        return True
+    return _mergeable_is_conflicting(pr.get("mergeable"))
+
+
 def _active_pending_ask_kinds(pr):
     kinds = {"request-changes"}
-    if pr.get("bucket") == "needs-rebase":
+    if _pr_conflicting_for_cleanup(pr):
         kinds.add("needs-rebase")
     return kinds
 
@@ -2217,7 +2236,7 @@ def _sweep_pending_pr(
         state["comments"],
         state["reviews"],
         has_pending_label,
-        allow_legacy_rebase=pr.get("bucket") == "needs-rebase",
+        allow_legacy_rebase=_pr_conflicting_for_cleanup(pr),
         maintainer_logins=maintainer_logins,
         active_ask_kinds=active_ask_kinds,
     )
@@ -2305,10 +2324,21 @@ def sweep_pending_contributor_actions(
     for pr in prs:
         if pr.get("author_excluded"):
             continue
-        if pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval":
+        conflicting = _pr_conflicting_for_cleanup(pr)
+        is_ci_approval = (
+            pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval"
+        )
+        # ci-approval is a fast security gate, not a stale-contributor lane, so it
+        # stays out of scope EXCEPT for a provably-conflicting fork PR: a fork PR
+        # with no CI still routes here (ci-noop) yet gets a deterministic rebase
+        # nudge when conflicting, and that nudge is a valid cleanup ask. A
+        # non-conflicting ci-approval PR is ignored even with a pending label, so
+        # the close path never fires without a fresh, authoritative conflict.
+        if is_ci_approval and not conflicting:
             continue
         maybe_pending = (
             pr.get("bucket") == "needs-rebase"
+            or conflicting
             or PENDING_CONTRIBUTOR_LABEL in set(pr.get("labels") or [])
             or pr.get("labels_truncated")
         )
@@ -2681,6 +2711,11 @@ def build_repo(
                 "tests": tests,
                 "ci": ci,
                 "bucket": bucket,
+                # Carry the fresh authoritative mergeability so the cleanup sweep
+                # can recognize a conflicting fork PR that routes to
+                # `needs-ci-approval` (ci-noop) as a rebase-nudge cleanup target -
+                # the nudge, not the bucket, is the ask.
+                "mergeable": pr.get("mergeable"),
                 "closes": closes,
                 "head_sha": pr["headRefOid"],
                 "updated_at": pr.get("updatedAt", "") or "",
