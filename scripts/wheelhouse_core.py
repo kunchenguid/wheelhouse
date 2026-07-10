@@ -2884,6 +2884,10 @@ def build_repo(
                 continue
             if card_note:  # surface the safety warning on the card body / response
                 item["warning"] = card_note
+            # Attach the advisory, read-only security summary of the changed
+            # workflow/action files so the owner reviews the pwn-request HOLD
+            # faster. Presentation only - it never approves or weakens the hold.
+            _attach_ci_security_summary(item, slug, pr)
 
         items.append(item)
 
@@ -3564,6 +3568,460 @@ def _approve_warning_suffix(verdict):
             "clears the read-only fork pull_request run."
         )
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# CI-approval security summary (advisory, read-only, deterministic).
+#
+# For a fork PR that touches workflow/action execution files the pwn-request
+# HOLD in `approve_ci`/`ci_safety` cards it for manual review, unchanged. This
+# builds a focused, deterministic security summary of ONLY those changed
+# workflow/action files so the owner can make that SAME manual call faster and
+# better-informed. It is presentation/context ONLY:
+#   * It never approves CI, never writes to the target, and never touches the
+#     hold, the owner gate, the posture logic, or classification.
+#   * It reports only structured facts (trigger / permission / secret NAMES,
+#     action refs, checkout refs) - never verbatim file lines - so no secret
+#     VALUE can leak, and every contributor-derived value is echoed inside an
+#     inline-code span at render time.
+#   * It fails CLOSED: any read/parse failure yields a "review the diff
+#     manually" note and NEVER raises into the scan, so the card still holds.
+# --------------------------------------------------------------------------- #
+_SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_-]*)")
+_SECRETS_INHERIT_RE = re.compile(r"secrets:\s*inherit\b", re.I)
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# Returned as the summary BODY when the workflow/action changes cannot be
+# analyzed deterministically. It keeps the manual review required (fail closed).
+CI_SUMMARY_UNANALYZABLE = (
+    "Could not analyze the workflow/action changes automatically - review the "
+    "diff manually. Approval stays held either way."
+)
+
+
+def _fetch_file_text(slug, path, ref=None):
+    """Decoded text of one file at an optional ref, or None on read/decode
+    failure. Read-only; used to inspect the PR-head version of a changed
+    workflow/action file (the version approving CI would run)."""
+    api = "/repos/%s/contents/%s" % (slug, path)
+    if ref:
+        api += "?ref=%s" % quote(str(ref), safe="")
+    r = _gh_api_capture(api)
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("encoding") != "base64":
+        return None
+    content = data.get("content")
+    if content is None:
+        return None
+    try:
+        return base64.b64decode(content).decode("utf-8", "replace")
+    except (ValueError, TypeError):
+        return None
+
+
+def _list_pr_file_changes(slug, pr, expected_count=None):
+    """Return (changes, ok, complete) where changes = [{filename, status}, ...].
+    ok/complete=False means the caller must fail closed (like `_list_pr_files`)."""
+    out = subprocess.run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            "/repos/%s/pulls/%s/files" % (slug, pr),
+            "--jq",
+            ".[] | {filename: .filename, status: .status}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return ([], False, False)
+    changes = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            return ([], False, False)
+        if isinstance(obj, dict) and obj.get("filename"):
+            changes.append(
+                {
+                    "filename": str(obj["filename"]),
+                    "status": str(obj.get("status") or ""),
+                }
+            )
+    count = _changed_file_count(expected_count)
+    complete = count is not None and len(changes) >= count
+    return (changes, True, complete)
+
+
+def _workflow_steps(doc):
+    """Every step dict declared by a workflow (`jobs.*.steps`) or a composite
+    action (`runs.steps`), so uses/run detection covers both file kinds."""
+    steps = []
+    if not isinstance(doc, dict):
+        return steps
+    jobs = doc.get("jobs")
+    if isinstance(jobs, dict):
+        for job in jobs.values():
+            if isinstance(job, dict) and isinstance(job.get("steps"), list):
+                steps.extend(s for s in job["steps"] if isinstance(s, dict))
+    runs = doc.get("runs")
+    if isinstance(runs, dict) and isinstance(runs.get("steps"), list):
+        steps.extend(s for s in runs["steps"] if isinstance(s, dict))
+    return steps
+
+
+def _permission_specs(doc):
+    """(scope_label, spec) for top-level and per-job `permissions:` blocks."""
+    specs = []
+    if not isinstance(doc, dict):
+        return specs
+    if "permissions" in doc:
+        specs.append(("top-level", doc.get("permissions")))
+    jobs = doc.get("jobs")
+    if isinstance(jobs, dict):
+        for name, job in jobs.items():
+            if isinstance(job, dict) and "permissions" in job:
+                specs.append(("job `%s`" % name, job.get("permissions")))
+    return specs
+
+
+def _permission_has_write(spec):
+    """True if a `permissions:` spec grants any write scope (`write-all` or a
+    scope mapped to `write`) - an elevation worth surfacing."""
+    if isinstance(spec, str):
+        return spec.strip().lower() == "write-all"
+    if isinstance(spec, dict):
+        for value in spec.values():
+            if str(value).strip().lower() == "write":
+                return True
+    return False
+
+
+def _format_permission(spec):
+    if spec is None:
+        return "none (read-only)"
+    if isinstance(spec, str):
+        return spec
+    if isinstance(spec, dict):
+        return ", ".join("%s: %s" % (k, spec[k]) for k in spec)
+    return str(spec)
+
+
+def _parse_uses(uses):
+    """(name, ref, kind) for a step `uses:` value. kind in
+    {'local','docker','remote'}; None for an empty value."""
+    u = str(uses or "").strip()
+    if not u:
+        return None
+    if u.startswith("./") or u.startswith("../"):
+        return (u, "", "local")
+    if u.startswith("docker://"):
+        return (u, "", "docker")
+    if "@" in u:
+        name, ref = u.rsplit("@", 1)
+    else:
+        name, ref = u, ""
+    return (name, ref, "remote")
+
+
+def _classify_action(name, ref, kind, owner):
+    """(category, pinned) for one action reference.
+
+    category in {'local','docker','first','third'}; pinned is True only for a
+    remote action pinned to a full 40-char commit SHA (mutable tag/branch refs
+    and unpinned docker images are the supply-chain risk to surface)."""
+    if kind == "local":
+        return ("local", False)
+    if kind == "docker":
+        return ("docker", "@sha256:" in name)
+    action_owner = name.split("/", 1)[0] if "/" in name else name
+    first_party = action_owner in ("actions", "github", owner)
+    pinned = bool(_FULL_SHA_RE.match(ref))
+    return ("first" if first_party else "third", pinned)
+
+
+def _analyze_ci_file(slug, path, head_sha, status, owner):
+    """Deterministic, read-only findings for ONE changed workflow/action file at
+    the PR head. Returns a facts dict; on read/parse failure returns a dict with
+    `unreadable`/`unparsed` set so the caller can fail closed for that file."""
+    text = _fetch_file_text(slug, path, head_sha)
+    if text is None:
+        return {"path": path, "status": status, "unreadable": True}
+    if yaml is None:
+        return {"path": path, "status": status, "unparsed": True}
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {"path": path, "status": status, "unparsed": True}
+
+    is_map = isinstance(doc, dict)
+    triggers = sorted(_on_triggers(doc)) if is_map else []
+    perms = _permission_specs(doc)
+    actions = []
+    checkouts = []
+    run_steps = 0
+    for step in _workflow_steps(doc):
+        if step.get("run") is not None:
+            run_steps += 1
+        parsed = _parse_uses(step.get("uses"))
+        if not parsed:
+            continue
+        name, ref, ukind = parsed
+        category, pinned = _classify_action(name, ref, ukind, owner)
+        actions.append(
+            {"name": name, "ref": ref, "category": category, "pinned": pinned}
+        )
+        if "actions/checkout" in name:
+            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+            checkouts.append(
+                {
+                    "ref": str(with_.get("ref") or ""),
+                    "repository": str(with_.get("repository") or ""),
+                }
+            )
+    return {
+        "path": path,
+        "status": status,
+        "triggers": triggers,
+        "pr_target": "pull_request_target" in triggers,
+        "checks_head": _checks_out_pr_head(doc) if is_map else False,
+        "permissions": perms,
+        "perms_write": any(_permission_has_write(s) for _, s in perms),
+        "secrets": sorted(set(_SECRET_REF_RE.findall(text))),
+        "secrets_inherit": bool(_SECRETS_INHERIT_RE.search(text)),
+        "checkouts": checkouts,
+        "actions": actions,
+        "run_steps": run_steps,
+    }
+
+
+def _checkout_ref_label(ref):
+    """A human label for a checkout `ref` input. Flags a PR-head ref (the
+    pwn-request source) without echoing anything but the expression itself."""
+    if not ref:
+        return "default (base branch)"
+    if _PR_HEAD_REF_RE.search(ref):
+        return "PR head - `%s`" % _safe_inline(ref)
+    return "`%s`" % _safe_inline(ref)
+
+
+def _summary_flags(analysis):
+    """High-severity flags for one file's findings (advisory, most-severe
+    first). These are the patterns that let contributor-controlled code run
+    with repository privileges or mutate the supply chain."""
+    flags = []
+    path = _safe_inline(analysis["path"])
+    if analysis["pr_target"] and analysis["checks_head"]:
+        flags.append(
+            "`%s`: runs on `pull_request_target` AND checks out the PR head - "
+            "the pwn-request pattern (fork code runs with repo secrets)" % path
+        )
+    elif analysis["pr_target"]:
+        flags.append(
+            "`%s`: runs on `pull_request_target`, which executes with repo "
+            "secrets even for fork PRs" % path
+        )
+    if analysis["perms_write"]:
+        flags.append("`%s`: grants a write token permission" % path)
+    if analysis["secrets_inherit"]:
+        flags.append("`%s`: passes `secrets: inherit` to a called workflow" % path)
+    if analysis["pr_target"] and analysis["secrets"]:
+        flags.append(
+            "`%s`: references repository secrets under `pull_request_target` (%s)"
+            % (path, ", ".join("`%s`" % _safe_inline(s) for s in analysis["secrets"]))
+        )
+    for act in analysis["actions"]:
+        if act["category"] == "third" and not act["pinned"]:
+            flags.append(
+                "`%s`: third-party action `%s` is not pinned to a commit SHA"
+                % (path, _safe_inline(_uses_display(act)))
+            )
+        elif act["category"] == "docker" and not act["pinned"]:
+            flags.append(
+                "`%s`: docker action `%s` is not pinned to a digest"
+                % (path, _safe_inline(act["name"]))
+            )
+    return flags
+
+
+def _uses_display(act):
+    return act["name"] + ("@" + act["ref"] if act["ref"] else "")
+
+
+def _file_fact_lines(analysis):
+    """The per-file advisory fact bullets (deterministic; values code-wrapped)."""
+    path = _safe_inline(analysis["path"])
+    status = _safe_inline(analysis["status"] or "changed")
+    lines = ["- `%s` (%s)" % (path, status)]
+    if analysis.get("unreadable"):
+        lines.append("  - Could not read this file at the PR head - review manually")
+        return lines
+    if analysis.get("unparsed"):
+        lines.append("  - Could not parse this file as YAML - review manually")
+        return lines
+
+    triggers = analysis["triggers"]
+    if triggers:
+        trig = ", ".join("`%s`" % _safe_inline(t) for t in triggers)
+        lines.append("  - Triggers: %s" % trig)
+    else:
+        lines.append("  - Triggers: none / not a workflow (e.g. composite action)")
+
+    if analysis["permissions"]:
+        perms = "; ".join(
+            "%s -> %s" % (label, _safe_inline(_format_permission(spec)))
+            for label, spec in analysis["permissions"]
+        )
+        lines.append("  - Permissions: %s" % perms)
+    else:
+        lines.append("  - Permissions: not set (inherits the repo default)")
+
+    if analysis["secrets"] or analysis["secrets_inherit"]:
+        names = ", ".join("`%s`" % _safe_inline(s) for s in analysis["secrets"])
+        detail = names or "referenced"
+        if analysis["secrets_inherit"]:
+            detail += (", " if names else "") + "`secrets: inherit`"
+        lines.append("  - Secrets/token: %s" % detail)
+    else:
+        lines.append("  - Secrets/token: none referenced")
+
+    if analysis["checkouts"]:
+        counts = []  # preserve order, collapse identical labels with a count
+        for co in analysis["checkouts"]:
+            label = _checkout_ref_label(co["ref"])
+            if co["repository"]:
+                label += " from `%s`" % _safe_inline(co["repository"])
+            for entry in counts:
+                if entry[0] == label:
+                    entry[1] += 1
+                    break
+            else:
+                counts.append([label, 1])
+        parts = [lab + (" (x%d)" % n if n > 1 else "") for lab, n in counts]
+        lines.append("  - Checkout: %s" % "; ".join(parts))
+    else:
+        lines.append("  - Checkout: no explicit `actions/checkout` step")
+
+    third = [a for a in analysis["actions"] if a["category"] in ("third", "docker")]
+    local = [a for a in analysis["actions"] if a["category"] == "local"]
+    if third:
+        parts = []
+        for a in third:
+            pin = "SHA-pinned" if a["pinned"] else "NOT SHA-pinned"
+            parts.append("`%s` (%s)" % (_safe_inline(_uses_display(a)), pin))
+        lines.append("  - Third-party actions: %s" % ", ".join(parts))
+    else:
+        lines.append("  - Third-party actions: none (first-party only)")
+    if local:
+        parts = ", ".join("`%s`" % _safe_inline(a["name"]) for a in local)
+        lines.append(
+            "  - Local actions (contributor-controlled code): %s" % parts
+        )
+
+    if analysis["run_steps"]:
+        lines.append(
+            "  - Run steps: %d (execute checked-out code)" % analysis["run_steps"]
+        )
+    return lines
+
+
+def _format_ci_security_summary(analyses, complete):
+    """Assemble the advisory findings body from per-file analyses."""
+    flags = []
+    for a in analyses:
+        if not (a.get("unreadable") or a.get("unparsed")):
+            flags.extend(_summary_flags(a))
+
+    lines = []
+    if flags:
+        lines.append("**Flags (most-severe first):**")
+        lines.extend("- %s" % f for f in flags)
+    else:
+        lines.append(
+            "**Flags:** none detected by the automated scan - still review the diff."
+        )
+    lines.append("")
+    lines.append("**Changed workflow/action files:**")
+    for a in analyses:
+        lines.extend(_file_fact_lines(a))
+    if not complete:
+        lines.append(
+            "- _Note: the changed-file list was incomplete; some changes may not "
+            "be summarized above - review the full diff._"
+        )
+    return "\n".join(lines)
+
+
+def ci_security_summary(slug, pr, head_sha, changed_files=None):
+    """Advisory, read-only security summary of the workflow/action files a fork
+    PR changes, for the CI-approval HOLD card (see the section comment above).
+
+    Returns a markdown findings string, `""` when the PR changes no
+    workflow/action execution file (nothing to summarize), or the
+    `CI_SUMMARY_UNANALYZABLE` note when the changes cannot be analyzed. NEVER
+    raises, NEVER approves, NEVER writes to the target repo."""
+    try:
+        owner = slug.split("/", 1)[0]
+        changes, ok, complete = _list_pr_file_changes(slug, pr, changed_files)
+        if not ok:
+            return CI_SUMMARY_UNANALYZABLE
+        risky = [c for c in changes if _risky_ci_files([c["filename"]])]
+        if not risky:
+            # No workflow/action change to summarize. Only claim "nothing" when
+            # the file list was provably complete; otherwise fail closed.
+            return "" if complete else CI_SUMMARY_UNANALYZABLE
+        analyses = [
+            _analyze_ci_file(slug, c["filename"], head_sha, c["status"], owner)
+            for c in risky
+        ]
+        return _format_ci_security_summary(analyses, complete)
+    except Exception as e:  # never let a summary bug break the scan
+        print(
+            "::warning::wheelhouse ci security summary error for %s#%s: %s"
+            % (slug, pr, str(e)[:160]),
+            file=sys.stderr,
+        )
+        return CI_SUMMARY_UNANALYZABLE
+
+
+def _attach_ci_security_summary(item, slug, pr):
+    """Attach the advisory read-only security summary to a ci-approval hold card
+    item. Display-only: it never approves, never writes, and never affects
+    routing or the hold. A failure falls back to the manual-review note."""
+    try:
+        summary = ci_security_summary(
+            slug, pr["number"], pr.get("head_sha", ""), pr.get("changed_files")
+        )
+    except Exception as e:  # defense in depth - ci_security_summary already guards
+        print(
+            "::warning::wheelhouse ci security summary error %s#%s: %s"
+            % (slug, pr.get("number"), str(e)[:160]),
+            file=sys.stderr,
+        )
+        summary = CI_SUMMARY_UNANALYZABLE
+    if summary:
+        item["security_summary"] = summary
+
+
+def _safe_inline(value, limit=160):
+    """Sanitize a contributor-derived value for safe display inside a single
+    inline-code span: collapse whitespace, neutralize backticks (so it cannot
+    break out of the span into markdown/HTML), and truncate. Purely cosmetic -
+    the summary never echoes verbatim file lines or secret values."""
+    s = re.sub(r"\s+", " ", str(value)).strip()
+    s = s.replace("`", "'")
+    if len(s) > limit:
+        s = s[: limit - 1] + "…"
+    return s
 
 
 def _workflow_run_matches_pr(slug, run_id, pr, head_sha, head_ref):

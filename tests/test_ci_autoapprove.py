@@ -429,7 +429,7 @@ def run_build_repo(
     default_branch="main",
 ):
     """Drive build_repo with the network-touching dependencies stubbed."""
-    calls = {"approve": [], "posture": 0, "safety": []}
+    calls = {"approve": [], "posture": 0, "safety": [], "summary": []}
     repo_cfg = {
         "name": "demo",
         "compliance_check": "Gate",
@@ -459,14 +459,22 @@ def run_build_repo(
             raise RuntimeError("approve boom")
         return approve_result
 
+    def fake_summary(slug, pr, head_sha, changed_files=None):
+        # Stub the read-only advisory summarizer so build_repo routing tests stay
+        # offline; the real deterministic detection is covered separately below.
+        calls["summary"].append((slug, pr, head_sha, changed_files))
+        return "SEC-SUMMARY(%s#%s)" % (slug, pr)
+
     save = (
         core.gh_graphql,
         core.repo_pr_target_posture,
         core.ci_safety,
         core.approve_ci,
+        core.ci_security_summary,
     )
     core.gh_graphql, core.repo_pr_target_posture = fake_graphql, fake_posture
     core.ci_safety, core.approve_ci = fake_ci_safety, fake_approve
+    core.ci_security_summary = fake_summary
     err = io.StringIO()
     try:
         with redirect_stderr(err):
@@ -479,6 +487,7 @@ def run_build_repo(
             core.repo_pr_target_posture,
             core.ci_safety,
             core.approve_ci,
+            core.ci_security_summary,
         ) = save
     calls["stderr"] = err.getvalue()  # so logging-path tests can assert the per-PR line
     return result, items, calls
@@ -555,6 +564,14 @@ def test_risky_pr_raises_card_not_approved():
     )
     check("route: risky PR card carries a warning", bool(items[0].get("warning")))
     check("route: risky PR is NOT auto-approved", calls["approve"] == [])
+    check(
+        "route: risky PR card carries the advisory security summary",
+        items[0].get("security_summary") == "SEC-SUMMARY(owner/demo#1)",
+    )
+    check(
+        "route: security summary was computed for the carded PR",
+        calls["summary"] == [("owner/demo", 1, "sha1", 1)],
+    )
 
 
 def test_pr_target_posture_raises_card_with_warning():
@@ -591,6 +608,41 @@ def test_exploit_pattern_card_warns_loudly():
         "DANGER" in (items[0].get("warning") or ""),
     )
     check("route: exploit-pattern PR is NOT auto-approved", calls["approve"] == [])
+
+
+def test_auto_approved_pr_gets_no_security_summary():
+    # A provably-safe PR is approved and raises NO card, so the advisory
+    # summarizer is never even consulted (no card = nothing to annotate).
+    result, items, calls = run_build_repo([needs_ci_pr()])
+    check("summary: safe auto-approved PR raises no card", items == [])
+    check("summary: summarizer not called on the approved path", calls["summary"] == [])
+
+
+def test_suppressed_ci_card_gets_no_security_summary():
+    # An owner/maintainer/bot-authored risky ci-approval PR is suppressed (no
+    # card) - the summarizer must never even be consulted, because the attach
+    # runs strictly AFTER the `author_excluded` continue in build_repo.
+    verdict = {
+        "safe": False,
+        "error": False,
+        "risky_files": [".github/workflows/ci.yml"],
+        "pr_target": False,
+        "exploit": False,
+        "reason": "risky",
+    }
+    pr = pr_node(1, None)
+    pr["author"] = {"login": "owner", "__typename": "User"}  # excluded author
+    saved_owner = os.environ.get("OWNER")
+    os.environ["OWNER"] = "owner"  # how build_repo resolves the maintainer set
+    try:
+        result, items, calls = run_build_repo([pr], verdict=verdict)
+    finally:
+        if saved_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = saved_owner
+    check("summary: excluded-author risky PR raises no card", items == [])
+    check("summary: summarizer not called on the suppressed path", calls["summary"] == [])
 
 
 def test_ci_safety_error_raises_card():
@@ -1452,6 +1504,8 @@ def main():
     test_risky_pr_raises_card_not_approved()
     test_pr_target_posture_raises_card_with_warning()
     test_exploit_pattern_card_warns_loudly()
+    test_auto_approved_pr_gets_no_security_summary()
+    test_suppressed_ci_card_gets_no_security_summary()
     test_ci_safety_error_raises_card()
     test_truncated_pr_file_list_routes_to_card()
     test_non_default_base_pr_raises_card_without_posture_read()

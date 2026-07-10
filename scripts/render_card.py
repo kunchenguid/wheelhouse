@@ -185,7 +185,10 @@ ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
 # and suppress the deterministic top-level recommendation when a structured
 # triage recommendation is present. Bumped 4 -> 5 to label known
 # claude-code-action harness polling/status lines in card-visible agent output.
-CARD_RENDER_VERSION = 5
+# Bumped 5 -> 6 to publish the advisory read-only `### Security review` section
+# on already-open CI-approval HOLD cards (a display-only add; the pwn-request
+# hold and manual approve are unchanged).
+CARD_RENDER_VERSION = 6
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -1004,6 +1007,28 @@ def _publish_decision_section(body, kind, options):
     return new_body if count else body
 
 
+def _security_review_section(summary):
+    """The advisory security-review block for a CI-approval HOLD card.
+
+    Presentation only: it renders the deterministic, read-only summary that
+    `wheelhouse_core.ci_security_summary` produced for the changed
+    workflow/action files. It never approves CI and never weakens the
+    pwn-request hold. The findings are deterministic, but they echo
+    contributor-controlled strings (action names, refs, secret NAMES - never
+    secret values), so the block is framed as advisory/untrusted context and
+    every value is code-wrapped upstream."""
+    return [
+        "### Security review (advisory)",
+        "",
+        "> [!NOTE]",
+        "> Automated, read-only summary of the workflow/action changes in this "
+        "fork PR - advisory, untrusted context only. It does **not** approve CI; "
+        "the security hold still requires your own review of the diff.",
+        "",
+        summary,
+    ]
+
+
 def render(item, held=False):
     """item -> {title, body, labels, marker}. Tolerates missing optional fields.
 
@@ -1077,6 +1102,12 @@ def render(item, held=False):
     if item.get("warning"):
         lines.append("> [!WARNING]")
         lines.append("> %s" % item["warning"])
+        lines.append("")
+    # An advisory, read-only security summary of the workflow/action changes on
+    # a CI-approval HOLD card (fork PR touching CI-execution files). Presentation
+    # only: it does NOT approve CI and never weakens the pwn-request hold.
+    if kind == "ci-approval" and item.get("security_summary"):
+        lines.extend(_security_review_section(item["security_summary"]))
         lines.append("")
     if triage:
         lines.append(triage_section(triage, owner=owner, repo=repo))

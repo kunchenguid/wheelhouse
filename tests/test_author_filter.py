@@ -154,11 +154,14 @@ def run_build_repo(
         core.repo_pr_target_posture,
         core.ci_safety,
         core.approve_ci,
+        core.ci_security_summary,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
     core.gh_graphql = fake_graphql
     core.load_config = fake_load_config
+    # Keep offline: the advisory summarizer would otherwise read the target repo.
+    core.ci_security_summary = lambda slug, pr, head_sha, changed_files=None: "SEC"
     core.repo_pr_target_posture = lambda slug: {
         "pr_target": False,
         "exploit": False,
@@ -191,6 +194,7 @@ def run_build_repo(
             core.repo_pr_target_posture,
             core.ci_safety,
             core.approve_ci,
+            core.ci_security_summary,
             old_owner,
             old_repo_owner,
         ) = save

@@ -113,7 +113,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `CONTRIBUTING.md`).
 - **Scripts:** `wheelhouse_core.py` (scan/classify/dedup/security gate + the
   shared CI-safety verdict `ci_safety` / `repo_pr_target_posture` and scan-time
-  auto-approve in `build_repo`, stale pending-contributor cleanup
+  auto-approve in `build_repo`, the advisory read-only CI-approval security
+  summary `ci_security_summary` (see "CI-approval security summary" in Sharp
+  edges), stale pending-contributor cleanup
   (`sweep_pending_contributor_actions`, target-side markers/labels, and the
   rebase-nudge arming path), plus shared utils
   `parse_state_block`, `authorized`, `state`, `nl-decisions-enabled`,
@@ -125,9 +127,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
   automatic triage section rendering, structured recommendation persistence,
   conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
-  updates, automated-status labeling for known harness transcript lines, and
-  target-activity state reflection, plus trusted triage-result card edits that
-  publish held cards),
+  updates, automated-status labeling for known harness transcript lines,
+  target-activity state reflection, the advisory `### Security review` section
+  on CI-approval HOLD cards (`_security_review_section`), plus trusted
+  triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; non-checkbox actions including `comment`, `decline`, and
   pr-review-only `request-changes` with optional cleanup arming after a successful
@@ -221,7 +224,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `5`: the
+  it is not a material field). `CARD_RENDER_VERSION` is currently `6`: the
+  5 -> 6 bump publishes the advisory read-only `### Security review` section on
+  already-open CI-approval HOLD cards (display-only; the pwn-request hold and
+  manual approve are unchanged); the
   4 -> 5 bump labels known claude-code-action harness polling/status transcript
   lines in card-visible auto-triage output and older cached `### Triage`
   sections without stripping content; the 3 -> 4 bump publishes the
@@ -815,6 +821,34 @@ still appears where it's plain English, e.g. "triage the queue".)
   (`_auto_approve_enabled`). The warning is display-only (not a material refresh
   field), since a ci-approval card's existence/refresh is already driven by the
   PR's own head_sha/comp/tests.
+- **CI-approval security summary (context only - the pwn-request HOLD stays).**
+  A fork PR touching CI-execution files still HOLDS for manual review, unchanged
+  (`ci_safety`/`approve_ci`, exit 4). `build_repo` additionally attaches a
+  deterministic, read-only security summary of ONLY the changed workflow/action
+  files (`wheelhouse_core.ci_security_summary` via `_attach_ci_security_summary`)
+  to the emitted contributor `ci-approval` card, rendered by
+  `render_card._security_review_section` as `### Security review (advisory)`.
+  It surfaces the captain's categories - trigger changes (esp.
+  `pull_request_target`), `permissions:` write grants, referenced secret NAMES /
+  `secrets: inherit`, checkout source/ref choices (PR-head = pwn-request),
+  third-party action pinning, and run-step contributor-code execution - reusing
+  the existing YAML-parse helpers (`_on_triggers`, `_checks_out_pr_head`,
+  `_risky_ci_files`). It reads the PR-head version of each changed file
+  (`_fetch_file_text` at the head SHA via the BASE repo's contents API, which
+  works for fork PR heads). **Presentation ONLY, hard invariants:** it NEVER
+  approves, NEVER writes to the target, NEVER touches the hold/owner-gate/posture
+  logic/classification; it reports only structured facts (names/refs), never
+  verbatim file lines, so no secret VALUE can leak, and every contributor-derived
+  value is code-wrapped (`_safe_inline`) so it cannot break out of the card's
+  markdown. It FAILS CLOSED: any read/parse failure yields
+  `CI_SUMMARY_UNANALYZABLE` ("review the diff manually") and NEVER raises, so the
+  card still holds. `security_summary` is a non-material display field (like
+  `warning`): never in `MATERIAL_FIELDS`/the state block, but derived from
+  `head_sha` (material for ci-approval), so a head move refreshes it; existing
+  cards pick it up once via the `CARD_RENDER_VERSION` 5 -> 6 bump. It runs on the
+  `ok:true` success path only, and only for contributor-authored HOLD cards
+  (owner/maintainer/bot ci-approval PRs are approved or suppressed with no card,
+  so the summarizer is never consulted). See `tests/test_ci_security_summary.py`.
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`
   also listens for the legacy `triage-item` (`types: [wheelhouse-item,
   triage-item]`). It is a cross-repo wire contract: source repos onboarded before
@@ -973,7 +1007,8 @@ Run the unit tests:
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, the contributor-fork CI-noop conflict-nudge exception (including UNKNOWN/error no-nudge and no cleanup arming), author-filter nudge skips, optional pending-contributor cleanup arming for normal `needs-rebase` nudges, and reconcile self-healing for conflicted PR cards, no network.
-- `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
+- `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present. Also asserts the advisory security summary is attached to a carded risky ci-approval PR (via a stubbed summarizer) but never computed on the auto-approved or suppressed-card paths.
+- `python tests/test_ci_security_summary.py` - the advisory read-only CI-approval security summary (`ci_security_summary`), no network: the HOLD stays effective and the summary CANNOT act (every gh call is a read, `approve_ci` is never invoked); risky patterns are surfaced (`pull_request_target` + PR-head checkout, write permissions, `secrets: inherit`, referenced secret NAMES, unpinned third-party actions) while SHA-pinned actions and benign first-party workflows raise no flags; secret VALUES / verbatim file lines are never echoed and contributor values are sanitized against markdown breakout; it fails closed (unreadable/incomplete file lists and unreadable/unparseable files -> a manual-review note, never raises); composite `action.yml` files are analyzed; and the render side scopes `### Security review (advisory)` to ci-approval, frames it advisory/untrusted, keeps `security_summary` out of the state block, and never triggers a material refresh.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network. Also covers the reviewed-event timestamp shape (`_timeline_event_time` reading `submitted_at`, so a maintainer/bot review no longer fails open as "reviewed event missing timestamp" and a review-caused `updated_at` bump is attributable while a truly unexplained bump still fails open), the re-read-by-id recovery (`_backfill_missing_review_times` recovering a missing review/`reviewed`-event timestamp, and a failed re-read failing open), and the widened provable-ask set (an un-armed, maintainer-reviewed, conflicting fork nudge backlog PR reminds first then closes on a later scan, still honoring keep-open and contributor-activity fail-open; and a nudged ci-noop `needs-ci-approval` PR that is authoritatively `mergeable == CONFLICTING` enters the same reminder-then-close lifecycle via `_pr_conflicting_for_cleanup`, while a non-conflicting `needs-ci-approval` PR - None/MERGEABLE/UNKNOWN - is skipped with no reads and honors keep-open).
