@@ -3887,7 +3887,7 @@ def _checkout_ref_label(ref):
     """A human label for a checkout `ref` input. Flags a PR-head ref (the
     pwn-request source) without echoing anything but the expression itself."""
     if not ref:
-        return "default (base branch)"
+        return "event default (`GITHUB_SHA`)"
     if _PR_HEAD_REF_RE.search(ref):
         return "PR head - `%s`" % _safe_inline(ref)
     return "`%s`" % _safe_inline(ref)
@@ -4189,6 +4189,15 @@ def ci_security_summary_cache(cards):
         try:
             key = (str(repo), int(number))
         except (TypeError, ValueError):
+            continue
+        labels = set(_label_names_from_issue(card))
+        if not {
+            "repo:%s" % key[0],
+            "kind:ci-approval",
+            "target:%s-%s" % key,
+        }.issubset(labels):
+            continue
+        if state.get(CI_SECURITY_SUMMARY_HEAD_FIELD) != head_sha:
             continue
         present = bool(state.get(CI_SECURITY_SUMMARY_PRESENT_FIELD))
         summary = _security_summary_from_card_body(card.get("body", ""))

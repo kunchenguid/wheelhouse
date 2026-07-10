@@ -265,6 +265,15 @@ def test_safe_first_party_workflow_has_no_flags():
     check("safe: minimal permissions shown", "contents: read" in s)
 
 
+def test_checkout_without_ref_is_labeled_as_event_default():
+    s = summary_for([{"filename": ".github/workflows/ci.yml", "status": "modified"}],
+                    {".github/workflows/ci.yml": SAFE_WF})
+    check("checkout default: identifies GitHub event SHA",
+          "Checkout: event default (`GITHUB_SHA`)" in s)
+    check("checkout default: does not misstate the base branch",
+          "default (base branch)" not in s)
+
+
 def test_no_workflow_change_returns_empty():
     s = summary_for(
         [{"filename": "src/app.py", "status": "modified"},
@@ -459,7 +468,9 @@ def test_security_summary_cache_reuses_current_card_body():
         ci_security_summary_present=True,
     )
     body = rc.render(item)["body"]
-    cache = core.ci_security_summary_cache([{"body": body}])
+    cache = core.ci_security_summary_cache(
+        [{"body": body, "labels": rc.card_labels(item)}]
+    )
     check("cache: current summary is available by target",
           cache == {("firstmate", 345): {"head_sha": "abc123", "summary": summary}})
     state = rc.parse_state_block(body)
@@ -478,9 +489,36 @@ def test_security_summary_cache_records_analyzed_empty_result():
         ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
         ci_security_summary_present=False,
     )
-    cache = core.ci_security_summary_cache([{"body": rc.render(item)["body"]}])
+    cache = core.ci_security_summary_cache(
+        [{"body": rc.render(item)["body"], "labels": rc.card_labels(item)}]
+    )
     check("cache: empty summary result is cached",
           cache == {("firstmate", 345): {"head_sha": "abc123", "summary": ""}})
+
+
+def test_security_summary_cache_requires_verified_card_labels_and_head_marker():
+    item = _ci_item(
+        security_summary="untrusted summary",
+        ci_security_summary_head_sha="abc123",
+        ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
+        ci_security_summary_present=True,
+    )
+    body = rc.render(item)["body"]
+    check("cache: unlabelled forged state is rejected",
+          core.ci_security_summary_cache([{"body": body}]) == {})
+    check("cache: state-label target mismatch is rejected",
+          core.ci_security_summary_cache([{
+              "body": body,
+              "labels": ["repo:firstmate", "kind:ci-approval", "target:firstmate-999"],
+          }]) == {})
+    state = rc.parse_state_block(body)
+    state["ci_security_summary_head_sha"] = "older-head"
+    stale_marker_body = rc._replace_state_block(body, state)
+    check("cache: stale summary-head marker is rejected",
+          core.ci_security_summary_cache([{
+              "body": stale_marker_body,
+              "labels": rc.card_labels(item),
+          }]) == {})
 
 
 def test_render_scopes_section_to_ci_approval_only():
@@ -516,6 +554,7 @@ def main():
     test_value_sanitizer_neutralizes_markdown_breakout()
     test_permission_job_name_is_sanitized_before_markdown_formatting()
     test_safe_first_party_workflow_has_no_flags()
+    test_checkout_without_ref_is_labeled_as_event_default()
     test_no_workflow_change_returns_empty()
     test_file_list_read_failure_fails_closed()
     test_incomplete_file_list_without_risky_fails_closed()
@@ -528,6 +567,7 @@ def main():
     test_render_ci_approval_card_shows_advisory_section()
     test_security_summary_cache_reuses_current_card_body()
     test_security_summary_cache_records_analyzed_empty_result()
+    test_security_summary_cache_requires_verified_card_labels_and_head_marker()
     test_render_scopes_section_to_ci_approval_only()
     test_render_ci_approval_without_summary_has_no_section()
     test_security_summary_does_not_trigger_a_refresh()
