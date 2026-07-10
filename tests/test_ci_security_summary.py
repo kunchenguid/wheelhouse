@@ -159,6 +159,45 @@ def test_composite_action_file_is_analyzed():
           "Run steps: 1" in s)
 
 
+def test_non_manifest_action_file_requires_manual_diff_review():
+    path = ".github/actions/example/index.js"
+    s = summary_for([{"filename": path, "status": "modified"}], {path: "{}"})
+    check("action code: non-manifest file fails closed",
+          s == core.CI_SUMMARY_UNANALYZABLE)
+
+
+def test_non_mapping_manifest_requires_manual_diff_review():
+    path = ".github/actions/example/action.yml"
+    s = summary_for([{"filename": path, "status": "modified"}], {path: "plain text"})
+    check("action manifest: scalar YAML fails closed",
+          s == core.CI_SUMMARY_UNANALYZABLE)
+
+
+def test_reusable_workflow_and_inherited_secrets_are_surfaced():
+    wf = (
+        "name: call\non:\n  pull_request:\njobs:\n  deploy:\n"
+        "    uses: evil/repo/.github/workflows/deploy.yml@main\n"
+        "    secrets: inherit\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("reusable workflow: unpinned called workflow is flagged",
+          "third-party reusable workflow" in s
+          and "evil/repo/.github/workflows/deploy.yml@main" in s)
+    check("reusable workflow: parsed inherited secrets are flagged",
+          "secrets: inherit" in s)
+
+
+def test_bracket_secret_reference_is_surfaced():
+    wf = (
+        "name: target\non:\n  pull_request_target:\njobs:\n  deploy:\n"
+        "    steps:\n      - run: echo ok\n"
+        "        env:\n          TOKEN: ${{ secrets['DEPLOY_TOKEN'] }}\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("secret reference: bracket syntax surfaces the secret name",
+          "`DEPLOY_TOKEN`" in s)
+
+
 # --------------------------------------------------------------------------- #
 # Secret VALUES are never exposed.
 # --------------------------------------------------------------------------- #
@@ -411,6 +450,39 @@ def test_render_ci_approval_card_shows_advisory_section():
           state.get("render_version") == rc.CARD_RENDER_VERSION)
 
 
+def test_security_summary_cache_reuses_current_card_body():
+    summary = "**Flags:** none detected by the automated scan - still review the diff."
+    item = _ci_item(
+        security_summary=summary,
+        ci_security_summary_head_sha="abc123",
+        ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
+        ci_security_summary_present=True,
+    )
+    body = rc.render(item)["body"]
+    cache = core.ci_security_summary_cache([{"body": body}])
+    check("cache: current summary is available by target",
+          cache == {("firstmate", 345): {"head_sha": "abc123", "summary": summary}})
+    state = rc.parse_state_block(body)
+    check("cache: summary cache markers are non-material",
+          rc.material_changed(item, state) is False)
+    check("cache: matching marker does not trigger a refresh",
+          rc.security_summary_stale(item, state) is False)
+    item["ci_security_summary_version"] += 1
+    check("cache: a newer summary version triggers one refresh",
+          rc.security_summary_stale(item, state) is True)
+
+
+def test_security_summary_cache_records_analyzed_empty_result():
+    item = _ci_item(
+        ci_security_summary_head_sha="abc123",
+        ci_security_summary_version=core.CI_SECURITY_SUMMARY_VERSION,
+        ci_security_summary_present=False,
+    )
+    cache = core.ci_security_summary_cache([{"body": rc.render(item)["body"]}])
+    check("cache: empty summary result is cached",
+          cache == {("firstmate", 345): {"head_sha": "abc123", "summary": ""}})
+
+
 def test_render_scopes_section_to_ci_approval_only():
     body = rc.render(_ci_item(kind="pr-review", security_summary="X"))["body"]
     check("render: pr-review card does not show the security section",
@@ -436,6 +508,10 @@ def main():
     test_pinned_third_party_action_not_flagged()
     test_secrets_inherit_flagged()
     test_composite_action_file_is_analyzed()
+    test_non_manifest_action_file_requires_manual_diff_review()
+    test_non_mapping_manifest_requires_manual_diff_review()
+    test_reusable_workflow_and_inherited_secrets_are_surfaced()
+    test_bracket_secret_reference_is_surfaced()
     test_secret_values_are_never_echoed()
     test_value_sanitizer_neutralizes_markdown_breakout()
     test_permission_job_name_is_sanitized_before_markdown_formatting()
@@ -450,6 +526,8 @@ def main():
     test_never_raises_even_when_reads_throw()
     test_summary_is_read_only_and_never_approves()
     test_render_ci_approval_card_shows_advisory_section()
+    test_security_summary_cache_reuses_current_card_body()
+    test_security_summary_cache_records_analyzed_empty_result()
     test_render_scopes_section_to_ci_approval_only()
     test_render_ci_approval_without_summary_has_no_section()
     test_security_summary_does_not_trigger_a_refresh()

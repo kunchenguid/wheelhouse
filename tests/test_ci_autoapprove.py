@@ -427,6 +427,7 @@ def run_build_repo(
     approve_raises=False,
     graphql_raises=False,
     default_branch="main",
+    summary_cache=None,
 ):
     """Drive build_repo with the network-touching dependencies stubbed."""
     calls = {"approve": [], "posture": 0, "safety": [], "summary": []}
@@ -479,7 +480,11 @@ def run_build_repo(
     try:
         with redirect_stderr(err):
             result, items = core.build_repo(
-                "owner", repo_cfg, False, auto_approve_ci=auto_approve_ci
+                "owner",
+                repo_cfg,
+                False,
+                auto_approve_ci=auto_approve_ci,
+                ci_security_summary_cache=summary_cache,
             )
     finally:
         (
@@ -572,6 +577,27 @@ def test_risky_pr_raises_card_not_approved():
         "route: security summary was computed for the carded PR",
         calls["summary"] == [("owner/demo", 1, "sha1", 1)],
     )
+
+
+def test_current_card_summary_is_reused_without_target_reads():
+    verdict = {
+        "safe": False,
+        "error": False,
+        "risky_files": [".github/workflows/ci.yml"],
+        "pr_target": False,
+        "exploit": False,
+        "reason": "risky",
+    }
+    cache = {("demo", 1): {"head_sha": "sha1", "summary": "CACHED-SUMMARY"}}
+    result, items, calls = run_build_repo(
+        [needs_ci_pr()], verdict=verdict, summary_cache=cache
+    )
+    check("summary cache: card is still raised", len(items) == 1)
+    check("summary cache: cached body is reused",
+          items[0].get("security_summary") == "CACHED-SUMMARY")
+    check("summary cache: no target summary reads repeat", calls["summary"] == [])
+    check("summary cache: current head is recorded",
+          items[0].get("ci_security_summary_head_sha") == "sha1")
 
 
 def test_pr_target_posture_raises_card_with_warning():
@@ -1502,6 +1528,7 @@ def main():
     test_same_repo_no_ci_routes_to_review_needed_not_ci_approval()
     test_unknown_fork_status_keeps_ci_card_without_auto_approval()
     test_risky_pr_raises_card_not_approved()
+    test_current_card_summary_is_reused_without_target_reads()
     test_pr_target_posture_raises_card_with_warning()
     test_exploit_pattern_card_warns_loudly()
     test_auto_approved_pr_gets_no_security_summary()

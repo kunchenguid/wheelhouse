@@ -164,6 +164,9 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # Non-material hidden timestamp used only to mirror target GitHub activity onto
 # the card issue's own updatedAt for `sort:updated-desc`.
 ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
+CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
+CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
+CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -364,11 +367,25 @@ def held_publish_needed(item, state, has_token):
     return bool((state or {}).get("held")) and not should_hold(item, has_token)
 
 
+def security_summary_stale(item, state):
+    if item.get("kind") != "ci-approval":
+        return False
+    expected = item.get(CI_SECURITY_SUMMARY_VERSION_FIELD)
+    if expected is None:
+        return False
+    return (
+        (state or {}).get(CI_SECURITY_SUMMARY_VERSION_FIELD) != expected
+        or (state or {}).get(CI_SECURITY_SUMMARY_HEAD_FIELD)
+        != (item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or "")
+    )
+
+
 def refresh_needed(item, state, has_token=False):
     return (
         material_changed(item, state)
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
+        or security_summary_stale(item, state)
     )
 
 
@@ -1062,6 +1079,16 @@ def render(item, held=False):
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
+    if kind == "ci-approval" and CI_SECURITY_SUMMARY_VERSION_FIELD in item:
+        state[CI_SECURITY_SUMMARY_HEAD_FIELD] = (
+            item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or ""
+        )
+        state[CI_SECURITY_SUMMARY_VERSION_FIELD] = item[
+            CI_SECURITY_SUMMARY_VERSION_FIELD
+        ]
+        state[CI_SECURITY_SUMMARY_PRESENT_FIELD] = bool(
+            item.get(CI_SECURITY_SUMMARY_PRESENT_FIELD)
+        )
     if held:
         state["held"] = True
     if triage:

@@ -32,8 +32,7 @@ replaces has been dropped: the local single-flight lock (-> Actions
 state), per-repo `owner` (-> derived from github.repository_owner).
 
 Usage:
-  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
-  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
+  wheelhouse_core.py scan [repo] [--cards cards.json]  scan configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
   wheelhouse_core.py scan-health <scan.json>  update the persisted per-repo consecutive-failure ledger; ::error:: + non-zero exit when a repo is dark past the threshold (uses default GITHUB_TOKEN)
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
@@ -2552,6 +2551,7 @@ def build_repo(
     pending_contributor_cleanup_days=14,
     pending_contributor_reminder_days=10,
     pending_contributor_cleanup_targets=_PENDING_CONTRIBUTOR_TARGETS_UNSET,
+    ci_security_summary_cache=None,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -2887,7 +2887,7 @@ def build_repo(
             # Attach the advisory, read-only security summary of the changed
             # workflow/action files so the owner reviews the pwn-request HOLD
             # faster. Presentation only - it never approves or weakens the hold.
-            _attach_ci_security_summary(item, slug, pr)
+            _attach_ci_security_summary(item, slug, pr, ci_security_summary_cache)
 
         items.append(item)
 
@@ -3588,12 +3588,18 @@ def _approve_warning_suffix(verdict):
 #     manually" note and NEVER raises into the scan, so the card still holds.
 # --------------------------------------------------------------------------- #
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_-]*)")
-_SECRETS_INHERIT_RE = re.compile(r"secrets:\s*inherit\b", re.I)
+_SECRET_BRACKET_REF_RE = re.compile(
+    r"secrets\s*\[\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"]\s*\]"
+)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 CI_SUMMARY_MAX_FILES = 24
 CI_SUMMARY_MAX_FLAGS = 48
 CI_SUMMARY_MAX_VALUES = 16
 CI_SUMMARY_MAX_CHARS = 12000
+CI_SECURITY_SUMMARY_VERSION = 1
+CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
+CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
+CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 
 # Returned as the summary BODY when the workflow/action changes cannot be
 # analyzed deterministically. It keeps the manual review required (fail closed).
@@ -3683,6 +3689,39 @@ def _workflow_steps(doc):
     return steps
 
 
+def _reusable_workflow_uses(doc):
+    if not isinstance(doc, dict):
+        return []
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return []
+    return [
+        job.get("uses")
+        for job in jobs.values()
+        if isinstance(job, dict) and job.get("uses") is not None
+    ]
+
+
+def _secret_names(text):
+    return sorted(
+        set(_SECRET_REF_RE.findall(text)) | set(_SECRET_BRACKET_REF_RE.findall(text))
+    )
+
+
+def _secrets_inherit(doc):
+    if not isinstance(doc, dict):
+        return False
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return False
+    return any(
+        isinstance(job, dict)
+        and isinstance(job.get("secrets"), str)
+        and job["secrets"].strip().lower() == "inherit"
+        for job in jobs.values()
+    )
+
+
 def _permission_specs(doc):
     """(scope_label, spec) for top-level and per-job `permissions:` blocks."""
     specs = []
@@ -3753,10 +3792,24 @@ def _classify_action(name, ref, kind, owner):
     return ("first" if first_party else "third", pinned)
 
 
+def _ci_summary_file_kind(path):
+    lower = path.lower()
+    if lower.startswith(".github/workflows/") and lower.endswith((".yml", ".yaml")):
+        return "workflow"
+    if lower.endswith(("/action.yml", "/action.yaml")) or lower in (
+        "action.yml",
+        "action.yaml",
+    ):
+        return "action"
+    return None
+
+
 def _analyze_ci_file(slug, path, head_sha, status, owner):
     """Deterministic, read-only findings for ONE changed workflow/action file at
     the PR head. Returns a facts dict; on read/parse failure returns a dict with
     `unreadable`/`unparsed` set so the caller can fail closed for that file."""
+    if _ci_summary_file_kind(path) is None:
+        return {"path": path, "status": status, "unanalyzable": True}
     text = _fetch_file_text(slug, path, head_sha)
     if text is None:
         return {"path": path, "status": status, "unreadable": True}
@@ -3766,9 +3819,10 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         doc = yaml.safe_load(text)
     except yaml.YAMLError:
         return {"path": path, "status": status, "unparsed": True}
+    if not isinstance(doc, dict):
+        return {"path": path, "status": status, "unparsed": True}
 
-    is_map = isinstance(doc, dict)
-    triggers = sorted(_on_triggers(doc)) if is_map else []
+    triggers = sorted(_on_triggers(doc))
     perms = _permission_specs(doc)
     actions = []
     checkouts = []
@@ -3782,7 +3836,13 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         name, ref, ukind = parsed
         category, pinned = _classify_action(name, ref, ukind, owner)
         actions.append(
-            {"name": name, "ref": ref, "category": category, "pinned": pinned}
+            {
+                "name": name,
+                "ref": ref,
+                "category": category,
+                "pinned": pinned,
+                "called_workflow": False,
+            }
         )
         if "actions/checkout" in name:
             with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
@@ -3792,16 +3852,31 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
                     "repository": str(with_.get("repository") or ""),
                 }
             )
+    for uses in _reusable_workflow_uses(doc):
+        parsed = _parse_uses(uses)
+        if not parsed:
+            continue
+        name, ref, ukind = parsed
+        category, pinned = _classify_action(name, ref, ukind, owner)
+        actions.append(
+            {
+                "name": name,
+                "ref": ref,
+                "category": category,
+                "pinned": pinned,
+                "called_workflow": True,
+            }
+        )
     return {
         "path": path,
         "status": status,
         "triggers": triggers,
         "pr_target": "pull_request_target" in triggers,
-        "checks_head": _checks_out_pr_head(doc) if is_map else False,
+        "checks_head": _checks_out_pr_head(doc),
         "permissions": perms,
         "perms_write": any(_permission_has_write(s) for _, s in perms),
-        "secrets": sorted(set(_SECRET_REF_RE.findall(text))),
-        "secrets_inherit": bool(_SECRETS_INHERIT_RE.search(text)),
+        "secrets": _secret_names(text),
+        "secrets_inherit": _secrets_inherit(doc),
         "checkouts": checkouts,
         "actions": actions,
         "run_steps": run_steps,
@@ -3845,9 +3920,14 @@ def _summary_flags(analysis):
         )
     for act in analysis["actions"]:
         if act["category"] == "third" and not act["pinned"]:
+            reference = (
+                "third-party reusable workflow"
+                if act.get("called_workflow")
+                else "third-party action"
+            )
             flags.append(
-                "`%s`: third-party action `%s` is not pinned to a commit SHA"
-                % (path, _safe_inline(_uses_display(act)))
+                "`%s`: %s `%s` is not pinned to a commit SHA"
+                % (path, reference, _safe_inline(_uses_display(act)))
             )
         elif act["category"] == "docker" and not act["pinned"]:
             flags.append(
@@ -3871,6 +3951,9 @@ def _file_fact_lines(analysis):
         return lines
     if analysis.get("unparsed"):
         lines.append("  - Could not parse this file as YAML - review manually")
+        return lines
+    if analysis.get("unanalyzable"):
+        lines.append("  - This is not a workflow or action manifest - review manually")
         return lines
 
     omitted = []
@@ -3944,9 +4027,9 @@ def _file_fact_lines(analysis):
         if extra:
             parts.append("+%d omitted" % extra)
             omitted.append("third-party actions")
-        lines.append("  - Third-party actions: %s" % ", ".join(parts))
+        lines.append("  - Third-party actions/workflows: %s" % ", ".join(parts))
     else:
-        lines.append("  - Third-party actions: none (first-party only)")
+        lines.append("  - Third-party actions/workflows: none (first-party only)")
     if local:
         shown, extra = _summary_values(local)
         parts = ", ".join("`%s`" % _safe_inline(a["name"]) for a in shown)
@@ -3992,10 +4075,11 @@ def _format_ci_security_summary(analyses, complete, omitted_files=0):
     """Assemble the advisory findings body from per-file analyses."""
     flags = []
     for a in analyses:
-        if not (a.get("unreadable") or a.get("unparsed")):
+        if not (a.get("unreadable") or a.get("unparsed") or a.get("unanalyzable")):
             flags.extend(_summary_flags(a))
     incomplete = not complete or any(
-        a.get("unreadable") or a.get("unparsed") for a in analyses
+        a.get("unreadable") or a.get("unparsed") or a.get("unanalyzable")
+        for a in analyses
     )
     shown_flags = flags[:CI_SUMMARY_MAX_FLAGS]
     omitted_flags = len(flags) - len(shown_flags)
@@ -4055,7 +4139,10 @@ def ci_security_summary(slug, pr, head_sha, changed_files=None):
             _analyze_ci_file(slug, c["filename"], head_sha, c["status"], owner)
             for c in risky[:CI_SUMMARY_MAX_FILES]
         ]
-        if any(a.get("unreadable") or a.get("unparsed") for a in analyses):
+        if any(
+            a.get("unreadable") or a.get("unparsed") or a.get("unanalyzable")
+            for a in analyses
+        ):
             return CI_SUMMARY_UNANALYZABLE
         return _format_ci_security_summary(
             analyses, complete, omitted_files=len(risky) - len(analyses)
@@ -4069,21 +4156,80 @@ def ci_security_summary(slug, pr, head_sha, changed_files=None):
         return CI_SUMMARY_UNANALYZABLE
 
 
-def _attach_ci_security_summary(item, slug, pr):
+def _security_summary_from_card_body(body):
+    heading = "### Security review (advisory)"
+    start = (body or "").find(heading)
+    if start < 0:
+        return None
+    after_heading = body[start + len(heading) :].lstrip("\n")
+    _, separator, after_notice = after_heading.partition("\n\n")
+    if not separator:
+        return None
+    summary, _, _ = after_notice.partition("\n### ")
+    summary = summary.rstrip()
+    return summary or None
+
+
+def ci_security_summary_cache(cards):
+    cache = {}
+    for card in cards or []:
+        state = parse_state_block(card.get("body", ""))
+        if (
+            not isinstance(state, dict)
+            or state.get("kind") != "ci-approval"
+            or state.get(CI_SECURITY_SUMMARY_VERSION_FIELD)
+            != CI_SECURITY_SUMMARY_VERSION
+        ):
+            continue
+        repo = state.get("repo")
+        number = state.get("number")
+        head_sha = state.get("head_sha")
+        if not repo or not head_sha:
+            continue
+        try:
+            key = (str(repo), int(number))
+        except (TypeError, ValueError):
+            continue
+        present = bool(state.get(CI_SECURITY_SUMMARY_PRESENT_FIELD))
+        summary = _security_summary_from_card_body(card.get("body", ""))
+        if present and summary is None:
+            continue
+        if not present:
+            summary = ""
+        cache[key] = {"head_sha": str(head_sha), "summary": summary}
+    return cache
+
+
+def _cached_ci_security_summary(cache, repo, pr, head_sha):
+    entry = (cache or {}).get((repo, int(pr)))
+    if entry and entry.get("head_sha") == (head_sha or ""):
+        return (True, entry.get("summary") or "")
+    return (False, "")
+
+
+def _attach_ci_security_summary(item, slug, pr, cache=None):
     """Attach the advisory read-only security summary to a ci-approval hold card
     item. Display-only: it never approves, never writes, and never affects
     routing or the hold. A failure falls back to the manual-review note."""
-    try:
-        summary = ci_security_summary(
-            slug, pr["number"], pr.get("head_sha", ""), pr.get("changed_files")
-        )
-    except Exception as e:  # defense in depth - ci_security_summary already guards
-        print(
-            "::warning::wheelhouse ci security summary error %s#%s: %s"
-            % (slug, pr.get("number"), str(e)[:160]),
-            file=sys.stderr,
-        )
-        summary = CI_SUMMARY_UNANALYZABLE
+    head_sha = pr.get("head_sha", "") or ""
+    cached, summary = _cached_ci_security_summary(
+        cache, item.get("repo", ""), pr["number"], head_sha
+    )
+    if not cached:
+        try:
+            summary = ci_security_summary(
+                slug, pr["number"], head_sha, pr.get("changed_files")
+            )
+        except Exception as e:  # defense in depth - ci_security_summary already guards
+            print(
+                "::warning::wheelhouse ci security summary error %s#%s: %s"
+                % (slug, pr.get("number"), str(e)[:160]),
+                file=sys.stderr,
+            )
+            summary = CI_SUMMARY_UNANALYZABLE
+    item[CI_SECURITY_SUMMARY_HEAD_FIELD] = head_sha
+    item[CI_SECURITY_SUMMARY_VERSION_FIELD] = CI_SECURITY_SUMMARY_VERSION
+    item[CI_SECURITY_SUMMARY_PRESENT_FIELD] = bool(summary)
     if summary:
         item["security_summary"] = summary
 
@@ -4639,7 +4785,23 @@ def cmd_scan_health(scan_path):
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
-def cmd_scan(only_repo=None):
+def _load_ci_security_summary_cache(path):
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            cards = json.load(f)
+    except (OSError, ValueError) as e:
+        print(
+            "::warning::wheelhouse could not load CI security summary cache %s: %s"
+            % (path, str(e)[:160]),
+            file=sys.stderr,
+        )
+        return {}
+    return ci_security_summary_cache(cards if isinstance(cards, list) else [])
+
+
+def cmd_scan(only_repo=None, cards_path=None):
     owner = get_owner()
     cfg = load_config()
     repos = cfg["repos"]
@@ -4652,6 +4814,7 @@ def cmd_scan(only_repo=None):
     else:
         names = list(repos)
 
+    summary_cache = _load_ci_security_summary_cache(cards_path)
     out_repos = {}
     items = []
     for name in names:
@@ -4666,6 +4829,7 @@ def cmd_scan(only_repo=None):
             cfg["pending_contributor_cleanup_days"],
             cfg["pending_contributor_reminder_days"],
             cfg["pending_contributor_cleanup_targets"],
+            summary_cache,
         )
         out_repos[name] = result
         items.extend(repo_items)
@@ -4816,7 +4980,17 @@ def main():
         sys.exit(__doc__)
     cmd = sys.argv[1]
     if cmd == "scan":
-        cmd_scan(sys.argv[2] if len(sys.argv) > 2 else None)
+        args = sys.argv[2:]
+        cards_path = None
+        if "--cards" in args:
+            index = args.index("--cards")
+            if index + 1 >= len(args):
+                sys.exit(__doc__)
+            cards_path = args[index + 1]
+            del args[index : index + 2]
+        if len(args) > 1:
+            sys.exit(__doc__)
+        cmd_scan(args[0] if args else None, cards_path)
     elif cmd == "scan-health" and len(sys.argv) == 3:
         cmd_scan_health(sys.argv[2])
     elif cmd == "approve-ci" and len(sys.argv) == 4:

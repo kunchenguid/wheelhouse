@@ -47,16 +47,6 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
-      # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
-      # runs, may post rebase nudges, and may remind or close stale
-      # pending-contributor PRs, so this step requires FLEET_TOKEN with Actions
-      # write scope.
-      - name: Scan the fleet
-        env:
-          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: python scripts/wheelhouse_core.py scan > scan.json
-
       # Current open cards in THIS repo - default token.
       - name: List open cards
         env:
@@ -67,6 +57,16 @@ jobs:
             "repos/{owner}/{repo}/issues?state=open&per_page=100" \
             | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
             > cards.json
+
+      # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
+      # runs, may post rebase nudges, and may remind or close stale
+      # pending-contributor PRs, so this step requires FLEET_TOKEN with Actions
+      # write scope.
+      - name: Scan the fleet
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: python scripts/wheelhouse_core.py scan --cards cards.json > scan.json
 
       # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.
