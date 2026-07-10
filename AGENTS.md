@@ -622,6 +622,44 @@ still appears where it's plain English, e.g. "triage the queue".)
   If the PR list or closing-reference scan is incomplete, `build_repo` withholds
   issue-triage cards for that repo because it cannot prove which issues are
   already addressed by open PRs.
+  **Scan queries are kept small and survivable (card #411).** A large repo (~100
+  open PRs) made the one-shot scan query 5xx persistently, so `build_repo`
+  returned `ok:false` every scan and froze that repo's whole card slice. Page
+  sizes are deliberately small - `PR_PAGE_SIZE`/`ISSUE_PAGE_SIZE` plus reduced
+  nested `labels`/`closingIssuesReferences` counts (the existing cursor loop +
+  `truncated` fallback carry the rest); `statusCheckRollup.contexts` stays large
+  on purpose (truncating checks could hide a failing gate = a false green, the
+  card #392 lesson). Every `gh api graphql` call goes through `_gh_graphql_data`,
+  which retries transient 5xx/timeout (and GraphQL query-timeout `errors`) with
+  exponential backoff + jitter (`_sleep` is indirected for tests); a non-transient
+  error or exhausted retries still raises, preserving the `ok:false`/`truncated`
+  fail-safe - retry never fabricates completeness.
+  **The `build_repo` "scan failed" warning is slug-prefixed** so a dark repo is
+  identifiable straight from the log (it used to carry no repo name).
+  **UNKNOWN-mergeable hardening.** `classify` still fails open to `merge-ready`
+  on `UNKNOWN`/missing mergeability, but `build_repo` routes through
+  `_resolve_pr_bucket`: a `merge-ready` candidate whose bulk `mergeable` is not
+  authoritatively `MERGEABLE` gets a targeted single-PR re-read (`_settle_mergeable`
+  -> `gh_graphql_pr_mergeable`, which forces GitHub to compute it) before it can
+  show a merge-ready posture. Settling to `CONFLICTING` routes it to `needs-rebase`
+  (nudged + consumed); if it still can't be proven mergeable it is demoted to
+  `review-needed` (card stays open, no false merge-ready) and the next scan
+  routes it correctly. Re-read failure fails open to the bulk value.
+- **Fleet-scan health ledger (loud signal for a persistently-dark repo).** A repo
+  that fails EVERY scan hides behind an otherwise-green scheduled run.
+  `scan-backstop.yml`'s final `always()` step runs `wheelhouse_core.py scan-health
+  scan.json` (default `GITHUB_TOKEN` - this repo's own bookkeeping, never
+  `FLEET_TOKEN`), which persists a per-repo consecutive-`ok:false` count in a
+  dedicated CLOSED issue in THIS repo carrying a hidden `wheelhouse-scan-health`
+  marker (found by the `wheelhouse:scan-health` label; state lives in GitHub, not
+  on disk). `ok:true` resets the count; `ok:false` increments; at
+  `SCAN_HEALTH_ALERT_THRESHOLD` consecutive failures (default 3, env-overridable
+  via `WHEELHOUSE_SCAN_HEALTH_THRESHOLD`) it prints `::error::` per dark repo and
+  exits non-zero to fail the run. It runs LAST so it never skips reconcile, and
+  fails OPEN on any ledger I/O or missing scan.json (bookkeeping must never turn a
+  scan red on its own hiccup). Pure helpers
+  `parse_scan_health`/`update_scan_health`/`render_scan_health_body` are
+  unit-tested; unscanned repos are carried forward and never alert.
 - **Queue author filter.**
   Decision cards are for other people's work, so `build_repo` suppresses cards for PRs and issues authored by the canonical maintainer set (`wheelhouse_core.maintainers()` = repo owner plus optional configured `maintainer`) or by bots.
   Bot detection uses the GraphQL `author.__typename == "Bot"` signal plus the `*[bot]` login suffix fallback.
@@ -891,6 +929,7 @@ Run the unit tests:
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
+- `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and UNKNOWN-mergeable hardening (`_settle_mergeable` first-conclusive/fail-open, `_resolve_pr_bucket` re-read catching CONFLICTING -> needs-rebase, demoting never-proven-mergeable to review-needed, no wasteful re-read for a known-MERGEABLE PR, plus `build_repo` integration for all four).
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.

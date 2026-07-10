@@ -34,6 +34,7 @@ state), per-repo `owner` (-> derived from github.repository_owner).
 Usage:
   wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
   wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI, nudge conflicted PR-review candidates, run stale pending-contributor cleanup, and log outcomes
+  wheelhouse_core.py scan-health <scan.json>  update the persisted per-repo consecutive-failure ledger; ::error:: + non-zero exit when a repo is dark past the threshold (uses default GITHUB_TOKEN)
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
@@ -52,9 +53,11 @@ calling workflow step).
 import base64
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -73,79 +76,93 @@ CONFIG_CANDIDATES = [
     os.path.join(ROOT, ".github", "wheelhouse.config.yaml"),
 ]
 
+# Page sizes are kept deliberately small. A single oversized page (100 open PRs,
+# each fanning out into deeply nested statusCheckRollup / labels /
+# closingIssuesReferences sub-connections) pushes GitHub's GraphQL resolver past
+# its complexity/timeout budget and returns HTTP 502/504 - which, without retry,
+# blanks the whole repo (ok:false). Small pages resolve well inside budget, and
+# the existing cursor pagination (`_page_open_prs` / `_page_open_issues`) plus
+# per-page retry (`_gh_graphql_data`) carry the rest reliably. statusCheckRollup
+# `contexts` is intentionally left large because silently truncating check
+# contexts could hide a failing gate and manufacture a false-green card (the
+# card #392 lesson); with the PR page cut to PR_PAGE_SIZE the rollup fan-out is
+# already small enough to stay within budget.
+PR_PAGE_SIZE = 30
+ISSUE_PAGE_SIZE = 50
+PR_LABELS_PAGE_SIZE = 20
+CLOSING_REFS_PAGE_SIZE = 20
+STATUS_CONTEXTS_PAGE_SIZE = 100
+
+_PR_NODE_FIELDS = """
+        number title isDraft updatedAt changedFiles isCrossRepository mergeable
+        author { login __typename }
+        headRefName headRefOid baseRefName
+        headRepository { name owner { login } }
+        baseRepository { name owner { login } }
+        labels(first:%d){ totalCount pageInfo { hasNextPage } nodes{ name } }
+        closingIssuesReferences(first:%d){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
+        commits(last:1){ nodes{ commit{ statusCheckRollup{
+          state
+          contexts(first:%d){ nodes{
+            __typename
+            ... on CheckRun { name conclusion status }
+            ... on StatusContext { context state }
+          }}
+        }}}}
+""" % (
+    PR_LABELS_PAGE_SIZE,
+    CLOSING_REFS_PAGE_SIZE,
+    STATUS_CONTEXTS_PAGE_SIZE,
+)
+
 GQL = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
     defaultBranchRef { name }
-    pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
+    pullRequests(states:OPEN, first:%d, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
       pageInfo { hasNextPage endCursor }
-      nodes {
-        number title isDraft updatedAt changedFiles isCrossRepository mergeable
-        author { login __typename }
-        headRefName headRefOid baseRefName
-        headRepository { name owner { login } }
-        baseRepository { name owner { login } }
-        labels(first:100){ totalCount nodes{ name } }
-        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
-        commits(last:1){ nodes{ commit{ statusCheckRollup{
-          state
-          contexts(first:100){ nodes{
-            __typename
-            ... on CheckRun { name conclusion status }
-            ... on StatusContext { context state }
-          }}
-        }}}}
-      }
+      nodes {%s}
     }
-    issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
+    issues(states:OPEN, first:%d, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
     }
   }
 }
-"""
+""" % (
+    PR_PAGE_SIZE,
+    _PR_NODE_FIELDS,
+    ISSUE_PAGE_SIZE,
+)
 
 PRS_PAGE_GQL = """
 query($owner:String!, $name:String!, $after:String!) {
   repository(owner:$owner, name:$name) {
-    pullRequests(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+    pullRequests(states:OPEN, first:%d, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
       pageInfo { hasNextPage endCursor }
-      nodes {
-        number title isDraft updatedAt changedFiles isCrossRepository mergeable
-        author { login __typename }
-        headRefName headRefOid baseRefName
-        headRepository { name owner { login } }
-        baseRepository { name owner { login } }
-        labels(first:100){ totalCount nodes{ name } }
-        closingIssuesReferences(first:100){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
-        commits(last:1){ nodes{ commit{ statusCheckRollup{
-          state
-          contexts(first:100){ nodes{
-            __typename
-            ... on CheckRun { name conclusion status }
-            ... on StatusContext { context state }
-          }}
-        }}}}
-      }
+      nodes {%s}
     }
   }
 }
-"""
+""" % (
+    PR_PAGE_SIZE,
+    _PR_NODE_FIELDS,
+)
 
 ISSUES_PAGE_GQL = """
 query($owner:String!, $name:String!, $after:String!) {
   repository(owner:$owner, name:$name) {
-    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+    issues(states:OPEN, first:%d, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes { number title updatedAt author{login __typename} labels(first:20){nodes{name}} }
     }
   }
 }
-"""
+""" % ISSUE_PAGE_SIZE
 
 CLOSING_REFS_PAGE_GQL = """
 query($owner:String!, $name:String!, $number:Int!, $after:String!) {
@@ -157,6 +174,14 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
         nodes { number }
       }
     }
+  }
+}
+"""
+
+PR_MERGEABLE_GQL = """
+query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) { mergeable }
   }
 }
 """
@@ -274,8 +299,121 @@ def get_owner():
 # --------------------------------------------------------------------------- #
 # gh wrappers (ambient GH_TOKEN, set per-step by the workflow)
 # --------------------------------------------------------------------------- #
+# GitHub's GraphQL endpoint intermittently 5xxes on the fleet scan (a heavy
+# per-PR query under scheduled-run load). A single un-retried failure blanks the
+# whole repo for the scan (ok:false), which - because reconcile refuses to touch
+# an ok:false repo - freezes every card for that repo until a later scan happens
+# to succeed. So every gh-graphql call goes through `_gh_graphql_data`, which
+# retries transient 5xx/timeout failures with exponential backoff + jitter before
+# giving up. A genuine (non-transient) error, or exhaustion of the retries, still
+# raises exactly as before, so the existing fail-safe semantics (build_repo ->
+# ok:false, page helpers -> truncated) are preserved - retry never fabricates
+# completeness, it only survives a hiccup.
+GRAPHQL_MAX_ATTEMPTS = 4
+GRAPHQL_BACKOFF_BASE = 0.5  # seconds; grows 0.5 -> 1 -> 2 (+ jitter)
+GRAPHQL_BACKOFF_CAP = 8.0
+
+# gh surfaces transport-level HTTP errors on stderr with a non-zero exit.
+_TRANSIENT_STDERR_MARKERS = (
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "internal server error",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "was submitted too quickly",  # secondary rate limit - back off and retry
+    "eof occurred",
+    "tls handshake",
+)
+
+# A GraphQL query timeout can also arrive as an HTTP 200 with an `errors` array
+# ("Something went wrong while executing your query. This may be the result of a
+# timeout..."). That is transient too and worth retrying.
+_TRANSIENT_GQL_ERROR_MARKERS = (
+    "something went wrong while executing your query",
+    "timeout",
+    "timed out",
+    "please try again",
+)
+
+# Indirected so tests can stub sleeping without wall-clock delay.
+_sleep = time.sleep
+
+
+def _text_has_marker(text, markers):
+    low = (text or "").lower()
+    return any(m in low for m in markers)
+
+
+def _is_transient_stderr(stderr):
+    return _text_has_marker(stderr, _TRANSIENT_STDERR_MARKERS)
+
+
+def _is_transient_gql_errors(errors):
+    try:
+        text = json.dumps(errors)
+    except (TypeError, ValueError):
+        text = str(errors)
+    return _text_has_marker(text, _TRANSIENT_GQL_ERROR_MARKERS)
+
+
+def _graphql_backoff_delay(attempt):
+    """Exponential backoff (capped) plus jitter for the `attempt`-th try (1-based)."""
+    delay = min(GRAPHQL_BACKOFF_BASE * (2 ** (attempt - 1)), GRAPHQL_BACKOFF_CAP)
+    return delay + random.uniform(0.0, GRAPHQL_BACKOFF_BASE)
+
+
+def _gh_graphql_data(args):
+    """Run a `gh api graphql` invocation, returning the parsed `data` dict.
+
+    Retries `GRAPHQL_MAX_ATTEMPTS` times on transient 5xx/timeout failures (bad
+    gateway, gateway timeout, service unavailable, connection resets, secondary
+    rate limits, and GraphQL query-timeout `errors`) with exponential backoff +
+    jitter. A non-transient failure raises immediately; exhausting the retries
+    re-raises the last error - callers keep their existing fail-safe behavior."""
+    last_err = None
+    for attempt in range(1, GRAPHQL_MAX_ATTEMPTS + 1):
+        r = subprocess.run(args, capture_output=True, text=True)
+        if r.returncode != 0:
+            stderr = r.stderr.strip()
+            last_err = RuntimeError(stderr or "gh graphql failed")
+            if attempt < GRAPHQL_MAX_ATTEMPTS and _is_transient_stderr(stderr):
+                _sleep(_graphql_backoff_delay(attempt))
+                continue
+            raise last_err
+        try:
+            data = json.loads(r.stdout)
+        except (ValueError, TypeError) as e:
+            # A truncated/garbled body can accompany a flaky gateway that still
+            # exits 0; treat an unparseable response as transient.
+            last_err = RuntimeError(
+                "gh graphql returned unparseable output: %s" % (str(e)[:120])
+            )
+            if attempt < GRAPHQL_MAX_ATTEMPTS:
+                _sleep(_graphql_backoff_delay(attempt))
+                continue
+            raise last_err
+        if data.get("errors"):
+            last_err = RuntimeError(json.dumps(data["errors"]))
+            if attempt < GRAPHQL_MAX_ATTEMPTS and _is_transient_gql_errors(
+                data["errors"]
+            ):
+                _sleep(_graphql_backoff_delay(attempt))
+                continue
+            raise last_err
+        return data
+    raise last_err  # pragma: no cover - loop always returns or raises above
+
+
 def gh_graphql(owner, name):
-    r = subprocess.run(
+    data = _gh_graphql_data(
         [
             "gh",
             "api",
@@ -286,20 +424,13 @@ def gh_graphql(owner, name):
             "owner=" + owner,
             "-f",
             "name=" + name,
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
-    data = json.loads(r.stdout)
-    if data.get("errors"):
-        raise RuntimeError(json.dumps(data["errors"]))
     return data["data"]["repository"]
 
 
 def gh_graphql_pr_page(owner, name, after):
-    r = subprocess.run(
+    data = _gh_graphql_data(
         [
             "gh",
             "api",
@@ -312,20 +443,13 @@ def gh_graphql_pr_page(owner, name, after):
             "name=" + name,
             "-f",
             "after=" + after,
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
-    data = json.loads(r.stdout)
-    if data.get("errors"):
-        raise RuntimeError(json.dumps(data["errors"]))
     return data["data"]["repository"]["pullRequests"]
 
 
 def gh_graphql_issue_page(owner, name, after):
-    r = subprocess.run(
+    data = _gh_graphql_data(
         [
             "gh",
             "api",
@@ -338,20 +462,13 @@ def gh_graphql_issue_page(owner, name, after):
             "name=" + name,
             "-f",
             "after=" + after,
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
-    data = json.loads(r.stdout)
-    if data.get("errors"):
-        raise RuntimeError(json.dumps(data["errors"]))
     return data["data"]["repository"]["issues"]
 
 
 def gh_graphql_closing_refs_page(owner, name, number, after):
-    r = subprocess.run(
+    data = _gh_graphql_data(
         [
             "gh",
             "api",
@@ -366,19 +483,37 @@ def gh_graphql_closing_refs_page(owner, name, number, after):
             "number=%s" % number,
             "-f",
             "after=" + after,
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
-    data = json.loads(r.stdout)
-    if data.get("errors"):
-        raise RuntimeError(json.dumps(data["errors"]))
     pr = data["data"]["repository"]["pullRequest"]
     if not pr:
         raise RuntimeError("pull request #%s not found" % number)
     return pr["closingIssuesReferences"]
+
+
+def gh_graphql_pr_mergeable(owner, name, number):
+    """Read just `mergeable` for one PR. Fetching a single PR forces GitHub to
+    compute mergeability (the bulk list often returns UNKNOWN under load), so this
+    is the targeted re-read used to settle a merge-ready candidate."""
+    data = _gh_graphql_data(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + PR_MERGEABLE_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-F",
+            "number=%s" % number,
+        ]
+    )
+    pr = data["data"]["repository"]["pullRequest"]
+    if not pr:
+        raise RuntimeError("pull request #%s not found" % number)
+    return pr.get("mergeable")
 
 
 def gh_graphql_pr_user_content_edits_page(owner, name, number, after=None):
@@ -397,12 +532,7 @@ def gh_graphql_pr_user_content_edits_page(owner, name, number, after=None):
     ]
     if after is not None:
         args.extend(["-f", "after=" + after])
-    r = subprocess.run(args, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "gh graphql failed")
-    data = json.loads(r.stdout)
-    if data.get("errors"):
-        raise RuntimeError(json.dumps(data["errors"]))
+    data = _gh_graphql_data(args)
     pr = data["data"]["repository"]["pullRequest"]
     if not pr:
         raise RuntimeError("pull request #%s not found" % number)
@@ -650,6 +780,70 @@ def _pr_is_cross_repo(pr):
 
 def _mergeable_is_conflicting(mergeable):
     return str(mergeable or "").strip().upper() == "CONFLICTING"
+
+
+def _mergeable_is_mergeable(mergeable):
+    return str(mergeable or "").strip().upper() == "MERGEABLE"
+
+
+def _mergeable_is_conclusive(mergeable):
+    """GitHub reports MERGEABLE / CONFLICTING / UNKNOWN. Only the first two are
+    authoritative; UNKNOWN (or a missing value) means GitHub has not finished
+    computing mergeability yet."""
+    return _mergeable_is_mergeable(mergeable) or _mergeable_is_conflicting(mergeable)
+
+
+# How many single-PR re-reads to spend settling an UNKNOWN mergeable, and how
+# long to wait between them (GitHub computes mergeability asynchronously, so the
+# first read after the bulk list may still be UNKNOWN while the job runs).
+MERGEABLE_SETTLE_READS = 2
+MERGEABLE_SETTLE_DELAY = 2.0  # seconds
+
+
+def _settle_mergeable(owner, name, number):
+    """Force GitHub to settle an UNKNOWN `mergeable` for one PR via targeted
+    single-PR re-reads. Returns the first conclusive value (MERGEABLE /
+    CONFLICTING), or the last value seen (typically still UNKNOWN/None) if it
+    never settles. Fails open (returns None) on read error - the caller keeps
+    whatever the bulk scan reported."""
+    last = None
+    for i in range(MERGEABLE_SETTLE_READS):
+        try:
+            value = gh_graphql_pr_mergeable(owner, name, number)
+        except Exception:
+            return None
+        if _mergeable_is_conclusive(value):
+            return value
+        last = value
+        if i + 1 < MERGEABLE_SETTLE_READS:
+            _sleep(MERGEABLE_SETTLE_DELAY)
+    return last
+
+
+def _resolve_pr_bucket(owner, name, pr, draft, comp, tests, ci, cross_repo):
+    """Classify a PR, hardening the merge-ready fail-open on an UNKNOWN mergeable.
+
+    `classify` fails open to `merge-ready` when mergeability is UNKNOWN/missing,
+    which can let a freshly-conflicted PR slip through as merge-ready on the first
+    successful scan after the conflict appears (the bulk PR list frequently
+    returns UNKNOWN under load). So when the fast path lands on `merge-ready` but
+    mergeability is not authoritatively MERGEABLE, spend a targeted single-PR
+    re-read to force GitHub to compute it, then re-classify. If it settles to
+    CONFLICTING the PR correctly becomes `needs-rebase` (nudged + consumed); if it
+    can still not be proven mergeable, it is demoted to `review-needed` rather
+    than advertised as merge-ready, so an unverified PR never shows a merge-ready
+    posture (the next scan routes it correctly once GitHub finishes computing)."""
+    mergeable = pr.get("mergeable")
+    bucket = classify(draft, comp, tests, ci, cross_repo, mergeable)
+    if bucket != "merge-ready" or _mergeable_is_mergeable(mergeable):
+        return bucket
+    settled = _settle_mergeable(owner, name, pr["number"])
+    if settled is not None:
+        mergeable = settled
+    bucket = classify(draft, comp, tests, ci, cross_repo, mergeable)
+    if bucket == "merge-ready" and not _mergeable_is_mergeable(mergeable):
+        return "review-needed"
+    return bucket
 
 
 def _with_mergeability(bucket, mergeable):
@@ -2134,11 +2328,14 @@ def build_repo(
     except (
         Exception
     ) as e:  # resilient: a missing/unreadable repo does not abort the scan
+        # Name the repo in the warning so a dark repo is identifiable straight
+        # from the scan log (previously the message carried no repo, and the
+        # offending repo had to be inferred from notice ordering).
         return (
             {
                 "name": name,
                 "ok": False,
-                "warning": "scan failed: %s" % str(e)[:200],
+                "warning": "%s scan failed: %s" % (slug, str(e)[:200]),
                 "open_pr_numbers": [],
                 "open_issue_numbers": [],
             },
@@ -2202,8 +2399,8 @@ def build_repo(
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
-        bucket = classify(
-            pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
+        bucket = _resolve_pr_bucket(
+            owner, name, pr, pr["isDraft"], comp, tests, ci, cross_repo
         )
         author_excluded = _author_excluded_from_queue(author, maintainer_logins)
         try:
@@ -3286,6 +3483,273 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
 
 
 # --------------------------------------------------------------------------- #
+# fleet-scan health ledger
+# --------------------------------------------------------------------------- #
+# A repo that intermittently fails the fleet scan (ok:false) is invisible to the
+# rest of the pipeline for that run and self-heals on the next successful scan.
+# But a repo that fails EVERY scan (e.g. an oversized query GitHub keeps 5xxing)
+# stays dark indefinitely and hides behind an otherwise-green scheduled run.
+# This ledger persists a per-repo consecutive-failure count across runs (state
+# lives in GitHub, not on disk: a dedicated closed issue in THIS cards repo,
+# carrying a hidden `wheelhouse-scan-health` marker) so the backstop can raise a
+# loud, run-failing signal once a repo has been dark for several scans in a row.
+# It is bookkeeping for THIS repo, so it is written with the default GITHUB_TOKEN,
+# never FLEET_TOKEN.
+SCAN_HEALTH_MARKER = "wheelhouse-scan-health"
+SCAN_HEALTH_LABEL = "wheelhouse:scan-health"
+SCAN_HEALTH_TITLE = "Wheelhouse fleet-scan health (automated)"
+# Consecutive ok:false scans before the backstop shouts. Hourly scans -> 3 in a
+# row is ~3h of darkness. Overridable via env for a fork that scans on a
+# different cadence.
+SCAN_HEALTH_ALERT_THRESHOLD = 3
+_SCAN_HEALTH_RE = re.compile(
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(SCAN_HEALTH_MARKER), re.S
+)
+
+
+def _scan_health_threshold():
+    raw = os.environ.get("WHEELHOUSE_SCAN_HEALTH_THRESHOLD", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n >= 1:
+                return n
+        except ValueError:
+            pass
+    return SCAN_HEALTH_ALERT_THRESHOLD
+
+
+def parse_scan_health(body):
+    """Extract the persisted per-repo consecutive-failure map from the health
+    issue body. Returns {} for a missing/blank/unparseable ledger."""
+    if not body:
+        return {}
+    m = _SCAN_HEALTH_RE.search(body)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return {}
+    repos = data.get("repos") if isinstance(data, dict) else None
+    return repos if isinstance(repos, dict) else {}
+
+
+def _prev_failure_count(prev_entry):
+    if isinstance(prev_entry, dict):
+        try:
+            return int(prev_entry.get("consecutive_failures", 0))
+        except (TypeError, ValueError):
+            return 0
+    if isinstance(prev_entry, bool):  # guard: bool is an int subclass
+        return 0
+    if isinstance(prev_entry, int):
+        return prev_entry
+    return 0
+
+
+def update_scan_health(prev, repos, threshold=SCAN_HEALTH_ALERT_THRESHOLD):
+    """Pure health-ledger step. Given the previous per-repo failure counts and
+    the current scan's `repos` result map, return (new_counts, alerts).
+
+    - ok:true  -> the repo's consecutive-failure count resets to 0.
+    - ok:false -> the count increments; if it reaches `threshold` the repo is
+      added to `alerts`.
+    Repos present in `prev` but absent from this scan are carried forward
+    unchanged (a partial/single-repo scan must not wipe the fleet's history) and
+    never alert (they were not observed this pass). `alerts` is sorted by name for
+    deterministic output."""
+    prev = prev if isinstance(prev, dict) else {}
+    new_counts = {}
+    for name, entry in prev.items():
+        # Normalize carried-forward entries so the stored shape stays uniform.
+        new_counts[name] = {"consecutive_failures": _prev_failure_count(entry)}
+        if isinstance(entry, dict) and entry.get("last_warning"):
+            new_counts[name]["last_warning"] = str(entry["last_warning"])[:200]
+    alerts = []
+    for name in sorted(repos or {}):
+        result = repos.get(name)
+        if not isinstance(result, dict):
+            result = {}
+        if result.get("ok"):
+            new_counts[name] = {"consecutive_failures": 0}
+            continue
+        count = _prev_failure_count(prev.get(name)) + 1
+        entry = {"consecutive_failures": count}
+        warning = str(result.get("warning") or "").strip()
+        if warning:
+            entry["last_warning"] = warning[:200]
+        new_counts[name] = entry
+        if count >= threshold:
+            alerts.append({"name": name, "count": count, "warning": warning})
+    return new_counts, alerts
+
+
+def render_scan_health_body(counts, updated_at=""):
+    """Render the health-ledger issue body: a short human summary plus the hidden
+    machine-readable marker."""
+    counts = counts if isinstance(counts, dict) else {}
+    dark = sorted(
+        (n for n, e in counts.items() if _prev_failure_count(e) > 0),
+        key=lambda n: (-_prev_failure_count(counts[n]), n),
+    )
+    lines = [
+        "Automated ledger for the Wheelhouse fleet-scan backstop - do not edit by "
+        "hand.",
+        "",
+        "It records how many consecutive scheduled scans each fleet repo has "
+        "failed (`ok:false`) so a persistently-unreadable repo cannot hide behind "
+        "an otherwise-green scan.",
+        "",
+    ]
+    if dark:
+        lines.append("Currently failing:")
+        for name in dark:
+            entry = counts[name] if isinstance(counts[name], dict) else {}
+            note = ": %s" % entry["last_warning"] if entry.get("last_warning") else ""
+            lines.append(
+                "- `%s` - %d consecutive scan failure(s)%s"
+                % (name, _prev_failure_count(entry), note)
+            )
+    else:
+        lines.append("All scanned fleet repos are currently readable.")
+    lines.append("")
+    ledger = {"updated_at": updated_at or "", "repos": counts}
+    lines.append(
+        "<!-- %s: %s -->"
+        % (SCAN_HEALTH_MARKER, json.dumps(ledger, separators=(",", ":")))
+    )
+    return "\n".join(lines)
+
+
+def _this_repo_slug():
+    slug = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not slug or "/" not in slug:
+        sys.exit("GITHUB_REPOSITORY not set (owner/name) for scan-health")
+    return slug
+
+
+def _find_scan_health_issue(slug):
+    """Locate the health-ledger issue by its label (any state), preferring one
+    that already carries the hidden marker. Returns the issue dict or None."""
+    path = "repos/%s/issues?state=all&labels=%s&per_page=20" % (
+        slug,
+        quote(SCAN_HEALTH_LABEL),
+    )
+    issues = gh_rest(path) or []
+    if not isinstance(issues, list):
+        return None
+    candidates = [
+        it
+        for it in issues
+        if isinstance(it, dict) and "pull_request" not in it
+    ]
+    for it in candidates:
+        if _SCAN_HEALTH_RE.search(it.get("body") or ""):
+            return it
+    return candidates[0] if candidates else None
+
+
+def _create_scan_health_issue(slug, body):
+    # gh_rest can't emit the `labels[]` array the create endpoint wants, so this
+    # one call goes direct. Created labeled, then closed so it stays out of the
+    # owner's open-issue queue while remaining findable by label.
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            "repos/%s/issues" % slug,
+            "-f",
+            "title=" + SCAN_HEALTH_TITLE,
+            "-f",
+            "body=" + body,
+            "-f",
+            "labels[]=" + SCAN_HEALTH_LABEL,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "create scan-health issue failed: %s" % (r.stderr.strip() or "gh error")
+        )
+    issue = json.loads(r.stdout)
+    number = issue.get("number")
+    if number:
+        gh_rest(
+            "repos/%s/issues/%s" % (slug, number),
+            method="PATCH",
+            fields={"state": "closed"},
+        )
+    return issue
+
+
+def cmd_scan_health(scan_path):
+    """Update the persisted per-repo consecutive-failure ledger from a scan.json
+    and raise a loud, run-failing `::error::` for any repo dark past the
+    threshold. Fails OPEN on any ledger I/O error so health bookkeeping can never
+    turn a scan red on its own hiccup."""
+    threshold = _scan_health_threshold()
+    try:
+        with open(scan_path) as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        # No usable scan output (e.g. the scan step itself failed, which already
+        # fails the job) - nothing to record.
+        print(
+            "::warning::scan-health: could not read %s: %s"
+            % (scan_path, str(e)[:160]),
+            file=sys.stderr,
+        )
+        return
+    repos = payload.get("repos") if isinstance(payload, dict) else None
+    repos = repos if isinstance(repos, dict) else {}
+    updated_at = payload.get("generated_at", "") if isinstance(payload, dict) else ""
+
+    alerts = []
+    try:
+        slug = _this_repo_slug()
+        issue = _find_scan_health_issue(slug)
+        prev = parse_scan_health(issue.get("body") if issue else None)
+        new_counts, alerts = update_scan_health(prev, repos, threshold)
+        body = render_scan_health_body(new_counts, updated_at)
+        if issue and issue.get("number"):
+            gh_rest(
+                "repos/%s/issues/%s" % (slug, issue["number"]),
+                method="PATCH",
+                fields={"body": body},
+            )
+        else:
+            _create_scan_health_issue(slug, body)
+    except SystemExit:
+        raise
+    except Exception as e:
+        # Ledger persistence failed - do not fail the scan over bookkeeping.
+        print(
+            "::warning::scan-health ledger update failed: %s" % str(e)[:200],
+            file=sys.stderr,
+        )
+        return
+
+    for a in alerts:
+        note = ": %s" % a["warning"] if a.get("warning") else ""
+        print(
+            "::error::wheelhouse fleet-scan: %s has failed %d consecutive scans%s"
+            % (a["name"], a["count"], note),
+            file=sys.stderr,
+        )
+    if alerts:
+        # Fail the (final) backstop step so a persistently-dark repo cannot hide
+        # behind a green scheduled run. Reconcile has already run in an earlier
+        # step, so failing here never skips self-healing for the healthy repos.
+        sys.exit(
+            "fleet-scan health: %d repo(s) dark past threshold" % len(alerts)
+        )
+
+
+# --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
 def cmd_scan(only_repo=None):
@@ -3319,7 +3783,14 @@ def cmd_scan(only_repo=None):
         out_repos[name] = result
         items.extend(repo_items)
         if result.get("warning"):
-            print("::warning::%s" % result["warning"], file=sys.stderr)
+            # `build_repo` already prefixes the repo slug onto the ok:false "scan
+            # failed" warning; other warnings still name the repo here so a dark
+            # or degraded repo is always identifiable from the scan log.
+            warning = result["warning"]
+            if not result.get("ok"):
+                print("::warning::%s" % warning, file=sys.stderr)
+            else:
+                print("::warning::%s: %s" % (name, warning), file=sys.stderr)
 
     payload = {
         "owner": owner,
@@ -3456,6 +3927,8 @@ def main():
     cmd = sys.argv[1]
     if cmd == "scan":
         cmd_scan(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif cmd == "scan-health" and len(sys.argv) == 3:
+        cmd_scan_health(sys.argv[2])
     elif cmd == "approve-ci" and len(sys.argv) == 4:
         cmd_approve_ci(sys.argv[2], sys.argv[3])
     elif cmd == "checks" and len(sys.argv) == 3:
