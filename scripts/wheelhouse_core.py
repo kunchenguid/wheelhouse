@@ -41,6 +41,7 @@ Usage:
   wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo (pr-review)
   wheelhouse_core.py auto-triage-issues-enabled <repo> print true/false for one configured repo (issue-triage)
   wheelhouse_core.py thank-on-merge-enabled <repo> print true/false for one configured repo
+  wheelhouse_core.py auto-merge-enabled <repo> print true/false: is scan-time auto_merge on for one configured repo?
   wheelhouse_core.py state <field>        print one field of the state block in $ISSUE_BODY
   wheelhouse_core.py repos                list configured repos
 
@@ -211,6 +212,10 @@ NEEDS_MAINTAINER = {"merge-ready", "needs-ci-approval", "review-needed"}
 REBASE_NUDGE_MARKER_PREFIX = "wheelhouse-rebase-nudge"
 PENDING_CONTRIBUTOR_LABEL = "wheelhouse:pending-contributor-action"
 PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL = "wheelhouse:keep-open"
+# Per-PR escape hatch: applying this label to a TARGET PR exempts it from
+# scan-time auto-merge (see auto_merge.py). It never affects the manual merge
+# path or any other decision - it only forces the auto-merge gate to hold.
+NO_AUTO_MERGE_LABEL = "wheelhouse:no-auto-merge"
 PENDING_CONTRIBUTOR_MARKER_PREFIX = "wheelhouse-pending-contributor-action"
 PENDING_CONTRIBUTOR_REMINDER_PREFIX = "wheelhouse-pending-contributor-reminder"
 PENDING_CONTRIBUTOR_CLOSE_PREFIX = "wheelhouse-pending-contributor-close"
@@ -262,6 +267,11 @@ def load_config():
         # fork still gets scan-time auto-approval of provably-safe fork-CI runs.
         # Set false to restore the click-to-approve-everything behavior.
         "auto_approve_ci": bool(cfg.get("auto_approve_ci", True)),
+        # Scan-time auto-merge is DEFAULT OFF (opt-in). A merge is irreversible
+        # and higher-stakes than a fork-CI approval, so a repo never auto-merges
+        # until the owner opts in globally or per repo AND commits a VISION.md on
+        # the target's default branch (see auto_merge.py / AGENTS.md "Auto-merge").
+        "auto_merge": bool(cfg.get("auto_merge", False)),
         # Advisory LLM triage is DEFAULT ON when the Claude token exists. The
         # flag is only a spend-control opt-out; absence keeps fresh forks useful.
         "auto_triage": bool(cfg.get("auto_triage", True)),
@@ -1049,6 +1059,19 @@ def _auto_approve_enabled(repo_cfg, global_default):
     cheap, portable escape hatch - a single repo can opt out without flipping the
     fleet-wide default."""
     v = repo_cfg.get("auto_approve_ci")
+    return global_default if v is None else bool(v)
+
+
+def _auto_merge_enabled(repo_cfg, global_default):
+    """Effective auto_merge for one repo: the per-repo `auto_merge` override if
+    set, else the global flag.
+
+    Unlike auto_approve_ci this is DEFAULT OFF in code - a merge is irreversible,
+    so a repo must opt in globally or with a per-repo override (and additionally
+    commit a VISION.md on the target's default branch) before scan-time
+    auto-merge can act. A per-repo `auto_merge: false` is the portable one-repo
+    kill switch even when the fleet-wide default is on."""
+    v = repo_cfg.get("auto_merge")
     return global_default if v is None else bool(v)
 
 
@@ -3336,6 +3359,152 @@ def _risky_ci_files(files):
     return risky
 
 
+# Auto-merge unconditional file exclusions. A merge-ready PR touching ANY of
+# these holds for a human (no LLM involved) - a strict SUPERSET of the
+# pwn-request `_risky_ci_files` set, extended into every category the auto-merge
+# design marks as never-provably-safe (workflow/action, governance, release,
+# dependency/supply-chain, security/auth/credential, billing, migration,
+# persistence/schema, install/bootstrap/build entrypoints, public-default
+# surfaces, and VISION.md self-authorization). Deliberately generous: a false
+# hold is recoverable (the owner just merges manually), a false auto-merge is
+# not. Matching is path-segment / suffix based and case-insensitive on the
+# filename so it survives odd casing.
+_AM_EXCLUDE_SUFFIXES = {
+    "dependency": (
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "go.mod",
+        "go.sum",
+        "cargo.toml",
+        "cargo.lock",
+        "pipfile",
+        "pipfile.lock",
+        "poetry.lock",
+        "pyproject.toml",
+        "requirements.txt",
+        "gemfile",
+        "gemfile.lock",
+        "composer.json",
+        "composer.lock",
+        "gopkg.toml",
+        "gopkg.lock",
+    ),
+    "release": (
+        "release-please-config.json",
+        ".release-please-manifest.json",
+        "changelog.md",
+        ".releaserc",
+        ".releaserc.json",
+        ".releaserc.yml",
+        ".releaserc.yaml",
+        ".goreleaser.yml",
+        ".goreleaser.yaml",
+        "version",
+        "version.txt",
+    ),
+    "security": (
+        "security.md",
+        ".npmrc",
+        ".pypirc",
+    ),
+    "governance": (
+        "codeowners",
+        "license",
+        "license.md",
+        "license.txt",
+    ),
+    "install-bootstrap": (
+        "install.sh",
+        "bootstrap.sh",
+        "setup.py",
+        "setup.cfg",
+        "makefile",
+    ),
+    "vision": ("vision.md",),
+}
+
+# Substring signals matched against the whole lowercased path.
+_AM_EXCLUDE_PATH_SUBSTRINGS = {
+    "security": ("secret", "credential", "password", "private-key", "privatekey"),
+    "authentication": ("/auth/", "auth-", "-auth", "oauth", "authn", "authz"),
+    "billing": ("billing", "payment", "invoice", "stripe", "subscription", "paywall"),
+    "migration": ("migration", "/migrate/", "migrations/", "/alembic/", "flyway"),
+}
+
+
+def _am_basename(path):
+    return path.rsplit("/", 1)[-1]
+
+
+def _auto_merge_exclusions(files):
+    """Return a sorted, de-duplicated list of "category:path" strings for every
+    file in `files` that falls in the auto-merge unconditional-exclusion set.
+    Empty list means none of the changed files are excluded.
+
+    A PR that touches VISION.md is excluded here (the self-authorization guard)
+    on TOP of the base-branch-only read done elsewhere: even reading the base
+    copy, a PR editing the rubric it is judged against must never auto-merge."""
+    hits = set()
+    for raw in files or []:
+        f = str(raw or "").strip()
+        if not f:
+            continue
+        low = f.lower()
+        base = _am_basename(low)
+        # 1) pwn-request CI/action files (reuse the exact existing predicate).
+        if _risky_ci_files([f]):
+            hits.add("workflow-action:%s" % f)
+            continue
+        # 2) everything else under .github/ is governance/config surface.
+        if low.startswith(".github/"):
+            hits.add("governance:%s" % f)
+            continue
+        # 3) known exact-name / suffix categories.
+        matched = False
+        for category, names in _AM_EXCLUDE_SUFFIXES.items():
+            if base in names or any(
+                low == n or low.endswith("/" + n) for n in names
+            ):
+                hits.add("%s:%s" % (category, f))
+                matched = True
+                break
+        if matched:
+            continue
+        # 4) dependency directories and other supply-chain / build entrypoints.
+        if low.startswith("vendor/") or "/vendor/" in low:
+            hits.add("dependency:%s" % f)
+            continue
+        if base.startswith("dockerfile") or base.startswith("docker-compose"):
+            hits.add("install-bootstrap:%s" % f)
+            continue
+        if base.endswith(".mk") or (base.startswith("setup") and base.endswith(".sh")):
+            hits.add("install-bootstrap:%s" % f)
+            continue
+        # 5) persistence / schema: raw SQL and schema definition files.
+        if low.endswith(".sql") or low.endswith(".prisma") or base.startswith("schema."):
+            hits.add("persistence:%s" % f)
+            continue
+        # 6) public-default surfaces: config-schema / defaults files that set
+        #    externally observable defaults. Conservative on purpose.
+        if (
+            base.endswith((".config.js", ".config.ts", ".config.mjs", ".config.cjs"))
+            or base in ("defaults.yml", "defaults.yaml", "defaults.json", "defaults.toml")
+            or low.startswith("config/")
+            or "/config/" in low
+        ):
+            hits.add("public-default:%s" % f)
+            continue
+        # 7) substring path signals (security/auth/billing/migration).
+        for category, needles in _AM_EXCLUDE_PATH_SUBSTRINGS.items():
+            if any(n in low for n in needles):
+                hits.add("%s:%s" % (category, f))
+                break
+    return sorted(hits)
+
+
 def _on_triggers(doc):
     """The set of trigger names declared by a parsed workflow doc. Tolerates the
     YAML 1.1 gotcha where the bare key `on:` parses as the boolean True."""
@@ -5036,6 +5205,7 @@ def cmd_scan(only_repo=None, cards_path=None):
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "card_issues": cfg["card_issues"],
         "auto_approve_ci": cfg["auto_approve_ci"],
+        "auto_merge": cfg["auto_merge"],
         "auto_triage": cfg["auto_triage"],
         "auto_triage_issues": cfg["auto_triage_issues"],
         "pending_contributor_cleanup": cfg["pending_contributor_cleanup"],
@@ -5157,6 +5327,17 @@ def cmd_thank_on_merge_enabled(repo):
     )
 
 
+def cmd_auto_merge_enabled(repo):
+    cfg = load_config()
+    if repo not in cfg["repos"]:
+        sys.exit("unknown repo '%s'" % repo)
+    print(
+        "true"
+        if _auto_merge_enabled(cfg["repos"][repo], cfg["auto_merge"])
+        else "false"
+    )
+
+
 def cmd_state(field):
     """Print one field of the state block in $ISSUE_BODY (for the deep-review workflow)."""
     st = parse_state_block(os.environ.get("ISSUE_BODY", ""))
@@ -5195,6 +5376,8 @@ def main():
         cmd_auto_triage_issues_enabled(sys.argv[2])
     elif cmd == "thank-on-merge-enabled" and len(sys.argv) == 3:
         cmd_thank_on_merge_enabled(sys.argv[2])
+    elif cmd == "auto-merge-enabled" and len(sys.argv) == 3:
+        cmd_auto_merge_enabled(sys.argv[2])
     elif cmd == "state" and len(sys.argv) == 3:
         cmd_state(sys.argv[2])
     elif cmd == "repos":

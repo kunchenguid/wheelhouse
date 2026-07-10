@@ -690,7 +690,61 @@ def normalize_triage(data):
         triage["recommended_next_step"] = (
             rec if rec.lower().startswith(allowed) else "look closer - " + rec
         )
+    # Optional auto-merge behavior verdict (pr-review only; asked by triage.yml
+    # only when the target's base branch carries a VISION.md). Non-material and
+    # advisory - auto_merge.py re-validates it and holds on any doubt.
+    am = normalize_automerge_verdict(data.get("automerge"))
+    if am:
+        triage["automerge_verdict"] = am
     return triage
+
+
+def _coerce_verdict_bool(value):
+    """Strict-ish boolean coercion for the auto-merge behavior verdict: accept a
+    real JSON boolean or the strings 'true'/'false'; anything else is None so the
+    verdict fails closed."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t == "true":
+            return True
+        if t == "false":
+            return False
+    return None
+
+
+def normalize_automerge_verdict(data):
+    """Parse the OPTIONAL `automerge` sub-object of the pr-review triage JSON into
+    the structured `automerge_verdict` persisted in card state and later consumed
+    by auto_merge.py (the deterministic auto-merge executor). Fail-closed: a
+    missing sub-object, a non-dict, a blank behavior class, or a required boolean
+    that is not coercible returns None, so no verdict is persisted and the
+    executor holds.
+
+    `optin_default_off` is only required for class C, so it defaults to False when
+    absent (which itself disqualifies a class-C PR at the executor). This is
+    advisory input only - the executor re-validates every field independently."""
+    if not isinstance(data, dict):
+        return None
+    cls = str(data.get("behavior_class") or "").strip().upper()
+    if not cls:
+        return None
+    verdict = {"behavior_class": cls}
+    for field in (
+        "aligns_with_vision",
+        "changes_existing_or_default_behavior",
+        "recommend_merge",
+        "optin_default_off",
+    ):
+        b = _coerce_verdict_bool(data.get(field))
+        if b is None:
+            if field == "optin_default_off":
+                b = False
+            else:
+                return None
+        verdict[field] = b
+    return verdict
 
 
 def _all_accept_actions():
@@ -888,6 +942,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_status",
         "triage_error",
         "triage_recommendation",
+        "automerge_verdict",
     ):
         if key in (old_state or {}):
             state[key] = old_state[key]
@@ -899,7 +954,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     return _replace_state_block(body, state) if changed else body
 
 
-def _state_with_triage(state, revision, status, error=None, recommendation=None):
+def _state_with_triage(
+    state, revision, status, error=None, recommendation=None, automerge_verdict=None
+):
     new_state = dict(state or {})
     new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
@@ -911,6 +968,13 @@ def _state_with_triage(state, revision, status, error=None, recommendation=None)
         new_state["triage_recommendation"] = recommendation
     else:
         new_state.pop("triage_recommendation", None)
+    # The auto-merge behavior verdict is a NON-MATERIAL cache field like
+    # triage_recommendation: persisted only on a fresh successful attempt, and
+    # cleared otherwise so a stale/failed verdict can never drive a merge.
+    if status == "succeeded" and automerge_verdict:
+        new_state["automerge_verdict"] = automerge_verdict
+    else:
+        new_state.pop("automerge_verdict", None)
     return new_state
 
 
@@ -963,12 +1027,16 @@ def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
         if normalized
         else None
     )
+    automerge_verdict = (
+        (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
+    )
     new_state = _state_with_triage(
         state,
         revision,
         status,
         None if normalized else error,
         recommendation=recommendation,
+        automerge_verdict=automerge_verdict,
     )
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])

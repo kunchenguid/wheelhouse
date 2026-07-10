@@ -76,6 +76,19 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/wheelhouse_core.py scan --cards cards.json > scan.json
 
+      # Scan-time auto-merge (default OFF; strict subset of the manual merge
+      # gate). Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
+      # it reads the persisted per-card behavior verdict from cards.json (a local
+      # file, no token needed to read it). It performs NO card writes here -
+      # those are left to the default-token "Record auto-merges" step below so
+      # token discipline holds (the merge on FLEET_TOKEN, the resolved decision
+      # record + ledger on github.token). See AGENTS.md "Auto-merge".
+      - name: Auto-merge eligible PRs
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: python scripts/auto_merge.py act scan.json cards.json
+
       # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.
       - name: Reconcile the queue
@@ -84,6 +97,19 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/reconcile.py scan.json cards.json
+
+      # Durable audit trail + resolved decision record for every auto-merge, in
+      # THIS repo (default token, never FLEET_TOKEN - this repo's own
+      # bookkeeping). Runs AFTER reconcile so the resolve is the last write and
+      # wins over any cosmetic refresh reconcile may have done. Fail-open: an
+      # audit hiccup never un-merges anything.
+      - name: Record auto-merges
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: python scripts/auto_merge.py record automerge.json
 
       # Track per-repo consecutive scan failures in a dedicated (closed) ledger
       # issue in THIS repo, and fail the run loudly if a fleet repo has been dark

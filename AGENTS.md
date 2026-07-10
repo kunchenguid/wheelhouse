@@ -859,6 +859,59 @@ still appears where it's plain English, e.g. "triage the queue".)
   A cache metadata mismatch triggers a pure-card refresh through `security_summary_stale`; existing cards otherwise pick up the section once via the `CARD_RENDER_VERSION` 5 -> 6 bump.
   It runs on the `ok:true` success path only, and only for contributor-authored HOLD cards (owner/maintainer/bot ci-approval PRs are approved or suppressed with no card, so the summarizer is never consulted).
   See `tests/test_ci_security_summary.py`.
+- **Scan-time auto-merge (V1) is a STRICT SUBSET of the manual merge gate, built
+  on the same scan-time safe-action architecture as fork-CI auto-approve.** All
+  the logic lives in `scripts/auto_merge.py` (deterministic gates, the act
+  executor, the durable ledger, and the resolved-card recorder); the merge itself
+  reuses `apply_decision.do_merge` unchanged. It is DEFAULT OFF: a repo
+  auto-merges nothing until it BOTH sets `auto_merge: true` (global or per-repo,
+  `wheelhouse_core._auto_merge_enabled`, default false) AND commits a `VISION.md`
+  on its DEFAULT branch (the alignment rubric doubles as the opt-in signal). A
+  merge-ready `pr-review` candidate is merged only when EVERY gate passes:
+  G0 repo opted-in + VISION.md present; G1 a pure `needs-decision` pr-review card
+  (not held); G2 the PR touches none of the unconditional exclusions
+  (`_auto_merge_exclusions` - a strict SUPERSET of `_risky_ci_files` covering
+  workflow/action, governance, release, dependency/supply-chain,
+  security/auth/credential, billing, migration, persistence/schema,
+  install/bootstrap/build, public-default, and VISION.md itself); G3 the author is
+  a non-bot non-maintainer with >=1 prior merged PR in the same repo
+  (captain-fixed returning-contributor definition - no revert/quality history);
+  G4 live `mergeable == True` AND `mergeable_state == 'clean'` (the REST twins of
+  MERGEABLE/CLEAN; anything else fails closed); G5 blast radius <=20 changed files
+  AND <=1000 total changed lines (captain-fixed caps, exact boundary passes);
+  G6 a fresh structured `automerge_verdict` for the CURRENT head SHA
+  (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
+  alignment, ruling out an ineligible existing/default behavior change, and
+  recommending merge (class C also requires an explicit strictly-opt-in +
+  default-off flag); G7 an immediate live re-check of head SHA + mergeable +
+  clean state right before `do_merge`. Any missing/stale/malformed/uncertain/
+  unreadable input HOLDS for human review (fail-closed), and an ok:false /
+  truncated / `indeterminate_pr_numbers` repo is frozen exactly like reconcile.
+  The behavior verdict is PRODUCED by extending the pr-review triage
+  (`triage.yml` fetches base-branch VISION.md - the contents API with NO `?ref`,
+  never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md
+  is also a G2 exclusion - and asks for the A/B/C fields;
+  `render_card.normalize_automerge_verdict` parses them) and PERSISTED as the
+  NON-MATERIAL `automerge_verdict` state key alongside `triage_recommendation`
+  (never in `MATERIAL_FIELDS`, cleared on any failed/stale attempt, carried
+  through same-revision refresh). Token discipline mirrors the rest of the fleet:
+  the merge is a cross-repo write on FLEET_TOKEN (the "Auto-merge eligible PRs"
+  step in `scan-backstop.yml`, which reads the persisted verdict from the local
+  `cards.json` - no token needed to read a file), while the durable audit ledger
+  (a dedicated CLOSED issue in THIS repo with the `wheelhouse-auto-merge-log`
+  marker, mirroring the scan-health ledger) and the resolved decision record
+  (comment + close via `render_card.close_card`) are written by the separate
+  default-token "Record auto-merges" step (act -> reconcile -> record ordering).
+  Kill switches (layered): the global/per-repo `auto_merge` flag, deleting a
+  repo's VISION.md, removing `CLAUDE_CODE_OAUTH_TOKEN` (no verdict -> everything
+  holds), and a per-PR `wheelhouse:no-auto-merge` target label
+  (`NO_AUTO_MERGE_LABEL`). Wheelhouse NEVER auto-reverts. By captain override V1
+  DELIBERATELY has NO open-PR file-overlap gate and NO per-contributor/per-scan
+  rate cap - their absence is intentional and asserted by
+  `tests/test_auto_merge_v1.py` (which also covers every gate, A/B/C handling,
+  malformed/stale verdicts, the 20-file/1000-line boundaries, base-branch-only
+  VISION reads, the self-authorization exclusion, live re-checks, the audit
+  ledger/resolved record, and the kill switches, all offline).
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`
   also listens for the legacy `triage-item` (`types: [wheelhouse-item,
   triage-item]`). It is a cross-repo wire contract: source repos onboarded before
@@ -1028,6 +1081,7 @@ Run the unit tests:
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
 - `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and the UNKNOWN-mergeability policy (`_settle_mergeable` poll-first-conclusive/fail-open, `_resolve_pr_bucket` polling an explicit `UNKNOWN` and returning `needs-rebase` on settled CONFLICTING / `merge-ready` on settled MERGEABLE / `MERGEABILITY_PENDING` when it never settles, no poll for a known-MERGEABLE PR, plus `build_repo` integration: UNKNOWN->CONFLICTING nudges with no card, UNKNOWN->MERGEABLE emits a merge-ready card, unsettled UNKNOWN emits no item and lands in `indeterminate_pr_numbers` with no nudge, and the #111 acceptance that a statically-conflicting PR never enters the worklist across readable-CONFLICTING and post-base-push-UNKNOWN scans). The reconcile freeze of an `indeterminate_pr_numbers` card (no close, no refresh) and the unchanged non-indeterminate soft-close live in `tests/test_reconcile.py`.
 - `python tests/test_config_schema.py` - structural load test that `wheelhouse_core.load_config()` accepts the checked-in `wheelhouse.config.yml`: every `repos:` entry is well-formed (name is trimmed and matches its key; `compliance_check` is null or a trimmed non-empty string; `test_check_patterns` is a list of trimmed non-empty strings; `merge_method` is unset or squash|merge|rebase) and repo names are case-insensitively unique. Deliberately pins no repo names or fleet size, so it keeps guarding the file as the fleet grows/shrinks, no network.
+- `python tests/test_auto_merge_v1.py` - scan-time auto-merge (V1), no network and no target-repo writes: the config + exclusion helpers (`_auto_merge_enabled` default-off/overrides, `_auto_merge_exclusions` covering every category incl. VISION.md self-authorization); the pure `verdict_eligible` gate (A/B/C eligibility, class-C opt-in/default-off, malformed/stale/absent verdicts, fail-closed defaults) plus `normalize_automerge_verdict` parsing/coercion; the blast-radius caps at the exact 20-file and 1000-line boundaries; every deterministic gate G0-G6 walked through PASS and HOLD via representative live-card fixtures in `act_on_scan`; the G7 live head + merge-state re-check immediately before acting (and the scan-vs-live head mismatch); the `wheelhouse:no-auto-merge` escape hatch and global/per-repo kill switches; the ok:false/truncated/indeterminate freeze; base-branch-ONLY VISION.md reads (contents API, no `?ref`); the durable ledger (parse/append/render/cap) + audit comment + `record` CLI resolving the card and appending the ledger (best-effort/no-op paths); the `do_merge` race/error outcomes; and the DELIBERATE ABSENCE of an open-PR file-overlap gate and any per-contributor/per-scan rate cap; plus offline YAML wiring checks (FLEET act step, github.token record step, act->reconcile->record order, and the triage.yml base-VISION verdict prompt).
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.
