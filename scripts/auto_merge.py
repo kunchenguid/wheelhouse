@@ -798,15 +798,7 @@ def cmd_claim(scan_path, cards_path):
         cards = []
     claimed = claim_cards(scan, cards)
     out_path = os.environ.get("WHEELHOUSE_AUTOMERGE_CLAIMS", "automerge-claims.json")
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(claimed, f, indent=2)
-    except OSError as e:
-        print(
-            "::warning::wheelhouse auto-merge could not write claims: %s"
-            % str(e)[:160],
-            file=sys.stderr,
-        )
+    _write_claim_handoff(out_path, claimed, "claims")
     print("wheelhouse auto-merge: %d card claim(s)" % len(claimed))
 
 
@@ -842,15 +834,7 @@ def cmd_validate(cards_path):
     out_path = os.environ.get(
         "WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS", "automerge-valid-claims.json"
     )
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(validated, f, indent=2)
-    except OSError as e:
-        print(
-            "::warning::wheelhouse auto-merge could not write validated claims: %s"
-            % str(e)[:160],
-            file=sys.stderr,
-        )
+    _write_claim_handoff(out_path, validated, "validated claims")
     print("wheelhouse auto-merge: %d validated claim(s)" % len(validated))
 
 
@@ -912,7 +896,12 @@ def act_merge(
         return ("held", "final card re-check: %s" % card_reason, "")
 
     message, terminal, merge_commit = apply_decision.do_merge(
-        owner, repo, number, head_sha, return_merge_commit=True
+        owner,
+        repo,
+        number,
+        head_sha,
+        return_merge_commit=True,
+        expected_base_sha=base_sha,
     )
     if terminal == "resolved" and message.startswith("Merged "):
         merge_commit = str(merge_commit or "").strip()
@@ -1477,6 +1466,33 @@ def _write_json_atomically(path, payload):
             os.unlink(temp_path)
         except FileNotFoundError:
             pass
+
+
+def _write_claim_handoff(path, cards, name):
+    try:
+        _write_json_atomically(path, cards)
+        return
+    except Exception as error:
+        release_errors = []
+        released = []
+        seen = set()
+        for card in cards:
+            number = card.get("number") if isinstance(card, dict) else None
+            if not number or number in seen:
+                continue
+            seen.add(number)
+            try:
+                _release_card_claim(number)
+                released.append(str(number))
+            except Exception as release_error:
+                release_errors.append("#%s: %s" % (number, str(release_error)[:120]))
+        detail = "could not write %s: %s" % (name, str(error)[:160])
+        if released:
+            detail += "; released claims on %s" % ", ".join("#%s" % n for n in released)
+        if release_errors:
+            detail += "; claim release failures: %s" % "; ".join(release_errors)
+        print("::error::wheelhouse auto-merge %s" % detail, file=sys.stderr)
+        raise RuntimeError("wheelhouse auto-merge %s handoff failed" % name) from error
 
 
 def _load_json(path, default):

@@ -554,7 +554,9 @@ def _stale_pr_head_result(repo, number, expected, current, action):
     return None
 
 
-def do_merge(owner, repo, number, head_sha, return_merge_commit=False):
+def do_merge(
+    owner, repo, number, head_sha, return_merge_commit=False, expected_base_sha=None
+):
     def outcome(message, terminal, merge_commit=""):
         if return_merge_commit:
             return (message, terminal, merge_commit)
@@ -577,6 +579,21 @@ def do_merge(owner, repo, number, head_sha, return_merge_commit=False):
     stale = _stale_pr_head_result(repo, number, head_sha, current, "merging")
     if stale:
         return outcome(*stale)
+    expected_base_sha = str(expected_base_sha or "").strip()
+    if expected_base_sha:
+        current_base_sha = str((pr.get("base") or {}).get("sha") or "").strip()
+        if current_base_sha != expected_base_sha:
+            return outcome(
+                "HOLD: %s#%s base moved since auto-merge evaluation "
+                "(was %s, now %s). Re-scan before merging."
+                % (
+                    repo,
+                    number,
+                    expected_base_sha[:8],
+                    current_base_sha[:8] or "<none>",
+                ),
+                "blocked",
+            )
     method = _merge_method(repo)
     try:
         fields = {"merge_method": method}

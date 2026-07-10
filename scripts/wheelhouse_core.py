@@ -3443,7 +3443,7 @@ _AM_EXCLUDE_PATH_SUBSTRINGS = {
 _AM_EXCLUDE_PATH_COMPONENTS = {
     "security": re.compile(r"(?:^|/)security(?:[._/-]|$)"),
     "authentication": re.compile(
-        r"(?:^|/)(?:auth|authentication|authorization|authn|authz|permissions?|iam|rbac|acl)(?:[._/-]|$)"
+        r"(?:^|/)(?:auth|authentication|authorization|authn|authz|permissions?|iam|rbac|acl|access(?:[._-]?control))(?:[._/-]|$)"
     ),
     "migration": re.compile(
         r"(?:^|/)(?:scripts/)?migrate[^/]*\.(?:py|ts|tsx|js|jsx|mjs|cjs|rb|go|sql)$"

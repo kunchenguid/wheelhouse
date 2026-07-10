@@ -1019,6 +1019,23 @@ def test_auto_merge_receives_sha_from_successful_merge_response():
     )
 
 
+def test_auto_merge_rejects_a_changed_expected_base():
+    pr = open_pr()
+    pr["base"] = {"sha": "new-base"}
+    fake, calls = fake_gh_rest(pr)
+    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
+                    maintainers=lambda: {"owner-login"}):
+        message, terminal = ad.do_merge(
+            "owner-login",
+            "target-repo",
+            5,
+            "abc123",
+            expected_base_sha="reviewed-base",
+        )
+    check("merge: changed expected base is blocked", terminal == "blocked" and "base moved" in message)
+    check("merge: changed expected base sends no merge request", merge_puts(calls) == [])
+
+
 def test_thank_on_merge_disabled_globally():
     fake, calls = fake_gh_rest(open_pr())
     with patch_core(
@@ -1829,6 +1846,7 @@ def main():
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()
     test_auto_merge_receives_sha_from_successful_merge_response()
+    test_auto_merge_rejects_a_changed_expected_base()
     test_thank_on_merge_disabled_globally()
     test_thank_on_merge_disabled_per_repo()
     test_thank_on_merge_skips_non_success_outcomes()

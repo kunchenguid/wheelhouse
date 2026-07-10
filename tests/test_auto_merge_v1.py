@@ -216,8 +216,10 @@ class World:
                 return self.files.get((slug, number), ([], True, True))
         return ([], False, False)
 
-    def do_merge(self, owner, repo, number, head, return_merge_commit=False):
-        self.do_merge_calls.append((owner, repo, number, head))
+    def do_merge(
+        self, owner, repo, number, head, return_merge_commit=False, expected_base_sha=None
+    ):
+        self.do_merge_calls.append((owner, repo, number, head, expected_base_sha))
         self.merge_tokens.append(os.environ.get("GH_TOKEN"))
         result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
@@ -407,6 +409,8 @@ def test_exclusions_cover_every_category():
         ("src/iam.py", "authentication"),
         ("src/rbac.go", "authentication"),
         ("src/acl.rs", "authentication"),
+        ("src/access_control.py", "authentication"),
+        ("src/access-control.ts", "authentication"),
         ("src/security.py", "security"),
         ("pom.xml", "dependency"),
         ("build.gradle", "dependency"),
@@ -518,6 +522,8 @@ def test_happy_path_class_A_merges():
     check("act: merge record carries contributor proof", bool(m["contributor_proof"]))
     check("act: merge record carries head + vision + commit",
           m["head_sha"] and m["vision_sha"] == "vsha" and m["merge_commit"])
+    check("act: do_merge receives the reviewed base SHA",
+          w.do_merge_calls[0][-1] == "b1" * 20)
     check("act: ::notice:: audit line emitted", "auto-merge merged" in err)
 
 
@@ -1943,6 +1949,71 @@ def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
         am._write_json_atomically = saved["write"]
         am.release_card_claim = saved["release"]
         am.append_to_ledger = saved["ledger"]
+
+
+def test_atomic_claim_handoffs_release_claims_and_fail_loudly():
+    saved = {
+        "claim": am.claim_cards,
+        "validate": am.validate_claimed_cards,
+        "write": am._write_json_atomically,
+        "release": am._release_card_claim,
+        "claims_env": os.environ.get("WHEELHOUSE_AUTOMERGE_CLAIMS"),
+        "validated_env": os.environ.get("WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS"),
+    }
+    card = {"number": 101}
+    released = []
+    am.claim_cards = lambda scan, cards: [card]
+    am.validate_claimed_cards = lambda cards: [card]
+    am._write_json_atomically = lambda path, data: (_ for _ in ()).throw(
+        OSError("disk full")
+    )
+    am._release_card_claim = lambda number: released.append(number)
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            scan_path = os.path.join(directory, "scan.json")
+            cards_path = os.path.join(directory, "cards.json")
+            with open(scan_path, "w", encoding="utf-8") as f:
+                json.dump({}, f)
+            with open(cards_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+            for label, env_key, command in (
+                (
+                    "claims",
+                    "WHEELHOUSE_AUTOMERGE_CLAIMS",
+                    lambda: am.cmd_claim(scan_path, cards_path),
+                ),
+                (
+                    "validated claims",
+                    "WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS",
+                    lambda: am.cmd_validate(cards_path),
+                ),
+            ):
+                os.environ[env_key] = os.path.join(directory, "%s.json" % label)
+                released.clear()
+                failed = False
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    try:
+                        command()
+                    except RuntimeError:
+                        failed = True
+                check(
+                    "handoff: failed %s write releases known claims and fails loudly" % label,
+                    failed and released == [101] and "::error::" in stderr.getvalue(),
+                )
+    finally:
+        am.claim_cards = saved["claim"]
+        am.validate_claimed_cards = saved["validate"]
+        am._write_json_atomically = saved["write"]
+        am._release_card_claim = saved["release"]
+        for key, value in (
+            ("WHEELHOUSE_AUTOMERGE_CLAIMS", saved["claims_env"]),
+            ("WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS", saved["validated_env"]),
+        ):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_missing_merge_sha_fails_act_after_persisting_claim_releases():
