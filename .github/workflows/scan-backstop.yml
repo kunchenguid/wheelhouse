@@ -84,6 +84,12 @@ jobs:
           WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/auto_merge.py claim scan.json cards.json
 
+      - name: Validate auto-merge decision cards
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: python scripts/auto_merge.py validate automerge-claims.json
+
       # Scan-time auto-merge (default OFF; strict subset of the manual merge
       # gate). Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
       # it reads the persisted per-card behavior verdict from cards.json (a local
@@ -96,7 +102,7 @@ jobs:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-        run: python scripts/auto_merge.py act scan.json automerge-claims.json
+        run: python scripts/auto_merge.py act scan.json automerge-valid-claims.json
 
       # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.

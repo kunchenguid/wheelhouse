@@ -3434,6 +3434,13 @@ _AM_EXCLUDE_PATH_SUBSTRINGS = {
     "migration": ("migration", "/migrate/", "migrations/", "/alembic/", "flyway"),
 }
 
+_AM_EXCLUDE_PATH_COMPONENTS = {
+    "security": re.compile(r"(?:^|/)security(?:[._/-]|$)"),
+    "authentication": re.compile(
+        r"(?:^|/)(?:auth|authentication|authorization|authn|authz)(?:[._/-]|$)"
+    ),
+}
+
 
 def _am_basename(path):
     return path.rsplit("/", 1)[-1]
@@ -3497,11 +3504,16 @@ def _auto_merge_exclusions(files):
         ):
             hits.add("public-default:%s" % f)
             continue
-        # 7) substring path signals (security/auth/billing/migration).
-        for category, needles in _AM_EXCLUDE_PATH_SUBSTRINGS.items():
-            if any(n in low for n in needles):
+        for category, pattern in _AM_EXCLUDE_PATH_COMPONENTS.items():
+            if pattern.search(low):
                 hits.add("%s:%s" % (category, f))
                 break
+        else:
+            # 7) substring path signals (security/auth/billing/migration).
+            for category, needles in _AM_EXCLUDE_PATH_SUBSTRINGS.items():
+                if any(n in low for n in needles):
+                    hits.add("%s:%s" % (category, f))
+                    break
     return sorted(hits)
 
 

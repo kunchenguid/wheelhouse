@@ -65,6 +65,7 @@ import apply_decision  # noqa: E402
 # Blast-radius caps (captain-fixed). Both are inclusive maxima.
 MAX_CHANGED_FILES = 20
 MAX_CHANGED_LINES = 1000
+MAX_VISION_BYTES = 40000
 
 # The eligible behavior classes (captain-fixed):
 #   A = no product behavior change
@@ -204,16 +205,25 @@ def vision_on_default_branch(slug):
     if not isinstance(data, dict) or data.get("type") != "file":
         return (False, "")
     sha = str(data.get("sha") or "").strip()
-    # A present-but-empty VISION.md is not a usable rubric - hold.
+    size = data.get("size")
     content = data.get("content")
-    if data.get("encoding") == "base64" and isinstance(content, str):
-        try:
-            text = base64.b64decode(content).decode("utf-8", "replace")
-        except (ValueError, TypeError):
-            return (False, "")
-        if not text.strip():
-            return (False, "")
-    return (bool(sha), sha)
+    if (
+        not sha
+        or type(size) is not int
+        or size <= 0
+        or size > MAX_VISION_BYTES
+        or data.get("encoding") != "base64"
+        or not isinstance(content, str)
+    ):
+        return (False, "")
+    try:
+        raw = base64.b64decode(re.sub(r"\s+", "", content), validate=True)
+        text = raw.decode("utf-8")
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return (False, "")
+    if len(raw) != size or not text.strip():
+        return (False, "")
+    return (True, sha)
 
 
 def has_prior_merged_pr(slug, author):
@@ -386,7 +396,6 @@ def evaluate_candidate(
     repo_cfg,
     global_auto_merge,
     maintainer_logins,
-    vision_cache,
 ):
     """Run every deterministic gate for one merge-ready pr-review scan item and
     return a structured result. Does NOT merge - see `act_on_scan`.
@@ -443,10 +452,7 @@ def evaluate_candidate(
     if not v_ok:
         return hold("G6 %s" % v_reason)
 
-    # G0b: VISION.md present on the DEFAULT branch (base), cached once per repo.
-    if repo not in vision_cache:
-        vision_cache[repo] = vision_on_default_branch(slug)
-    vision_present, vision_sha = vision_cache[repo]
+    vision_present, vision_sha = vision_on_default_branch(slug)
     if not vision_present:
         return hold("G0 no committed VISION.md on %s default branch" % repo)
     if str((verdict or {}).get("vision_sha") or "") != vision_sha:
@@ -663,10 +669,58 @@ def cmd_claim(scan_path, cards_path):
     print("wheelhouse auto-merge: %d card claim(s)" % len(claimed))
 
 
+def validate_claimed_cards(cards):
+    validated = []
+    for (repo, number), expected in _card_index(cards).items():
+        if not _card_is_claimed(expected.get("labels") or set()):
+            continue
+        issue = expected.get("issue")
+        try:
+            current = render_card.get_card(issue)
+            current_entry = _card_index([current]).get((repo, number))
+            if (
+                current_entry
+                and render_card.issue_is_open(current)
+                and current_entry["state"] == expected["state"]
+                and _card_is_claimed(current_entry["labels"])
+                and not _selected_card_option(current.get("body"))
+            ):
+                validated.append(current)
+                continue
+            _release_card_claim(issue)
+        except Exception as e:
+            print(
+                "::warning::wheelhouse auto-merge could not validate claim #%s: %s"
+                % (issue, str(e)[:160]),
+                file=sys.stderr,
+            )
+    return validated
+
+
+def cmd_validate(cards_path):
+    cards = _load_json(cards_path, [])
+    if not isinstance(cards, list):
+        cards = []
+    validated = validate_claimed_cards(cards)
+    out_path = os.environ.get(
+        "WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS", "automerge-valid-claims.json"
+    )
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(validated, f, indent=2)
+    except OSError as e:
+        print(
+            "::warning::wheelhouse auto-merge could not write validated claims: %s"
+            % str(e)[:160],
+            file=sys.stderr,
+        )
+    print("wheelhouse auto-merge: %d validated claim(s)" % len(validated))
+
+
 # --------------------------------------------------------------------------- #
 # G7: act (live re-check immediately before merging, then do_merge)
 # --------------------------------------------------------------------------- #
-def act_merge(owner, repo, number, head_sha):
+def act_merge(owner, repo, number, head_sha, vision_sha):
     """G7. Immediately re-read head SHA + mergeability + clean merge state, then
     call the existing do_merge (which does its own head re-check and runs on the
     ambient FLEET_TOKEN with the unchanged owner-safety / thank-you model).
@@ -674,6 +728,11 @@ def act_merge(owner, repo, number, head_sha):
     Returns (outcome, detail, merge_commit) where outcome in
     'merged' / 'held' / 'error'."""
     slug = "%s/%s" % (owner, repo)
+    vision_present, live_vision_sha = vision_on_default_branch(slug)
+    if not vision_present:
+        return ("held", "VISION.md disappeared before acting", "")
+    if live_vision_sha != vision_sha:
+        return ("held", "VISION.md changed before acting", "")
     pr = live_pr(slug, number)
     if pr is None:
         return ("held", "could not re-read PR before merging", "")
@@ -715,8 +774,6 @@ def act_on_scan(scan, cards):
     global_auto_merge = cfg["auto_merge"]
     maintainer_logins = {m.casefold() for m in core.maintainers()}
     index = _card_index(cards)
-    vision_cache = {}
-
     merges = []
     holds = []
     releases = [
@@ -763,7 +820,6 @@ def act_on_scan(scan, cards):
                 repo_cfg,
                 global_auto_merge,
                 maintainer_logins,
-                vision_cache,
             )
         except Exception as e:  # noqa: BLE001 - fail-closed on any surprise
             reason = "evaluation raised: %s" % str(e)[:160]
@@ -782,7 +838,11 @@ def act_on_scan(scan, cards):
             continue
         try:
             outcome, detail, merge_commit = act_merge(
-                owner, repo, item["number"], result["head_sha"]
+                owner,
+                repo,
+                item["number"],
+                result["head_sha"],
+                result["audit"]["vision_sha"],
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
             outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")
@@ -1134,6 +1194,8 @@ def _load_json(path, default):
 def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "claim":
         cmd_claim(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "validate":
+        cmd_validate(sys.argv[2])
     elif len(sys.argv) >= 4 and sys.argv[1] == "act":
         cmd_act(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3 and sys.argv[1] == "record":

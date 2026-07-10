@@ -162,6 +162,7 @@ class World:
         self.global_auto_merge = True
         self.repos = {}  # repo -> repo_cfg dict
         self.vision = {}  # repo -> (present, sha)
+        self.vision_seq = {}
         self.merged_authors = {}  # (slug, author) -> bool
         self.pr_seq = {}  # (slug, str(number)) -> [pr, ...]
         self.files = {}  # (slug, str(number)) -> (files, ok, complete)
@@ -176,6 +177,13 @@ class World:
         if not seq:
             return None
         return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def vision_on_default_branch(self, slug):
+        repo = slug.split("/")[-1]
+        seq = self.vision_seq.get(repo)
+        if seq:
+            return seq.pop(0) if len(seq) > 1 else seq[0]
+        return self.vision.get(repo, (False, ""))
 
     def do_merge(self, owner, repo, number, head):
         self.do_merge_calls.append((owner, repo, number, head))
@@ -198,9 +206,7 @@ def run_act(world, items, cards, has_token=True):
         "owner": core.get_owner,
         "token": os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN"),
     }
-    am.vision_on_default_branch = lambda slug: world.vision.get(
-        slug.split("/")[-1], (False, "")
-    )
+    am.vision_on_default_branch = world.vision_on_default_branch
     am.has_prior_merged_pr = lambda slug, author: world.merged_authors.get(
         (slug, author), False
     )
@@ -307,6 +313,18 @@ def test_exclusions_cover_every_category():
         "exclusion: action.yml at any depth is a pwn-request hold",
         core._auto_merge_exclusions(["nested/action.yaml"]),
     )
+    for path, category in (
+        ("src/auth.py", "authentication"),
+        ("src/authentication.py", "authentication"),
+        ("src/security.py", "security"),
+    ):
+        check(
+            "exclusion: component filename %s is held" % path,
+            any(
+                hit.startswith(category + ":")
+                for hit in core._auto_merge_exclusions([path])
+            ),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +451,7 @@ def test_G0_repo_not_opted_in_is_silently_skipped():
     # But evaluate_candidate still fails closed on G0a as defense in depth.
     r = am.evaluate_candidate("owner", items[0], {"issue": 1, "state": {}, "labels":
                               {"needs-decision"}}, {"auto_merge": False}, False,
-                              set(), {})
+                              set())
     check("G0: evaluate_candidate G0a defense-in-depth", "G0" in r["hold_reason"])
 
 
@@ -747,6 +765,39 @@ def test_claim_rechecks_owner_selection_after_locking():
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
 
 
+def test_validate_claimed_card_rechecks_owner_selection_before_acting():
+    claimed = make_card(101, "fmt", 5, "vc" * 20, automerge_verdict=ELIGIBLE_A)
+    current = dict(claimed, state="OPEN")
+    current["body"] += "\n- [x] Hold <!-- opt:hold -->"
+    saved = {"get": render_card.get_card, "gh": render_card._gh}
+    render_card.get_card = lambda number: current
+
+    def edit(args, check=False):
+        remove = {
+            args[i + 1]
+            for i, arg in enumerate(args[:-1])
+            if arg == "--remove-label"
+        }
+        current["labels"] = [
+            label for label in current["labels"] if label.get("name") not in remove
+        ]
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    render_card._gh = edit
+    try:
+        validated = am.validate_claimed_cards([claimed])
+        labels = am._card_label_names(current)
+        check(
+            "validate: a new owner selection releases the claim before acting",
+            validated == []
+            and "processing" not in labels
+            and am.AUTO_MERGE_CLAIM_LABEL not in labels,
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card._gh = saved["gh"]
+
+
 def test_stale_claim_release_failure_is_recovered_on_next_scan():
     stale = make_card(101, "fmt", 5, "st" * 20, automerge_verdict=ELIGIBLE_A)
     current = dict(stale, state="OPEN")
@@ -801,6 +852,38 @@ def test_G7_escape_hatch_appears_before_acting_holds():
     w.set_pr("owner/fmt", 5, [good, tagged])
     payload, _ = run_act(w, items, cards)
     check("G7: escape hatch appearing before acting holds", not payload["merges"])
+
+
+def test_vision_is_rechecked_per_candidate_and_before_acting():
+    w, items, cards = default_world(head="vv" * 20)
+    w.vision_seq = {"fmt": [(True, "vsha"), (True, "new-vision")]}
+    payload, _ = run_act(w, items, cards)
+    check("G7: changed VISION.md before acting holds", not payload["merges"])
+    check("G7: changed VISION.md does not call merge", not w.do_merge_calls)
+
+    w2 = World()
+    w2.repos = {"fmt": {"auto_merge": True}}
+    w2.merged_authors = {("owner/fmt", "alice"): True}
+    w2.vision_seq = {"fmt": [(True, "vsha"), (True, "vsha"), (True, "new-vision")]}
+    w2.files[("owner/fmt", "5")] = (["src/one.py"], True, True)
+    w2.files[("owner/fmt", "6")] = (["src/two.py"], True, True)
+    w2.set_pr("owner/fmt", 5, make_pr(head="v5" * 20))
+    w2.set_pr("owner/fmt", 6, make_pr(head="v6" * 20))
+    items2 = [make_item("fmt", 5, "v5" * 20), make_item("fmt", 6, "v6" * 20)]
+    cards2 = [
+        make_card(101, "fmt", 5, "v5" * 20, automerge_verdict=ELIGIBLE_A),
+        make_card(102, "fmt", 6, "v6" * 20, automerge_verdict=ELIGIBLE_A),
+    ]
+    payload2, _ = run_act(w2, items2, cards2)
+    check(
+        "G0: each candidate reads its own current VISION.md revision",
+        len(payload2["merges"]) == 1
+        and payload2["merges"][0]["number"] == "5"
+        and any(
+            hold["number"] == "6" and "VISION.md revision" in hold["hold_reason"]
+            for hold in payload2["holds"]
+        ),
+    )
 
 
 def test_head_moved_scan_vs_live_holds():
@@ -954,6 +1037,7 @@ def test_vision_read_is_base_branch_only():
         payload = {
             "type": "file",
             "sha": "visionsha",
+            "size": len(b"Our vision."),
             "encoding": "base64",
             "content": __import__("base64").b64encode(b"Our vision.").decode(),
         }
@@ -980,6 +1064,7 @@ def test_vision_absent_and_empty_fail_closed():
 
     def gh_empty(path):
         payload = {"type": "file", "sha": "s", "encoding": "base64",
+                   "size": 3,
                    "content": __import__("base64").b64encode(b"   ").decode()}
         return type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})()
 
@@ -992,6 +1077,44 @@ def test_vision_absent_and_empty_fail_closed():
               am.vision_on_default_branch("o/r") == (False, ""))
     finally:
         am._gh_api = save
+
+
+def test_vision_oversized_or_incomplete_fails_closed():
+    saved = am._gh_api
+
+    def content(payload):
+        return lambda path: type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})()
+
+    try:
+        oversized = b"x" * (am.MAX_VISION_BYTES + 1)
+        am._gh_api = content(
+            {
+                "type": "file",
+                "sha": "oversized",
+                "size": len(oversized),
+                "encoding": "base64",
+                "content": __import__("base64").b64encode(oversized).decode(),
+            }
+        )
+        check(
+            "vision: oversized policy is unavailable for auto-merge",
+            am.vision_on_default_branch("o/r") == (False, ""),
+        )
+        am._gh_api = content(
+            {
+                "type": "file",
+                "sha": "incomplete",
+                "size": 10,
+                "encoding": "base64",
+                "content": __import__("base64").b64encode(b"short").decode(),
+            }
+        )
+        check(
+            "vision: incomplete policy is unavailable for auto-merge",
+            am.vision_on_default_branch("o/r") == (False, ""),
+        )
+    finally:
+        am._gh_api = saved
 
 
 # --------------------------------------------------------------------------- #
@@ -1133,6 +1256,7 @@ def test_scan_backstop_wiring_and_token_discipline():
     by_name = {s.get("name"): s for s in steps if isinstance(s, dict)}
     listed = by_name.get("List open cards")
     claim = by_name.get("Claim auto-merge decision cards")
+    validate = by_name.get("Validate auto-merge decision cards")
     act = by_name.get("Auto-merge eligible PRs")
     rec = by_name.get("Record auto-merges")
     check("wiring: auto-merge act step exists", act is not None)
@@ -1151,8 +1275,16 @@ def test_scan_backstop_wiring_and_token_discipline():
         and "auto_merge.py claim scan.json cards.json" in claim.get("run", ""),
     )
     check(
-        "wiring: act consumes only freshly claimed cards",
-        act and "auto_merge.py act scan.json automerge-claims.json" in act.get("run", ""),
+        "wiring: claimed cards are revalidated under github.token before acting",
+        validate
+        and "github.token" in (validate.get("env") or {}).get("GH_TOKEN", "")
+        and "auto_merge.py validate automerge-claims.json" in validate.get("run", ""),
+    )
+    check(
+        "wiring: act consumes only final validated claims",
+        act
+        and "auto_merge.py act scan.json automerge-valid-claims.json"
+        in act.get("run", ""),
     )
     check(
         "wiring: absent triage token disables both claim and act",
@@ -1175,6 +1307,7 @@ def test_scan_backstop_wiring_and_token_discipline():
     check(
         "wiring: order is act -> reconcile -> record",
         order.index("Claim auto-merge decision cards")
+        < order.index("Validate auto-merge decision cards")
         < order.index("Auto-merge eligible PRs")
         < order.index("Reconcile the queue")
         < order.index("Record auto-merges"),
@@ -1226,6 +1359,19 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     check(
         "triage: binds verdict storage to the fetched VISION.md SHA",
         "vision_sha=$VISION_SHA" in text and "--vision-sha \"$VISION_SHA\"" in text,
+    )
+    check(
+        "triage: incomplete diffs suppress auto-merge verdict storage",
+        'if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then'
+        in text
+        and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
+    )
+    check(
+        "triage: oversized or incomplete VISION.md is unavailable for auto-merge",
+        "VISION_SIZE=" in text
+        and '"$VISION_SIZE" -le "$vision_limit_bytes"' in text
+        and '"$vision_bytes" = "$VISION_SIZE"' in text
+        and 'head -c "$vision_limit_bytes" > vision.md' not in text,
     )
 
 

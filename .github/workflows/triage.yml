@@ -290,6 +290,7 @@ jobs:
                 --json title,body --jq '"# " + (.title // "") + "\n\n" + (.body // "")' || true
               echo
               echo "## Diff"
+              DIFF_COMPLETE=false
               diff_limit_bytes=120000
               diff_raw="diff.raw"
               set +e
@@ -307,6 +308,7 @@ jobs:
                 echo "(could not fetch diff)"
               else
                 cat "$diff_raw"
+                DIFF_COMPLETE=true
               fi
             fi
             echo "</target-content>"
@@ -321,21 +323,31 @@ jobs:
           # assessment is skipped entirely and the executor holds on G0.
           VISION_PRESENT=false
           VISION_SHA=""
+          AUTOMERGE_VERDICT_AVAILABLE=false
           if [ "$KIND" = "pr-review" ]; then
             vision_limit_bytes=40000
-            # Presence is decided by whether we actually wrote non-empty content
-            # (not the pipeline exit): a 404 leaves vision.md empty, and a large
-            # VISION.md that trips head's SIGPIPE must still count as present.
             if GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/contents/VISION.md" \
               > vision.json 2>/dev/null; then
               VISION_SHA="$(jq -r 'if type == "object" and .type == "file" and (.sha | type == "string") then .sha else empty end' vision.json)"
-              set +e
-              jq -r '.content // empty' vision.json | base64 -d 2>/dev/null \
-                | head -c "$vision_limit_bytes" > vision.md
-              set -e
+              VISION_SIZE="$(jq -r 'if type == "object" and .type == "file" and (.size | type == "number") and .size >= 0 then .size else empty end' vision.json)"
+              if printf '%s' "$VISION_SIZE" | grep -Eq '^[0-9]+$' \
+                && [ "$VISION_SIZE" -le "$vision_limit_bytes" ]; then
+                set +e
+                jq -r '.content // empty' vision.json | base64 -d > vision.md 2>/dev/null
+                decode_status=("${PIPESTATUS[@]}")
+                set -e
+                vision_bytes="$(wc -c < vision.md | tr -d '[:space:]')"
+                if [ "${decode_status[0]}" -eq 0 ] && [ "${decode_status[1]}" -eq 0 ] \
+                  && [ "$vision_bytes" = "$VISION_SIZE" ] && [ "$vision_bytes" -gt 0 ] \
+                  && [ -n "$VISION_SHA" ]; then
+                  VISION_PRESENT=true
+                fi
+              fi
             fi
-            if [ -s vision.md ] && [ -n "$VISION_SHA" ]; then
-              VISION_PRESENT=true
+            if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then
+              AUTOMERGE_VERDICT_AVAILABLE=true
+            else
+              VISION_SHA=""
             fi
           fi
 
@@ -383,7 +395,7 @@ jobs:
             echo
             cat target.txt
             echo
-            if [ "$VISION_PRESENT" = "true" ]; then
+            if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
               echo "The target repository has opted into automatic merging and"
               echo "committed the VISION.md below (read from its DEFAULT branch, so"
               echo "it is TRUSTED owner-authored policy, not the PR's own content)."
@@ -407,7 +419,7 @@ jobs:
               echo '  "product_implications": "whether this deserves owner discussion or is routine/low-risk, with why",'
               echo '  "recommended_action": "close | decline | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment to post or show for the recommended action"'
-            elif [ "$VISION_PRESENT" = "true" ]; then
+            elif [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
               echo '  "summary": "plain one-sentence summary of what the PR does",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
