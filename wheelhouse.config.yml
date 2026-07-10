@@ -81,9 +81,10 @@ repos:
   # ===========================================================================
   # Fleet expansion (2026-07-10): 15 more owned repos brought under Wheelhouse.
   # Each entry's CI shape below was verified against that repo's LIVE workflow
-  # files AND Actions run history on 2026-07-10 - the exact rendered job/check
-  # names (including matrix legs), and whether the no-mistakes contribution gate
-  # actually runs on PRs to the repo's default branch. merge_method is omitted
+  # files and, where available, Actions run history on 2026-07-10 - the exact
+  # rendered job/check names (including matrix legs), and whether the
+  # no-mistakes contribution gate actually runs on PRs to the repo's default
+  # branch. merge_method is omitted
   # throughout, so each defaults to squash, like the entries above.
   # ===========================================================================
 
@@ -157,9 +158,9 @@ repos:
     compliance_check: null
     test_check_patterns: ["test"]
 
-  # -- These have no CI workflows at all (no `.github/workflows`). No compliance
-  #    gate and no test checks exist, so both are left null/empty; such a repo's
-  #    PRs simply surface for review without a tests-green signal.
+  # -- These have no CI test or gate workflows. No compliance gate and no test
+  #    checks exist, so both are left null/empty; such a repo's PRs simply
+  #    surface for review without a tests-green signal.
   - name: dotfiles
     # No CI. Its only workflow (close-prs.yml) auto-comments and closes non-owner
     # PRs via pull_request_target; it is not a merge gate or a test check.
