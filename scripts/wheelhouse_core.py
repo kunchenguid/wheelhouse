@@ -168,7 +168,7 @@ CLOSING_REFS_PAGE_GQL = """
 query($owner:String!, $name:String!, $number:Int!, $after:String!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
-      closingIssuesReferences(first:100, after:$after) {
+      closingIssuesReferences(first:%d, after:$after) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes { number }
@@ -176,7 +176,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
     }
   }
 }
-"""
+""" % CLOSING_REFS_PAGE_SIZE
 
 PR_MERGEABLE_GQL = """
 query($owner:String!, $name:String!, $number:Int!) {
@@ -1214,7 +1214,7 @@ def _pending_record(
     }
 
 
-def _ensure_target_label(
+def _ensure_repo_label(
     slug, name, color="fbca04", description="Managed by Wheelhouse"
 ):
     try:
@@ -1234,7 +1234,7 @@ def _ensure_target_label(
 
 
 def _add_target_label(slug, number, label):
-    _ensure_target_label(slug, label)
+    _ensure_repo_label(slug, label)
     gh_rest(
         "/repos/%s/issues/%s/labels" % (slug, number),
         method="POST",
@@ -3654,6 +3654,7 @@ def _create_scan_health_issue(slug, body):
     # gh_rest can't emit the `labels[]` array the create endpoint wants, so this
     # one call goes direct. Created labeled, then closed so it stays out of the
     # owner's open-issue queue while remaining findable by label.
+    _ensure_repo_label(slug, SCAN_HEALTH_LABEL)
     r = subprocess.run(
         [
             "gh",
@@ -3829,7 +3830,10 @@ def cmd_checks(repo):
     comp = rc.get("compliance_check")
     pats = rc.get("test_check_patterns", []) or []
     names = set()
-    for pr in data["pullRequests"]["nodes"]:
+    prs, complete = _page_open_prs(owner, rc["name"], data["pullRequests"])
+    if not complete:
+        sys.exit("could not read every open PR; refusing incomplete check-name list")
+    for pr in prs:
         _, _, _, n = check_status(pr, rc)
         names.update(n)
     print("check names on %s (compliance_check=%r):" % (repo, comp))

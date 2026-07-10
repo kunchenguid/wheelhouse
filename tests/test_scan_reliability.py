@@ -20,7 +20,7 @@ import io
 import json
 import os
 import sys
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
@@ -277,6 +277,12 @@ def test_pagination_midpage_failure_propagates():
     check("pagination-fail: mid-page failure propagates (caller marks truncated)", raised)
 
 
+def test_page_queries_keep_closing_references_bounded():
+    expected = "closingIssuesReferences(first:%d" % core.CLOSING_REFS_PAGE_SIZE
+    check("page-size: initial closing references are bounded", expected in core.GQL)
+    check("page-size: continued closing references are bounded", expected in core.CLOSING_REFS_PAGE_GQL)
+
+
 # --------------------------------------------------------------------------- #
 # fleet-scan health ledger
 # --------------------------------------------------------------------------- #
@@ -413,6 +419,97 @@ def test_cmd_scan_health_green_run_no_alert():
     check("cmd-health-green: run not failed", exit_code in (None, 0))
     patched = [c for c in rest_log if c["method"] == "PATCH"]
     check("cmd-health-green: reset persisted", core.parse_scan_health(patched[0]["fields"]["body"])["firstmate"]["consecutive_failures"] == 0)
+
+
+def test_create_scan_health_issue_creates_label_first():
+    events = []
+    save_ensure = core._ensure_repo_label
+    save_run = core.subprocess.run
+    save_rest = core.gh_rest
+
+    def fake_ensure(slug, label):
+        events.append(("label", slug, label))
+
+    def fake_run(args, capture_output=True, text=True):
+        events.append(("issue", args))
+        return FakeProc(stdout=json.dumps({"number": 7}))
+
+    def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
+        events.append(("rest", path, method, fields))
+        return {}
+
+    core._ensure_repo_label = fake_ensure
+    core.subprocess.run = fake_run
+    core.gh_rest = fake_rest
+    try:
+        core._create_scan_health_issue("owner/cards", "ledger")
+    finally:
+        core._ensure_repo_label = save_ensure
+        core.subprocess.run = save_run
+        core.gh_rest = save_rest
+    check(
+        "cmd-health-create: creates the health label before the ledger issue",
+        [event[0] for event in events[:2]] == ["label", "issue"],
+    )
+    check(
+        "cmd-health-create: creates the dedicated health label",
+        events[0] == ("label", "owner/cards", core.SCAN_HEALTH_LABEL),
+    )
+
+
+def test_checks_command_reads_every_pr_page():
+    first = {
+        "totalCount": 45,
+        "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+        "nodes": [_pr_stub(i) for i in range(30)],
+    }
+    second = {
+        "totalCount": 45,
+        "pageInfo": {"hasNextPage": False, "endCursor": "c2"},
+        "nodes": [_pr_stub(i) for i in range(30, 45)],
+    }
+    seen = []
+    save_owner = core.get_owner
+    save_config = core.load_config
+    save_graphql = core.gh_graphql
+    save_page = core.gh_graphql_pr_page
+    save_status = core.check_status
+    save_warning = core.config_warning
+    core.get_owner = lambda: "owner"
+    core.load_config = lambda: {
+        "repos": {"demo": {"name": "demo", "compliance_check": "Gate"}}
+    }
+    core.gh_graphql = lambda owner, name: {"pullRequests": first}
+    core.gh_graphql_pr_page = lambda owner, name, after: second
+
+    def fake_status(pr, cfg):
+        seen.append(pr["number"])
+        return "pass", "green", True, ["check-%d" % pr["number"]]
+
+    core.check_status = fake_status
+    core.config_warning = lambda repo, comp, names: None
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out):
+            core.cmd_checks("demo")
+    finally:
+        (
+            core.get_owner,
+            core.load_config,
+            core.gh_graphql,
+            core.gh_graphql_pr_page,
+            core.check_status,
+            core.config_warning,
+        ) = (
+            save_owner,
+            save_config,
+            save_graphql,
+            save_page,
+            save_status,
+            save_warning,
+        )
+    check("checks: reads all paginated PRs", seen == list(range(45)))
+    check("checks: includes check names from later pages", "check-44" in out.getvalue())
 
 
 def test_cmd_scan_health_missing_scanfile_fails_open():
@@ -755,6 +852,7 @@ def main():
     test_unparseable_body_retried_as_transient()
     test_pagination_multipage_assembly()
     test_pagination_midpage_failure_propagates()
+    test_page_queries_keep_closing_references_bounded()
     test_health_parse_roundtrip()
     test_health_increment_reset_and_alert()
     test_health_recovery_clears_alert()
@@ -762,6 +860,8 @@ def main():
     test_health_legacy_int_entry_tolerated()
     test_cmd_scan_health_alerts_and_fails_run()
     test_cmd_scan_health_green_run_no_alert()
+    test_create_scan_health_issue_creates_label_first()
+    test_checks_command_reads_every_pr_page()
     test_cmd_scan_health_missing_scanfile_fails_open()
     test_cmd_scan_health_ledger_io_error_fails_open()
     test_settle_mergeable_returns_first_conclusive()
