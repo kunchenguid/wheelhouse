@@ -142,6 +142,8 @@ jobs:
 - **Injection-safe by construction.** GitHub context values are passed through `env:` and read by `jq --arg`, never interpolated into the shell - a hostile PR title cannot break out.
 - **PR-review merge conflicts.** Ingest dispatches create cards from the payload; they do not read GraphQL `mergeable` or post rebase nudges.
   The scheduled scan later treats `CONFLICTING` PRs as `needs-rebase`, posts any contributor nudge, and consumes stale pure pending cards.
+  After a base-branch push, GitHub can temporarily return `UNKNOWN` while it recalculates mergeability.
+  The scan polls that pending value before changing membership; if it cannot settle it, it leaves any existing card unchanged rather than creating or consuming a card from an indeterminate answer.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
   Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.

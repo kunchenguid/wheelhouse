@@ -6,6 +6,7 @@ A personal, always-on, cross-repo **"what needs my decision"** command center, b
 Every issue in this repo is one pending decision about the repositories you maintain - a PR worth merging, a fork-CI run worth approving, an issue worth triaging.
 The scheduled scan keeps the queue focused on other people's work: PRs and issues authored by the repo owner, the configured maintainer, or bots stay out of the scan-built worklist, while missing author metadata fails open.
 PR-review candidates that GitHub reports as merge-conflicted leave the maintainer worklist until the contributor rebases or merges the base branch and pushes a mergeable head.
+If GitHub is still calculating mergeability after a base-branch update, Wheelhouse waits for a conclusive answer without changing that PR's card membership.
 You drive cards by ticking a checkbox, replying with a slash-command, or replying in plain English; a workflow executes your call on the real repo and closes the card when the action is terminal.
 No server, no database, no bot to host - just this repo and a small set of secrets.
 
@@ -24,6 +25,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
   A hidden HTML comment holds the machine-readable state.
   The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
 - **GitHub Actions are the handlers:** they create cards, refresh pending cards when material target state changes, reflect target activity for recently-updated sorting, execute your decisions, and reconcile the queue against live repo state.
+  The hourly scan retries transient GitHub query failures and records repeated unreadable-repo failures in a closed health-ledger issue, so a persistently-dark fleet repo eventually fails the run loudly instead of remaining invisible.
 
 ```
  source repos ──dispatch──▶ ingest ─────────┐
@@ -292,6 +294,9 @@ Pure pending PR-review and issue-triage cards that were already open before auto
 If you act before that refresh lands, a `/merge` (or a "merge it" comment) and `/request-changes` still refuse a stale head with a note.
 The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next successful complete scan.
 If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards open because it cannot prove the target disappeared.
+After a base-branch push, GitHub can temporarily report a PR's mergeability as `UNKNOWN` while it recalculates it.
+Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive value before changing its worklist membership.
+If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
 If an open target no longer needs a maintainer decision, its pure pending card is closed too.
 That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after a successful scan.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
@@ -314,7 +319,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The explicit dispatch fast path trusts what your source workflow sends, so filter there too if you want it to match the scan.
   If an explicit dispatch creates a PR-review card for your own PR, `/request-changes` refuses to submit the review because GitHub rejects self-review.
 - **Merge-conflict routing.** The scheduled scan treats only GitHub's authoritative GraphQL `mergeable: CONFLICTING` value as a merge conflict.
-  A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`; `UNKNOWN` or missing mergeability fails open and routes normally.
+  A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`.
+  GitHub's explicit `UNKNOWN` value is a pending computation, not a routing answer: Wheelhouse polls an otherwise merge-ready or review-needed candidate and freezes that PR-review card's membership if it cannot settle the result, so `UNKNOWN` never creates, closes, or consumes that card.
+  A missing mergeability value still fails open and routes normally.
   Contributor-authored conflicted PRs get one plain-language rebase nudge per head SHA under `FLEET_TOKEN`: it explains the base-branch conflict, asks the contributor to rebase onto or merge the latest base branch, resolve the conflict, and push, then says checks will re-run and the PR will get looked at again.
   A hidden marker in the PR comment prevents duplicates.
   Owner, maintainer, and bot-authored conflicted PRs are not nudged and do not emit decision cards.
@@ -393,6 +400,12 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Run `scan-backstop` manually and read the logs - a repo that can't be read is reported as a warning and skipped, not fatal.
   If the target is authored by the repo owner, the configured maintainer, or a bot, the scheduled scan intentionally leaves it out of the queue.
   If an otherwise merge-ready or review-needed PR has a merge conflict, the scheduled scan intentionally leaves it out of the queue until the contributor pushes a mergeable head; contributor-authored PRs get a rebase nudge comment.
+  If the log says its mergeability is pending, GitHub has not finished recalculating after a base-branch update; Wheelhouse leaves the PR out of a new card and preserves any existing card until a later scan gets a conclusive result.
+- **The `scan-backstop` run failed with `fleet-scan health`.**
+  One fleet repo returned `ok:false` for three consecutive scans, so the final health step failed the run after reconcile had already processed the healthy repos.
+  Read the scan warnings and restore the repo's readable state, then a successful scan resets its counter in the closed `wheelhouse:scan-health` ledger issue.
+  Forks that run the backstop on a different cadence can set a positive `WHEELHOUSE_SCAN_HEALTH_THRESHOLD` environment variable on the workflow's **Check fleet-scan health** step; the default is three consecutive failures.
+  Ledger read or write failures only warn and do not fail the run.
 - **Items look wrong (a non-compliant PR shows as merge-ready).**
   Your `compliance_check` / `test_check_patterns` don't match your actual check names.
   Wheelhouse aggregates duplicate compliance contexts worst-wins and treats GitHub rollup `FAILURE` or `ERROR` as compliance failure, so also check for a cancelled duplicate run or an untracked required check in the PR's Checks tab.
@@ -460,12 +473,12 @@ wheelhouse.config.yml          the one file you edit
 .github/workflows/
   ingest.yml                   repository_dispatch / manual -> create, refresh, or activity-reflect a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close terminal cards
-  scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, and run target-side stale pending-contributor cleanup
+  scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
-  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, pending-contributor cleanup, CI safety, auto-approval, ref qualification, and scan logs
+  wheelhouse_core.py           resilient GraphQL scan/classify, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, ref qualification, and scan logs
   render_card.py               build decision cards, including held pending-triage placeholders; create/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
@@ -484,6 +497,7 @@ tests/test_auto_triage.py      offline unit test for automatic triage config, ca
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting, including ref qualification and automated-status labeling
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification
+tests/test_scan_reliability.py offline unit test for scan retry/pagination, scan-health ledger, and UNKNOWN-mergeability safety
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
 

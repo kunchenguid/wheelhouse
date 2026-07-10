@@ -690,7 +690,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   fail-open (GraphQL never returns null for an open PR's `mergeable`).
 - **Merge conflicts leave the maintainer queue.**
   `wheelhouse_core.py` fetches GraphQL `pullRequests.nodes.mergeable` and treats only `CONFLICTING` as authoritative.
-  `UNKNOWN` or missing mergeability fails open because GitHub computes it asynchronously, so the PR classifies normally until a later scan can prove the conflict (see the UNKNOWN-pending bullet above for the merge-ready/review-needed poll/freeze that keeps this from oscillating).
+  An explicit `UNKNOWN` is a pending value - see the UNKNOWN-pending bullet above for the merge-ready/review-needed settlement poll and membership freeze that prevent oscillation.
+  A missing value alone still fails open, so the PR classifies normally until a later scan can prove a conflict.
   A conflicting PR that would otherwise route to `merge-ready` or `review-needed` becomes waiting-on-contributor `needs-rebase`, which is intentionally absent from `NEEDS_MAINTAINER`.
   This never rewrites `needs-ci-approval`: fork CI approval is independent of whether the eventual merge would conflict, and issue triage is unrelated.
   On the `ok:true` scan path, `build_repo` posts a contributor nudge under `FLEET_TOKEN` for non-owner/non-maintainer/non-bot `needs-rebase` PRs.
