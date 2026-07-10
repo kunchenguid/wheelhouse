@@ -2386,9 +2386,7 @@ def _auto_approve_or_card(
     return (False, _ci_safety_note(verdict), log_note, None)
 
 
-def _mergeable_for_ci_noop_nudge(
-    pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET
-):
+def _mergeable_for_ci_noop_nudge(pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET):
     """Conclusive mergeability for a consumed ci-approval noop, or None.
 
     Only an authoritative CONFLICTING value may trigger the rebase nudge.
@@ -2767,25 +2765,17 @@ def build_repo(
         ci_noop_settled_mergeables,
         ci_noop_settlement_errors,
         pr_truncated or issue_truncated or not closing_scan_complete,
-        (
-            pr["number"]
-            for pr in enriched
-            if pr["bucket"] == MERGEABILITY_PENDING
-        ),
+        (pr["number"] for pr in enriched if pr["bucket"] == MERGEABILITY_PENDING),
     )
     if ci_noop_settlement_failure:
         return (ci_noop_settlement_failure, [])
     for pr in ci_noop_nudge_candidates:
         mergeable = _mergeable_for_ci_noop_nudge(
             pr,
-            ci_noop_settled_mergeables.get(
-                pr["number"], _MERGEABLE_SETTLEMENT_UNSET
-            ),
+            ci_noop_settled_mergeables.get(pr["number"], _MERGEABLE_SETTLEMENT_UNSET),
         )
         if _mergeable_is_conflicting(mergeable):
-            _maybe_nudge_rebase(
-                slug, name, pr, maintainer_logins, arm_cleanup=False
-            )
+            _maybe_nudge_rebase(slug, name, pr, maintainer_logins, arm_cleanup=False)
 
     if card_issues:
         if pr_truncated or not closing_scan_complete:

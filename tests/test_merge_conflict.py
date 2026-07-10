@@ -414,7 +414,9 @@ def test_ci_approval_not_rerouted_by_conflict():
     # With auto-approve off there is no noop consume path, so no nudge either -
     # the card is the owner-visible surface. Nudge only attaches to the handled
     # approve_ci noop + CONFLICTING path (see below).
-    check("build: ci-approval conflict does not nudge when carded", calls["posts"] == [])
+    check(
+        "build: ci-approval conflict does not nudge when carded", calls["posts"] == []
+    )
 
 
 def test_ci_noop_conflicting_fork_nudges_once_per_head():
@@ -462,7 +464,10 @@ def test_ci_noop_conflicting_fork_nudges_once_per_head():
         "ci-noop-conflict: reuses fire-once-per-head marker",
         core._rebase_nudge_marker("sha257") in body,
     )
-    check("ci-noop-conflict: no product name in contributor copy", "Wheelhouse" not in body)
+    check(
+        "ci-noop-conflict: no product name in contributor copy",
+        "Wheelhouse" not in body,
+    )
     check(
         "ci-noop-conflict: settle not needed when bulk mergeable is conclusive",
         calls1["settle"] == [],
@@ -506,10 +511,13 @@ def test_ci_noop_unknown_settles_conflicting_then_nudges():
     )
     check("ci-noop-settled: emits NO card", items == [])
     check("ci-noop-settled: settle was attempted", len(calls["settle"]) == 1)
-    check("ci-noop-settled: one nudge after settled CONFLICTING", len(calls["posts"]) == 1)
+    check(
+        "ci-noop-settled: one nudge after settled CONFLICTING", len(calls["posts"]) == 1
+    )
     check(
         "ci-noop-settled: marker is head-specific",
-        core._rebase_nudge_marker("sha329") in (calls["posts"][0]["body"] if calls["posts"] else ""),
+        core._rebase_nudge_marker("sha329")
+        in (calls["posts"][0]["body"] if calls["posts"] else ""),
     )
 
 
@@ -565,7 +573,9 @@ def test_ci_noop_mergeable_fork_does_not_nudge():
     )
     check("ci-noop-mergeable: emits NO card", items == [])
     check("ci-noop-mergeable: no conflict so no nudge", calls["posts"] == [])
-    check("ci-noop-mergeable: no settle for conclusive MERGEABLE", calls["settle"] == [])
+    check(
+        "ci-noop-mergeable: no settle for conclusive MERGEABLE", calls["settle"] == []
+    )
 
 
 def test_ci_approved_with_workflows_does_not_nudge_on_conflict():
