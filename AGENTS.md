@@ -739,11 +739,21 @@ still appears where it's plain English, e.g. "triage the queue".)
   scan emits no worklist item and reconcile consumes any stale card; if a real
   pending run appears on a later scan, the normal approve/card/suppressed-card
   path runs again.
+  **Exception for a conflicted fork with no CI:** `needs-ci-approval` is never
+  rewritten to `needs-rebase` (classification stays independent of mergeability),
+  so a noop-consumed fork PR with null `statusCheckRollup` would otherwise
+  drop silently with neither a card nor a rebase nudge. When the handled path is
+  specifically `approve_ci` `noop` AND settled mergeability is `CONFLICTING`,
+  `build_repo` posts the same fire-once-per-head contributor rebase nudge the
+  `needs-rebase` path uses, then still emits no card. An `approved` path (PR
+  actually has workflows) is unchanged; `UNKNOWN` mergeability is settled first
+  and never nudges until conclusive `CONFLICTING`; missing mergeable fails open
+  (no nudge).
   Fork-originated `action_required` workflow runs are expected to have an empty `workflow_run.pull_requests` list, so `approve_ci` verifies that fork case with the already-filtered run's exact `head_sha` plus `head_branch`; non-empty `pull_requests` stays strict and must contain exactly the target PR.
   After verification, `approve_ci` dedups matching pending runs by stable `workflowDatabaseId` when GitHub exposes it, keeps the highest `databaseId`, and leaves same-named distinct workflows or runs without workflow identity distinct.
   This dedup happens after the risky-files/posture safety gate, so it never weakens the HOLD path.
   **Observability (every outcome is logged, never silent).** `_auto_approve_or_card`
-  returns `(handled, card_note, log_note)` and `build_repo` emits exactly ONE
+  returns `(handled, card_note, log_note, approve_status)` and `build_repo` emits exactly ONE
   stderr line per `needs-ci-approval` PR the auto path handles: a `::notice::`
   when approved or verified no-op, else a `::warning::wheelhouse auto-approve
   carded <repo>#<pr>: <log_note>` for contributor-authored PRs or
