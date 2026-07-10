@@ -2453,8 +2453,11 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
         and "--limit 300" not in list_cards_run,
     )
     check(
-        "scan-backstop: open card listing fails closed on pipeline errors",
-        list_cards is not None and "set -euo pipefail" in list_cards_run,
+        "scan-backstop: open card listing falls back to an empty cache on errors",
+        list_cards is not None
+        and "if ! gh api --paginate --slurp" in list_cards_run
+        and "cards.json.tmp" in list_cards_run
+        and "printf '[]\\n' > cards.json" in list_cards_run,
     )
     check(
         "scan-backstop: open card listing excludes pull requests",

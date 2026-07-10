@@ -164,6 +164,10 @@ MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 # Non-material hidden timestamp used only to mirror target GitHub activity onto
 # the card issue's own updatedAt for `sort:updated-desc`.
 ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
+CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
+CI_SECURITY_SUMMARY_DIFF_FIELD = "ci_security_summary_diff_revision"
+CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
+CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -185,7 +189,10 @@ ACTIVITY_REFLECTED_FIELD = "activity_reflected_at"
 # and suppress the deterministic top-level recommendation when a structured
 # triage recommendation is present. Bumped 4 -> 5 to label known
 # claude-code-action harness polling/status lines in card-visible agent output.
-CARD_RENDER_VERSION = 5
+# Bumped 5 -> 6 to publish the advisory read-only `### Security review` section
+# on already-open CI-approval HOLD cards (a display-only add; the pwn-request
+# hold and manual approve are unchanged).
+CARD_RENDER_VERSION = 6
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -361,11 +368,32 @@ def held_publish_needed(item, state, has_token):
     return bool((state or {}).get("held")) and not should_hold(item, has_token)
 
 
+def security_summary_stale(item, state):
+    """True when a scan-supplied CI security-summary cache entry needs a
+    pure-card re-render because its format, PR head, or base-diff revision
+    changed. The rendered summary itself is deliberately not compared here: it
+    is display-only card-body content, never a material decision input."""
+    if item.get("kind") != "ci-approval":
+        return False
+    expected = item.get(CI_SECURITY_SUMMARY_VERSION_FIELD)
+    if expected is None:
+        return False
+    return (
+        (state or {}).get(CI_SECURITY_SUMMARY_VERSION_FIELD) != expected
+        or (state or {}).get(CI_SECURITY_SUMMARY_HEAD_FIELD)
+        != (item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or "")
+        or not item.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+        or (state or {}).get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+        != item.get(CI_SECURITY_SUMMARY_DIFF_FIELD)
+    )
+
+
 def refresh_needed(item, state, has_token=False):
     return (
         material_changed(item, state)
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
+        or security_summary_stale(item, state)
     )
 
 
@@ -1004,6 +1032,28 @@ def _publish_decision_section(body, kind, options):
     return new_body if count else body
 
 
+def _security_review_section(summary):
+    """The advisory security-review block for a CI-approval HOLD card.
+
+    Presentation only: it renders the deterministic, read-only summary that
+    `wheelhouse_core.ci_security_summary` produced for the changed
+    workflow/action files. It never approves CI and never weakens the
+    pwn-request hold. The findings are deterministic, but they echo
+    contributor-controlled strings (action names, refs, secret NAMES - never
+    secret values), so the block is framed as advisory/untrusted context and
+    every value is code-wrapped upstream."""
+    return [
+        "### Security review (advisory)",
+        "",
+        "> [!NOTE]",
+        "> Automated, read-only summary of the workflow/action changes in this "
+        "fork PR - advisory, untrusted context only. It does **not** approve CI; "
+        "the security hold still requires your own review of the diff.",
+        "",
+        summary,
+    ]
+
+
 def render(item, held=False):
     """item -> {title, body, labels, marker}. Tolerates missing optional fields.
 
@@ -1037,6 +1087,19 @@ def render(item, held=False):
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
+    if kind == "ci-approval" and CI_SECURITY_SUMMARY_VERSION_FIELD in item:
+        state[CI_SECURITY_SUMMARY_HEAD_FIELD] = (
+            item.get(CI_SECURITY_SUMMARY_HEAD_FIELD) or ""
+        )
+        state[CI_SECURITY_SUMMARY_DIFF_FIELD] = (
+            item.get(CI_SECURITY_SUMMARY_DIFF_FIELD) or ""
+        )
+        state[CI_SECURITY_SUMMARY_VERSION_FIELD] = item[
+            CI_SECURITY_SUMMARY_VERSION_FIELD
+        ]
+        state[CI_SECURITY_SUMMARY_PRESENT_FIELD] = bool(
+            item.get(CI_SECURITY_SUMMARY_PRESENT_FIELD)
+        )
     if held:
         state["held"] = True
     if triage:
@@ -1077,6 +1140,12 @@ def render(item, held=False):
     if item.get("warning"):
         lines.append("> [!WARNING]")
         lines.append("> %s" % item["warning"])
+        lines.append("")
+    # An advisory, read-only security summary of the workflow/action changes on
+    # a CI-approval HOLD card (fork PR touching CI-execution files). Presentation
+    # only: it does NOT approve CI and never weakens the pwn-request hold.
+    if kind == "ci-approval" and item.get("security_summary"):
+        lines.extend(_security_review_section(item["security_summary"]))
         lines.append("")
     if triage:
         lines.append(triage_section(triage, owner=owner, repo=repo))

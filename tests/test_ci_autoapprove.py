@@ -385,6 +385,7 @@ def pr_node(number, status_rollup, draft=False, base_ref="main", cross_repo=True
         "headRefName": "feature-%d" % number,
         "headRefOid": "sha%d" % number,
         "baseRefName": base_ref,
+        "baseRefOid": "base-%s" % base_ref,
         "headRepository": {"name": "demo-fork", "owner": {"login": "forker"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"nodes": []},
@@ -427,9 +428,10 @@ def run_build_repo(
     approve_raises=False,
     graphql_raises=False,
     default_branch="main",
+    summary_cache=None,
 ):
     """Drive build_repo with the network-touching dependencies stubbed."""
-    calls = {"approve": [], "posture": 0, "safety": []}
+    calls = {"approve": [], "posture": 0, "safety": [], "summary": []}
     repo_cfg = {
         "name": "demo",
         "compliance_check": "Gate",
@@ -459,19 +461,31 @@ def run_build_repo(
             raise RuntimeError("approve boom")
         return approve_result
 
+    def fake_summary(slug, pr, head_sha, changed_files=None):
+        # Stub the read-only advisory summarizer so build_repo routing tests stay
+        # offline; the real deterministic detection is covered separately below.
+        calls["summary"].append((slug, pr, head_sha, changed_files))
+        return "SEC-SUMMARY(%s#%s)" % (slug, pr)
+
     save = (
         core.gh_graphql,
         core.repo_pr_target_posture,
         core.ci_safety,
         core.approve_ci,
+        core.ci_security_summary,
     )
     core.gh_graphql, core.repo_pr_target_posture = fake_graphql, fake_posture
     core.ci_safety, core.approve_ci = fake_ci_safety, fake_approve
+    core.ci_security_summary = fake_summary
     err = io.StringIO()
     try:
         with redirect_stderr(err):
             result, items = core.build_repo(
-                "owner", repo_cfg, False, auto_approve_ci=auto_approve_ci
+                "owner",
+                repo_cfg,
+                False,
+                auto_approve_ci=auto_approve_ci,
+                ci_security_summary_cache=summary_cache,
             )
     finally:
         (
@@ -479,6 +493,7 @@ def run_build_repo(
             core.repo_pr_target_posture,
             core.ci_safety,
             core.approve_ci,
+            core.ci_security_summary,
         ) = save
     calls["stderr"] = err.getvalue()  # so logging-path tests can assert the per-PR line
     return result, items, calls
@@ -555,6 +570,45 @@ def test_risky_pr_raises_card_not_approved():
     )
     check("route: risky PR card carries a warning", bool(items[0].get("warning")))
     check("route: risky PR is NOT auto-approved", calls["approve"] == [])
+    check(
+        "route: risky PR card carries the advisory security summary",
+        items[0].get("security_summary") == "SEC-SUMMARY(owner/demo#1)",
+    )
+    check(
+        "route: security summary was computed for the carded PR",
+        calls["summary"] == [("owner/demo", 1, "sha1", 1)],
+    )
+
+
+def test_current_card_summary_is_reused_without_target_reads():
+    verdict = {
+        "safe": False,
+        "error": False,
+        "risky_files": [".github/workflows/ci.yml"],
+        "pr_target": False,
+        "exploit": False,
+        "reason": "risky",
+    }
+    cache = {
+        ("demo", 1): {
+            "head_sha": "sha1",
+            "diff_revision": '["main","base-main"]',
+            "summary": "CACHED-SUMMARY",
+        }
+    }
+    result, items, calls = run_build_repo(
+        [needs_ci_pr()], verdict=verdict, summary_cache=cache
+    )
+    check("summary cache: card is still raised", len(items) == 1)
+    check(
+        "summary cache: cached body is reused",
+        items[0].get("security_summary") == "CACHED-SUMMARY",
+    )
+    check("summary cache: no target summary reads repeat", calls["summary"] == [])
+    check(
+        "summary cache: current head is recorded",
+        items[0].get("ci_security_summary_head_sha") == "sha1",
+    )
 
 
 def test_pr_target_posture_raises_card_with_warning():
@@ -591,6 +645,43 @@ def test_exploit_pattern_card_warns_loudly():
         "DANGER" in (items[0].get("warning") or ""),
     )
     check("route: exploit-pattern PR is NOT auto-approved", calls["approve"] == [])
+
+
+def test_auto_approved_pr_gets_no_security_summary():
+    # A provably-safe PR is approved and raises NO card, so the advisory
+    # summarizer is never even consulted (no card = nothing to annotate).
+    result, items, calls = run_build_repo([needs_ci_pr()])
+    check("summary: safe auto-approved PR raises no card", items == [])
+    check("summary: summarizer not called on the approved path", calls["summary"] == [])
+
+
+def test_suppressed_ci_card_gets_no_security_summary():
+    # An owner/maintainer/bot-authored risky ci-approval PR is suppressed (no
+    # card) - the summarizer must never even be consulted, because the attach
+    # runs strictly AFTER the `author_excluded` continue in build_repo.
+    verdict = {
+        "safe": False,
+        "error": False,
+        "risky_files": [".github/workflows/ci.yml"],
+        "pr_target": False,
+        "exploit": False,
+        "reason": "risky",
+    }
+    pr = pr_node(1, None)
+    pr["author"] = {"login": "owner", "__typename": "User"}  # excluded author
+    saved_owner = os.environ.get("OWNER")
+    os.environ["OWNER"] = "owner"  # how build_repo resolves the maintainer set
+    try:
+        result, items, calls = run_build_repo([pr], verdict=verdict)
+    finally:
+        if saved_owner is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = saved_owner
+    check("summary: excluded-author risky PR raises no card", items == [])
+    check(
+        "summary: summarizer not called on the suppressed path", calls["summary"] == []
+    )
 
 
 def test_ci_safety_error_raises_card():
@@ -708,9 +799,7 @@ def test_approve_noop_consumes_stale_ci_approval_card():
         [needs_ci_pr()], approve_result=("noop", "no workflow runs awaiting approval")
     )
     check("route: approve noop emits NO stale card", items == [])
-    check(
-        "route: approve noop first checked the run state", len(calls["approve"]) == 1
-    )
+    check("route: approve noop first checked the run state", len(calls["approve"]) == 1)
 
 
 def test_approve_hold_falls_back_to_card():
@@ -1065,7 +1154,10 @@ def test_approve_ci_dedup_does_not_bypass_risky_file_hold():
         SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
         safety_verdict=verdict,
     )
-    check("approve_ci: risky-file HOLD still wins despite duplicate runs", status == "hold")
+    check(
+        "approve_ci: risky-file HOLD still wins despite duplicate runs",
+        status == "hold",
+    )
     check(
         "approve_ci: HOLD short-circuits before run-list/approve calls",
         calls["approved"] == [] and calls["run_list"] == [],
@@ -1450,8 +1542,11 @@ def main():
     test_same_repo_no_ci_routes_to_review_needed_not_ci_approval()
     test_unknown_fork_status_keeps_ci_card_without_auto_approval()
     test_risky_pr_raises_card_not_approved()
+    test_current_card_summary_is_reused_without_target_reads()
     test_pr_target_posture_raises_card_with_warning()
     test_exploit_pattern_card_warns_loudly()
+    test_auto_approved_pr_gets_no_security_summary()
+    test_suppressed_ci_card_gets_no_security_summary()
     test_ci_safety_error_raises_card()
     test_truncated_pr_file_list_routes_to_card()
     test_non_default_base_pr_raises_card_without_posture_read()

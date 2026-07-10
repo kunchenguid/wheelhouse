@@ -147,6 +147,7 @@ jobs:
   The scan polls that pending value before changing membership; if it cannot settle it, it leaves any existing card unchanged rather than creating or consuming a card from an indeterminate answer.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
   Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
+  Only a scan-created contributor card that holds for changed workflow/action files receives the deterministic, read-only *Security review (advisory)* section; it is context for the unchanged manual hold, not a dispatch-payload feature or an approval.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
   If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and reconcile consumes any stale CI-approval card.
   For a contributor fork whose safe approval returns that no-op result and whose mergeability conclusively settles to `CONFLICTING`, the scan keeps the CI-approval classification and emits no card, but posts the ordinary fire-once-per-head rebase nudge before consuming the target from the worklist.

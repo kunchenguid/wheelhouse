@@ -235,6 +235,7 @@ def run_build_repo(
         core.ci_safety,
         core.approve_ci,
         core._settle_mergeables,
+        core.ci_security_summary,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -249,6 +250,8 @@ def run_build_repo(
     core.ci_safety = fake_ci_safety
     core.approve_ci = fake_approve
     core._settle_mergeables = fake_settle_many
+    # Keep offline: the advisory summarizer would otherwise read the target repo.
+    core.ci_security_summary = lambda slug, pr, head_sha, changed_files=None: "SEC"
     os.environ["OWNER"] = "owner"
     os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
     err = io.StringIO()
@@ -277,6 +280,7 @@ def run_build_repo(
             core.ci_safety,
             core.approve_ci,
             core._settle_mergeables,
+            core.ci_security_summary,
             old_owner,
             old_repo_owner,
         ) = save

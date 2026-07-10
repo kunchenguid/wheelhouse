@@ -47,6 +47,25 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
+      # Current open cards in THIS repo - default token. This also supplies the
+      # optional, read-only CI security-summary cache; an unreadable list falls
+      # back to an empty cache so the fleet scan still runs and re-analyzes.
+      - name: List open cards
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api --paginate --slurp \
+            "repos/{owner}/{repo}/issues?state=open&per_page=100" \
+            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
+            > cards.json.tmp; then
+            echo "::warning::Could not read the optional CI security-summary cache; scanning without it"
+            rm -f cards.json.tmp
+            printf '[]\n' > cards.json
+          else
+            mv cards.json.tmp cards.json
+          fi
+
       # Cross-repo scan reads fleet state, may approve provably-safe fork-CI
       # runs, may post rebase nudges, and may remind or close stale
       # pending-contributor PRs, so this step requires FLEET_TOKEN with Actions
@@ -55,18 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: python scripts/wheelhouse_core.py scan > scan.json
-
-      # Current open cards in THIS repo - default token.
-      - name: List open cards
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api --paginate --slurp \
-            "repos/{owner}/{repo}/issues?state=open&per_page=100" \
-            | jq '[.[][] | select(has("pull_request") | not) | {number, body: (.body // ""), updated_at: (.updated_at // ""), labels: [(.labels // [])[] | {name: .name}], title: (.title // "")}]' \
-            > cards.json
+        run: python scripts/wheelhouse_core.py scan --cards cards.json > scan.json
 
       # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.
