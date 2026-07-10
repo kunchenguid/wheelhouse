@@ -296,6 +296,15 @@ def main():
             continue
         number = int(state.get("number", 0))
         kind = state.get("kind", "pr-review")
+        if kind in PR_KINDS and number in set(r.get("indeterminate_pr_numbers", [])):
+            # This PR's mergeability was unreadable this scan (UNKNOWN did not
+            # settle), so the scan cannot say whether it belongs in the worklist.
+            # Freeze the card exactly as-is: an UNKNOWN reading must never
+            # create, close, or consume a card. Same fail-safe family as the
+            # ok:false / truncated repo skips above (act only on known state) -
+            # NOT the separate, out-of-scope K-consecutive-absence soft-close
+            # hysteresis.
+            continue
         open_set = set(
             r.get("open_pr_numbers", [])
             if kind in PR_KINDS

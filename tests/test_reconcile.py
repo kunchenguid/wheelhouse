@@ -150,6 +150,7 @@ def scan_payload(
     open_issue_numbers=None,
     ok=True,
     truncated=False,
+    indeterminate_pr_numbers=None,
 ):
     return {
         "repos": {
@@ -159,6 +160,9 @@ def scan_payload(
                 "open_issue_numbers": []
                 if open_issue_numbers is None
                 else open_issue_numbers,
+                "indeterminate_pr_numbers": []
+                if indeterminate_pr_numbers is None
+                else indeterminate_pr_numbers,
                 "truncated": truncated,
             }
         },
@@ -258,6 +262,33 @@ def test_open_target_that_left_worklist_is_consumed():
     check(
         "reconcile: close message says no maintainer decision needed",
         "no longer needs a maintainer decision" in calls["close"][0]["message"],
+    )
+
+
+def test_indeterminate_pr_card_is_frozen():
+    # #111 invariant: an open PR whose mergeability was unreadable this scan
+    # (UNKNOWN did not settle) is reported in `indeterminate_pr_numbers` and emits
+    # no worklist item. Its existing card must be FROZEN - neither closed/consumed
+    # nor refreshed - so an UNKNOWN reading can never flip worklist membership or
+    # mint/close a card. This is the same mergeable-UNKNOWN oscillation that
+    # minted 10 duplicate cards for lavish-axi#111.
+    calls = run_reconcile(
+        scan_payload(items=[], indeterminate_pr_numbers=[42]),
+        [
+            card(
+                labels(
+                    "needs-decision",
+                    "repo:wheelhouse",
+                    "kind:pr-review",
+                    "priority:med",
+                    "target:wheelhouse-42",
+                )
+            )
+        ],
+    )
+    check("reconcile-freeze: indeterminate card is NOT closed", calls["close"] == [])
+    check(
+        "reconcile-freeze: indeterminate card is NOT refreshed", calls["upsert"] == []
     )
 
 
@@ -605,6 +636,7 @@ def main():
     test_refresh_uses_known_card_when_target_label_missing()
     test_refresh_uses_current_labels_before_upsert()
     test_open_target_that_left_worklist_is_consumed()
+    test_indeterminate_pr_card_is_frozen()
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()
     test_open_target_that_left_worklist_uses_current_labels_before_close()
