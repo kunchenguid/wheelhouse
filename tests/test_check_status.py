@@ -97,6 +97,25 @@ def test_rollup_failure_backstop_downgrades_all_success_read():
     )
 
 
+def test_rollup_failure_backstop_fails_closed_without_a_compliance_gate():
+    # `compliance_check: null` means there is intentionally no required gate,
+    # not that an otherwise failed rollup becomes safe to merge. This is the
+    # configuration used by repositories that have CI but no no-mistakes gate.
+    no_gate_cfg = {
+        "compliance_check": None,
+        "test_check_patterns": ["test"],
+    }
+    contexts = [check_run("test (ubuntu-latest)")]
+    comp, tests, ci, names = core.check_status(
+        pr_with(rollup("FAILURE", contexts)), no_gate_cfg
+    )
+    check(
+        "rollup FAILURE with no compliance gate -> fail (not n/a)",
+        comp == "fail",
+    )
+    check("no-gate rollup failure preserves a green test signal", tests == "green")
+
+
 def test_genuinely_green_pr_still_passes():
     contexts = [
         check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
@@ -112,6 +131,7 @@ def main():
     test_duplicate_compliance_contexts_cancelled_then_success()
     test_duplicate_compliance_contexts_success_then_cancelled()
     test_rollup_failure_backstop_downgrades_all_success_read()
+    test_rollup_failure_backstop_fails_closed_without_a_compliance_gate()
     test_genuinely_green_pr_still_passes()
     print()
     if _failures:
