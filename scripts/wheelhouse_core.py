@@ -1570,6 +1570,69 @@ def _read_pr_user_content_edits(slug, number):
         seen_cursors.add(cursor)
 
 
+def _authoritative_review_submitted_at(slug, number, review_id):
+    """Re-read one PR review by id to recover its authoritative `submitted_at`.
+
+    The list endpoints occasionally omit a usable timestamp on a review (and on
+    the `reviewed` timeline event that mirrors it). Re-reading the single review
+    by id is the same documented fallback `apply_decision.do_request_changes`
+    already uses when arming. Returns the recovered ISO timestamp, or None so the
+    caller fails open rather than crashing the whole scan on one missing field.
+    """
+    try:
+        review = gh_rest("/repos/%s/pulls/%s/reviews/%s" % (slug, number, review_id))
+    except Exception:
+        return None
+    if not isinstance(review, dict):
+        return None
+    submitted_at = review.get("submitted_at")
+    return submitted_at if str(submitted_at or "").strip() else None
+
+
+def _backfill_missing_review_times(slug, number, reviews, timeline):
+    """Recover a usable timestamp for any review or `reviewed` timeline event that
+    lacks one, via re-read-by-id, so a provable ask is never discarded over one
+    missing field and the review's time is still attributed to the target's
+    activity. Mutates the dicts in place; every recovery is best-effort and fails
+    open (a still-missing timestamp is handled by the downstream fail-open
+    checks)."""
+    reread_cache = {}
+
+    def reread(review_id):
+        key = str(review_id)
+        if key not in reread_cache:
+            reread_cache[key] = _authoritative_review_submitted_at(
+                slug, number, review_id
+            )
+        return reread_cache[key]
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        if _item_time(review, "submitted_at", "created_at", "updated_at") is not None:
+            continue
+        review_id = review.get("id")
+        if review_id is None:
+            continue
+        recovered = reread(review_id)
+        if recovered:
+            review["submitted_at"] = recovered
+
+    for event in timeline:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event") or "") != "reviewed":
+            continue
+        if _timeline_event_time(event, "reviewed") is not None:
+            continue
+        review_id = event.get("id")
+        if review_id is None:
+            continue
+        recovered = reread(review_id)
+        if recovered:
+            event["submitted_at"] = recovered
+
+
 def _read_pr_cleanup_state(slug, number):
     issue = gh_rest("/repos/%s/issues/%s" % (slug, number))
     pr = gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -1585,6 +1648,9 @@ def _read_pr_cleanup_state(slug, number):
     timeline = _read_paginated_list(
         "/repos/%s/issues/%s/timeline?per_page=100" % (slug, number)
     )
+    # Recover any review/`reviewed`-event timestamp the list endpoints dropped so
+    # a provable ask isn't discarded and the review's time is attributable.
+    _backfill_missing_review_times(slug, number, reviews, timeline)
     body_edits = _read_pr_user_content_edits(slug, number)
     return {
         "issue": issue,
@@ -1816,7 +1882,14 @@ def _commit_event_time(event):
 def _timeline_event_time(event, event_name):
     if event_name == "committed":
         return _commit_event_time(event)
-    return _item_time(event, "created_at")
+    # A `reviewed` timeline event carries its timestamp in `submitted_at`, not
+    # `created_at` (GitHub's timeline shape). Reading only `created_at` made every
+    # PR with a review fail open as "reviewed event missing timestamp", so the
+    # already-nudged backlog never reached the reminder-then-close clock. Read
+    # both keys so a review recorded in the timeline is never discarded and its
+    # time still feeds the attributable-activity set; every other event type only
+    # carries `created_at`, so the extra key is a harmless fallback.
+    return _item_time(event, "created_at", "submitted_at")
 
 
 def _timeline_event_authors(event, event_name):
@@ -2095,9 +2168,59 @@ def _close_pending_target(slug, number, record, now):
     _patch_pending_target_closed(slug, number)
 
 
-def _active_pending_ask_kinds(pr):
-    kinds = {"request-changes"}
+def _pr_conflicting_for_cleanup(pr):
+    """Whether a scanned PR may have an eligible rebase-nudge cleanup record.
+
+    `needs-rebase` is always eligible for proof lookup.
+    The ci-noop exception is eligible only for a cross-repo
+    `needs-ci-approval` PR whose scan-time mergeability is conclusively
+    `CONFLICTING`.
+    The caller must still prove the nudge itself before it can act.
+    """
     if pr.get("bucket") == "needs-rebase":
+        return True
+    return _is_ci_noop_cleanup_candidate(pr) and _mergeable_is_conflicting(
+        pr.get("mergeable")
+    )
+
+
+def _is_ci_noop_cleanup_candidate(pr):
+    """Identify the fork ci-noop route without treating it as an ask or action.
+
+    A later conflict check and a provable rebase-nudge record are both required
+    before stale cleanup can do anything for this fast CI-approval lane.
+    """
+    return (
+        pr.get("bucket") == "needs-ci-approval"
+        and pr.get("cross_repo") is True
+    )
+
+
+def _is_ci_approval_cleanup_lane(pr):
+    return (
+        pr.get("kind") == "ci-approval"
+        or pr.get("bucket") == "needs-ci-approval"
+    )
+
+
+def _ci_noop_conflict_is_current(owner, repo, pr):
+    """Re-check ci-noop mergeability immediately before a cleanup write.
+
+    Standard rebase cleanup already routes from a current `needs-rebase` scan
+    bucket.
+    The ci-noop exception must instead fail closed unless a fresh re-read is
+    still conclusively `CONFLICTING`.
+    """
+    if not _is_ci_noop_cleanup_candidate(pr):
+        return True
+    return _mergeable_is_conflicting(_settle_mergeable(owner, repo, pr["number"]))
+
+
+def _active_pending_ask_kinds(pr):
+    if _is_ci_approval_cleanup_lane(pr):
+        return {"needs-rebase"} if _pr_conflicting_for_cleanup(pr) else set()
+    kinds = {"request-changes"}
+    if _pr_conflicting_for_cleanup(pr):
         kinds.add("needs-rebase")
     return kinds
 
@@ -2144,7 +2267,7 @@ def _sweep_pending_pr(
         state["comments"],
         state["reviews"],
         has_pending_label,
-        allow_legacy_rebase=pr.get("bucket") == "needs-rebase",
+        allow_legacy_rebase=_pr_conflicting_for_cleanup(pr),
         maintainer_logins=maintainer_logins,
         active_ask_kinds=active_ask_kinds,
     )
@@ -2190,6 +2313,12 @@ def _sweep_pending_pr(
         state["comments"], record["ask_id"], maintainer_logins, asked_dt
     )
 
+    action_due = now >= close_at or (now >= reminder_at and not reminded)
+    if not action_due:
+        return "skip"
+    if not _ci_noop_conflict_is_current(owner, repo, pr):
+        return "skip"
+
     if now >= close_at:
         if not reminded:
             _post_pending_reminder(slug, number, record, now)
@@ -2232,10 +2361,18 @@ def sweep_pending_contributor_actions(
     for pr in prs:
         if pr.get("author_excluded"):
             continue
-        if pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval":
+        conflicting = _pr_conflicting_for_cleanup(pr)
+        is_ci_approval = _is_ci_approval_cleanup_lane(pr)
+        # ci-approval is a fast security gate, not a stale-contributor lane.
+        # The narrow ci-noop exception requires both a proven rebase nudge and a
+        # conclusively conflicting cross-repo PR.
+        # A non-conflicting ci-approval PR is ignored even with a pending label,
+        # so the close path never fires without a fresh, authoritative conflict.
+        if is_ci_approval and not conflicting:
             continue
         maybe_pending = (
             pr.get("bucket") == "needs-rebase"
+            or conflicting
             or PENDING_CONTRIBUTOR_LABEL in set(pr.get("labels") or [])
             or pr.get("labels_truncated")
         )
@@ -2608,6 +2745,11 @@ def build_repo(
                 "tests": tests,
                 "ci": ci,
                 "bucket": bucket,
+                # Carry the fresh authoritative mergeability so the cleanup sweep
+                # can recognize a conflicting fork PR that routes to
+                # `needs-ci-approval` (ci-noop) as a rebase-nudge cleanup target -
+                # the nudge, not the bucket, is the ask.
+                "mergeable": pr.get("mergeable"),
                 "closes": closes,
                 "head_sha": pr["headRefOid"],
                 "updated_at": pr.get("updatedAt", "") or "",

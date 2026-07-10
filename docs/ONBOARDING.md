@@ -14,7 +14,8 @@ For issue-triage, a new `updated_at` can queue a fresh attempt even when no full
 For any kind, a new `updated_at` can make a hidden state-only card edit for activity sorting when no refresh or triage-queue write is already happening.
 
 > You add these files to **your source repos**, not to Wheelhouse.
-> The hub only ever reads; it never pushes to your source repos except to execute a decision you made.
+> The dispatch path reads source-repo state only.
+> The scheduled scan can post a deterministic merge-conflict nudge and, when stale pending-contributor cleanup is enabled, a reminder or close; it can also execute a decision you made.
 
 ## The dispatch contract
 
@@ -149,13 +150,17 @@ jobs:
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
   If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and reconcile consumes any stale CI-approval card.
   For a contributor fork whose safe approval returns that no-op result and whose mergeability conclusively settles to `CONFLICTING`, the scan keeps the CI-approval classification and emits no card, but posts the ordinary fire-once-per-head rebase nudge before consuming the target from the worklist.
-  It never sends that nudge for an actually approved CI run, a missing or unresolved mergeability value, or a failed mergeability settlement, and this exception does not arm pending-contributor cleanup.
+  It never sends that nudge for an actually approved CI run, a missing or unresolved mergeability value, or a failed mergeability settlement, and this exception does not write the structured pending-contributor cleanup state.
   A failed settlement marks the repo scan unhealthy, so reconcile preserves existing cards instead of consuming them.
   The `scan-backstop` logs emit one notice for each approved or no-pending run, one `wheelhouse auto-approve carded ...` warning for each contributor run that becomes a card, or one `wheelhouse auto-approve suppressed-card ...` warning for each owner, maintainer, or bot run that cannot be approved and does not emit a card.
   Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
   Verified duplicate pending runs sharing a stable `workflowDatabaseId` are deduped to the highest/newest run before approval; same-named distinct workflows and runs without a workflow identity are still treated as distinct.
+- **Conflicting ci-noop fork PRs.** This is a scheduled-scan cleanup exception, not a dispatch behavior.
+  When stale pending-contributor cleanup is enabled, a cross-repo PR in the `needs-ci-approval` ci-noop route can follow the stale rebase-nudge lifecycle only when a trusted rebase nudge is proven and GitHub currently reports it as `CONFLICTING`.
+  The scan reads mergeability again immediately before it posts a reminder or closes the PR, so non-conflicting, `UNKNOWN`, or unreadable targets stay out of cleanup.
+  A normal `ci-approval` item or dispatch does not create this exception.
 - **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want activity sorting and automatic issue-card triage caching.
   The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.
 - **Third-party alternative.** If you prefer, `peter-evans/repository-dispatch` does the same dispatch as an action; the `gh api` form above keeps you dependency-free.

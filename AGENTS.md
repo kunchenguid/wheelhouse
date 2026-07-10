@@ -568,9 +568,16 @@ still appears where it's plain English, e.g. "triage the queue".)
   Every global setting has a per-repo override, including the enable flag,
   thresholds, and targets.
   It is intentionally scoped to provable contributor-action asks:
-  successful `/request-changes` reviews and merge-conflict `needs-rebase`
-  nudges.
-  It never handles `ci-approval`, never handles issue-triage, never runs from
+  successful `/request-changes` reviews and merge-conflict rebase nudges.
+  The ASK is the nudge, not the routing bucket.
+  A conflicting fork PR in the `needs-ci-approval` ci-noop route is eligible only when the sweep can prove an existing rebase nudge.
+  Routing alone never creates or proves an ask.
+  Its nudge is deliberately treated through the legacy retrofit rather than requiring cleanup state, so an unarmed nudge is not orphaned.
+  `_pr_conflicting_for_cleanup` gates this widened proof path with the scan's authoritative `mergeable == CONFLICTING` result, carried in the enriched scan dict.
+  A `needs-ci-approval` PR is entered ONLY when it is authoritatively CONFLICTING this scan.
+  A non-conflicting one is ignored even with a pending label, so the fast security-gate lane is untouched and the close path is fail-closed on current conflict.
+  UNKNOWN, MERGEABLE, and None never qualify.
+  It never handles issue-triage, never runs from
   ingest, never runs in Claude/LLM paths, and never uses `READONLY_TOKEN`.
   The sweep runs inside `wheelhouse_core.py scan` under `FLEET_TOKEN`, before
   worklist emission, so a PR closed by cleanup is removed from the scanned open
@@ -593,10 +600,21 @@ still appears where it's plain English, e.g. "triage the queue".)
   ambiguous timestamps/authors, unaccounted target `updated_at`, untrusted
   marker authorship, an unprovable review/nudge, invalid targets, or disabled
   config all fail open.
-  Legacy `<!-- wheelhouse-rebase-nudge:<head_sha> -->` comments are retrofitted
-  only when a trusted author, the original comment timestamp/id, and unchanged
-  head can be proven; the first eligible pass reminds and adds the active label,
-  and only a later pass with that reminder may close.
+  **Timeline `reviewed` events carry `submitted_at`, not `created_at`.**
+  `_timeline_event_time` must read both keys - reading only `created_at` made
+  every PR a maintainer/bot had reviewed fail open as "reviewed event missing
+  timestamp", which is what kept the already-nudged fleet backlog out of the
+  reminder-then-close clock and left a review-caused `updated_at` bump looking
+  "unattributable". Wherever a review or `reviewed`-event read still lacks a
+  usable timestamp, `_read_pr_cleanup_state` recovers it by re-reading the review
+  by id (`_backfill_missing_review_times`, the same authoritative fallback
+  `apply_decision.do_request_changes` uses when arming); a failed re-read leaves
+  the field missing so the downstream check still fails open. A GENUINELY
+  unexplained target `updated_at` (no readable activity at that time) still fails
+  open - that safety net is intentional, not a bug to remove.
+  Legacy `<!-- wheelhouse-rebase-nudge:<head_sha> -->` comments form the unarmed, pre-arming nudge backlog and can be retrofitted into the lifecycle.
+  The retrofit requires a trusted author, the original comment timestamp/id, an unchanged head, and a cleanup-eligible conflict path.
+  The first eligible pass reminds and adds the active label, and only a later pass with that reminder may close.
 - NL conversation memory is owner-scoped, and the scoping IS the security
   boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
   `github.token`) and `apply_decision.py assemble_history` renders it as a
@@ -958,7 +976,7 @@ Run the unit tests:
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network.
+- `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network. Also covers the reviewed-event timestamp shape (`_timeline_event_time` reading `submitted_at`, so a maintainer/bot review no longer fails open as "reviewed event missing timestamp" and a review-caused `updated_at` bump is attributable while a truly unexplained bump still fails open), the re-read-by-id recovery (`_backfill_missing_review_times` recovering a missing review/`reviewed`-event timestamp, and a failed re-read failing open), and the widened provable-ask set (an un-armed, maintainer-reviewed, conflicting fork nudge backlog PR reminds first then closes on a later scan, still honoring keep-open and contributor-activity fail-open; and a nudged ci-noop `needs-ci-approval` PR that is authoritatively `mergeable == CONFLICTING` enters the same reminder-then-close lifecycle via `_pr_conflicting_for_cleanup`, while a non-conflicting `needs-ci-approval` PR - None/MERGEABLE/UNKNOWN - is skipped with no reads and honors keep-open).
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, `activity_reflected_at` remaining non-material and being folded into queued writes, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
