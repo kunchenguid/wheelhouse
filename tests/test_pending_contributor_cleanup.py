@@ -1146,6 +1146,31 @@ def test_widened_ci_noop_conflicting_pr_reminds_then_closes():
           fake.mergeable_calls == [7])
 
 
+def test_ci_noop_ignores_request_changes_markers():
+    ci_noop_pr = enriched_pr(
+        labels=[core.PENDING_CONTRIBUTOR_LABEL],
+        bucket="needs-ci-approval",
+        kind="ci-approval",
+        mergeable="CONFLICTING",
+        cross_repo=True,
+    )
+    check("ci-noop: active asks contain only needs-rebase",
+          core._active_pending_ask_kinds(ci_noop_pr) == {"needs-rebase"})
+    check("pr-review: request-changes remains an active ask",
+          core._active_pending_ask_kinds(enriched_pr()) == {"request-changes"})
+
+    record = request_record()
+    fake = FakeGitHub(
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+    )
+    closed = run(fake, ci_noop_pr, now_days=14)
+    check("ci-noop: request-changes marker without rebase nudge does not close",
+          closed == set())
+    check("ci-noop: request-changes marker without rebase nudge performs no writes",
+          not any(call["method"] for call in fake.calls))
+
+
 def test_widened_ci_noop_skips_when_conflict_has_resolved():
     marker = core._rebase_nudge_marker("sha1")
     legacy_record = rebase_record(source_id=201)
@@ -1285,6 +1310,7 @@ def main():
     test_widened_backlog_respects_keep_open()
     test_widened_backlog_contributor_activity_fails_open()
     test_widened_ci_noop_conflicting_pr_reminds_then_closes()
+    test_ci_noop_ignores_request_changes_markers()
     test_widened_ci_noop_skips_when_conflict_has_resolved()
     test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope()
     test_conflicting_non_ci_noop_lanes_stay_out_of_scope()

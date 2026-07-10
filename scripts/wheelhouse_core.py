@@ -2185,6 +2185,13 @@ def _is_ci_noop_cleanup_candidate(pr):
     )
 
 
+def _is_ci_approval_cleanup_lane(pr):
+    return (
+        pr.get("kind") == "ci-approval"
+        or pr.get("bucket") == "needs-ci-approval"
+    )
+
+
 def _ci_noop_conflict_is_current(owner, repo, pr):
     if not _is_ci_noop_cleanup_candidate(pr):
         return True
@@ -2192,6 +2199,8 @@ def _ci_noop_conflict_is_current(owner, repo, pr):
 
 
 def _active_pending_ask_kinds(pr):
+    if _is_ci_approval_cleanup_lane(pr):
+        return {"needs-rebase"} if _pr_conflicting_for_cleanup(pr) else set()
     kinds = {"request-changes"}
     if _pr_conflicting_for_cleanup(pr):
         kinds.add("needs-rebase")
@@ -2335,9 +2344,7 @@ def sweep_pending_contributor_actions(
         if pr.get("author_excluded"):
             continue
         conflicting = _pr_conflicting_for_cleanup(pr)
-        is_ci_approval = (
-            pr.get("kind") == "ci-approval" or pr.get("bucket") == "needs-ci-approval"
-        )
+        is_ci_approval = _is_ci_approval_cleanup_lane(pr)
         # ci-approval is a fast security gate, not a stale-contributor lane, so it
         # stays out of scope EXCEPT for a provably-conflicting fork PR: a fork PR
         # with no CI still routes here (ci-noop) yet gets a deterministic rebase
