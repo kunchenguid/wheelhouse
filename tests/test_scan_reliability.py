@@ -9,10 +9,13 @@ Unit-exercise the fleet-scan reliability + correctness hardening, NO network:
 - Consecutive-failure health ledger (`parse_scan_health` / `update_scan_health` /
   `render_scan_health_body` / `cmd_scan_health`): increment/reset, threshold
   alert, run-failing exit, and fail-open on ledger I/O errors.
-- UNKNOWN-mergeable hardening (`_settle_mergeable` / `_resolve_pr_bucket` +
-  build_repo): a targeted single-PR re-read settles a merge-ready candidate to
-  CONFLICTING (-> needs-rebase) or, when it can never be proven mergeable,
-  demotes it to review-needed instead of a false merge-ready posture.
+- UNKNOWN-mergeability policy (`_settle_mergeable` / `_resolve_pr_bucket` +
+  build_repo): poll a merge-ready candidate whose mergeable reads UNKNOWN until it
+  settles to CONFLICTING (-> needs-rebase) or MERGEABLE (-> merge-ready); if it
+  never settles, return MERGEABILITY_PENDING and freeze the PR
+  (`indeterminate_pr_numbers`) so an UNKNOWN reading never flips worklist
+  membership. Plus the #111 acceptance that a statically-conflicting PR never
+  enters the worklist.
 
 Run: python tests/test_scan_reliability.py
 """
@@ -668,10 +671,14 @@ def test_resolve_bucket_reread_catches_conflict():
     check("resolve: settled CONFLICTING -> needs-rebase", bucket == "needs-rebase")
 
 
-def test_resolve_bucket_still_unknown_demotes_to_review():
+def test_resolve_bucket_unsettled_returns_pending():
+    # UNKNOWN that never settles must NOT be classified into any worklist bucket:
+    # it returns the pending sentinel so build_repo freezes the PR (no membership
+    # flip, no card).
+    reads = []
     save_read = core.gh_graphql_pr_mergeable
     save_sleep = core._sleep
-    core.gh_graphql_pr_mergeable = lambda o, n, num: "UNKNOWN"
+    core.gh_graphql_pr_mergeable = lambda o, n, num: reads.append(num) or "UNKNOWN"
     core._sleep = lambda d: None
     try:
         bucket = core._resolve_pr_bucket(
@@ -680,10 +687,9 @@ def test_resolve_bucket_still_unknown_demotes_to_review():
     finally:
         core.gh_graphql_pr_mergeable = save_read
         core._sleep = save_sleep
-    check(
-        "resolve: never-proven-mergeable demotes to review-needed (no false merge-ready)",
-        bucket == "review-needed",
-    )
+    check("resolve-pending: unsettled UNKNOWN returns MERGEABILITY_PENDING", bucket == core.MERGEABILITY_PENDING)
+    check("resolve-pending: it is NOT a worklist bucket", core.MERGEABILITY_PENDING not in core.NEEDS_MAINTAINER)
+    check("resolve-pending: polled the full budget", len(reads) == core.MERGEABLE_SETTLE_READS)
 
 
 def test_resolve_bucket_known_mergeable_no_reread():
@@ -867,18 +873,59 @@ def test_build_repo_unknown_mergeable_conflict_nudges_no_card():
     check("build-unknown-conflict: repo scan stays ok", result["ok"] is True)
 
 
-def test_build_repo_unknown_mergeable_unsettled_demotes():
-    # A green PR whose mergeable never settles: no false merge-ready. It still
-    # emits a pr-review card (so the target isn't dropped) but as review-needed.
+def test_build_repo_unknown_mergeable_settles_mergeable_card():
+    # UNKNOWN that settles MERGEABLE -> normal merge-ready card (membership: in).
+    first = {
+        "totalCount": 1,
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [_full_pr(52, mergeable="UNKNOWN")],
+    }
+    result, items, posts = _run_build_repo(first, mergeable_reads=["UNKNOWN", "MERGEABLE"])
+    check("build-unknown-mergeable: merge-ready card emitted", len(items) == 1 and items[0]["bucket"] == "merge-ready")
+    check("build-unknown-mergeable: not frozen", result.get("indeterminate_pr_numbers") == [])
+    check("build-unknown-mergeable: no nudge", posts == [])
+
+
+def test_build_repo_unknown_mergeable_unsettled_freezes():
+    # A green PR whose mergeable never settles: NO false merge-ready, and no
+    # membership flip. It emits NO worklist item and is reported as indeterminate
+    # so reconcile freezes it. No nudge (an UNKNOWN reading is not CONFLICTING).
     first = {
         "totalCount": 1,
         "pageInfo": {"hasNextPage": False},
         "nodes": [_full_pr(51, mergeable="UNKNOWN")],
     }
-    result, items, posts = _run_build_repo(first, mergeable_reads=["UNKNOWN", "UNKNOWN"])
-    check("build-unknown-unsettled: still emits a pr-review card", len(items) == 1 and items[0]["kind"] == "pr-review")
-    check("build-unknown-unsettled: demoted to review-needed (not merge-ready)", items[0]["bucket"] == "review-needed")
-    check("build-unknown-unsettled: no nudge (not conflicting)", posts == [])
+    result, items, posts = _run_build_repo(first, mergeable_reads=[])  # all reads UNKNOWN
+    check("build-unknown-frozen: no worklist item emitted", items == [])
+    check("build-unknown-frozen: reported in indeterminate_pr_numbers", result["indeterminate_pr_numbers"] == [51])
+    check("build-unknown-frozen: PR stays in open_pr_numbers (still open)", 51 in result["open_pr_numbers"])
+    check("build-unknown-frozen: no nudge off an UNKNOWN reading", posts == [])
+    check("build-unknown-frozen: repo scan stays ok", result["ok"] is True)
+
+
+def test_build_repo_static_conflict_never_enters_worklist():
+    # #111 acceptance: a statically CONFLICTING PR classifies needs-rebase on
+    # every readable scan and NEVER emits a worklist item (so it can never mint a
+    # duplicate card), across three scan flavors: readable CONFLICTING, and the
+    # post-base-push UNKNOWN that settles CONFLICTING on re-read.
+    def scan(mergeable, reads):
+        first = {
+            "totalCount": 1,
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [_full_pr(111, mergeable=mergeable)],
+        }
+        return _run_build_repo(first, mergeable_reads=reads)
+
+    r1, items1, _ = scan("CONFLICTING", [])
+    r2, items2, _ = scan("UNKNOWN", ["CONFLICTING"])
+    r3, items3, _ = scan("UNKNOWN", ["UNKNOWN", "CONFLICTING"])
+    check("acceptance: readable CONFLICTING emits no card", items1 == [])
+    check("acceptance: UNKNOWN settling CONFLICTING emits no card", items2 == [])
+    check("acceptance: UNKNOWN-then-CONFLICTING (2 reads) emits no card", items3 == [])
+    check(
+        "acceptance: conflicting PR is never frozen-indeterminate once readable",
+        r1["indeterminate_pr_numbers"] == [] and r2["indeterminate_pr_numbers"] == [] and r3["indeterminate_pr_numbers"] == [],
+    )
 
 
 def main():
@@ -908,13 +955,15 @@ def main():
     test_settle_mergeable_returns_first_conclusive()
     test_settle_mergeable_fails_open_on_error()
     test_resolve_bucket_reread_catches_conflict()
-    test_resolve_bucket_still_unknown_demotes_to_review()
+    test_resolve_bucket_unsettled_returns_pending()
     test_resolve_bucket_known_mergeable_no_reread()
     test_resolve_bucket_reread_settles_mergeable()
     test_build_repo_multipage_ok_and_complete()
     test_build_repo_midpage_failure_truncates()
     test_build_repo_unknown_mergeable_conflict_nudges_no_card()
-    test_build_repo_unknown_mergeable_unsettled_demotes()
+    test_build_repo_unknown_mergeable_settles_mergeable_card()
+    test_build_repo_unknown_mergeable_unsettled_freezes()
+    test_build_repo_static_conflict_never_enters_worklist()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

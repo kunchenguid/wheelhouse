@@ -786,64 +786,95 @@ def _mergeable_is_mergeable(mergeable):
     return str(mergeable or "").strip().upper() == "MERGEABLE"
 
 
+def _mergeable_is_unknown(mergeable):
+    """GitHub's GraphQL `mergeable` is a non-null enum on a valid response:
+    MERGEABLE / CONFLICTING / UNKNOWN. UNKNOWN is the EXPECTED PENDING STATE
+    (GitHub is still computing it, typically right after a base push) - never an
+    answer. A missing/None value is not something the bulk list produces for an
+    open PR, so it is left to classify's existing fail-open rather than triggering
+    a poll."""
+    return str(mergeable or "").strip().upper() == "UNKNOWN"
+
+
 def _mergeable_is_conclusive(mergeable):
-    """GitHub reports MERGEABLE / CONFLICTING / UNKNOWN. Only the first two are
-    authoritative; UNKNOWN (or a missing value) means GitHub has not finished
-    computing mergeability yet."""
+    """Only MERGEABLE and CONFLICTING are authoritative answers."""
     return _mergeable_is_mergeable(mergeable) or _mergeable_is_conflicting(mergeable)
 
 
-# How many single-PR re-reads to spend settling an UNKNOWN mergeable, and how
-# long to wait between them (GitHub computes mergeability asynchronously, so the
-# first read after the bulk list may still be UNKNOWN while the job runs).
-MERGEABLE_SETTLE_READS = 2
-MERGEABLE_SETTLE_DELAY = 2.0  # seconds
+# Sentinel bucket for a PR whose mergeability could not be settled this scan.
+# It is deliberately NOT in NEEDS_MAINTAINER, PR_KIND, or PRIORITY, and is NOT
+# `needs-rebase`, so build_repo emits no worklist item and no rebase nudge for
+# it: an UNKNOWN reading must never create, close, consume, or nudge. The PR is
+# frozen (its number is reported in `indeterminate_pr_numbers`) until a later
+# scan reads a conclusive value.
+MERGEABILITY_PENDING = "mergeability-pending"
+
+# UNKNOWN-mergeable poll budget. GitHub computes PR mergeability LAZILY: a push
+# to the base branch invalidates every open PR's cached mergeability to UNKNOWN,
+# and NOTHING recomputes it until the PR is queried - the first query returns
+# UNKNOWN and merely TRIGGERS the async compute, which settles to
+# MERGEABLE/CONFLICTING within seconds-to-a-minute (confirmed live: a repo went
+# 32 UNKNOWN -> 0 within ~2 min of being queried; matches GitHub's documented
+# REST "mergeable is null until computed, poll until non-null" contract). So a
+# single-PR re-read with short backoff both TRIGGERS and then CATCHES the settled
+# value. If the scan is the only regular requester, an un-polled UNKNOWN would
+# make a statically-conflicting PR flip in/out of the worklist once per base push
+# (the lavish-axi#111 duplicate-card oscillation).
+MERGEABLE_SETTLE_READS = 4
+MERGEABLE_SETTLE_BASE = 1.5  # seconds; backoff grows 1.5 -> 3 -> 6 (capped)
+MERGEABLE_SETTLE_CAP = 6.0
 
 
 def _settle_mergeable(owner, name, number):
-    """Force GitHub to settle an UNKNOWN `mergeable` for one PR via targeted
-    single-PR re-reads. Returns the first conclusive value (MERGEABLE /
-    CONFLICTING), or the last value seen (typically still UNKNOWN/None) if it
-    never settles. Fails open (returns None) on read error - the caller keeps
-    whatever the bulk scan reported."""
+    """Poll one PR's `mergeable` with short backoff until it resolves.
+
+    The first single-PR read TRIGGERS GitHub's lazy recompute; subsequent reads
+    (spaced by exponential backoff) CATCH the settled value. Returns the first
+    conclusive value (MERGEABLE / CONFLICTING), or the last non-conclusive value
+    seen (typically UNKNOWN/None) if it never settles within the budget. Fails
+    open (returns the last value, possibly None) on read error - the caller
+    treats a non-conclusive result as still-pending and freezes the PR rather
+    than flipping its worklist membership."""
     last = None
     for i in range(MERGEABLE_SETTLE_READS):
         try:
             value = gh_graphql_pr_mergeable(owner, name, number)
         except Exception:
-            return None
+            return last
         if _mergeable_is_conclusive(value):
             return value
         last = value
         if i + 1 < MERGEABLE_SETTLE_READS:
-            _sleep(MERGEABLE_SETTLE_DELAY)
+            _sleep(min(MERGEABLE_SETTLE_BASE * (2 ** i), MERGEABLE_SETTLE_CAP))
     return last
 
 
 def _resolve_pr_bucket(owner, name, pr, draft, comp, tests, ci, cross_repo):
-    """Classify a PR, hardening the merge-ready fail-open on an UNKNOWN mergeable.
+    """Classify a PR, treating an UNKNOWN mergeable as an expected pending state.
 
-    `classify` fails open to `merge-ready` when mergeability is UNKNOWN/missing,
-    which can let a freshly-conflicted PR slip through as merge-ready on the first
-    successful scan after the conflict appears (the bulk PR list frequently
-    returns UNKNOWN under load). So when the fast path lands on `merge-ready` but
-    mergeability is not authoritatively MERGEABLE, spend a targeted single-PR
-    re-read to force GitHub to compute it, then re-classify. If it settles to
-    CONFLICTING the PR correctly becomes `needs-rebase` (nudged + consumed); if it
-    can still not be proven mergeable, it is demoted to `review-needed` rather
-    than advertised as merge-ready, so an unverified PR never shows a merge-ready
-    posture (the next scan routes it correctly once GitHub finishes computing)."""
+    `classify` fails open to `merge-ready` when mergeability is UNKNOWN/missing.
+    Left alone, that lets a statically-conflicting PR whose mergeability was just
+    invalidated by a base push (see MERGEABLE_SETTLE_READS) read as merge-ready
+    and flip INTO the worklist for one scan - minting a duplicate card that the
+    next scan (once GitHub settles it to CONFLICTING) soft-closes again. So when
+    the fast path lands on `merge-ready` but mergeability is not authoritatively
+    MERGEABLE, poll the single PR to settle it, then re-classify: CONFLICTING ->
+    `needs-rebase` (out, nudged), MERGEABLE -> `merge-ready` (in). If it still
+    can't be settled within the budget, return `MERGEABILITY_PENDING` so
+    build_repo FREEZES the PR: an UNKNOWN reading must never flip worklist
+    membership (in stays in, out stays out; no card created/closed/consumed)."""
     mergeable = pr.get("mergeable")
     bucket = classify(draft, comp, tests, ci, cross_repo, mergeable)
-    if bucket != "merge-ready" or _mergeable_is_mergeable(mergeable):
+    # UNKNOWN only threatens membership where it fails open to merge-ready but is
+    # really CONFLICTING. review-needed + UNKNOWN stays review-needed (no flip),
+    # and needs-rebase already required an authoritative CONFLICTING. Only an
+    # explicit UNKNOWN is polled - a missing value keeps classify's fail-open.
+    if bucket != "merge-ready" or not _mergeable_is_unknown(mergeable):
         return bucket
     settled = _settle_mergeable(owner, name, pr["number"])
-    if settled is not None:
-        mergeable = settled
-    bucket = classify(draft, comp, tests, ci, cross_repo, mergeable)
-    if bucket == "merge-ready" and not _mergeable_is_mergeable(mergeable):
-        return "review-needed"
-    return bucket
+    if _mergeable_is_conclusive(settled):
+        return classify(draft, comp, tests, ci, cross_repo, settled)
+    return MERGEABILITY_PENDING
 
 
 def _with_mergeability(bucket, mergeable):
@@ -2318,6 +2349,10 @@ def build_repo(
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
     below, so an ok:false repo (early return) is never auto-approved or nudged.
+    A merge-ready candidate whose bulk `mergeable` reads UNKNOWN is polled to a
+    conclusive value (`_resolve_pr_bucket`); if it still cannot be settled it is
+    reported in `indeterminate_pr_numbers` and emits no item, so an UNKNOWN
+    reading never flips worklist membership (reconcile freezes such a card).
     Open PRs, open issues, and PR closing issue references are paginated; if the
     PR or closing-reference scan is incomplete, issue-triage items are withheld
     because Wheelhouse cannot prove which issues are already addressed by PRs."""
@@ -2615,6 +2650,14 @@ def build_repo(
         "ok": True,
         "open_pr_numbers": [p["number"] for p in enriched],
         "open_issue_numbers": open_issue_numbers,
+        # PRs whose mergeability could not be settled this scan (UNKNOWN did not
+        # resolve within the poll budget). They stay in `open_pr_numbers` (still
+        # open) but emit no worklist item, and reconcile FREEZES their cards -
+        # an UNKNOWN reading must never flip worklist membership or
+        # create/close/consume a card.
+        "indeterminate_pr_numbers": [
+            p["number"] for p in enriched if p["bucket"] == MERGEABILITY_PENDING
+        ],
         "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
     }

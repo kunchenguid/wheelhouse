@@ -636,16 +636,6 @@ still appears where it's plain English, e.g. "triage the queue".)
   fail-safe - retry never fabricates completeness.
   **The `build_repo` "scan failed" warning is slug-prefixed** so a dark repo is
   identifiable straight from the log (it used to carry no repo name).
-  **UNKNOWN-mergeable hardening.** `classify` still fails open to `merge-ready`
-  on `UNKNOWN`/missing mergeability, but `build_repo` routes through
-  `_resolve_pr_bucket`: a `merge-ready` candidate whose bulk `mergeable` is not
-  authoritatively `MERGEABLE` gets a targeted single-PR re-read (`_settle_mergeable`
-  -> `gh_graphql_pr_mergeable`, which forces GitHub to compute it) before it can
-  show a merge-ready posture. Settling to `CONFLICTING` routes it to `needs-rebase`
-  (nudged + consumed); if it still can't be proven mergeable it is demoted to
-  `review-needed` (card stays open, no false merge-ready) and the next scan
-  routes it correctly. A re-read failure preserves the bulk value, then follows
-  the same never-proven-mergeable demotion rather than emitting a false merge-ready card.
 - **Fleet-scan health ledger (loud signal for a persistently-dark repo).** A repo
   that fails EVERY scan hides behind an otherwise-green scheduled run.
   `scan-backstop.yml`'s final `always()` step runs `wheelhouse_core.py scan-health
@@ -669,10 +659,35 @@ still appears where it's plain English, e.g. "triage the queue".)
   This deliberately bypasses the global or per-repo `auto_approve_ci: false` opt-out only for those author-excluded ci-approval PRs; contributor PRs still honor the opt-out and card as before.
   Unsafe, uncertain, or failed owner, maintainer, and bot CI-approval targets still do not emit cards, but they keep the scan-log warning.
   Skipped targets still remain in `open_pr_numbers` / `open_issue_numbers` but are absent from the `items` worklist, so `reconcile.py` consumes any existing pure `needs-decision` owner, maintainer, or bot card on the next successful scan.
+- **UNKNOWN mergeability is an EXPECTED PENDING STATE, never a classifiable
+  answer (the lavish-axi#111 duplicate-card fix).** GitHub computes PR
+  mergeability LAZILY: a push to the base branch invalidates every open PR's
+  cached mergeability to `UNKNOWN`, and nothing recomputes it until the PR is
+  queried - the first query returns `UNKNOWN` and merely TRIGGERS the async
+  compute, which settles within seconds-to-a-minute (confirmed live: a fleet repo
+  went 32 `UNKNOWN` -> 0 within ~2 min of being queried; matches GitHub's
+  documented REST "mergeable is null until computed, poll until non-null"
+  contract). If the hourly scan is the only regular requester, an un-polled
+  `UNKNOWN` makes a statically-conflicting PR fail open to `merge-ready` (a new
+  card) then settle to `CONFLICTING` (`needs-rebase`, card soft-closed) - one
+  create/close oscillation per base push (10 duplicate cards for #111). So a
+  `merge-ready` candidate whose `mergeable` reads exactly `UNKNOWN` is polled with
+  short backoff (`_resolve_pr_bucket` -> `_settle_mergeable` ->
+  `gh_graphql_pr_mergeable`; the first read triggers the compute, later reads
+  catch it) until it resolves: `CONFLICTING` -> `needs-rebase` (out, nudged),
+  `MERGEABLE` -> `merge-ready` (in). If it still can't be settled within the
+  budget it returns the `MERGEABILITY_PENDING` sentinel and `build_repo` reports
+  the PR in `indeterminate_pr_numbers` (kept in `open_pr_numbers`, emits NO
+  worklist item), and `reconcile.py` FREEZES that card - the **hard invariant is
+  that an UNKNOWN reading must NEVER flip worklist membership or create/close/
+  consume a card** (in stays in, out stays out). The reconcile freeze is a
+  per-PR extension of the existing `ok:false`/`truncated` unreadable-state skip,
+  NOT the (separate, out-of-scope) K-consecutive-absence soft-close hysteresis.
+  Only an explicit `UNKNOWN` is polled; a missing/None value keeps classify's
+  fail-open (GraphQL never returns null for an open PR's `mergeable`).
 - **Merge conflicts leave the maintainer queue.**
   `wheelhouse_core.py` fetches GraphQL `pullRequests.nodes.mergeable` and treats only `CONFLICTING` as authoritative.
-  In `classify` and paths other than a merge-ready candidate's `_resolve_pr_bucket` hardening, `UNKNOWN` or missing mergeability fails open because GitHub computes it asynchronously, so the PR classifies normally until a later scan can prove the conflict.
-  A merge-ready candidate instead gets the targeted re-read and never remains merge-ready unless it is proven `MERGEABLE`.
+  `UNKNOWN` or missing mergeability fails open because GitHub computes it asynchronously, so the PR classifies normally until a later scan can prove the conflict (see the UNKNOWN-pending bullet above for the merge-ready poll/freeze that keeps this from oscillating).
   A conflicting PR that would otherwise route to `merge-ready` or `review-needed` becomes waiting-on-contributor `needs-rebase`, which is intentionally absent from `NEEDS_MAINTAINER`.
   This never rewrites `needs-ci-approval`: fork CI approval is independent of whether the eventual merge would conflict, and issue triage is unrelated.
   On the `ok:true` scan path, `build_repo` posts a contributor nudge under `FLEET_TOKEN` for non-owner/non-maintainer/non-bot `needs-rebase` PRs.
@@ -931,7 +946,7 @@ Run the unit tests:
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
-- `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and UNKNOWN-mergeable hardening (`_settle_mergeable` first-conclusive/fail-open, `_resolve_pr_bucket` re-read catching CONFLICTING -> needs-rebase, demoting never-proven-mergeable to review-needed, no wasteful re-read for a known-MERGEABLE PR, plus `build_repo` integration for all four).
+- `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and the UNKNOWN-mergeability policy (`_settle_mergeable` poll-first-conclusive/fail-open, `_resolve_pr_bucket` polling an explicit `UNKNOWN` and returning `needs-rebase` on settled CONFLICTING / `merge-ready` on settled MERGEABLE / `MERGEABILITY_PENDING` when it never settles, no poll for a known-MERGEABLE PR, plus `build_repo` integration: UNKNOWN->CONFLICTING nudges with no card, UNKNOWN->MERGEABLE emits a merge-ready card, unsettled UNKNOWN emits no item and lands in `indeterminate_pr_numbers` with no nudge, and the #111 acceptance that a statically-conflicting PR never enters the worklist across readable-CONFLICTING and post-base-push-UNKNOWN scans). The reconcile freeze of an `indeterminate_pr_numbers` card (no close, no refresh) and the unchanged non-indeterminate soft-close live in `tests/test_reconcile.py`.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.
