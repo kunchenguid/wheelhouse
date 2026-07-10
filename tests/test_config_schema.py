@@ -17,6 +17,8 @@ Run: python tests/test_config_schema.py
 import os
 import sys
 
+import yaml
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import wheelhouse_core as core  # noqa: E402
@@ -37,17 +39,32 @@ def test_real_config_loads():
     check("fleet is non-empty", len(cfg["repos"]) > 0)
 
 
+def raw_repo_entries():
+    with open(core.config_path()) as f:
+        raw = yaml.safe_load(f) or {}
+    entries = raw.get("repos")
+    check("raw repos is a list", isinstance(entries, list))
+    return entries if isinstance(entries, list) else []
+
+
 def test_every_repo_entry_is_well_formed():
     repos = core.load_config()["repos"]
-    for name, entry in repos.items():
-        # name is the mapping key AND echoed on the entry; both non-empty str.
-        check("repo key is a non-empty str: %r" % (name,),
-              isinstance(name, str) and bool(name.strip()))
-        check("%s: name field matches its key" % name, entry.get("name") == name)
+    for index, entry in enumerate(raw_repo_entries()):
+        label = "repos[%d]" % index
+        check("%s: entry is a mapping" % label, isinstance(entry, dict))
+        if not isinstance(entry, dict):
+            continue
+
+        name = entry.get("name")
+        valid_name = isinstance(name, str) and bool(name.strip())
+        check("%s: name is a non-empty str" % label, valid_name)
+        if valid_name:
+            check("%s: loader preserves the entry" % label,
+                  repos.get(name) == entry)
         # compliance_check is either absent/null (no gate) or a non-empty string
         # naming an exact required check. Never an empty string or other type.
         comp = entry.get("compliance_check")
-        check("%s: compliance_check is None or a non-empty str" % name,
+        check("%s: compliance_check is None or a non-empty str" % label,
               comp is None or (isinstance(comp, str) and bool(comp.strip())))
         # test_check_patterns, when present, is a list of non-empty strings.
         pats = entry.get("test_check_patterns")
@@ -56,11 +73,11 @@ def test_every_repo_entry_is_well_formed():
             or (isinstance(pats, list)
                 and all(isinstance(p, str) and bool(p) for p in pats))
         )
-        check("%s: test_check_patterns is a list of non-empty strs (or unset)" % name,
+        check("%s: test_check_patterns is a list of non-empty strs (or unset)" % label,
               ok_pats)
         # merge_method, when present, is one of the methods the executor accepts.
         mm = entry.get("merge_method")
-        check("%s: merge_method is unset or squash|merge|rebase" % name,
+        check("%s: merge_method is unset or squash|merge|rebase" % label,
               mm is None or mm in ("squash", "merge", "rebase"))
 
 
@@ -68,13 +85,16 @@ def test_repo_names_are_unique():
     # load_config keys by name, so a duplicate name would silently drop an entry.
     # Re-read the raw list to prove the file itself has no dup that the mapping
     # would mask.
-    import yaml
-
-    with open(core.config_path()) as f:
-        raw = yaml.safe_load(f) or {}
-    names = [r["name"] for r in (raw.get("repos") or []) if isinstance(r, dict) and r.get("name")]
+    entries = raw_repo_entries()
+    names = [
+        entry["name"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("name"), str)
+        and entry["name"].strip()
+    ]
     check("no duplicate repo names in the file", len(names) == len(set(names)))
-    check("mapping keeps every listed repo", len(names) == len(core.load_config()["repos"]))
+    check("mapping keeps every raw repo entry", len(entries) == len(core.load_config()["repos"]))
 
 
 def main():
