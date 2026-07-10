@@ -754,7 +754,14 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False):
     return node
 
 
-def _run_build_repo(first_prs, *, pr_pages=None, pr_page_raises=False, mergeable_reads=None):
+def _run_build_repo(
+    first_prs,
+    *,
+    pr_pages=None,
+    pr_page_raises=False,
+    mergeable_reads=None,
+    settlement_events=None,
+):
     repo_cfg = {"name": "demo", "compliance_check": "Gate", "test_check_patterns": ["test"]}
     posts = []
 
@@ -781,6 +788,8 @@ def _run_build_repo(first_prs, *, pr_pages=None, pr_page_raises=False, mergeable
     reads = list(mergeable_reads or [])
 
     def fake_mergeable(owner, name, num):
+        if settlement_events is not None:
+            settlement_events.append(("read", num))
         return reads.pop(0) if reads else "UNKNOWN"
 
     def fake_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
@@ -804,7 +813,10 @@ def _run_build_repo(first_prs, *, pr_pages=None, pr_page_raises=False, mergeable
     core.gh_graphql_pr_mergeable = fake_mergeable
     core.gh_rest = fake_rest
     core.load_config = lambda: {"repos": {"demo": repo_cfg}, "maintainer": ""}
-    core._sleep = lambda d: None
+    if settlement_events is None:
+        core._sleep = lambda d: None
+    else:
+        core._sleep = lambda d: settlement_events.append(("sleep", d))
     os.environ["OWNER"] = "owner"
     os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
     err = io.StringIO()
@@ -903,6 +915,33 @@ def test_build_repo_unknown_mergeable_unsettled_freezes():
     check("build-unknown-frozen: repo scan stays ok", result["ok"] is True)
 
 
+def test_build_repo_settles_unknown_prs_in_rounds():
+    first = {
+        "totalCount": 2,
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [
+            _full_pr(53, mergeable="UNKNOWN"),
+            _full_pr(54, mergeable="UNKNOWN"),
+        ],
+    }
+    events = []
+    result, items, _ = _run_build_repo(
+        first,
+        mergeable_reads=["UNKNOWN", "UNKNOWN", "MERGEABLE", "MERGEABLE"],
+        settlement_events=events,
+    )
+    first_sleep = next(i for i, event in enumerate(events) if event[0] == "sleep")
+    check(
+        "build-unknown-rounds: every first read precedes the first backoff",
+        events[:first_sleep] == [("read", 53), ("read", 54)],
+    )
+    check(
+        "build-unknown-rounds: settled PRs retain their worklist cards",
+        result["indeterminate_pr_numbers"] == []
+        and [item["number"] for item in items] == [53, 54],
+    )
+
+
 def test_build_repo_static_conflict_never_enters_worklist():
     # #111 acceptance: a statically CONFLICTING PR classifies needs-rebase on
     # every readable scan and NEVER emits a worklist item (so it can never mint a
@@ -963,6 +1002,7 @@ def main():
     test_build_repo_unknown_mergeable_conflict_nudges_no_card()
     test_build_repo_unknown_mergeable_settles_mergeable_card()
     test_build_repo_unknown_mergeable_unsettled_freezes()
+    test_build_repo_settles_unknown_prs_in_rounds()
     test_build_repo_static_conflict_never_enters_worklist()
     print()
     if _failures:

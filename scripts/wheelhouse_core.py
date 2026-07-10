@@ -823,33 +823,43 @@ MERGEABILITY_PENDING = "mergeability-pending"
 MERGEABLE_SETTLE_READS = 4
 MERGEABLE_SETTLE_BASE = 1.5  # seconds; backoff grows 1.5 -> 3 -> 6 (capped)
 MERGEABLE_SETTLE_CAP = 6.0
+_MERGEABLE_SETTLEMENT_UNSET = object()
+
+
+def _settle_mergeables(owner, name, numbers):
+    values = {number: None for number in dict.fromkeys(numbers)}
+    pending = list(values)
+    for i in range(MERGEABLE_SETTLE_READS):
+        next_round = []
+        for number in pending:
+            try:
+                value = gh_graphql_pr_mergeable(owner, name, number)
+            except Exception:
+                continue
+            values[number] = value
+            if not _mergeable_is_conclusive(value):
+                next_round.append(number)
+        pending = next_round
+        if pending and i + 1 < MERGEABLE_SETTLE_READS:
+            _sleep(min(MERGEABLE_SETTLE_BASE * (2 ** i), MERGEABLE_SETTLE_CAP))
+    return values
 
 
 def _settle_mergeable(owner, name, number):
-    """Poll one PR's `mergeable` with short backoff until it resolves.
-
-    The first single-PR read TRIGGERS GitHub's lazy recompute; subsequent reads
-    (spaced by exponential backoff) CATCH the settled value. Returns the first
-    conclusive value (MERGEABLE / CONFLICTING), or the last non-conclusive value
-    seen (typically UNKNOWN/None) if it never settles within the budget. Fails
-    open (returns the last value, possibly None) on read error - the caller
-    treats a non-conclusive result as still-pending and freezes the PR rather
-    than flipping its worklist membership."""
-    last = None
-    for i in range(MERGEABLE_SETTLE_READS):
-        try:
-            value = gh_graphql_pr_mergeable(owner, name, number)
-        except Exception:
-            return last
-        if _mergeable_is_conclusive(value):
-            return value
-        last = value
-        if i + 1 < MERGEABLE_SETTLE_READS:
-            _sleep(min(MERGEABLE_SETTLE_BASE * (2 ** i), MERGEABLE_SETTLE_CAP))
-    return last
+    return _settle_mergeables(owner, name, [number])[number]
 
 
-def _resolve_pr_bucket(owner, name, pr, draft, comp, tests, ci, cross_repo):
+def _resolve_pr_bucket(
+    owner,
+    name,
+    pr,
+    draft,
+    comp,
+    tests,
+    ci,
+    cross_repo,
+    settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET,
+):
     """Classify a PR, treating an UNKNOWN mergeable as an expected pending state.
 
     `classify` fails open to `merge-ready` when mergeability is UNKNOWN/missing.
@@ -871,7 +881,11 @@ def _resolve_pr_bucket(owner, name, pr, draft, comp, tests, ci, cross_repo):
     # explicit UNKNOWN is polled - a missing value keeps classify's fail-open.
     if bucket != "merge-ready" or not _mergeable_is_unknown(mergeable):
         return bucket
-    settled = _settle_mergeable(owner, name, pr["number"])
+    settled = (
+        _settle_mergeable(owner, name, pr["number"])
+        if settled_mergeable is _MERGEABLE_SETTLEMENT_UNSET
+        else settled_mergeable
+    )
     if _mergeable_is_conclusive(settled):
         return classify(draft, comp, tests, ci, cross_repo, settled)
     return MERGEABILITY_PENDING
@@ -2429,13 +2443,32 @@ def build_repo(
     enriched = []
     closing_scan_complete = True
     closing_scan_warning = ""
+    pr_contexts = []
+    settle_numbers = []
     for pr in prs:
         author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
+        bucket = classify(
+            pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
+        )
+        pr_contexts.append((pr, author, comp, tests, ci, cross_repo))
+        if bucket == "merge-ready" and _mergeable_is_unknown(pr.get("mergeable")):
+            settle_numbers.append(pr["number"])
+
+    settled_mergeables = _settle_mergeables(owner, name, settle_numbers)
+    for pr, author, comp, tests, ci, cross_repo in pr_contexts:
         bucket = _resolve_pr_bucket(
-            owner, name, pr, pr["isDraft"], comp, tests, ci, cross_repo
+            owner,
+            name,
+            pr,
+            pr["isDraft"],
+            comp,
+            tests,
+            ci,
+            cross_repo,
+            settled_mergeables.get(pr["number"], _MERGEABLE_SETTLEMENT_UNSET),
         )
         author_excluded = _author_excluded_from_queue(author, maintainer_logins)
         try:
