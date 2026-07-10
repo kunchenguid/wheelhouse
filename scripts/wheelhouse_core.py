@@ -1570,6 +1570,69 @@ def _read_pr_user_content_edits(slug, number):
         seen_cursors.add(cursor)
 
 
+def _authoritative_review_submitted_at(slug, number, review_id):
+    """Re-read one PR review by id to recover its authoritative `submitted_at`.
+
+    The list endpoints occasionally omit a usable timestamp on a review (and on
+    the `reviewed` timeline event that mirrors it). Re-reading the single review
+    by id is the same documented fallback `apply_decision.do_request_changes`
+    already uses when arming. Returns the recovered ISO timestamp, or None so the
+    caller fails open rather than crashing the whole scan on one missing field.
+    """
+    try:
+        review = gh_rest("/repos/%s/pulls/%s/reviews/%s" % (slug, number, review_id))
+    except Exception:
+        return None
+    if not isinstance(review, dict):
+        return None
+    submitted_at = review.get("submitted_at")
+    return submitted_at if str(submitted_at or "").strip() else None
+
+
+def _backfill_missing_review_times(slug, number, reviews, timeline):
+    """Recover a usable timestamp for any review or `reviewed` timeline event that
+    lacks one, via re-read-by-id, so a provable ask is never discarded over one
+    missing field and the review's time is still attributed to the target's
+    activity. Mutates the dicts in place; every recovery is best-effort and fails
+    open (a still-missing timestamp is handled by the downstream fail-open
+    checks)."""
+    reread_cache = {}
+
+    def reread(review_id):
+        key = str(review_id)
+        if key not in reread_cache:
+            reread_cache[key] = _authoritative_review_submitted_at(
+                slug, number, review_id
+            )
+        return reread_cache[key]
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        if _item_time(review, "submitted_at", "created_at", "updated_at") is not None:
+            continue
+        review_id = review.get("id")
+        if review_id is None:
+            continue
+        recovered = reread(review_id)
+        if recovered:
+            review["submitted_at"] = recovered
+
+    for event in timeline:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event") or "") != "reviewed":
+            continue
+        if _timeline_event_time(event, "reviewed") is not None:
+            continue
+        review_id = event.get("id")
+        if review_id is None:
+            continue
+        recovered = reread(review_id)
+        if recovered:
+            event["submitted_at"] = recovered
+
+
 def _read_pr_cleanup_state(slug, number):
     issue = gh_rest("/repos/%s/issues/%s" % (slug, number))
     pr = gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -1585,6 +1648,9 @@ def _read_pr_cleanup_state(slug, number):
     timeline = _read_paginated_list(
         "/repos/%s/issues/%s/timeline?per_page=100" % (slug, number)
     )
+    # Recover any review/`reviewed`-event timestamp the list endpoints dropped so
+    # a provable ask isn't discarded and the review's time is attributable.
+    _backfill_missing_review_times(slug, number, reviews, timeline)
     body_edits = _read_pr_user_content_edits(slug, number)
     return {
         "issue": issue,
@@ -1816,7 +1882,14 @@ def _commit_event_time(event):
 def _timeline_event_time(event, event_name):
     if event_name == "committed":
         return _commit_event_time(event)
-    return _item_time(event, "created_at")
+    # A `reviewed` timeline event carries its timestamp in `submitted_at`, not
+    # `created_at` (GitHub's timeline shape). Reading only `created_at` made every
+    # PR with a review fail open as "reviewed event missing timestamp", so the
+    # already-nudged backlog never reached the reminder-then-close clock. Read
+    # both keys so a review recorded in the timeline is never discarded and its
+    # time still feeds the attributable-activity set; every other event type only
+    # carries `created_at`, so the extra key is a harmless fallback.
+    return _item_time(event, "created_at", "submitted_at")
 
 
 def _timeline_event_authors(event, event_name):

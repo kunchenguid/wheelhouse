@@ -6,6 +6,7 @@ Run: python tests/test_pending_contributor_cleanup.py
 """
 import contextlib
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -74,6 +75,14 @@ def timeline_event(event, when, actor=CONTRIBUTOR):
     return {"event": event, "created_at": when, "actor": actor}
 
 
+def reviewed_event(rid, when, user=CONTRIBUTOR, state="changes_requested"):
+    # A GitHub `reviewed` timeline event carries `submitted_at`, not `created_at`.
+    ev = {"event": "reviewed", "id": rid, "user": user, "state": state}
+    if when is not None:
+        ev["submitted_at"] = when
+    return ev
+
+
 def commit_event(when, author=CONTRIBUTOR, committer=None):
     event = {"event": "committed", "author": author}
     if when is not None:
@@ -140,6 +149,8 @@ class FakeGitHub:
         patch_error=False,
         timeline_error=False,
         body_edits_error=False,
+        review_rereads=None,
+        reread_error=False,
     ):
         self.issue = issue_obj or issue([core.PENDING_CONTRIBUTOR_LABEL])
         self.pr = pr_obj or pr()
@@ -152,6 +163,8 @@ class FakeGitHub:
         self.patch_error = patch_error
         self.timeline_error = timeline_error
         self.body_edits_error = body_edits_error
+        self.review_rereads = dict(review_rereads or {})
+        self.reread_error = reread_error
         self.calls = []
         self._fill_target_updated_at()
 
@@ -222,6 +235,12 @@ class FakeGitHub:
             return [self.comments] if slurp else self.comments
         if path.endswith("/pulls/7/reviews?per_page=100"):
             return [self.reviews] if slurp else self.reviews
+        m = re.search(r"/pulls/7/reviews/(\d+)$", path)
+        if m and method is None:
+            if self.reread_error:
+                raise RuntimeError("review re-read failed")
+            rid = int(m.group(1))
+            return self.review_rereads.get(rid, {"id": rid})
         if path.endswith("/pulls/7/comments?per_page=100"):
             return [self.review_comments] if slurp else self.review_comments
         if path.endswith("/issues/7/timeline?per_page=100"):
@@ -869,6 +888,184 @@ def test_ci_approval_and_disabled_cleanup_are_out_of_scope():
           fake.calls == [])
 
 
+def test_reviewed_timeline_event_uses_submitted_at():
+    # A `reviewed` timeline event carries `submitted_at`, not `created_at`.
+    ev = reviewed_event(555, ts(2), user=MAINTAINER)
+    check("reviewed event time read from submitted_at",
+          core._timeline_event_time(ev, "reviewed") == core._parse_time(ts(2)))
+    check("non-reviewed event time still read from created_at",
+          core._timeline_event_time(timeline_event("labeled", ts(3)), "labeled")
+          == core._parse_time(ts(3)))
+
+    # Reproduction of the observed "reviewed event missing timestamp" fail-open:
+    # a maintainer review recorded in the timeline must not block the close.
+    asked = core._parse_time(ts())
+    state = {
+        "issue": {"state": "open", "updated_at": ts(2)},
+        "pr": {"state": "open", "updated_at": ts(2)},
+        "comments": [],
+        "reviews": [review(555, ts(2), user=MAINTAINER)],
+        "review_comments": [],
+        "timeline": [reviewed_event(555, ts(2), user=MAINTAINER)],
+        "body_edits": [],
+    }
+    check("reviewed maintainer event no longer raises missing-timestamp",
+          core._has_qualifying_contributor_activity(state, asked, {"owner", "co-maintainer"})
+          is False)
+
+    # A contributor review in the timeline is still detected as activity.
+    state_contrib = dict(state)
+    state_contrib["reviews"] = [review(556, ts(2), user=CONTRIBUTOR)]
+    state_contrib["timeline"] = [reviewed_event(556, ts(2), user=CONTRIBUTOR)]
+    check("reviewed contributor event counts as qualifying activity",
+          core._has_qualifying_contributor_activity(
+              state_contrib, asked, {"owner", "co-maintainer"}) is True)
+
+
+def test_reviewed_event_missing_timestamp_recovered_by_reread():
+    # A nudged backlog PR whose maintainer review carries no usable timestamp in
+    # either the reviews list or the timeline: the authoritative time is
+    # recovered by re-reading the review by id, so the provable ask is not
+    # discarded over one missing field.
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[{"id": 555, "state": "CHANGES_REQUESTED", "user": MAINTAINER}],
+        timeline=[reviewed_event(555, None, user=MAINTAINER)],
+        review_rereads={555: {"id": 555, "submitted_at": ts(2)}},
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("reread: recovered review timestamp lets close proceed", closed == {7})
+    check("reread: review re-read was issued exactly once",
+          sum(1 for c in fake.calls if re.search(r"/pulls/7/reviews/555$", c["path"]))
+          == 1)
+
+
+def test_reviewed_event_reread_failure_fails_open():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[{"id": 555, "state": "CHANGES_REQUESTED", "user": MAINTAINER}],
+        timeline=[reviewed_event(555, None, user=MAINTAINER)],
+        reread_error=True,
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("reread: an unreadable review timestamp fails open (no close)",
+          closed == set())
+
+
+def test_unattributable_update_from_review_becomes_attributable():
+    # Reproduction of "issue updated after ask without attributable activity":
+    # the target updated_at reflects a maintainer review whose time, once read,
+    # attributes the update so the clock is not reset.
+    asked = core._parse_time(ts())
+    state = {
+        "issue": {"state": "open", "updated_at": ts(2)},
+        "pr": {"state": "open", "updated_at": ts(2)},
+        "comments": [],
+        "reviews": [review(555, ts(2), user=MAINTAINER)],
+        "review_comments": [],
+        "timeline": [reviewed_event(555, ts(2), user=MAINTAINER)],
+        "body_edits": [],
+    }
+    # No raise => the update is attributable and this is not qualifying activity.
+    check("update from a maintainer review is attributable, not fail-open",
+          core._has_qualifying_contributor_activity(
+              state, asked, {"owner", "co-maintainer"}) is False)
+
+    # A genuinely unexplained target update still fails open (safety preserved).
+    unexplained = dict(state)
+    unexplained["issue"] = {"state": "open", "updated_at": ts(5)}
+    unexplained["pr"] = {"state": "open", "updated_at": ts(5)}
+    raised = False
+    try:
+        core._has_qualifying_contributor_activity(
+            unexplained, asked, {"owner", "co-maintainer"})
+    except RuntimeError:
+        raised = True
+    check("a truly unattributable update still fails open", raised)
+
+
+def test_widened_backlog_nudged_pr_reminds_then_closes():
+    # The already-nudged backlog: an un-armed (no pending marker, no pending
+    # label) conflicting fork PR that a maintainer once reviewed. Before the fix
+    # the maintainer review blocked it forever; now it enters the two-phase
+    # reminder-then-close lifecycle.
+    marker = core._rebase_nudge_marker("sha1")
+    reviewed = reviewed_event(555, ts(2), user=MAINTAINER)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[comment("please rebase\n\n" + marker, ts(), OWNER, 201)],
+        reviews=[review(555, ts(2), user=MAINTAINER)],
+        timeline=[reviewed],
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("widen: reviewed backlog nudge reminds first (two-phase)", closed == set())
+    check("widen: reminder arms pending label for the later close",
+          core.PENDING_CONTRIBUTOR_LABEL in labels)
+
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[review(555, ts(2), user=MAINTAINER)],
+        timeline=[reviewed_event(555, ts(2), user=MAINTAINER)],
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("widen: reviewed backlog nudge closes on the later scan", closed == {7})
+
+
+def test_widened_backlog_respects_keep_open():
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([core.PENDING_CONTRIBUTOR_KEEP_OPEN_LABEL]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[review(555, ts(2), user=MAINTAINER)],
+        timeline=[reviewed_event(555, ts(2), user=MAINTAINER)],
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("widen: keep-open opt-out blocks the widened backlog close",
+          closed == set())
+
+
+def test_widened_backlog_contributor_activity_fails_open():
+    # A contributor pushed/commented after the ask on a widened-set PR: the clock
+    # resets, it must not close (uncertainty / real activity refuses to close).
+    marker = core._rebase_nudge_marker("sha1")
+    legacy_record = rebase_record(source_id=201)
+    fake = FakeGitHub(
+        issue_obj=issue([]),
+        comments=[
+            comment("please rebase\n\n" + marker, ts(), OWNER, 201),
+            comment("still working on it", ts(3), CONTRIBUTOR, 9),
+            reminder_comment(legacy_record),
+        ],
+        reviews=[review(555, ts(2), user=MAINTAINER)],
+        timeline=[reviewed_event(555, ts(2), user=MAINTAINER)],
+    )
+    closed = run(fake, enriched_pr(labels=[], bucket="needs-rebase"), now_days=14)
+    check("widen: contributor follow-up on a nudged PR does not close",
+          closed == set())
+
+
 def main():
     test_config_defaults_off_and_per_repo_override()
     test_no_action_before_reminder_threshold()
@@ -900,6 +1097,13 @@ def main():
     test_truncated_scan_labels_fall_back_to_target_label_read()
     test_non_arming_signals_do_not_enter_cleanup()
     test_ci_approval_and_disabled_cleanup_are_out_of_scope()
+    test_reviewed_timeline_event_uses_submitted_at()
+    test_reviewed_event_missing_timestamp_recovered_by_reread()
+    test_reviewed_event_reread_failure_fails_open()
+    test_unattributable_update_from_review_becomes_attributable()
+    test_widened_backlog_nudged_pr_reminds_then_closes()
+    test_widened_backlog_respects_keep_open()
+    test_widened_backlog_contributor_activity_fails_open()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
