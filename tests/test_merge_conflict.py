@@ -4,6 +4,7 @@ Unit-exercise merge-conflict routing and contributor nudges with NO network.
 
 Run: python tests/test_merge_conflict.py
 """
+
 import io
 import json
 import os
@@ -12,7 +13,9 @@ import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+)
 import reconcile  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
@@ -280,8 +283,7 @@ def card(number=91, target=42):
 def run_reconcile(scan, cards, current_cards=None):
     calls = {"upsert": [], "close": []}
     current_by_number = {
-        c["number"]: c
-        for c in (cards if current_cards is None else current_cards)
+        c["number"]: c for c in (cards if current_cards is None else current_cards)
     }
 
     def fake_upsert(item, existing=None, has_token=False):
@@ -341,8 +343,7 @@ def test_classify_conflict_routes_pr_review_to_rebase():
 def test_unknown_mergeability_fails_open():
     check(
         "classify: UNKNOWN mergeability keeps merge-ready route",
-        core.classify(False, "pass", "green", True, False, "UNKNOWN")
-        == "merge-ready",
+        core.classify(False, "pass", "green", True, False, "UNKNOWN") == "merge-ready",
     )
     check(
         "classify: null mergeability keeps merge-ready route",
@@ -374,12 +375,18 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     result1, items1, calls1 = run_build_repo([pr], comments_by_pr=comments)
     result2, items2, calls2 = run_build_repo([pr], comments_by_pr=comments)
     check("nudge: conflicted PR keeps repo scan ok", result1["ok"] is True)
-    check("nudge: conflicted PR remains open in scan state", result1["open_pr_numbers"] == [42])
+    check(
+        "nudge: conflicted PR remains open in scan state",
+        result1["open_pr_numbers"] == [42],
+    )
     check("nudge: conflicted PR emits no decision card", items1 == [] and items2 == [])
     check("nudge: first scan posts one comment", len(calls1["posts"]) == 1)
     check("nudge: second scan posts no duplicate", calls2["posts"] == [])
     body = calls1["posts"][0]["body"] if calls1["posts"] else ""
-    check("nudge: body names the rebase action", "rebase" in body and "resolve the conflict" in body)
+    check(
+        "nudge: body names the rebase action",
+        "rebase" in body and "resolve the conflict" in body,
+    )
     check("nudge: body mentions checks re-run after fix", "checks will re-run" in body)
     check("nudge: body has no internal product name", "Wheelhouse" not in body)
     check(
@@ -389,11 +396,19 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         and "stepping out" not in body
         and "triage" not in body.lower(),
     )
-    check("nudge: body carries a head-specific marker", core._rebase_nudge_marker("sha42") in body)
-    check("nudge: comment fetch uses pagination slurp", calls1["fetches"] and calls1["fetches"][0]["slurp"] is True)
+    check(
+        "nudge: body carries a head-specific marker",
+        core._rebase_nudge_marker("sha42") in body,
+    )
+    check(
+        "nudge: comment fetch uses pagination slurp",
+        calls1["fetches"] and calls1["fetches"][0]["slurp"] is True,
+    )
     check("nudge: marker persists in stored comments", len(comments.get(42, [])) == 1)
-    check("nudge: cleanup state is not armed while cleanup disabled",
-          calls1["patches"] == [] and calls1["labels"] == [])
+    check(
+        "nudge: cleanup state is not armed while cleanup disabled",
+        calls1["patches"] == [] and calls1["labels"] == [],
+    )
     check("nudge: second scan still ok", result2["ok"] is True)
 
     enabled_comments = {}
@@ -401,13 +416,17 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         [pr], comments_by_pr=enabled_comments, pending_contributor_cleanup=True
     )
     patch_bodies = [p["body"] for p in enabled_calls["patches"]]
-    check("nudge: cleanup marker is armed when cleanup enabled",
-          any(core.PENDING_CONTRIBUTOR_MARKER_PREFIX in body for body in patch_bodies))
-    check("nudge: pending contributor label is added when cleanup enabled",
-          any(
-              (item["fields"] or {}).get("labels[]") == core.PENDING_CONTRIBUTOR_LABEL
-              for item in enabled_calls["labels"]
-          ))
+    check(
+        "nudge: cleanup marker is armed when cleanup enabled",
+        any(core.PENDING_CONTRIBUTOR_MARKER_PREFIX in body for body in patch_bodies),
+    )
+    check(
+        "nudge: pending contributor label is added when cleanup enabled",
+        any(
+            (item["fields"] or {}).get("labels[]") == core.PENDING_CONTRIBUTOR_LABEL
+            for item in enabled_calls["labels"]
+        ),
+    )
 
     _, _, target_disabled_calls = run_build_repo(
         [pr],
@@ -415,8 +434,11 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         pending_contributor_cleanup=True,
         pending_contributor_cleanup_targets=["issue"],
     )
-    check("nudge: cleanup state is not armed when PR target disabled",
-          target_disabled_calls["patches"] == [] and target_disabled_calls["labels"] == [])
+    check(
+        "nudge: cleanup state is not armed when PR target disabled",
+        target_disabled_calls["patches"] == []
+        and target_disabled_calls["labels"] == [],
+    )
 
     _, _, empty_target_calls = run_build_repo(
         [pr],
@@ -424,8 +446,10 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         pending_contributor_cleanup=True,
         pending_contributor_cleanup_targets=[],
     )
-    check("nudge: cleanup state is not armed when cleanup targets are empty",
-          empty_target_calls["patches"] == [] and empty_target_calls["labels"] == [])
+    check(
+        "nudge: cleanup state is not armed when cleanup targets are empty",
+        empty_target_calls["patches"] == [] and empty_target_calls["labels"] == [],
+    )
 
     _, _, null_target_calls = run_build_repo(
         [pr],
@@ -433,8 +457,10 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         pending_contributor_cleanup=True,
         pending_contributor_cleanup_targets=None,
     )
-    check("nudge: cleanup state is not armed when cleanup targets are null",
-          null_target_calls["patches"] == [] and null_target_calls["labels"] == [])
+    check(
+        "nudge: cleanup state is not armed when cleanup targets are null",
+        null_target_calls["patches"] == [] and null_target_calls["labels"] == [],
+    )
 
 
 def test_rebase_nudge_body_is_contributor_plain_language():
@@ -442,10 +468,18 @@ def test_rebase_nudge_body_is_contributor_plain_language():
     head = "abcdef0123456789deadbeef"
     body = core._rebase_nudge_body("demo", 42, head)
     marker = core._rebase_nudge_marker(head)
-    check("nudge-body: explains the merge conflict", "merge conflict" in body and "base branch" in body)
-    check("nudge-body: asks contributor to rebase/merge and push", "rebase" in body and "push" in body)
-    check("nudge-body: says checks re-run and PR is looked at again",
-          "checks will re-run" in body and "looked at again" in body)
+    check(
+        "nudge-body: explains the merge conflict",
+        "merge conflict" in body and "base branch" in body,
+    )
+    check(
+        "nudge-body: asks contributor to rebase/merge and push",
+        "rebase" in body and "push" in body,
+    )
+    check(
+        "nudge-body: says checks re-run and PR is looked at again",
+        "checks will re-run" in body and "looked at again" in body,
+    )
     check("nudge-body: no product name", "Wheelhouse" not in body)
     check(
         "nudge-body: no internal queue jargon",
@@ -456,8 +490,10 @@ def test_rebase_nudge_body_is_contributor_plain_language():
         and "triage" not in body.lower(),
     )
     check("nudge-body: hidden idempotence marker survives rewrite", marker in body)
-    check("nudge-body: marker is HTML-comment form",
-          body.rstrip().endswith(marker) and marker.startswith("<!-- "))
+    check(
+        "nudge-body: marker is HTML-comment form",
+        body.rstrip().endswith(marker) and marker.startswith("<!-- "),
+    )
 
 
 def test_untrusted_rebase_marker_does_not_suppress_nudge():
@@ -475,7 +511,9 @@ def test_untrusted_rebase_marker_does_not_suppress_nudge():
     result, items, calls = run_build_repo([pr], comments_by_pr=comments)
     check("nudge: untrusted marker keeps scan ok", result["ok"] is True)
     check("nudge: untrusted marker emits no card", items == [])
-    check("nudge: untrusted marker does not suppress real nudge", len(calls["posts"]) == 1)
+    check(
+        "nudge: untrusted marker does not suppress real nudge", len(calls["posts"]) == 1
+    )
 
 
 def test_nudge_skips_owner_and_bot_authors():
@@ -491,9 +529,7 @@ def test_nudge_skips_owner_and_bot_authors():
 
 
 def test_issue_triage_unaffected():
-    result, items, calls = run_build_repo(
-        [], [issue_node(70)], card_issues=True
-    )
+    result, items, calls = run_build_repo([], [issue_node(70)], card_issues=True)
     check("issue: repo scan stays ok", result["ok"] is True)
     check(
         "issue: issue-triage card still emits",
@@ -514,7 +550,10 @@ def test_reconcile_consumes_conflicted_card_that_left_worklist():
         "items": [],
     }
     calls = run_reconcile(scan, [card(number=91, target=42)])
-    check("reconcile: conflicted target outside worklist has no upsert", calls["upsert"] == [])
+    check(
+        "reconcile: conflicted target outside worklist has no upsert",
+        calls["upsert"] == [],
+    )
     check(
         "reconcile: conflicted target outside worklist closes stale card",
         len(calls["close"]) == 1 and calls["close"][0]["number"] == 91,
