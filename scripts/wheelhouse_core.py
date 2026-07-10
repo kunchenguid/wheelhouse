@@ -1075,6 +1075,15 @@ def _auto_merge_enabled(repo_cfg, global_default):
     return global_default is True if v is None else v is True
 
 
+def _default_branch_vision_sha(slug):
+    try:
+        data = gh_rest("/repos/%s/contents/VISION.md" % slug)
+    except RuntimeError:
+        return ""
+    sha = data.get("sha") if isinstance(data, dict) else ""
+    return str(sha or "") if isinstance(sha, str) else ""
+
+
 def _auto_triage_enabled(repo_cfg, global_default):
     """Effective auto_triage for one repo, mirroring auto_approve_ci.
 
@@ -2569,6 +2578,7 @@ def build_repo(
     pending_contributor_reminder_days=10,
     pending_contributor_cleanup_targets=_PENDING_CONTRIBUTOR_TARGETS_UNSET,
     ci_security_summary_cache=None,
+    auto_merge=False,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -2803,6 +2813,11 @@ def build_repo(
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
     triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
+    auto_merge_vision_sha = ""
+    if _auto_merge_enabled(repo_cfg, auto_merge) and any(
+        pr.get("bucket") == "merge-ready" for pr in enriched
+    ):
+        auto_merge_vision_sha = _default_branch_vision_sha(slug)
     default_posture = None
 
     items = []
@@ -2837,6 +2852,8 @@ def build_repo(
         }
         if kind == "pr-review":
             item["auto_triage"] = triage_enabled
+            item["base_sha"] = pr.get("base_sha") or ""
+            item["automerge_vision_sha"] = auto_merge_vision_sha
 
         if kind == "ci-approval":
             if pr.get("cross_repo") is not True:
@@ -5214,6 +5231,7 @@ def cmd_scan(only_repo=None, cards_path=None):
             cfg["pending_contributor_reminder_days"],
             cfg["pending_contributor_cleanup_targets"],
             summary_cache,
+            cfg["auto_merge"],
         )
         out_repos[name] = result
         items.extend(repo_items)

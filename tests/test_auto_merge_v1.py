@@ -181,6 +181,8 @@ class World:
         self.pr_seq = {}  # (slug, str(number)) -> [pr, ...]
         self.last_pr = {}
         self.files = {}  # (slug, str(number)) -> (files, ok, complete)
+        self.check_status = {}
+        self.check_status_seq = {}
         self.do_merge_calls = []
         self.card_token_reads = []
         self.merge_tokens = []
@@ -216,6 +218,13 @@ class World:
                 return self.files.get((slug, number), ([], True, True))
         return ([], False, False)
 
+    def live_check_status(self, owner, repo, number, head, repo_cfg):
+        key = (owner, repo, str(number), str(head))
+        sequence = self.check_status_seq.get(key)
+        if sequence:
+            return sequence.pop(0) if len(sequence) > 1 else sequence[0]
+        return self.check_status.get(key, (True, "comp=pass tests=green"))
+
     def do_merge(
         self, owner, repo, number, head, return_merge_commit=False, expected_base_sha=None
     ):
@@ -237,6 +246,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         "prior": am.has_prior_merged_pr,
         "live": am.live_pr,
         "compare": am.immutable_compare_files,
+        "checks": am.live_check_status,
         "domerge": apply_decision.do_merge,
         "get_card": render_card.get_card,
         "cfg": core.load_config,
@@ -251,6 +261,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
     )
     am.live_pr = world.live_pr
     am.immutable_compare_files = world.immutable_compare_files
+    am.live_check_status = world.live_check_status
     apply_decision.do_merge = world.do_merge
     core.load_config = lambda: {
         "auto_merge": world.global_auto_merge,
@@ -291,6 +302,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         am.has_prior_merged_pr = saved["prior"]
         am.live_pr = saved["live"]
         am.immutable_compare_files = saved["compare"]
+        am.live_check_status = saved["checks"]
         apply_decision.do_merge = saved["domerge"]
         render_card.get_card = saved["get_card"]
         core.load_config = saved["cfg"]
@@ -1345,6 +1357,82 @@ def test_G7_missing_default_card_token_holds():
     check("G7: missing default card token does not merge", not w.do_merge_calls)
 
 
+def test_G7_rechecks_configured_status_contexts():
+    w, items, cards = default_world(head="cs" * 20)
+    w.check_status[("owner", "fmt", "5", "cs" * 20)] = (
+        False,
+        "configured checks are comp=pass tests=fail",
+    )
+    payload, _ = run_act(w, items, cards)
+    check("G7: failed configured check before merge holds", not payload["merges"])
+    check("G7: failed configured check does not call merge", not w.do_merge_calls)
+
+
+def test_live_check_status_reads_current_configured_contexts():
+    saved = core._gh_graphql_data
+    calls = []
+    head = "a" * 40
+
+    def graphql(args):
+        calls.append(args)
+        return {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": head,
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "statusCheckRollup": {
+                                            "state": "FAILURE",
+                                            "contexts": {
+                                                "nodes": [
+                                                    {
+                                                        "__typename": "CheckRun",
+                                                        "name": "Gate",
+                                                        "conclusion": "SUCCESS",
+                                                        "status": "COMPLETED",
+                                                    },
+                                                    {
+                                                        "__typename": "CheckRun",
+                                                        "name": "test unit",
+                                                        "conclusion": "FAILURE",
+                                                        "status": "COMPLETED",
+                                                    },
+                                                ]
+                                            },
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+        }
+
+    core._gh_graphql_data = graphql
+    try:
+        ok, reason = am.live_check_status(
+            "owner",
+            "fmt",
+            5,
+            head,
+            {"compliance_check": "Gate", "test_check_patterns": ["test"]},
+        )
+        check(
+            "G7: live configured check read fails closed",
+            not ok and "tests=fail" in reason,
+        )
+        check(
+            "G7: live configured check read targets the exact PR",
+            calls and "number=5" in calls[0],
+        )
+    finally:
+        core._gh_graphql_data = saved
+
+
 def test_vision_is_rechecked_per_candidate_and_before_acting():
     w, items, cards = default_world(head="vv" * 20)
     w.vision_seq = {"fmt": [(True, "vsha"), (True, "new-vision")]}
@@ -1707,11 +1795,15 @@ def test_record_cli_resolves_card_and_appends_ledger():
     saved = {
         "ledger": am.append_to_ledger,
         "release": am.release_card_claim,
+        "pending": am.pending_audit_records,
+        "stage": am.stage_pending_audit,
         "get": render_card.get_card,
         "close": am._strict_audited_close_card,
     }
     am.append_to_ledger = lambda records: calls["ledger"].extend(records)
     am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
+    am.pending_audit_records = lambda: []
+    am.stage_pending_audit = lambda record: record
     render_card.get_card = lambda n: {"state": "OPEN", "labels": []}
     am._strict_audited_close_card = lambda n, msg, close_issue=True: calls["resolved"].append(
         (n, close_issue)
@@ -1730,8 +1822,64 @@ def test_record_cli_resolves_card_and_appends_ledger():
         os.unlink(tmp)
         am.append_to_ledger = saved["ledger"]
         am.release_card_claim = saved["release"]
+        am.pending_audit_records = saved["pending"]
+        am.stage_pending_audit = saved["stage"]
         render_card.get_card = saved["get"]
         am._strict_audited_close_card = saved["close"]
+
+
+def test_record_retains_and_retries_failed_audits_before_releasing_claims():
+    saved = {
+        "ledger": am.append_to_ledger,
+        "release": am.release_card_claim,
+        "pending": am.pending_audit_records,
+        "stage": am.stage_pending_audit,
+        "resolve": am.resolve_card,
+    }
+    pending = []
+    released = []
+    resolved = []
+    record = _merge_record()
+    try:
+        am.pending_audit_records = lambda: list(pending)
+
+        def stage(value):
+            pending[:] = [value]
+            return value
+
+        am.stage_pending_audit = stage
+        am.append_to_ledger = lambda records: (_ for _ in ()).throw(
+            RuntimeError("HTTP 422 ledger write failed")
+        )
+        am.resolve_card = lambda value: resolved.append(value)
+        am.release_card_claim = lambda value: released.append(value["card_issue"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "results.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"merges": [record], "releases": [record]}, f)
+            failed = False
+            try:
+                am.cmd_record(path)
+            except RuntimeError:
+                failed = True
+            check(
+                "audit: failed ledger write retains the pending record and claim",
+                failed and pending == [record] and released == [] and resolved == [],
+            )
+            am.append_to_ledger = lambda records: None
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"merges": [], "releases": []}, f)
+            am.cmd_record(path)
+        check(
+            "audit: pending record retries before releasing its claim",
+            resolved == [record] and released == [record["card_issue"]],
+        )
+    finally:
+        am.append_to_ledger = saved["ledger"]
+        am.release_card_claim = saved["release"]
+        am.pending_audit_records = saved["pending"]
+        am.stage_pending_audit = saved["stage"]
+        am.resolve_card = saved["resolve"]
 
 
 def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():

@@ -917,6 +917,38 @@ def test_should_auto_triage_cache_and_gates():
     )
 
 
+def test_should_auto_triage_invalidates_base_and_vision_revisions():
+    it = item(base_sha="base-a", automerge_vision_sha="vision-a")
+    pure = labels("needs-decision", "kind:pr-review")
+    fresh = core.parse_state_block(
+        rc.body_with_triage_queued(rc.render(it)["body"], it)
+    )
+    check(
+        "cache: matching base and VISION revisions skip triage",
+        rc.should_auto_triage(it, fresh, pure, has_token=True) is False,
+    )
+    check(
+        "cache: changed base requeues triage for the same head",
+        rc.should_auto_triage(
+            item(base_sha="base-b", automerge_vision_sha="vision-a"),
+            fresh,
+            pure,
+            has_token=True,
+        )
+        is True,
+    )
+    check(
+        "cache: changed VISION requeues triage for the same head",
+        rc.should_auto_triage(
+            item(base_sha="base-a", automerge_vision_sha="vision-b"),
+            fresh,
+            pure,
+            has_token=True,
+        )
+        is True,
+    )
+
+
 def test_triage_queued_for_head_requires_matching_queued_attempt():
     head = "abc1234def"
     check(

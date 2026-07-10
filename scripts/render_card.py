@@ -501,7 +501,24 @@ def triage_fresh(item, state):
     not get re-run every hourly scan for the same revision.
     """
     revision = triage_revision(item)
-    return bool(revision and (state or {}).get("triaged_sha") == revision)
+    state = state or {}
+    if not revision or state.get("triaged_sha") != revision:
+        return False
+    if item.get("kind") != "pr-review":
+        return True
+    verdict = state.get("automerge_verdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    for item_field, state_field, verdict_field in (
+        ("base_sha", "triaged_base_sha", "base_sha"),
+        ("automerge_vision_sha", "triaged_vision_sha", "vision_sha"),
+    ):
+        expected = str(item.get(item_field) or "")
+        if not expected:
+            continue
+        actual = str(state.get(state_field) or verdict.get(verdict_field) or "")
+        if actual != expected:
+            return False
+    return True
 
 
 def triage_queued_for_head(state, revision):
@@ -939,6 +956,8 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     changed = False
     for key in (
         "triaged_sha",
+        "triaged_base_sha",
+        "triaged_vision_sha",
         "triage_status",
         "triage_error",
         "triage_recommendation",
@@ -955,11 +974,26 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
 
 
 def _state_with_triage(
-    state, revision, status, error=None, recommendation=None, automerge_verdict=None
+    state,
+    revision,
+    status,
+    error=None,
+    recommendation=None,
+    automerge_verdict=None,
+    base_sha="",
+    vision_sha="",
 ):
     new_state = dict(state or {})
     new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
+    if re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or "")):
+        new_state["triaged_base_sha"] = str(base_sha)
+    else:
+        new_state.pop("triaged_base_sha", None)
+    if str(vision_sha or ""):
+        new_state["triaged_vision_sha"] = str(vision_sha)
+    else:
+        new_state.pop("triaged_vision_sha", None)
     if error:
         new_state["triage_error"] = _clean_triage_text(error, limit=220)
     else:
@@ -994,7 +1028,13 @@ def body_with_triage_queued(body, item):
     elif state_revision(state, kind) != revision:
         return body
     clean = remove_triage_section(body)
-    new_state = _state_with_triage(state, revision, "queued")
+    new_state = _state_with_triage(
+        state,
+        revision,
+        "queued",
+        base_sha=item.get("base_sha", ""),
+        vision_sha=item.get("automerge_vision_sha", ""),
+    )
     new_state = _state_with_activity_reflected(
         new_state, item, allow_without_baseline=True
     )
@@ -1049,6 +1089,8 @@ def body_with_triage_result(
         None if normalized else error,
         recommendation=recommendation,
         automerge_verdict=automerge_verdict,
+        base_sha=base_sha,
+        vision_sha=vision_sha,
     )
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])

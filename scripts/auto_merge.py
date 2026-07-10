@@ -88,6 +88,7 @@ _audit_sleep = time.sleep
 LEDGER_MARKER = "wheelhouse-auto-merge-log"
 LEDGER_LABEL = "wheelhouse:auto-merge-log"
 LEDGER_TITLE = "Wheelhouse auto-merge log (automated)"
+AUDIT_PENDING_FIELD = "automerge_audit_pending"
 # Keep the stored history bounded so the ledger body cannot grow without limit.
 LEDGER_ENTRY_CAP = 200
 LEDGER_MAX_BODY_BYTES = 60000
@@ -95,6 +96,24 @@ _LEDGER_RE = re.compile(
     r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(LEDGER_MARKER), re.S
 )
 _GIT_OBJECT_ID_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+_LIVE_STATUS_GQL = """
+query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      headRefOid
+      commits(last:1) { nodes { commit { statusCheckRollup {
+        state
+        contexts(first:%d) { nodes {
+          __typename
+          ... on CheckRun { name conclusion status }
+          ... on StatusContext { context state }
+        }}
+      }}}}
+    }
+  }
+}
+""" % core.STATUS_CONTEXTS_PAGE_SIZE
 
 
 # --------------------------------------------------------------------------- #
@@ -284,6 +303,36 @@ def live_pr(slug, number):
         return core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
     except RuntimeError:
         return None
+
+
+def live_check_status(owner, repo, number, head_sha, repo_cfg):
+    try:
+        data = core._gh_graphql_data(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=" + _LIVE_STATUS_GQL,
+                "-f",
+                "owner=" + owner,
+                "-f",
+                "name=" + repo,
+                "-F",
+                "number=%s" % number,
+            ]
+        )
+        pr = data["data"]["repository"]["pullRequest"]
+        if not isinstance(pr, dict):
+            return (False, "could not re-read PR check status")
+        if str(pr.get("headRefOid") or "") != str(head_sha or ""):
+            return (False, "head moved while re-reading check status")
+        comp, tests, _, _ = core.check_status(pr, repo_cfg)
+    except (KeyError, TypeError, RuntimeError, ValueError) as error:
+        return (False, "could not re-read configured checks: %s" % str(error)[:160])
+    if comp not in ("pass", "n/a") or tests != "green":
+        return (False, "configured checks are comp=%s tests=%s" % (comp, tests))
+    return (True, "comp=%s tests=%s" % (comp, tests))
 
 
 def mergeable_clean(pr):
@@ -648,6 +697,24 @@ def _release_card_claim(number):
         )
 
 
+def _pending_audit_record(state, card_issue=None):
+    state = state if isinstance(state, dict) else {}
+    record = state.get(AUDIT_PENDING_FIELD)
+    if not isinstance(record, dict):
+        return None
+    if card_issue is not None and str(record.get("card_issue") or "") != str(card_issue):
+        return None
+    if str(record.get("repo") or "") != str(state.get("repo") or ""):
+        return None
+    if str(record.get("number") or "") != str(state.get("number") or ""):
+        return None
+    if str(record.get("head_sha") or "") != str(state.get("head_sha") or ""):
+        return None
+    if not _GIT_OBJECT_ID_RE.fullmatch(str(record.get("merge_commit") or "")):
+        return None
+    return record
+
+
 def recover_stale_card_claims(cards):
     recovered = []
     for entry in _card_index(cards).values():
@@ -655,6 +722,8 @@ def recover_stale_card_claims(cards):
             continue
         number = entry.get("issue")
         if not number:
+            continue
+        if _pending_audit_record(entry.get("state"), number):
             continue
         try:
             current = render_card.get_card(number)
@@ -668,6 +737,7 @@ def recover_stale_card_claims(cards):
                 current_entry
                 and render_card.issue_is_open(current)
                 and _card_is_claimed(current_entry.get("labels") or set())
+                and not _pending_audit_record(current_entry.get("state"), number)
             ):
                 _release_card_claim(number)
                 recovered.append(number)
@@ -856,7 +926,15 @@ def _read_card_with_card_token(number, card_token):
 
 
 def act_merge(
-    owner, repo, number, head_sha, vision_sha, base_sha, expected_card, card_token
+    owner,
+    repo,
+    number,
+    head_sha,
+    vision_sha,
+    base_sha,
+    expected_card,
+    card_token,
+    repo_cfg,
 ):
     """G7. Immediately re-read head SHA + mergeability + clean merge state, then
     call the existing do_merge (which does its own head re-check and runs on the
@@ -894,6 +972,11 @@ def act_merge(
     )
     if not card_ok:
         return ("held", "final card re-check: %s" % card_reason, "")
+    checks_ok, checks_reason = live_check_status(
+        owner, repo, number, head_sha, repo_cfg
+    )
+    if not checks_ok:
+        return ("held", "final re-check: %s" % checks_reason, "")
 
     message, terminal, merge_commit = apply_decision.do_merge(
         owner,
@@ -1009,6 +1092,7 @@ def act_on_scan(scan, cards):
                 result["base_sha"],
                 card_entry,
                 card_token,
+                repo_cfg,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
             outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")
@@ -1404,6 +1488,64 @@ def release_card_claim(record):
         )
 
 
+def stage_pending_audit(record):
+    card_issue = record.get("card_issue")
+    if not card_issue:
+        raise RuntimeError("auto-merge audit record has no card issue")
+    card = render_card.get_card(card_issue)
+    if not card or not render_card.issue_is_open(card):
+        raise RuntimeError("could not read open card #%s for pending audit" % card_issue)
+    state = core.parse_state_block(card.get("body") or "")
+    if not state:
+        raise RuntimeError("card #%s has no state for pending audit" % card_issue)
+    existing = _pending_audit_record(state, card_issue)
+    if existing:
+        if _ledger_entry_identity(existing) != _ledger_entry_identity(record):
+            raise RuntimeError("card #%s has a different pending audit" % card_issue)
+        return existing
+    new_state = dict(state)
+    new_state[AUDIT_PENDING_FIELD] = record
+    render_card._edit_issue_body(
+        card_issue,
+        render_card._replace_state_block(card.get("body") or "", new_state),
+    )
+    return record
+
+
+def pending_audit_records():
+    slug = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not slug or "/" not in slug:
+        return []
+    cards = core._flatten_paginated_comments(
+        core.gh_rest(
+            "repos/%s/issues?state=open&labels=%s&per_page=100"
+            % (slug, core.quote(AUTO_MERGE_CLAIM_LABEL)),
+            paginate=True,
+            slurp=True,
+        )
+    )
+    records = []
+    seen = set()
+    for card in cards:
+        if not isinstance(card, dict) or "pull_request" in card:
+            continue
+        labels = _card_label_names(card)
+        state = core.parse_state_block(card.get("body") or "") or {}
+        author = ((card.get("user") or {}).get("login") or card.get("author") or "")
+        if (
+            author != CARD_AUTOMATION_AUTHOR
+            or not _trusted_card({"author": author}, state, labels)
+            or not _card_is_claimed(labels)
+        ):
+            continue
+        record = _pending_audit_record(state, card.get("number"))
+        identity = _ledger_entry_identity(record)
+        if record and identity and identity not in seen:
+            records.append(record)
+            seen.add(identity)
+    return records
+
+
 def _fallback_claim_releases(path):
     claims = _load_json(path, [])
     if not isinstance(claims, list):
@@ -1428,27 +1570,69 @@ def cmd_record(results_path, validated_claims_path=None):
         releases = []
         if validated_claims_path:
             releases = _fallback_claim_releases(validated_claims_path)
-    if not records and not releases:
-        print("wheelhouse auto-merge record: no auto-merges to record")
-        return
     errors = []
     try:
-        append_to_ledger(records)
+        pending = pending_audit_records()
     except Exception as error:
+        pending = []
         errors.append(error)
+    protected_cards = {
+        record.get("card_issue")
+        for record in records
+        if isinstance(record, dict) and record.get("card_issue")
+    }
+    known = {
+        _ledger_entry_identity(record)
+        for record in pending
+        if _ledger_entry_identity(record)
+    }
+    staged = list(pending)
     for record in records:
+        if not isinstance(record, dict):
+            errors.append(RuntimeError("invalid auto-merge audit record"))
+            continue
+        identity = _ledger_entry_identity(record)
+        if not identity:
+            errors.append(RuntimeError("invalid auto-merge audit identity"))
+            continue
+        if identity in known:
+            continue
         try:
-            resolve_card(record)
+            staged.append(stage_pending_audit(record))
+            known.add(identity)
         except Exception as error:
             errors.append(error)
-        release_card_claim(record)
-    resolved_cards = {record.get("card_issue") for record in records}
+    if not staged and not releases:
+        if errors:
+            raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[0]
+        print("wheelhouse auto-merge record: no auto-merges to record")
+        return
+    ledger_written = not staged
+    if staged:
+        try:
+            append_to_ledger(staged)
+            ledger_written = True
+        except Exception as error:
+            errors.append(error)
+    resolved_cards = set()
+    if ledger_written:
+        for record in staged:
+            protected_cards.add(record.get("card_issue"))
+            try:
+                resolve_card(record)
+                resolved_cards.add(record.get("card_issue"))
+                release_card_claim(record)
+            except Exception as error:
+                errors.append(error)
     for record in releases:
-        if record.get("card_issue") not in resolved_cards:
+        if (
+            record.get("card_issue") not in resolved_cards
+            and record.get("card_issue") not in protected_cards
+        ):
             release_card_claim(record)
     if errors:
         raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[0]
-    print("wheelhouse auto-merge record: recorded %d auto-merge(s)" % len(records))
+    print("wheelhouse auto-merge record: recorded %d auto-merge(s)" % len(staged))
 
 
 # --------------------------------------------------------------------------- #
