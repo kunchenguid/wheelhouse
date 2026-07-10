@@ -687,6 +687,100 @@ def test_claim_rejects_changed_decision_card():
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
 
 
+def test_claim_rechecks_owner_selection_after_locking():
+    w, items, _ = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    current = dict(initial, state="OPEN")
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+    }
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: None
+
+    def edit(args, check=False):
+        if "--add-label" in args:
+            current["labels"] += [
+                {"name": "processing"},
+                {"name": am.AUTO_MERGE_CLAIM_LABEL},
+            ]
+            current["body"] += "\n- [x] Hold <!-- opt:hold -->"
+        elif "--remove-label" in args:
+            remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
+            current["labels"] = [label for label in current["labels"]
+                                 if label.get("name") not in remove]
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    render_card._gh = edit
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        claims = am.claim_cards({"items": items}, [initial])
+        labels = am._card_label_names(current)
+        check("claim: post-lock owner selection cancels the claim",
+              claims == [] and "processing" not in labels
+              and am.AUTO_MERGE_CLAIM_LABEL not in labels)
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
+def test_stale_claim_release_failure_is_recovered_on_next_scan():
+    stale = make_card(101, "fmt", 5, "st" * 20, automerge_verdict=ELIGIBLE_A)
+    current = dict(stale, state="OPEN")
+    saved = {"get": render_card.get_card, "gh": render_card._gh}
+    attempts = [0]
+    render_card.get_card = lambda number: current
+
+    def edit(args, check=False):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            return type("R", (), {"returncode": 1, "stderr": "transient failure"})()
+        remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
+        current["labels"] = [label for label in current["labels"]
+                             if label.get("name") not in remove]
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    render_card._gh = edit
+    try:
+        failed = False
+        try:
+            am._release_card_claim(101)
+        except RuntimeError:
+            failed = True
+        recovered = am.recover_stale_card_claims([stale])
+        labels = am._card_label_names(current)
+        check("claim: release failure is surfaced", failed)
+        check("claim: next scan releases the stale claim",
+              recovered == [101] and "processing" not in labels
+              and am.AUTO_MERGE_CLAIM_LABEL not in labels)
+    finally:
+        render_card.get_card = saved["get"]
+        render_card._gh = saved["gh"]
+
+
 # --------------------------------------------------------------------------- #
 # G7: live head + merge-state re-check immediately before acting
 # --------------------------------------------------------------------------- #
@@ -1093,6 +1187,11 @@ def test_scan_backstop_wiring_and_token_discipline():
     check(
         "wiring: manual decisions share the auto-merge concurrency lock",
         handler.get("concurrency", {}).get("group") == "wheelhouse-backstop",
+    )
+    check(
+        "wiring: shared lock queues manual decisions instead of replacing them",
+        doc.get("concurrency", {}).get("queue") == "max"
+        and handler.get("concurrency", {}).get("queue") == "max",
     )
     check(
         "wiring: manual target actions re-read claim state before execution",

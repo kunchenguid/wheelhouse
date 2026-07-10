@@ -31,6 +31,7 @@ permissions:
 
 concurrency:
   group: wheelhouse-backstop
+  queue: max
   cancel-in-progress: false
 
 jobs:

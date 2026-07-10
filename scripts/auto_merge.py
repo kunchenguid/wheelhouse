@@ -527,7 +527,7 @@ def evaluate_candidate(
 
 
 def _release_card_claim(number):
-    render_card._gh(
+    result = render_card._gh(
         [
             "issue",
             "edit",
@@ -539,6 +539,43 @@ def _release_card_claim(number):
         ],
         check=False,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "could not release auto-merge claim: %s"
+            % str(getattr(result, "stderr", "") or "gh error").strip()
+        )
+
+
+def recover_stale_card_claims(cards):
+    recovered = []
+    for entry in _card_index(cards).values():
+        if not _card_is_claimed(entry.get("labels") or set()):
+            continue
+        number = entry.get("issue")
+        if not number:
+            continue
+        try:
+            current = render_card.get_card(number)
+            current_entry = _card_index([current]).get(
+                (
+                    str((entry.get("state") or {}).get("repo") or ""),
+                    str((entry.get("state") or {}).get("number") or ""),
+                )
+            )
+            if (
+                current_entry
+                and render_card.issue_is_open(current)
+                and _card_is_claimed(current_entry.get("labels") or set())
+            ):
+                _release_card_claim(number)
+                recovered.append(number)
+        except Exception as e:
+            print(
+                "::warning::wheelhouse auto-merge could not recover stale claim #%s: %s"
+                % (number, str(e)[:160]),
+                file=sys.stderr,
+            )
+    return recovered
 
 
 def claim_cards(scan, cards):
@@ -546,6 +583,7 @@ def claim_cards(scan, cards):
     global_auto_merge = cfg["auto_merge"]
     index = _card_index(cards)
     claimed = []
+    recover_stale_card_claims(cards)
     if not auto_merge_triage_available():
         return claimed
     for item in (scan or {}).get("items") or []:
@@ -592,6 +630,7 @@ def claim_cards(scan, cards):
                 or not render_card.issue_is_open(claimed_card)
                 or claimed_entry["state"] != expected["state"]
                 or not _card_is_claimed(claimed_entry["labels"])
+                or _selected_card_option(claimed_card.get("body"))
             ):
                 _release_card_claim(expected["issue"])
                 continue

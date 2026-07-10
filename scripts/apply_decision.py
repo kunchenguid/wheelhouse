@@ -574,10 +574,13 @@ def do_merge(owner, repo, number, head_sha):
         return stale
     method = _merge_method(repo)
     try:
+        fields = {"merge_method": method}
+        if head_sha:
+            fields["sha"] = head_sha
         core.gh_rest(
             "/repos/%s/pulls/%s/merge" % (slug, number),
             method="PUT",
-            fields={"merge_method": method},
+            fields=fields,
         )
     except RuntimeError as e:
         detail = str(e)[:200]

@@ -972,6 +972,10 @@ def posts(calls):
     return [c for c in calls if c["method"] == "POST"]
 
 
+def merge_puts(calls):
+    return [c for c in calls if c["method"] == "PUT" and c["path"].endswith("/merge")]
+
+
 def test_thank_on_merge_posts_after_successful_merge():
     fake, calls = fake_gh_rest(open_pr())
     with patch_core(
@@ -995,6 +999,9 @@ def test_thank_on_merge_posts_after_successful_merge():
         "thank: default wording has no product name or jargon",
         p and "wheelhouse" not in (p[0]["fields"] or {}).get("body", "").lower(),
     )
+    m = merge_puts(calls)
+    check("merge: API precondition binds the expected head SHA",
+          len(m) == 1 and m[0]["fields"].get("sha") == "abc123")
 
 
 def test_thank_on_merge_disabled_globally():
