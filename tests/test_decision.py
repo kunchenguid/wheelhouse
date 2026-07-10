@@ -1036,6 +1036,57 @@ def test_auto_merge_rejects_a_changed_expected_base():
     check("merge: changed expected base sends no merge request", merge_puts(calls) == [])
 
 
+def test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge():
+    pr = open_pr()
+    pr.update(
+        {
+            "base": {"sha": "reviewed-base"},
+            "mergeable": True,
+            "mergeable_state": "behind",
+        }
+    )
+    guarded_fake, guarded_calls = fake_gh_rest(pr)
+    with patch_core(
+        gh_rest=guarded_fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge(
+            "owner-login",
+            "target-repo",
+            5,
+            "abc123",
+            expected_base_sha="reviewed-base",
+            require_clean_merge_state=True,
+        )
+    check(
+        "merge: auto-merge final non-CLEAN state is blocked",
+        terminal == "blocked" and "no longer mergeable and CLEAN" in message,
+    )
+    check(
+        "merge: final non-CLEAN state sends no merge request",
+        merge_puts(guarded_calls) == [],
+    )
+
+    manual_fake, manual_calls = fake_gh_rest(pr)
+    with patch_core(
+        gh_rest=manual_fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        _, manual_terminal = ad.do_merge(
+            "owner-login", "target-repo", 5, "abc123"
+        )
+    check(
+        "merge: manual path leaves the auto-merge CLEAN guard disabled",
+        manual_terminal == "resolved",
+    )
+    check(
+        "merge: manual path still sends its merge request",
+        len(merge_puts(manual_calls)) == 1,
+    )
+
+
 def test_thank_on_merge_disabled_globally():
     fake, calls = fake_gh_rest(open_pr())
     with patch_core(
@@ -1847,6 +1898,7 @@ def main():
     test_thank_on_merge_posts_after_successful_merge()
     test_auto_merge_receives_sha_from_successful_merge_response()
     test_auto_merge_rejects_a_changed_expected_base()
+    test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge()
     test_thank_on_merge_disabled_globally()
     test_thank_on_merge_disabled_per_repo()
     test_thank_on_merge_skips_non_success_outcomes()

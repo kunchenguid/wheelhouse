@@ -555,7 +555,13 @@ def _stale_pr_head_result(repo, number, expected, current, action):
 
 
 def do_merge(
-    owner, repo, number, head_sha, return_merge_commit=False, expected_base_sha=None
+    owner,
+    repo,
+    number,
+    head_sha,
+    return_merge_commit=False,
+    expected_base_sha=None,
+    require_clean_merge_state=False,
 ):
     def outcome(message, terminal, merge_commit=""):
         if return_merge_commit:
@@ -592,6 +598,15 @@ def do_merge(
                     expected_base_sha[:8],
                     current_base_sha[:8] or "<none>",
                 ),
+                "blocked",
+            )
+    if require_clean_merge_state:
+        mergeable_state = str(pr.get("mergeable_state") or "").strip().lower()
+        if pr.get("mergeable") is not True or mergeable_state != "clean":
+            return outcome(
+                "HOLD: %s#%s is no longer mergeable and CLEAN "
+                "(mergeable=%r, mergeable_state=%r). Re-scan before merging."
+                % (repo, number, pr.get("mergeable"), mergeable_state or "<none>"),
                 "blocked",
             )
     method = _merge_method(repo)

@@ -432,17 +432,20 @@ def _card_comment_count(card):
 
 
 def _card_author_login(card):
-    author = (card or {}).get("author")
-    if isinstance(author, dict):
-        author = author.get("login")
-    return str(author or "").strip()
+    for key in ("author", "user"):
+        author = (card or {}).get(key)
+        if isinstance(author, dict):
+            author = author.get("login")
+        login = str(author or "").strip()
+        if login:
+            return login
+    return ""
 
 
-def _trusted_card(card, state, labels):
+def _trusted_card_identity(card, state, labels):
     repo = str((state or {}).get("repo") or "").strip()
     number = str((state or {}).get("number") or "").strip()
     required = {
-        "needs-decision",
         "repo:%s" % repo,
         "kind:pr-review",
         "target:%s-%s" % (repo, number),
@@ -454,6 +457,10 @@ def _trusted_card(card, state, labels):
         and required.issubset(labels)
         and any(label.startswith("priority:") for label in labels)
     )
+
+
+def _trusted_card(card, state, labels):
+    return _trusted_card_identity(card, state, labels) and "needs-decision" in labels
 
 
 def _card_is_claimed(labels):
@@ -1103,6 +1110,7 @@ def act_merge(
         head_sha,
         return_merge_commit=True,
         expected_base_sha=base_sha,
+        require_clean_merge_state=True,
     )
     if terminal == "resolved" and message.startswith("Merged "):
         merge_commit = str(merge_commit or "").strip()
@@ -1797,14 +1805,13 @@ def pending_audit_records():
             continue
         labels = _card_label_names(card)
         state = core.parse_state_block(card.get("body") or "") or {}
-        author = ((card.get("user") or {}).get("login") or card.get("author") or "")
+        record = _pending_audit_record(state, card.get("number"))
         if (
-            author != CARD_AUTOMATION_AUTHOR
-            or not _trusted_card({"author": author}, state, labels)
-            or not _card_is_claimed(labels)
+            not record
+            or not _trusted_card_identity(card, state, labels)
+            or AUTO_MERGE_CLAIM_LABEL not in labels
         ):
             continue
-        record = _pending_audit_record(state, card.get("number"))
         identity = _ledger_entry_identity(record)
         if record and identity and identity not in seen:
             records.append(record)

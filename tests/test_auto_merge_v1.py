@@ -184,6 +184,7 @@ class World:
         self.check_status = {}
         self.check_status_seq = {}
         self.do_merge_calls = []
+        self.do_merge_clean_guards = []
         self.card_token_reads = []
         self.merge_tokens = []
         self.do_merge_returns = {}  # (repo, number) -> (message, terminal)
@@ -226,9 +227,17 @@ class World:
         return self.check_status.get(key, (True, "comp=pass tests=green"))
 
     def do_merge(
-        self, owner, repo, number, head, return_merge_commit=False, expected_base_sha=None
+        self,
+        owner,
+        repo,
+        number,
+        head,
+        return_merge_commit=False,
+        expected_base_sha=None,
+        require_clean_merge_state=False,
     ):
         self.do_merge_calls.append((owner, repo, number, head, expected_base_sha))
+        self.do_merge_clean_guards.append(require_clean_merge_state)
         self.merge_tokens.append(os.environ.get("GH_TOKEN"))
         result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
@@ -554,6 +563,10 @@ def test_happy_path_class_A_merges():
           m["head_sha"] and m["vision_sha"] == "vsha" and m["merge_commit"])
     check("act: do_merge receives the reviewed base SHA",
           w.do_merge_calls[0][-1] == "b1" * 20)
+    check(
+        "act: do_merge enables its final CLEAN guard",
+        w.do_merge_clean_guards == [True],
+    )
     check("act: ::notice:: audit line emitted", "auto-merge merged" in err)
 
 
@@ -1511,6 +1524,65 @@ def test_successful_merge_stages_audit_before_result_handoff():
             core.parse_state_block(cards[0]["body"]), 101
         ),
     )
+
+
+def test_pending_audit_recovery_accepts_a_partial_audited_close():
+    record = _merge_record()
+    card = make_card(
+        101,
+        "fmt",
+        5,
+        record["head_sha"],
+        labels=[
+            "processing",
+            "resolved",
+            am.AUTO_MERGE_CLAIM_LABEL,
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    card["user"] = {"login": card.pop("author")}
+    state = core.parse_state_block(card["body"])
+    state[am.AUDIT_PENDING_FIELD] = record
+    card["body"] = render_card._replace_state_block(card["body"], state)
+    saved_rest = core.gh_rest
+    saved_repo = os.environ.get("GITHUB_REPOSITORY")
+    saved_ledger = am.append_to_ledger
+    saved_resolve = am.resolve_card
+    saved_release = am.release_card_claim
+    retried = {"ledger": [], "resolved": [], "released": []}
+    core.gh_rest = lambda *args, **kwargs: [[card]]
+    am.append_to_ledger = lambda records: retried["ledger"].extend(records)
+    am.resolve_card = lambda value: retried["resolved"].append(value)
+    am.release_card_claim = lambda value: retried["released"].append(
+        value["card_issue"]
+    )
+    os.environ["GITHUB_REPOSITORY"] = "owner/wheelhouse"
+    try:
+        check(
+            "audit: partial audited close remains discoverable for retry",
+            am.pending_audit_records() == [record],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "results.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"merges": [], "releases": []}, f)
+            am.cmd_record(path)
+        check(
+            "audit: partial audited close retries the record and close",
+            retried == {"ledger": [record], "resolved": [record], "released": [101]},
+        )
+    finally:
+        core.gh_rest = saved_rest
+        am.append_to_ledger = saved_ledger
+        am.resolve_card = saved_resolve
+        am.release_card_claim = saved_release
+        if saved_repo is None:
+            os.environ.pop("GITHUB_REPOSITORY", None)
+        else:
+            os.environ["GITHUB_REPOSITORY"] = saved_repo
 
 
 def test_live_check_status_reads_current_configured_contexts():
