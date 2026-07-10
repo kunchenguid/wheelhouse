@@ -861,6 +861,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
 Messages Wheelhouse posts onto **target repos** (e.g. a rebase nudge on a contributor's PR) speak naturally, like a friendly maintainer bot.
 They must not name the product ("Wheelhouse") or use internal-state jargon ("maintainer queue", "resurface", bucket/kind names).
 This includes pending-contributor cleanup reminders and close comments.
+For a rebase nudge, explain that the branch has a merge conflict with the base branch, ask the contributor to rebase onto or merge the latest base branch and push the resolved conflict, then say that checks will re-run and the PR will get looked at again.
 
 Owner-facing decision cards and comments on **this repo's** issues are the private queue; those may keep the Wheelhouse name and internal vocabulary.
 

@@ -315,7 +315,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   If an explicit dispatch creates a PR-review card for your own PR, `/request-changes` refuses to submit the review because GitHub rejects self-review.
 - **Merge-conflict routing.** The scheduled scan treats only GitHub's authoritative GraphQL `mergeable: CONFLICTING` value as a merge conflict.
   A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`; `UNKNOWN` or missing mergeability fails open and routes normally.
-  Contributor-authored conflicted PRs get one friendly rebase nudge per head SHA under `FLEET_TOKEN`, with a hidden marker in the PR comment to prevent duplicates.
+  Contributor-authored conflicted PRs get one plain-language rebase nudge per head SHA under `FLEET_TOKEN`: it explains the base-branch conflict, asks the contributor to rebase onto or merge the latest base branch, resolve the conflict, and push, then says checks will re-run and the PR will get looked at again.
+  A hidden marker in the PR comment prevents duplicates.
   Owner, maintainer, and bot-authored conflicted PRs are not nudged and do not emit decision cards.
 - **Token scope.** The default `GITHUB_TOKEN` only reaches this repo and is used for all card activity (so it can't recursively re-trigger the handler).
   Acting on your other repos uses `FLEET_TOKEN`, which is never printed and is only used in cross-repo scan, approval, execution, and read-only fetch steps.
