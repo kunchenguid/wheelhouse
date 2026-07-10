@@ -3937,9 +3937,11 @@ def _checkout_repository_indeterminate(repository, target_repository):
 
 def _checkout_default_event_context(triggers):
     trigger_set = {str(trigger) for trigger in triggers}
-    if "pull_request_target" in trigger_set:
+    has_pr_target = "pull_request_target" in trigger_set
+    has_pr = "pull_request" in trigger_set
+    if has_pr_target and not has_pr:
         return "pull_request_target"
-    if "pull_request" in trigger_set:
+    if has_pr and not has_pr_target:
         return "pull_request"
     return None
 

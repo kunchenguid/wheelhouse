@@ -314,6 +314,23 @@ def test_pr_target_same_repository_checkout_without_ref_uses_trusted_base():
           "the pwn-request pattern" not in s)
 
 
+def test_mixed_pr_trigger_same_repository_checkout_requires_manual_review():
+    wf = (
+        "name: mixed PR default checkout\non:\n  pull_request:\n  pull_request_target:\n"
+        "jobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("mixed PR trigger same-repository checkout: labels default event-dependent",
+          "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s)
+    check("mixed PR trigger same-repository checkout: does not claim trusted base",
+          "`pull_request_target` base branch (trusted base code)" not in s)
+    check("mixed PR trigger same-repository checkout: does not claim contributor code",
+          "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s)
+    check("mixed PR trigger same-repository checkout: analysis fails closed",
+          "**Automated analysis incomplete - review the full diff manually.**" in s)
+
+
 def test_unknown_trigger_same_repository_checkout_requires_manual_review():
     wf = (
         "name: event-dependent default checkout\non:\n  workflow_dispatch:\njobs:\n  check:\n"
@@ -667,6 +684,7 @@ def main():
     test_explicit_pr_head_checkout_ref_is_unchanged()
     test_same_repository_checkouts_without_ref_use_the_event_sha()
     test_pr_target_same_repository_checkout_without_ref_uses_trusted_base()
+    test_mixed_pr_trigger_same_repository_checkout_requires_manual_review()
     test_unknown_trigger_same_repository_checkout_requires_manual_review()
     test_external_checkout_without_ref_is_labeled_as_mutable_default_branch()
     test_dynamic_checkout_without_ref_requires_manual_review()
