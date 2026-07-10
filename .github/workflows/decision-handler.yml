@@ -440,7 +440,10 @@ jobs:
           labels: resolved
 
       - name: Block card label
-        if: ${{ always() && steps.execute.outputs.terminal_state == 'blocked' }}
+        # Treat terminal_state == 'error' like 'blocked' so a failed decision
+        # becomes a durable open blocked card. Reconcile's is_refreshable guard
+        # then skips soft self-heal (card #447 silent false-close).
+        if: ${{ always() && (steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: add
@@ -450,7 +453,7 @@ jobs:
           labels: blocked
 
       - name: Drop needs-decision on terminal
-        if: ${{ always() && (steps.execute.outputs.terminal_state == 'resolved' || steps.execute.outputs.terminal_state == 'blocked') }}
+        if: ${{ always() && (steps.execute.outputs.terminal_state == 'resolved' || steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
         uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
         with:
           action: remove

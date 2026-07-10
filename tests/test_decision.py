@@ -793,6 +793,21 @@ def test_thank_on_merge_skips_non_success_outcomes():
     check("thank: a failed merge PUT is an error, not resolved", terminal == "error")
     check("thank: no comment when the merge itself failed", posts(calls) == [])
 
+    # Card #447: 403 token failures and merge conflicts both terminal "error".
+    # decision-handler must label both as blocked (not pure needs-decision).
+    fake, calls = fake_gh_rest(
+        open_pr(),
+        merge_error=(
+            "gh api .../pulls/5/merge failed: gh: Resource not accessible "
+            "by personal access token (HTTP 403)"
+        ),
+    )
+    with patch_core(gh_rest=fake, **common):
+        msg, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: a 403 merge PUT is an error, not resolved", terminal == "error")
+    check("thank: 403 merge failure message is actionable", "failed" in msg.lower())
+    check("thank: no comment when the merge itself failed with 403", posts(calls) == [])
+
 
 def test_thank_on_merge_best_effort_survives_comment_failure():
     fake, calls = fake_gh_rest(open_pr(), comment_error="502: bad gateway")

@@ -618,6 +618,57 @@ def test_route_and_execute_stay_deterministic():
         )
 
 
+def test_error_terminal_state_labels_as_blocked():
+    """Card #447: terminal_state == 'error' must join 'blocked' in the label
+    state-machine so a failed decision becomes a durable open blocked card
+    that reconcile cannot soft-heal as resolved.
+    """
+    steps = handle_steps()
+    block = step_by_name(steps, "Block card label")
+    drop = step_by_name(steps, "Drop needs-decision on terminal")
+    check("workflow: Block card label step exists", block is not None)
+    check("workflow: Drop needs-decision on terminal step exists", drop is not None)
+    if block:
+        block_if = str(block.get("if", ""))
+        check(
+            "workflow: Block card label if: includes 'error'",
+            "'error'" in block_if or '"error"' in block_if,
+        )
+        check(
+            "workflow: Block card label if: still includes 'blocked'",
+            "'blocked'" in block_if or '"blocked"' in block_if,
+        )
+        check(
+            "workflow: Block card label still adds the blocked label",
+            block.get("with", {}).get("labels") == "blocked",
+        )
+    if drop:
+        drop_if = str(drop.get("if", ""))
+        check(
+            "workflow: Drop needs-decision if: includes 'error'",
+            "'error'" in drop_if or '"error"' in drop_if,
+        )
+        check(
+            "workflow: Drop needs-decision if: includes 'resolved'",
+            "'resolved'" in drop_if or '"resolved"' in drop_if,
+        )
+        check(
+            "workflow: Drop needs-decision if: includes 'blocked'",
+            "'blocked'" in drop_if or '"blocked"' in drop_if,
+        )
+    # Close remains resolved-only - an error card stays OPEN (blocked).
+    close = step_by_name(steps, "Close resolved card")
+    check("workflow: Close resolved card step exists", close is not None)
+    if close:
+        close_if = str(close.get("if", ""))
+        check(
+            "workflow: Close resolved card if: is resolved-only (not error)",
+            ("'resolved'" in close_if or '"resolved"' in close_if)
+            and "'error'" not in close_if
+            and '"error"' not in close_if,
+        )
+
+
 def test_nl_prompt_instructs_fully_qualified_refs():
     prompt_with_slug = ad.build_nl_prompt(
         "card body", "merge it", "target content", "pr-review", target_slug="acme/repo"
@@ -690,6 +741,7 @@ def main():
     test_search_wrapper_installs_non_writable_tool()
     test_claude_output_is_isolated_before_routing()
     test_route_and_execute_stay_deterministic()
+    test_error_terminal_state_labels_as_blocked()
     test_nl_prompt_instructs_fully_qualified_refs()
     test_nl_route_qualifies_answer_with_deterministic_state_not_model_text()
     print()

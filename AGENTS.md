@@ -181,6 +181,17 @@ still appears where it's plain English, e.g. "triage the queue".)
   stops manufacturing the duplicate-pending-run race that started the card #392
   incident - this dedup runs strictly after the risky-files/posture HOLD check
   and never weakens it.
+- **Failed decision = durable open `blocked`, never pure `needs-decision`
+  (card #447).** `decision-handler.yml` maps `terminal_state == 'error'` onto
+  the same label path as `blocked` (add `blocked`, drop `needs-decision`; do
+  NOT close). Leaving a failed action as pure `needs-decision` lets reconcile's
+  soft self-heal silently consume it as `resolved` when the open target later
+  leaves the worklist. Hard-close still auto-cleans a `blocked` card once the
+  target is genuinely merged/closed. Guarded by the YAML-inspection in
+  `tests/test_nl_decisions_search.py` (`test_error_terminal_state_labels_as_blocked`)
+  and the soft/hard-close cases in `tests/test_reconcile.py`. The FLEET_TOKEN
+  merge-permission gap that can *trigger* a 403 is a separate config concern;
+  this coupling only makes that failure loud.
 - Decision cards are machine-created.
   The target author is shown as plain text (`by <login>`), never as a GitHub
   `@mention`.

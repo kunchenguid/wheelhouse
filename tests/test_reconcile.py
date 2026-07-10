@@ -368,6 +368,67 @@ def test_open_target_that_left_worklist_uses_current_labels_before_close():
     )
 
 
+def test_blocked_open_target_that_left_worklist_is_not_soft_healed():
+    """Card #447: a failed decision lands as blocked; soft self-heal must not
+    consume it while the target is still open (even if it left the worklist)."""
+    blocked_card = card(
+        labels(
+            "blocked",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    calls = run_reconcile(scan_payload(items=[]), [blocked_card])
+    check(
+        "reconcile: blocked card with open target outside worklist is not soft-closed",
+        calls["close"] == [],
+    )
+    # Same protection when needs-decision is still present (e.g. mid-transition).
+    blocked_pending = card(
+        labels(
+            "needs-decision",
+            "blocked",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    calls = run_reconcile(scan_payload(items=[]), [blocked_pending])
+    check(
+        "reconcile: needs-decision+blocked open target is not soft-closed",
+        calls["close"] == [],
+    )
+
+
+def test_blocked_card_hard_closes_when_target_no_longer_open():
+    """Hard-close still auto-cleans a blocked card once the target is
+    merged/closed - no stuck cards for genuinely-done targets."""
+    blocked_card = card(
+        labels(
+            "blocked",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    calls = run_reconcile(
+        scan_payload(items=[], open_pr_numbers=[]),
+        [blocked_card],
+    )
+    check(
+        "reconcile: blocked card hard-closes when target is no longer open",
+        len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
+    )
+    check(
+        "reconcile: hard-close message says target is no longer open",
+        "no longer open" in calls["close"][0]["message"],
+    )
+
+
 def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
     """No material field differs, but the card's render_version is missing
     (stale) - the OR-trigger should still refresh it once."""
@@ -640,6 +701,8 @@ def main():
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()
     test_open_target_that_left_worklist_uses_current_labels_before_close()
+    test_blocked_open_target_that_left_worklist_is_not_soft_healed()
+    test_blocked_card_hard_closes_when_target_no_longer_open()
     test_render_stale_only_pure_card_is_refreshed_via_reconcile()
     test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile()
     test_target_activity_newer_gets_state_only_reflection_once()
