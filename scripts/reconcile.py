@@ -288,6 +288,8 @@ def main():
     for ex in cards_with_state:
         card_number = ex["number"]
         state = ex["state"]
+        if state.get("automerge_audit_pending") or state.get("automerge_audit_intent"):
+            continue
         repo = state.get("repo")
         r = repos.get(repo)
         if not r or not r.get("ok"):
@@ -340,6 +342,15 @@ def main():
                 "card." % (repo, number)
             )
         else:
+            current = current_card(ex)
+            if current is None:
+                continue
+            if (
+                current["state"].get("automerge_audit_pending")
+                or current["state"].get("automerge_audit_intent")
+            ):
+                continue
+            card_number = current["number"]
             msg = (
                 "Self-healed by the scheduled backstop: %s#%s is no longer open "
                 "(merged/closed) - consuming this card." % (repo, number)

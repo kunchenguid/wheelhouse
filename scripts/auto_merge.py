@@ -36,8 +36,8 @@ Two CLIs, run as separate workflow steps so each uses the right token:
       join the persisted behavior verdict from the card bodies, run G0-G7, and
       call do_merge for the ones that qualify. Writes a machine-readable results
       file (path from $WHEELHOUSE_AUTOMERGE_RESULTS, default automerge.json) and
-      one ::notice::/::warning:: audit line per candidate. It performs NO
-      THIS-repo card writes (token discipline) - those are left to `record`.
+      one ::notice::/::warning:: audit line per candidate. Uses the separate
+      default card token only to persist an audit intent before merging.
 
   auto_merge.py record <results.json> [validated-claims.json]
       Under GITHUB_TOKEN. Append each auto-merge to the durable ledger issue in
@@ -89,6 +89,7 @@ LEDGER_MARKER = "wheelhouse-auto-merge-log"
 LEDGER_LABEL = "wheelhouse:auto-merge-log"
 LEDGER_TITLE = "Wheelhouse auto-merge log (automated)"
 AUDIT_PENDING_FIELD = "automerge_audit_pending"
+AUDIT_INTENT_FIELD = "automerge_audit_intent"
 # Keep the stored history bounded so the ledger body cannot grow without limit.
 LEDGER_ENTRY_CAP = 200
 LEDGER_MAX_BODY_BYTES = 60000
@@ -104,7 +105,7 @@ query($owner:String!, $name:String!, $number:Int!) {
       headRefOid
       commits(last:1) { nodes { commit { statusCheckRollup {
         state
-        contexts(first:%d) { nodes {
+        contexts(first:%d) { totalCount pageInfo { hasNextPage } nodes {
           __typename
           ... on CheckRun { name conclusion status }
           ... on StatusContext { context state }
@@ -327,6 +328,22 @@ def live_check_status(owner, repo, number, head_sha, repo_cfg):
             return (False, "could not re-read PR check status")
         if str(pr.get("headRefOid") or "") != str(head_sha or ""):
             return (False, "head moved while re-reading check status")
+        commits = pr.get("commits") or {}
+        commit_nodes = commits.get("nodes") if isinstance(commits, dict) else None
+        commit = commit_nodes[0].get("commit") if isinstance(commit_nodes, list) and commit_nodes else None
+        rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
+        contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+        page_info = contexts.get("pageInfo") if isinstance(contexts, dict) else None
+        context_nodes = contexts.get("nodes") if isinstance(contexts, dict) else None
+        total_count = contexts.get("totalCount") if isinstance(contexts, dict) else None
+        if (
+            not isinstance(page_info, dict)
+            or page_info.get("hasNextPage") is not False
+            or not isinstance(context_nodes, list)
+            or not isinstance(total_count, int)
+            or total_count != len(context_nodes)
+        ):
+            return (False, "configured check contexts are incomplete")
         comp, tests, _, _ = core.check_status(pr, repo_cfg)
     except (KeyError, TypeError, RuntimeError, ValueError) as error:
         return (False, "could not re-read configured checks: %s" % str(error)[:160])
@@ -407,9 +424,11 @@ def _card_label_names(card):
 
 def _card_comment_count(card):
     comments = (card or {}).get("comments")
-    if not isinstance(comments, list):
-        return None
-    return len(comments)
+    if isinstance(comments, list):
+        return len(comments)
+    if isinstance(comments, int) and not isinstance(comments, bool) and comments >= 0:
+        return comments
+    return None
 
 
 def _card_author_login(card):
@@ -698,8 +717,20 @@ def _release_card_claim(number):
 
 
 def _pending_audit_record(state, card_issue=None):
+    return _audit_state_record(
+        state, AUDIT_PENDING_FIELD, card_issue, require_merge_commit=True
+    )
+
+
+def _audit_intent_record(state, card_issue=None):
+    return _audit_state_record(
+        state, AUDIT_INTENT_FIELD, card_issue, require_merge_commit=False
+    )
+
+
+def _audit_state_record(state, field, card_issue=None, require_merge_commit=False):
     state = state if isinstance(state, dict) else {}
-    record = state.get(AUDIT_PENDING_FIELD)
+    record = state.get(field)
     if not isinstance(record, dict):
         return None
     if card_issue is not None and str(record.get("card_issue") or "") != str(card_issue):
@@ -710,9 +741,74 @@ def _pending_audit_record(state, card_issue=None):
         return None
     if str(record.get("head_sha") or "") != str(state.get("head_sha") or ""):
         return None
-    if not _GIT_OBJECT_ID_RE.fullmatch(str(record.get("merge_commit") or "")):
+    if not _ledger_entry_identity(record):
+        return None
+    merge_commit = str(record.get("merge_commit") or "")
+    if require_merge_commit and not _GIT_OBJECT_ID_RE.fullmatch(merge_commit):
+        return None
+    if not require_merge_commit and merge_commit:
         return None
     return record
+
+
+def _audit_state_is_protected(state, card_issue=None):
+    return bool(
+        _pending_audit_record(state, card_issue)
+        or _audit_intent_record(state, card_issue)
+    )
+
+
+def _with_card_token(card_token, operation):
+    if not str(card_token or "").strip():
+        raise RuntimeError("default card token is unavailable")
+    original_token = os.environ.get("GH_TOKEN")
+    try:
+        os.environ["GH_TOKEN"] = card_token
+        return operation()
+    finally:
+        if original_token is None:
+            os.environ.pop("GH_TOKEN", None)
+        else:
+            os.environ["GH_TOKEN"] = original_token
+
+
+def stage_audit_intent(expected_card, record, card_token):
+    card_issue = record.get("card_issue")
+    if not card_issue:
+        raise RuntimeError("auto-merge audit intent has no card issue")
+    card = _read_card_with_card_token(card_issue, card_token)
+    current = _card_index([card]).get(
+        (str(record.get("repo") or ""), str(record.get("number") or ""))
+    )
+    matches, reason = _current_claim_matches(
+        expected_card, card, str(record.get("repo") or ""), str(record.get("number") or "")
+    )
+    if not matches or not current:
+        raise RuntimeError("could not stage audit intent: %s" % reason)
+    state = current.get("state") or {}
+    existing = _audit_intent_record(state, card_issue)
+    if existing:
+        if _ledger_entry_identity(existing) != _ledger_entry_identity(record):
+            raise RuntimeError("card #%s has a different audit intent" % card_issue)
+        return current
+    if _pending_audit_record(state, card_issue):
+        raise RuntimeError("card #%s already has a pending audit" % card_issue)
+    new_state = dict(state)
+    new_state[AUDIT_INTENT_FIELD] = record
+    _with_card_token(
+        card_token,
+        lambda: render_card._edit_issue_body(
+            card_issue,
+            render_card._replace_state_block(card.get("body") or "", new_state),
+        ),
+    )
+    staged_card = _read_card_with_card_token(card_issue, card_token)
+    staged = _card_index([staged_card]).get(
+        (str(record.get("repo") or ""), str(record.get("number") or ""))
+    )
+    if not staged or not _audit_intent_record(staged.get("state"), card_issue):
+        raise RuntimeError("could not confirm audit intent on card #%s" % card_issue)
+    return staged
 
 
 def recover_stale_card_claims(cards):
@@ -723,7 +819,7 @@ def recover_stale_card_claims(cards):
         number = entry.get("issue")
         if not number:
             continue
-        if _pending_audit_record(entry.get("state"), number):
+        if _audit_state_is_protected(entry.get("state"), number):
             continue
         try:
             current = render_card.get_card(number)
@@ -737,7 +833,7 @@ def recover_stale_card_claims(cards):
                 current_entry
                 and render_card.issue_is_open(current)
                 and _card_is_claimed(current_entry.get("labels") or set())
-                and not _pending_audit_record(current_entry.get("state"), number)
+                and not _audit_state_is_protected(current_entry.get("state"), number)
             ):
                 _release_card_claim(number)
                 recovered.append(number)
@@ -787,6 +883,23 @@ def claim_cards(scan, cards):
     index = _card_index(cards)
     claimed = []
     recover_stale_card_claims(cards)
+    for (repo, number), expected in index.items():
+        if (
+            not _card_is_claimed(expected.get("labels") or set())
+            or not _audit_intent_record(expected.get("state"), expected.get("issue"))
+        ):
+            continue
+        try:
+            current = render_card.get_card(expected["issue"])
+            matches, _ = _current_claim_matches(expected, current, repo, number)
+            if matches:
+                claimed.append(current)
+        except Exception as e:
+            print(
+                "::warning::wheelhouse auto-merge could not preserve audit intent #%s: %s"
+                % (expected["issue"], str(e)[:160]),
+                file=sys.stderr,
+            )
     if not auto_merge_triage_available():
         return claimed
     for item in (scan or {}).get("items") or []:
@@ -885,6 +998,11 @@ def validate_claimed_cards(cards):
             )
             if current_matches:
                 validated.append(current)
+                continue
+            current_entry = _card_index([current]).get((repo, number))
+            if current_entry and _audit_state_is_protected(
+                current_entry.get("state"), issue
+            ):
                 continue
             _release_card_claim(issue)
         except Exception as e:
@@ -1008,6 +1126,55 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _audit_record(result, merge_commit="", merged_at="", detail=""):
+    return {
+        "repo": result["repo"],
+        "number": result["number"],
+        "card_issue": result["card_issue"],
+        "head_sha": result["head_sha"],
+        "merge_commit": merge_commit,
+        "merged_at": merged_at,
+        "contributor": result["audit"].get("contributor", ""),
+        "contributor_proof": result["audit"].get("contributor_proof", ""),
+        "vision_sha": result["audit"].get("vision_sha", ""),
+        "behavior_class": result["audit"].get("behavior_class", ""),
+        "behavior_verdict": result["audit"].get("behavior_verdict", {}),
+        "gates": result["gates"],
+        "detail": detail,
+    }
+
+
+def recover_audit_intents(owner, index):
+    merges = []
+    releases = []
+    holds = []
+    ambiguous = []
+    recovered = set()
+    for (repo, number), entry in index.items():
+        intent = _audit_intent_record(entry.get("state"), entry.get("issue"))
+        if not intent or not _card_is_claimed(entry.get("labels") or set()):
+            continue
+        pr = live_pr("%s/%s" % (owner, repo), number)
+        if pr is None:
+            holds.append(
+                {
+                    "repo": repo,
+                    "number": number,
+                    "hold_reason": "audit recovery could not read target PR",
+                }
+            )
+            continue
+        if pr.get("merged"):
+            reason = "audit outcome is ambiguous after target merge"
+            holds.append({"repo": repo, "number": number, "hold_reason": reason})
+            ambiguous.append("%s#%s: %s" % (repo, number, reason))
+            continue
+        if str(pr.get("state") or "").lower() != "open":
+            releases.append({"card_issue": entry["issue"]})
+            recovered.add((repo, number))
+    return merges, releases, holds, ambiguous, recovered
+
+
 def act_on_scan(scan, cards):
     """Evaluate every merge-ready pr-review candidate and merge the ones that
     qualify. Returns the results payload (also written to disk by the CLI).
@@ -1022,16 +1189,35 @@ def act_on_scan(scan, cards):
     merges = []
     holds = []
     post_merge_errors = []
-    releases = [
+    (
+        recovered_merges,
+        recovered_releases,
+        recovery_holds,
+        recovery_ambiguous,
+        recovered_keys,
+    ) = recover_audit_intents(owner, index)
+    ambiguous_outcomes = list(recovery_ambiguous)
+    merges.extend(recovered_merges)
+    releases = list(recovered_releases)
+    holds.extend(recovery_holds)
+    protected_issues = {
+        entry["issue"]
+        for entry in index.values()
+        if _audit_state_is_protected(entry.get("state"), entry.get("issue"))
+    }
+    releases.extend(
         {"card_issue": entry["issue"]}
         for entry in index.values()
         if _card_is_claimed(entry.get("labels"))
-    ]
+        and entry["issue"] not in protected_issues
+    )
     for item in (scan or {}).get("items") or []:
         if item.get("kind") != "pr-review" or item.get("bucket") != "merge-ready":
             continue
         repo = item["repo"]
         number = str(item["number"])
+        if (repo, number) in recovered_keys:
+            continue
         repo_cfg = (cfg["repos"] or {}).get(repo, {})
         # SILENTLY skip a repo that never opted into auto-merge (the default for
         # the whole fleet): it is an ordinary merge-ready card, not an auto-merge
@@ -1082,6 +1268,19 @@ def act_on_scan(scan, cards):
                 }
             )
             continue
+        intent = _audit_record(result)
+        try:
+            staged_card = stage_audit_intent(card_entry, intent, card_token)
+        except Exception as e:
+            reason = "could not stage audit intent: %s" % str(e)[:160]
+            _warn(repo, number, reason)
+            holds.append({"repo": repo, "number": number, "hold_reason": reason})
+            continue
+        releases = [
+            release
+            for release in releases
+            if release.get("card_issue") != result["card_issue"]
+        ]
         try:
             outcome, detail, merge_commit = act_merge(
                 owner,
@@ -1090,28 +1289,37 @@ def act_on_scan(scan, cards):
                 result["head_sha"],
                 result["audit"]["vision_sha"],
                 result["base_sha"],
-                card_entry,
+                staged_card,
                 card_token,
                 repo_cfg,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
             outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")
+        if outcome == "post-merge-error":
+            confirmed = live_pr("%s/%s" % (owner, repo), number)
+            confirmed_commit = str((confirmed or {}).get("merge_commit_sha") or "")
+            if (
+                confirmed
+                and confirmed.get("merged")
+                and _GIT_OBJECT_ID_RE.fullmatch(confirmed_commit)
+            ):
+                outcome = "merged"
+                detail = "%s; merge commit re-read from target" % detail
+                merge_commit = confirmed_commit
         if outcome == "merged":
-            record = {
-                "repo": repo,
-                "number": number,
-                "card_issue": result["card_issue"],
-                "head_sha": result["head_sha"],
-                "merge_commit": merge_commit,
-                "merged_at": _now(),
-                "contributor": result["audit"].get("contributor", ""),
-                "contributor_proof": result["audit"].get("contributor_proof", ""),
-                "vision_sha": result["audit"].get("vision_sha", ""),
-                "behavior_class": result["audit"].get("behavior_class", ""),
-                "behavior_verdict": result["audit"].get("behavior_verdict", {}),
-                "gates": result["gates"],
-                "detail": detail,
-            }
+            record = _audit_record(
+                result,
+                merge_commit=merge_commit,
+                merged_at=_now(),
+                detail=detail,
+            )
+            try:
+                stage_pending_audit_with_card_token(record, card_token)
+            except Exception as e:
+                post_merge_errors.append(
+                    "%s#%s: could not stage completed audit: %s"
+                    % (repo, number, str(e)[:160])
+                )
             merges.append(record)
             print(
                 "::notice::wheelhouse auto-merge merged %s#%s (%s) commit %s: "
@@ -1134,6 +1342,10 @@ def act_on_scan(scan, cards):
             )
             if outcome == "post-merge-error":
                 post_merge_errors.append("%s#%s: %s" % (repo, number, detail))
+            elif outcome == "error":
+                ambiguous_outcomes.append("%s#%s: %s" % (repo, number, detail))
+            elif outcome == "held":
+                releases.append({"card_issue": result["card_issue"]})
 
     return {
         "generated_at": _now(),
@@ -1142,6 +1354,7 @@ def act_on_scan(scan, cards):
         "holds": holds,
         "releases": releases,
         "post_merge_errors": post_merge_errors,
+        "ambiguous_outcomes": ambiguous_outcomes,
     }
 
 
@@ -1173,8 +1386,11 @@ def cmd_act(scan_path, cards_path):
         "wheelhouse auto-merge: %d merged, %d held"
         % (len(payload["merges"]), len(payload["holds"]))
     )
-    if payload.get("post_merge_errors"):
-        for error in payload["post_merge_errors"]:
+    audit_errors = list(payload.get("post_merge_errors") or []) + list(
+        payload.get("ambiguous_outcomes") or []
+    )
+    if audit_errors:
+        for error in audit_errors:
             print("::error::wheelhouse auto-merge audit handoff failed: %s" % error, file=sys.stderr)
         raise RuntimeError("could not record one or more completed auto-merges")
 
@@ -1477,15 +1693,35 @@ def resolve_card(record):
 def release_card_claim(record):
     card = record.get("card_issue")
     if not card:
-        return
+        return False
+    if not record.get("_audit_finalized"):
+        try:
+            current = render_card.get_card(card)
+            state = core.parse_state_block((current or {}).get("body") or "") or {}
+            if _audit_state_is_protected(state, card):
+                print(
+                    "::warning::wheelhouse auto-merge retained card #%s for audit recovery"
+                    % card,
+                    file=sys.stderr,
+                )
+                return False
+        except Exception as e:
+            print(
+                "::warning::wheelhouse auto-merge could not verify card #%s before release: %s"
+                % (card, str(e)[:200]),
+                file=sys.stderr,
+            )
+            return False
     try:
         _release_card_claim(card)
+        return True
     except Exception as e:
         print(
             "::warning::wheelhouse auto-merge could not release card #%s: %s"
             % (card, str(e)[:200]),
             file=sys.stderr,
         )
+        return False
 
 
 def stage_pending_audit(record):
@@ -1503,13 +1739,44 @@ def stage_pending_audit(record):
         if _ledger_entry_identity(existing) != _ledger_entry_identity(record):
             raise RuntimeError("card #%s has a different pending audit" % card_issue)
         return existing
+    intent = _audit_intent_record(state, card_issue)
+    if intent and _ledger_entry_identity(intent) != _ledger_entry_identity(record):
+        raise RuntimeError("card #%s has a different audit intent" % card_issue)
     new_state = dict(state)
+    new_state.pop(AUDIT_INTENT_FIELD, None)
     new_state[AUDIT_PENDING_FIELD] = record
     render_card._edit_issue_body(
         card_issue,
         render_card._replace_state_block(card.get("body") or "", new_state),
     )
     return record
+
+
+def stage_pending_audit_with_card_token(record, card_token):
+    return _with_card_token(
+        card_token,
+        lambda: stage_pending_audit(record),
+    )
+
+
+def clear_audit_intent(card_issue):
+    card = render_card.get_card(card_issue)
+    if not card or not render_card.issue_is_open(card):
+        raise RuntimeError("could not read open card #%s to clear audit intent" % card_issue)
+    state = core.parse_state_block(card.get("body") or "")
+    if not state:
+        raise RuntimeError("card #%s has no state to clear audit intent" % card_issue)
+    if not _audit_intent_record(state, card_issue):
+        return False
+    if _pending_audit_record(state, card_issue):
+        raise RuntimeError("card #%s has a pending audit" % card_issue)
+    new_state = dict(state)
+    new_state.pop(AUDIT_INTENT_FIELD, None)
+    render_card._edit_issue_body(
+        card_issue,
+        render_card._replace_state_block(card.get("body") or "", new_state),
+    )
+    return True
 
 
 def pending_audit_records():
@@ -1581,6 +1848,11 @@ def cmd_record(results_path, validated_claims_path=None):
         for record in records
         if isinstance(record, dict) and record.get("card_issue")
     }
+    protected_cards.update(
+        record.get("card_issue")
+        for record in pending
+        if isinstance(record, dict) and record.get("card_issue")
+    )
     known = {
         _ledger_entry_identity(record)
         for record in pending
@@ -1600,6 +1872,7 @@ def cmd_record(results_path, validated_claims_path=None):
         try:
             staged.append(stage_pending_audit(record))
             known.add(identity)
+            protected_cards.add(record.get("card_issue"))
         except Exception as error:
             errors.append(error)
     if not staged and not releases:
@@ -1621,7 +1894,7 @@ def cmd_record(results_path, validated_claims_path=None):
             try:
                 resolve_card(record)
                 resolved_cards.add(record.get("card_issue"))
-                release_card_claim(record)
+                release_card_claim(dict(record, _audit_finalized=True))
             except Exception as error:
                 errors.append(error)
     for record in releases:
@@ -1629,7 +1902,19 @@ def cmd_record(results_path, validated_claims_path=None):
             record.get("card_issue") not in resolved_cards
             and record.get("card_issue") not in protected_cards
         ):
-            release_card_claim(record)
+            if handoff_valid:
+                try:
+                    clear_audit_intent(record.get("card_issue"))
+                except Exception as error:
+                    errors.append(error)
+                    continue
+            if release_card_claim(record) is False:
+                errors.append(
+                    RuntimeError(
+                        "could not safely release auto-merge claim #%s"
+                        % record.get("card_issue")
+                    )
+                )
     if errors:
         raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[0]
     print("wheelhouse auto-merge record: recorded %d auto-merge(s)" % len(staged))

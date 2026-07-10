@@ -901,7 +901,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   (a dedicated CLOSED issue in THIS repo with the `wheelhouse-auto-merge-log`
   marker, mirroring the scan-health ledger) and the resolved decision record
   (comment + close via `render_card.close_card`) are written by the separate
-  default-token "Record auto-merges" step (act -> reconcile -> record ordering).
+  default-token "Record auto-merges" step.
+  The act step uses its separate default card token only to persist a pre-merge audit intent before calling `do_merge`.
+  The order is act -> record -> reconcile, and either a pre-merge intent or a staged pending audit prevents reconcile from consuming the claim until the audit has completed or a later FLEET_TOKEN pass can determine that no merge occurred.
   Kill switches (layered): the global/per-repo `auto_merge` flag, deleting a
   repo's VISION.md, removing `CLAUDE_CODE_OAUTH_TOKEN` (no verdict -> everything
   holds), and a per-PR `wheelhouse:no-auto-merge` target label

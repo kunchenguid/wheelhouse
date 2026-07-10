@@ -249,6 +249,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         "checks": am.live_check_status,
         "domerge": apply_decision.do_merge,
         "get_card": render_card.get_card,
+        "edit_body": render_card._edit_issue_body,
         "cfg": core.load_config,
         "maint": core.maintainers,
         "owner": core.get_owner,
@@ -279,6 +280,13 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         return cards_by_number.get(str(number))
 
     render_card.get_card = get_card
+
+    def edit_body(number, body, remove_labels=None):
+        card = cards_by_number.get(str(number))
+        if card is not None:
+            card["body"] = body
+
+    render_card._edit_issue_body = edit_body
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true" if has_token else "false"
     if has_card_token:
         os.environ["WHEELHOUSE_CARD_TOKEN"] = "card-token"
@@ -305,6 +313,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         am.live_check_status = saved["checks"]
         apply_decision.do_merge = saved["domerge"]
         render_card.get_card = saved["get_card"]
+        render_card._edit_issue_body = saved["edit_body"]
         core.load_config = saved["cfg"]
         core.maintainers = saved["maint"]
         core.get_owner = saved["owner"]
@@ -848,6 +857,8 @@ def test_claim_rechecks_and_locks_current_card():
         ],
     )
     current = dict(initial)
+    initial["comments"] = 0
+    current["comments"] = []
     current["state"] = "OPEN"
     calls = []
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
@@ -1249,8 +1260,12 @@ def test_post_merge_missing_endpoint_sha_fails_audit_handoff():
             not payload["merges"],
         )
         check(
-            "audit: invalid merge endpoint SHA fails the post-merge handoff",
-            payload["post_merge_errors"] and payload["releases"] == [{"card_issue": 101}],
+            "audit: invalid merge endpoint SHA retains the recovery intent",
+            payload["post_merge_errors"]
+            and payload["releases"] == []
+            and am._audit_intent_record(
+                core.parse_state_block(cards[0]["body"]), 101
+            ),
         )
 
 
@@ -1331,6 +1346,16 @@ def test_card_reader_includes_comment_activity():
         render_card._gh = saved
 
 
+def test_card_index_accepts_listing_comment_count():
+    listed = make_card(101, "fmt", 5, "co" * 20, automerge_verdict=ELIGIBLE_A)
+    listed["comments"] = 2
+    indexed = am._card_index([listed]).get(("fmt", "5"))
+    check(
+        "claim: card-list comment count is preserved for validation",
+        indexed is not None and indexed["comment_count"] == 2,
+    )
+
+
 def test_G7_card_read_uses_dedicated_default_token():
     w, items, cards = default_world(head="tk" * 20)
     saved = os.environ.get("GH_TOKEN")
@@ -1340,7 +1365,7 @@ def test_G7_card_read_uses_dedicated_default_token():
         check(
             "G7: card re-read uses only the dedicated default token",
             bool(payload["merges"])
-            and w.card_token_reads == ["card-token"]
+            and w.card_token_reads == ["card-token"] * 4
             and w.merge_tokens == ["fleet-token"],
         )
     finally:
@@ -1368,6 +1393,53 @@ def test_G7_rechecks_configured_status_contexts():
     check("G7: failed configured check does not call merge", not w.do_merge_calls)
 
 
+def test_premerge_audit_intent_retains_an_ambiguous_handoff():
+    head = "ir" * 20
+    w, items, cards = default_world(head=head)
+    w.do_merge_returns[("fmt", "5")] = ("merge request interrupted", "error")
+    payload, _ = run_act(w, items, cards)
+    intent = am._audit_intent_record(core.parse_state_block(cards[0]["body"]), 101)
+    check(
+        "audit: merge errors retain a durable pre-merge intent",
+        not payload["merges"]
+        and not payload["releases"]
+        and bool(payload["ambiguous_outcomes"])
+        and bool(intent),
+    )
+    w.set_pr(
+        "owner/fmt",
+        5,
+        make_pr(
+            head=head,
+            merged=True,
+            state="closed",
+            merge_commit_sha="d" * 40,
+        ),
+    )
+    recovered, _ = run_act(w, [], cards)
+    check(
+        "audit: later target merge remains held without proof of our merge",
+        not recovered["merges"]
+        and not recovered["releases"]
+        and bool(recovered["ambiguous_outcomes"]),
+    )
+
+
+def test_successful_merge_stages_audit_before_result_handoff():
+    w, items, cards = default_world(head="ah" * 20)
+    payload, _ = run_act(w, items, cards)
+    staged = am._pending_audit_record(core.parse_state_block(cards[0]["body"]), 101)
+    check(
+        "audit: completed merge is staged before the results handoff",
+        len(payload["merges"]) == 1
+        and staged is not None
+        and staged["merge_commit"] == "c" * 40
+        and not am._audit_intent_record(
+            core.parse_state_block(cards[0]["body"]), 101
+        ),
+    )
+
+
 def test_live_check_status_reads_current_configured_contexts():
     saved = core._gh_graphql_data
     calls = []
@@ -1387,6 +1459,8 @@ def test_live_check_status_reads_current_configured_contexts():
                                         "statusCheckRollup": {
                                             "state": "FAILURE",
                                             "contexts": {
+                                                "totalCount": 2,
+                                                "pageInfo": {"hasNextPage": False},
                                                 "nodes": [
                                                     {
                                                         "__typename": "CheckRun",
@@ -1428,6 +1502,54 @@ def test_live_check_status_reads_current_configured_contexts():
         check(
             "G7: live configured check read targets the exact PR",
             calls and "number=5" in calls[0],
+        )
+    finally:
+        core._gh_graphql_data = saved
+
+
+def test_live_check_status_holds_for_paginated_contexts():
+    saved = core._gh_graphql_data
+    head = "p" * 40
+
+    def graphql(args):
+        return {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": head,
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "statusCheckRollup": {
+                                            "state": "SUCCESS",
+                                            "contexts": {
+                                                "totalCount": 101,
+                                                "pageInfo": {"hasNextPage": True},
+                                                "nodes": [],
+                                            },
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+        }
+
+    core._gh_graphql_data = graphql
+    try:
+        ok, reason = am.live_check_status(
+            "owner",
+            "fmt",
+            5,
+            head,
+            {"compliance_check": "Gate", "test_check_patterns": ["test"]},
+        )
+        check(
+            "G7: paginated check contexts hold before merge",
+            not ok and "incomplete" in reason,
         )
     finally:
         core._gh_graphql_data = saved
@@ -2248,6 +2370,10 @@ def test_scan_backstop_wiring_and_token_discipline():
     check("wiring: auto-merge act step exists", act is not None)
     check("wiring: card list records card author provenance",
           listed and "author: (.user.login" in listed.get("run", ""))
+    check(
+        "wiring: card list records comment count for claim validation",
+        listed and "comments: (.comments // 0)" in listed.get("run", ""),
+    )
     check("wiring: current cards are claimed before auto-merge", claim is not None)
     check("wiring: record step exists", rec is not None)
     check(
@@ -2299,16 +2425,18 @@ def test_scan_backstop_wiring_and_token_discipline():
         "wiring: record does NOT get FLEET_TOKEN",
         rec and "FLEET_TOKEN" not in json.dumps(rec.get("env") or {}),
     )
-    # The merge must happen before reconcile self-heal-closes anything and the
-    # audit resolve must be the last write.
     order = [s.get("name") for s in steps if isinstance(s, dict)]
     check(
-        "wiring: order is act -> reconcile -> record",
+        "wiring: order is act -> record -> reconcile",
         order.index("Claim auto-merge decision cards")
         < order.index("Validate auto-merge decision cards")
         < order.index("Auto-merge eligible PRs")
-        < order.index("Reconcile the queue")
-        < order.index("Record auto-merges"),
+        < order.index("Record auto-merges")
+        < order.index("Reconcile the queue"),
+    )
+    check(
+        "wiring: reconcile still runs when audit recovery fails",
+        by_name.get("Reconcile the queue", {}).get("if") == "always()",
     )
     handler = yaml.safe_load(_read(".github/workflows/decision-handler.yml"))
     handler_steps = handler["jobs"]["handle"]["steps"]

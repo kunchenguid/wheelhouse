@@ -429,6 +429,61 @@ def test_blocked_card_hard_closes_when_target_no_longer_open():
     )
 
 
+def test_automerge_audit_state_survives_hard_close():
+    for field in ("automerge_audit_intent", "automerge_audit_pending"):
+        pending = card(
+            labels(
+                "needs-decision",
+                "processing",
+                "repo:wheelhouse",
+                "kind:pr-review",
+                "priority:med",
+                "target:wheelhouse-42",
+            )
+        )
+        state = reconcile.core.parse_state_block(pending["body"])
+        state[field] = {"repo": "wheelhouse", "number": 42}
+        pending["body"] = reconcile.render_card._replace_state_block(
+            pending["body"], state
+        )
+        calls = run_reconcile(
+            scan_payload(items=[], open_pr_numbers=[]),
+            [pending],
+        )
+        check(
+            "reconcile: %s survives target hard-close until audit recovery" % field,
+            calls["close"] == [],
+        )
+
+
+def test_automerge_audit_state_survives_stale_snapshot_hard_close():
+    snapshot = card(
+        labels(
+            "needs-decision",
+            "processing",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+    current = dict(snapshot)
+    state = reconcile.core.parse_state_block(current["body"])
+    state["automerge_audit_pending"] = {"repo": "wheelhouse", "number": 42}
+    current["body"] = reconcile.render_card._replace_state_block(
+        current["body"], state
+    )
+    calls = run_reconcile(
+        scan_payload(items=[], open_pr_numbers=[]),
+        [snapshot],
+        current_cards=[current],
+    )
+    check(
+        "reconcile: live pending audit blocks stale-snapshot hard-close",
+        calls["close"] == [],
+    )
+
+
 def test_render_stale_only_pure_card_is_refreshed_via_reconcile():
     """No material field differs, but the card's render_version is missing
     (stale) - the OR-trigger should still refresh it once."""
@@ -703,6 +758,8 @@ def main():
     test_open_target_that_left_worklist_uses_current_labels_before_close()
     test_blocked_open_target_that_left_worklist_is_not_soft_healed()
     test_blocked_card_hard_closes_when_target_no_longer_open()
+    test_automerge_audit_state_survives_hard_close()
+    test_automerge_audit_state_survives_stale_snapshot_hard_close()
     test_render_stale_only_pure_card_is_refreshed_via_reconcile()
     test_render_fresh_and_materially_unchanged_card_is_noop_via_reconcile()
     test_target_activity_newer_gets_state_only_reflection_once()
