@@ -276,6 +276,12 @@ def test_checkout_without_ref_is_labeled_as_event_default():
           "default (base branch)" not in s)
 
 
+def test_explicit_pr_head_checkout_ref_is_unchanged():
+    s = summary_for([{"filename": WF, "status": "added"}], {WF: EXPLOIT_WF})
+    check("explicit checkout ref: identifies PR-head expression",
+          "Checkout: PR head - `${{ github.event.pull_request.head.sha }}`" in s)
+
+
 def test_same_repository_checkouts_without_ref_use_the_event_sha():
     for repository in ("kunchenguid/firstmate", "${{ github.repository }}"):
         wf = (
@@ -289,6 +295,36 @@ def test_same_repository_checkouts_without_ref_use_the_event_sha():
               "Checkout: event default (`GITHUB_SHA`) - contributor PR code" in s)
         check("same repository checkout: not mutable default for %s" % repository,
               "default branch (mutable)" not in s)
+
+
+def test_pr_target_same_repository_checkout_without_ref_uses_trusted_base():
+    wf = (
+        "name: PR target default checkout\non:\n  pull_request_target:\njobs:\n  check:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          repository: ${{ github.repository }}\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("PR target same-repository checkout: identifies trusted base default",
+          "Checkout: event default (`GITHUB_SHA`) - `pull_request_target` base branch "
+          "(trusted base code)" in s)
+    check("PR target same-repository checkout: does not call base default contributor code",
+          "Checkout: event default (`GITHUB_SHA`) - contributor PR code" not in s)
+    check("PR target same-repository checkout: no explicit-head pwn-request flag",
+          "the pwn-request pattern" not in s)
+
+
+def test_unknown_trigger_same_repository_checkout_requires_manual_review():
+    wf = (
+        "name: event-dependent default checkout\non:\n  workflow_dispatch:\njobs:\n  check:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("unknown trigger same-repository checkout: labels default event-dependent",
+          "Checkout: event-dependent default (`GITHUB_SHA`) - review manually" in s)
+    check("unknown trigger same-repository checkout: analysis fails closed",
+          "**Automated analysis incomplete - review the full diff manually.**" in s)
 
 
 def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
@@ -628,7 +664,10 @@ def main():
     test_permission_job_name_is_sanitized_before_markdown_formatting()
     test_safe_first_party_workflow_has_no_flags()
     test_checkout_without_ref_is_labeled_as_event_default()
+    test_explicit_pr_head_checkout_ref_is_unchanged()
     test_same_repository_checkouts_without_ref_use_the_event_sha()
+    test_pr_target_same_repository_checkout_without_ref_uses_trusted_base()
+    test_unknown_trigger_same_repository_checkout_requires_manual_review()
     test_external_checkout_without_ref_is_labeled_as_mutable_default_branch()
     test_dynamic_checkout_without_ref_requires_manual_review()
     test_docker_action_manifest_surfaces_image_and_requires_manual_review()

@@ -3905,6 +3905,11 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
             _checkout_repository_indeterminate(
                 checkout["repository"], slug
             )
+            or (
+                not checkout["ref"]
+                and _checkout_repository_is_same(checkout["repository"], slug)
+                and _checkout_default_event_context(triggers) is None
+            )
             for checkout in checkouts
             if not checkout["ref"]
         ),
@@ -3930,12 +3935,29 @@ def _checkout_repository_indeterminate(repository, target_repository):
     )
 
 
-def _checkout_ref_label(ref, repository="", target_repository=""):
+def _checkout_default_event_context(triggers):
+    trigger_set = {str(trigger) for trigger in triggers}
+    if "pull_request_target" in trigger_set:
+        return "pull_request_target"
+    if "pull_request" in trigger_set:
+        return "pull_request"
+    return None
+
+
+def _checkout_ref_label(ref, repository="", target_repository="", triggers=()):
     """A human label for a checkout `ref` input. Flags a PR-head ref (the
     pwn-request source) without echoing anything but the expression itself."""
     if not ref:
         if _checkout_repository_is_same(repository, target_repository):
-            return "event default (`GITHUB_SHA`) - contributor PR code"
+            event_context = _checkout_default_event_context(triggers)
+            if event_context == "pull_request_target":
+                return (
+                    "event default (`GITHUB_SHA`) - `pull_request_target` base branch "
+                    "(trusted base code)"
+                )
+            if event_context == "pull_request":
+                return "event default (`GITHUB_SHA`) - contributor PR code"
+            return "event-dependent default (`GITHUB_SHA`) - review manually"
         if _checkout_repository_indeterminate(repository, target_repository):
             return (
                 "indeterminate repository `%s`; default ref cannot be determined - "
@@ -4055,7 +4077,10 @@ def _file_fact_lines(analysis):
         shown, extra = _summary_values(analysis["checkouts"])
         for co in shown:
             label = _checkout_ref_label(
-                co["ref"], co["repository"], analysis.get("target_repository", "")
+                co["ref"],
+                co["repository"],
+                analysis.get("target_repository", ""),
+                analysis.get("triggers", ()),
             )
             if co["repository"] and co["ref"]:
                 label += " from `%s`" % _safe_inline(co["repository"])
