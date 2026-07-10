@@ -1169,9 +1169,8 @@ def recover_audit_intents(owner, index):
             holds.append({"repo": repo, "number": number, "hold_reason": reason})
             ambiguous.append("%s#%s: %s" % (repo, number, reason))
             continue
-        if str(pr.get("state") or "").lower() != "open":
-            releases.append({"card_issue": entry["issue"]})
-            recovered.add((repo, number))
+        releases.append({"card_issue": entry["issue"]})
+        recovered.add((repo, number))
     return merges, releases, holds, ambiguous, recovered
 
 

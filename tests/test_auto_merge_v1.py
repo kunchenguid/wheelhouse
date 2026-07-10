@@ -438,6 +438,8 @@ def test_exclusions_cover_every_category():
         ("build.gradle.kts", "dependency"),
         ("settings.gradle", "dependency"),
         ("settings.gradle.kts", "dependency"),
+        ("uv.lock", "dependency"),
+        ("pylock.toml", "dependency"),
         (".gitmodules", "dependency"),
         ("scripts/migrate.py", "migration"),
         ("scripts/migrate_data.py", "migration"),
@@ -1423,6 +1425,70 @@ def test_premerge_audit_intent_retains_an_ambiguous_handoff():
         and not recovered["releases"]
         and bool(recovered["ambiguous_outcomes"]),
     )
+
+
+def test_open_pr_audit_intent_releases_claim_without_remerge():
+    head = "op" * 20
+    w, items, cards = default_world(head=head)
+    state = core.parse_state_block(cards[0]["body"])
+    state[am.AUDIT_INTENT_FIELD] = {
+        "repo": "fmt",
+        "number": "5",
+        "card_issue": 101,
+        "head_sha": head,
+        "merge_commit": "",
+        "merged_at": "",
+        "contributor": "alice",
+        "contributor_proof": "has >=1 prior merged PR in fmt",
+        "vision_sha": "vsha",
+        "behavior_class": "A",
+        "behavior_verdict": ELIGIBLE_A,
+        "gates": {},
+        "detail": "",
+    }
+    cards[0]["body"] = render_card._replace_state_block(cards[0]["body"], state)
+    w.set_pr(
+        "owner/fmt",
+        5,
+        make_pr(head=head, labels=[core.NO_AUTO_MERGE_LABEL]),
+    )
+    payload, _ = run_act(w, items, cards)
+    check(
+        "audit: proven-open target releases its stale audit intent claim",
+        payload["releases"] == [{"card_issue": 101}] and not w.do_merge_calls,
+    )
+    current = dict(cards[0], state="OPEN")
+    released = []
+    saved = {
+        "get": render_card.get_card,
+        "edit": render_card._edit_issue_body,
+        "pending": am.pending_audit_records,
+        "release": am.release_card_claim,
+    }
+    try:
+        render_card.get_card = lambda number: current
+        render_card._edit_issue_body = lambda number, body, remove_labels=None: current.update(
+            body=body
+        )
+        am.pending_audit_records = lambda: []
+        am.release_card_claim = lambda record: released.append(record["card_issue"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "results.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"merges": [], "releases": payload["releases"]}, f)
+            am.cmd_record(path)
+        check(
+            "audit: record clears the proven-open intent and releases its claim",
+            not am._audit_intent_record(
+                core.parse_state_block(current["body"]), 101
+            )
+            and released == [101],
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card._edit_issue_body = saved["edit"]
+        am.pending_audit_records = saved["pending"]
+        am.release_card_claim = saved["release"]
 
 
 def test_successful_merge_stages_audit_before_result_handoff():
@@ -2503,6 +2569,10 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         'if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then'
         in text
         and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
+    )
+    check(
+        "triage: unavailable assessments retain the base revision for cache freshness",
+        'VISION_SHA=""\n              BASE_SHA=""' not in text,
     )
     check(
         "triage: oversized or incomplete VISION.md is unavailable for auto-merge",

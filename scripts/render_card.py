@@ -1082,6 +1082,10 @@ def body_with_triage_result(
         automerge_verdict["base_sha"] = base_sha
     else:
         automerge_verdict = None
+    if not base_sha:
+        base_sha = state.get("triaged_base_sha", "")
+    if not vision_sha:
+        vision_sha = state.get("triaged_vision_sha", "")
     new_state = _state_with_triage(
         state,
         revision,

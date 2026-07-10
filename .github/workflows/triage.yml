@@ -363,7 +363,6 @@ jobs:
               AUTOMERGE_VERDICT_AVAILABLE=true
             else
               VISION_SHA=""
-              BASE_SHA=""
             fi
           fi
 

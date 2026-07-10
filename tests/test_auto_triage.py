@@ -918,7 +918,9 @@ def test_should_auto_triage_cache_and_gates():
 
 
 def test_should_auto_triage_invalidates_base_and_vision_revisions():
-    it = item(base_sha="base-a", automerge_vision_sha="vision-a")
+    base_a = "a" * 40
+    base_b = "b" * 40
+    it = item(base_sha=base_a, automerge_vision_sha="vision-a")
     pure = labels("needs-decision", "kind:pr-review")
     fresh = core.parse_state_block(
         rc.body_with_triage_queued(rc.render(it)["body"], it)
@@ -930,7 +932,7 @@ def test_should_auto_triage_invalidates_base_and_vision_revisions():
     check(
         "cache: changed base requeues triage for the same head",
         rc.should_auto_triage(
-            item(base_sha="base-b", automerge_vision_sha="vision-a"),
+            item(base_sha=base_b, automerge_vision_sha="vision-a"),
             fresh,
             pure,
             has_token=True,
@@ -940,13 +942,46 @@ def test_should_auto_triage_invalidates_base_and_vision_revisions():
     check(
         "cache: changed VISION requeues triage for the same head",
         rc.should_auto_triage(
-            item(base_sha="base-a", automerge_vision_sha="vision-b"),
+            item(base_sha=base_a, automerge_vision_sha="vision-b"),
             fresh,
             pure,
             has_token=True,
         )
         is True,
     )
+
+
+def test_triage_completion_preserves_queued_pr_context():
+    it = item(base_sha="b" * 40, automerge_vision_sha="")
+    queued = rc.body_with_triage_queued(rc.render(it)["body"], it)
+    successful = {
+        "summary": "Adds lightweight context.",
+        "product_implications": "Routine internal change.",
+        "recommended_next_step": "merge - scope is small.",
+    }
+    for label, triage, error in (
+        ("no VISION", successful, None),
+        ("unavailable diff", successful, None),
+        ("failed triage", None, "Claude did not return a result."),
+    ):
+        completed = rc.body_with_triage_result(
+            queued, it["head_sha"], triage=triage, error=error
+        )
+        state = core.parse_state_block(completed)
+        check(
+            "cache: %s completion keeps its queued base revision" % label,
+            state.get("triaged_base_sha") == it["base_sha"],
+        )
+        check(
+            "cache: %s completion does not requeue the same PR revision" % label,
+            rc.should_auto_triage(
+                it,
+                state,
+                labels("needs-decision", "kind:pr-review"),
+                has_token=True,
+            )
+            is False,
+        )
 
 
 def test_triage_queued_for_head_requires_matching_queued_attempt():
@@ -3208,6 +3243,8 @@ def main():
     test_automated_status_lines_are_labeled_only_on_allowlist()
     test_body_helpers_queue_and_apply_result_for_issue()
     test_should_auto_triage_cache_and_gates()
+    test_should_auto_triage_invalidates_base_and_vision_revisions()
+    test_triage_completion_preserves_queued_pr_context()
     test_should_auto_triage_cache_and_gates_for_issue()
     test_triage_queued_for_head_requires_matching_queued_attempt()
     test_reconcile_backfills_legacy_card_without_material_change()
