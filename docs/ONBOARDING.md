@@ -147,7 +147,10 @@ jobs:
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
   Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
-  If the scan later verifies that no matching run is awaiting approval, it emits no worklist item and reconcile consumes any stale CI-approval card.
+  If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and reconcile consumes any stale CI-approval card.
+  For a contributor fork whose safe approval returns that no-op result and whose mergeability conclusively settles to `CONFLICTING`, the scan keeps the CI-approval classification and emits no card, but posts the ordinary fire-once-per-head rebase nudge before consuming the target from the worklist.
+  It never sends that nudge for an actually approved CI run, a missing or unresolved mergeability value, or a failed mergeability settlement, and this exception does not arm pending-contributor cleanup.
+  A failed settlement marks the repo scan unhealthy, so reconcile preserves existing cards instead of consuming them.
   The `scan-backstop` logs emit one notice for each approved or no-pending run, one `wheelhouse auto-approve carded ...` warning for each contributor run that becomes a card, or one `wheelhouse auto-approve suppressed-card ...` warning for each owner, maintainer, or bot run that cannot be approved and does not emit a card.
   Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.

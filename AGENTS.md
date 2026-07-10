@@ -696,7 +696,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   This never rewrites `needs-ci-approval`: fork CI approval is independent of whether the eventual merge would conflict, and issue triage is unrelated.
   On the `ok:true` scan path, `build_repo` posts a contributor nudge under `FLEET_TOKEN` for non-owner/non-maintainer/non-bot `needs-rebase` PRs.
   The nudge body carries hidden marker `<!-- wheelhouse-rebase-nudge:<head_sha> -->`; before posting, Wheelhouse paginates the PR comments and skips if that marker already exists, so it posts at most once per conflicted head SHA and can nudge again only after a new push creates a new head.
-  If stale pending-contributor cleanup is active for PRs, a newly posted nudge is
+  If stale pending-contributor cleanup is active for PRs, a newly posted
+  `needs-rebase` nudge is
   patched with a structured `wheelhouse-pending-contributor-action` marker and
   the target gets `wheelhouse:pending-contributor-action`; if the nudge comment
   response lacks a comment id or timestamp, the cleanup arming fails open with a
@@ -746,9 +747,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   specifically `approve_ci` `noop` AND settled mergeability is `CONFLICTING`,
   `build_repo` posts the same fire-once-per-head contributor rebase nudge the
   `needs-rebase` path uses, then still emits no card. An `approved` path (PR
-  actually has workflows) is unchanged; `UNKNOWN` mergeability is settled first
-  and never nudges until conclusive `CONFLICTING`; missing mergeable fails open
-  (no nudge).
+  actually has workflows) is unchanged; `UNKNOWN` mergeability is settled before
+  the nudge and never nudges until conclusive `CONFLICTING`; missing mergeable
+  fails open (no nudge). A settlement-query error marks the repo scan unhealthy,
+  so reconcile preserves existing cards instead. This exception deliberately
+  passes `arm_cleanup=False`, so it never arms pending-contributor cleanup.
   Fork-originated `action_required` workflow runs are expected to have an empty `workflow_run.pull_requests` list, so `approve_ci` verifies that fork case with the already-filtered run's exact `head_sha` plus `head_branch`; non-empty `pull_requests` stays strict and must contain exactly the target PR.
   After verification, `approve_ci` dedups matching pending runs by stable `workflowDatabaseId` when GitHub exposes it, keeps the highest `databaseId`, and leaves same-named distinct workflows or runs without workflow identity distinct.
   This dedup happens after the risky-files/posture safety gate, so it never weakens the HOLD path.
@@ -951,7 +954,7 @@ Run the unit tests:
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, and stale-card self-healing, no network.
-- `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, optional pending-contributor cleanup arming for rebase nudges, and reconcile self-healing for conflicted PR cards, no network.
+- `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, the contributor-fork CI-noop conflict-nudge exception (including UNKNOWN/error no-nudge and no cleanup arming), author-filter nudge skips, optional pending-contributor cleanup arming for normal `needs-rebase` nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present.
 - `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.

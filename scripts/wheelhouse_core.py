@@ -2393,9 +2393,9 @@ def _mergeable_for_ci_noop_nudge(
 
     Only an authoritative CONFLICTING value may trigger the rebase nudge.
     An explicit UNKNOWN uses the caller's batched settlement result; if it
-    never settles, or settlement errors, return None so the scan fails open
-    with no nudge. Missing/None mergeable keeps classify's fail-open and does
-    not invent a conflict."""
+    never settles, return None with no nudge. Settlement errors are handled
+    before this helper runs and make the repo result unhealthy. Missing/None
+    mergeable keeps classify's fail-open and does not invent a conflict."""
     mergeable = pr.get("mergeable")
     if _mergeable_is_conclusive(mergeable):
         return mergeable
