@@ -3817,13 +3817,24 @@ def _action_runtime(doc, file_kind):
         return None
     runs = doc.get("runs")
     if not isinstance(runs, dict):
-        return None
+        return {"kind": "unknown", "using": ""}
     using = str(runs.get("using") or "").strip()
-    if using.lower() == "docker":
-        return {"using": using, "image": str(runs.get("image") or "")}
-    if using.lower().startswith("node"):
-        return {"using": using, "main": str(runs.get("main") or "")}
-    return None
+    normalized = using.lower()
+    if normalized == "composite":
+        return {"kind": "composite", "using": using}
+    if normalized == "docker":
+        return {
+            "kind": "docker",
+            "using": using,
+            "image": str(runs.get("image") or ""),
+        }
+    if normalized.startswith("node"):
+        return {
+            "kind": "node",
+            "using": using,
+            "main": str(runs.get("main") or ""),
+        }
+    return {"kind": "unknown", "using": using}
 
 
 def _analyze_ci_file(slug, path, head_sha, status, owner):
@@ -3906,7 +3917,11 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         "actions": actions,
         "run_steps": run_steps,
         "action_runtime": action_runtime,
-        "partially_analyzed": bool(action_runtime) or any(
+        "partially_analyzed": (
+            action_runtime is not None
+            and action_runtime["kind"] != "composite"
+        )
+        or any(
             _checkout_repository_indeterminate(
                 checkout["repository"], slug
             )
@@ -4107,17 +4122,24 @@ def _file_fact_lines(analysis):
         lines.append("  - Checkout: no explicit `actions/checkout` step")
 
     runtime = analysis.get("action_runtime")
-    if runtime:
+    if runtime and runtime["kind"] == "docker":
         using = _safe_inline(runtime["using"])
-        if "image" in runtime:
-            image = _safe_inline(runtime["image"] or "not declared")
-            lines.append("  - Docker action runtime: `%s`, image `%s`" % (using, image))
-        else:
-            main = _safe_inline(runtime["main"] or "not declared")
-            lines.append(
-                "  - JavaScript action runtime: `%s`, entrypoint `%s`" % (using, main)
-            )
+        image = _safe_inline(runtime["image"] or "not declared")
+        lines.append("  - Docker action runtime: `%s`, image `%s`" % (using, image))
         lines.append("  - Action runtime is not fully analyzed automatically - review manually")
+    elif runtime and runtime["kind"] == "node":
+        using = _safe_inline(runtime["using"])
+        main = _safe_inline(runtime["main"] or "not declared")
+        lines.append(
+            "  - JavaScript action runtime: `%s`, entrypoint `%s`" % (using, main)
+        )
+        lines.append("  - Action runtime is not fully analyzed automatically - review manually")
+    elif runtime and runtime["kind"] == "unknown":
+        using = _safe_inline(runtime["using"] or "not declared")
+        lines.append(
+            "  - Action runtime `%s` is missing or unrecognized - review manually"
+            % using
+        )
 
     third = [a for a in analysis["actions"] if a["category"] in ("third", "docker")]
     local = [a for a in analysis["actions"] if a["category"] == "local"]

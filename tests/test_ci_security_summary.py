@@ -173,6 +173,19 @@ def test_non_mapping_manifest_requires_manual_diff_review():
           s == core.CI_SUMMARY_UNANALYZABLE)
 
 
+def test_missing_or_unknown_action_runtime_requires_manual_diff_review():
+    path = ".github/actions/example/action.yml"
+    for name, action in (
+        ("missing", "name: incomplete\nruns:\n  steps: []\n"),
+        ("unknown", "name: incomplete\nruns:\n  using: shell\n"),
+    ):
+        s = summary_for([{"filename": path, "status": "modified"}], {path: action})
+        check("action manifest: %s runtime fails closed" % name,
+              "**Automated analysis incomplete - review the full diff manually.**" in s)
+        check("action manifest: %s runtime is not presented as clean" % name,
+              "Third-party actions/workflows: none (first-party only)" not in s)
+
+
 def test_reusable_workflow_and_inherited_secrets_are_surfaced():
     wf = (
         "name: call\non:\n  pull_request:\njobs:\n  deploy:\n"
@@ -683,6 +696,7 @@ def main():
     test_composite_action_file_is_analyzed()
     test_non_manifest_action_file_requires_manual_diff_review()
     test_non_mapping_manifest_requires_manual_diff_review()
+    test_missing_or_unknown_action_runtime_requires_manual_diff_review()
     test_reusable_workflow_and_inherited_secrets_are_surfaced()
     test_bracket_secret_reference_is_surfaced()
     test_secret_values_are_never_echoed()
