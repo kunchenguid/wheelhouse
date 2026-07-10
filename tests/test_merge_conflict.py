@@ -123,6 +123,7 @@ def run_build_repo(
     auto_approve_ci=False,
     approve_result=("noop", "no workflow runs awaiting approval"),
     settle_mergeable=None,
+    settle_errors=None,
     pending_contributor_cleanup=False,
     pending_contributor_cleanup_targets=UNSET,
     comments_by_pr=None,
@@ -207,14 +208,24 @@ def run_build_repo(
         if numbers:
             calls["settle"].append((owner, name, numbers))
         values = {}
+        errors = {}
         for number in numbers:
+            error = None
+            if isinstance(settle_errors, dict):
+                error = settle_errors.get(number)
+            elif callable(settle_errors):
+                error = settle_errors(owner, name, number)
+            if error:
+                values[number] = None
+                errors[number] = str(error)
+                continue
             if settle_mergeable is None:
                 values[number] = "UNKNOWN"
             elif callable(settle_mergeable):
                 values[number] = settle_mergeable(owner, name, number)
             else:
                 values[number] = settle_mergeable
-        return values, {}
+        return values, errors
 
     save = (
         core.gh_graphql,
@@ -490,6 +501,29 @@ def test_ci_noop_unknown_settles_conflicting_then_nudges():
     )
 
 
+def test_ci_noop_mergeability_read_failure_is_unhealthy():
+    pr = pr_node(334, status_rollup=None, mergeable="UNKNOWN", cross_repo=True)
+    result, items, calls = run_build_repo(
+        [pr],
+        auto_approve_ci=True,
+        approve_result=("noop", "no workflow runs awaiting approval"),
+        settle_errors={334: "HTTP 502"},
+    )
+    check("ci-noop-error: repo is unhealthy", result["ok"] is False)
+    check("ci-noop-error: emits no worklist item", items == [])
+    check("ci-noop-error: no nudge after failed settlement", calls["posts"] == [])
+    check(
+        "ci-noop-error: failed PR is indeterminate",
+        result["indeterminate_pr_numbers"] == [334],
+    )
+    check(
+        "ci-noop-error: warning preserves the query failure",
+        "mergeability settlement query failed" in result["warning"]
+        and "#334" in result["warning"]
+        and "HTTP 502" in result["warning"],
+    )
+
+
 def test_ci_noop_unknown_mergeables_settle_in_one_batch():
     prs = [
         pr_node(332, status_rollup=None, mergeable="UNKNOWN", cross_repo=True),
@@ -744,6 +778,7 @@ def main():
     test_ci_noop_conflicting_fork_nudges_once_per_head()
     test_ci_noop_unknown_mergeable_does_not_nudge()
     test_ci_noop_unknown_settles_conflicting_then_nudges()
+    test_ci_noop_mergeability_read_failure_is_unhealthy()
     test_ci_noop_unknown_mergeables_settle_in_one_batch()
     test_ci_noop_mergeable_fork_does_not_nudge()
     test_ci_approved_with_workflows_does_not_nudge_on_conflict()

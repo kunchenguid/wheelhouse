@@ -861,6 +861,46 @@ def _settle_mergeable(owner, name, number):
     return values[number]
 
 
+def _settlement_failure_result(
+    slug,
+    name,
+    prs,
+    issues,
+    numbers,
+    settled_mergeables,
+    settlement_errors,
+    truncated,
+    indeterminate_numbers=(),
+):
+    if not settlement_errors:
+        return None
+    indeterminate = set(indeterminate_numbers)
+    indeterminate.update(
+        number
+        for number in numbers
+        if not _mergeable_is_conclusive(settled_mergeables.get(number))
+    )
+    failed_numbers = sorted(settlement_errors)
+    failed_reason = settlement_errors[failed_numbers[0]]
+    return {
+        "name": name,
+        "ok": False,
+        "warning": (
+            "%s scan failed: mergeability settlement query failed for "
+            "PR(s) %s: %s"
+            % (
+                slug,
+                ", ".join("#%s" % number for number in failed_numbers),
+                failed_reason[:160],
+            )
+        ),
+        "open_pr_numbers": [pr["number"] for pr in prs],
+        "open_issue_numbers": [it["number"] for it in issues],
+        "indeterminate_pr_numbers": sorted(indeterminate),
+        "truncated": truncated,
+    }
+
+
 def _resolve_pr_bucket(
     owner,
     name,
@@ -2510,32 +2550,19 @@ def build_repo(
     settled_mergeables, settlement_errors = _settle_mergeables(
         owner, name, settle_numbers
     )
-    if settlement_errors:
-        indeterminate = sorted(
-            number
-            for number in settle_numbers
-            if not _mergeable_is_conclusive(settled_mergeables.get(number))
-        )
-        failed_numbers = sorted(settlement_errors)
-        failed_reason = settlement_errors[failed_numbers[0]]
+    settlement_failure = _settlement_failure_result(
+        slug,
+        name,
+        prs,
+        issues,
+        settle_numbers,
+        settled_mergeables,
+        settlement_errors,
+        pr_truncated or issue_truncated,
+    )
+    if settlement_failure:
         return (
-            {
-                "name": name,
-                "ok": False,
-                "warning": (
-                    "%s scan failed: mergeability settlement query failed for "
-                    "PR(s) %s: %s"
-                    % (
-                        slug,
-                        ", ".join("#%s" % number for number in failed_numbers),
-                        failed_reason[:160],
-                    )
-                ),
-                "open_pr_numbers": [pr["number"] for pr in prs],
-                "open_issue_numbers": [it["number"] for it in issues],
-                "indeterminate_pr_numbers": indeterminate,
-                "truncated": pr_truncated or issue_truncated,
-            },
+            settlement_failure,
             [],
         )
     for pr, author, comp, tests, ci, cross_repo in pr_contexts:
@@ -2726,10 +2753,28 @@ def build_repo(
         if _mergeable_is_unknown(pr.get("mergeable"))
     ]
     ci_noop_settled_mergeables = {}
+    ci_noop_settlement_errors = {}
     if ci_noop_unknown_numbers:
-        ci_noop_settled_mergeables, _ = _settle_mergeables(
+        ci_noop_settled_mergeables, ci_noop_settlement_errors = _settle_mergeables(
             owner, name, ci_noop_unknown_numbers
         )
+    ci_noop_settlement_failure = _settlement_failure_result(
+        slug,
+        name,
+        enriched,
+        issues,
+        ci_noop_unknown_numbers,
+        ci_noop_settled_mergeables,
+        ci_noop_settlement_errors,
+        pr_truncated or issue_truncated or not closing_scan_complete,
+        (
+            pr["number"]
+            for pr in enriched
+            if pr["bucket"] == MERGEABILITY_PENDING
+        ),
+    )
+    if ci_noop_settlement_failure:
+        return (ci_noop_settlement_failure, [])
     for pr in ci_noop_nudge_candidates:
         mergeable = _mergeable_for_ci_noop_nudge(
             pr,
