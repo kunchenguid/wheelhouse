@@ -3370,6 +3370,10 @@ _PR_HEAD_REF_RE = re.compile(
 )
 
 
+def _is_actions_checkout(name):
+    return str(name or "").strip().lower() == "actions/checkout"
+
+
 def _checks_out_pr_head(doc):
     """True if any job step is an actions/checkout pinning `ref` to the PR head.
     Best-effort but reliable (parses jobs/steps, not free text)."""
@@ -3387,7 +3391,8 @@ def _checks_out_pr_head(doc):
         for step in steps:
             if not isinstance(step, dict):
                 continue
-            if "actions/checkout" not in str(step.get("uses") or ""):
+            parsed = _parse_uses(step.get("uses"))
+            if not parsed or not _is_actions_checkout(parsed[0]):
                 continue
             with_ = step.get("with")
             if isinstance(with_, dict) and _PR_HEAD_REF_RE.search(
@@ -3789,8 +3794,8 @@ def _classify_action(name, ref, kind, owner):
         return ("local", False)
     if kind == "docker":
         return ("docker", "@sha256:" in name)
-    action_owner = name.split("/", 1)[0] if "/" in name else name
-    first_party = action_owner in ("actions", "github", owner)
+    action_owner = (name.split("/", 1)[0] if "/" in name else name).lower()
+    first_party = action_owner in ("actions", "github", str(owner).lower())
     pinned = bool(_FULL_SHA_RE.match(ref))
     return ("first" if first_party else "third", pinned)
 
@@ -3863,7 +3868,7 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
                 "called_workflow": False,
             }
         )
-        if "actions/checkout" in name:
+        if _is_actions_checkout(name):
             with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
             checkouts.append(
                 {

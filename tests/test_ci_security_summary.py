@@ -282,6 +282,15 @@ def test_explicit_pr_head_checkout_ref_is_unchanged():
           "Checkout: PR head - `${{ github.event.pull_request.head.sha }}`" in s)
 
 
+def test_checkout_action_coordinate_is_case_insensitive():
+    mixed_case = EXPLOIT_WF.replace("actions/checkout@v4", "Actions/Checkout@v4")
+    s = summary_for([{"filename": WF, "status": "added"}], {WF: mixed_case})
+    check("mixed-case checkout: identifies the pwn-request pattern",
+          "pwn-request" in s and "PR head" in s)
+    check("mixed-case checkout: remains a first-party action",
+          "Actions/Checkout@v4 (NOT SHA-pinned)" not in s)
+
+
 def test_same_repository_checkouts_without_ref_use_the_event_sha():
     for repository in ("kunchenguid/firstmate", "${{ github.repository }}"):
         wf = (
@@ -682,6 +691,7 @@ def main():
     test_safe_first_party_workflow_has_no_flags()
     test_checkout_without_ref_is_labeled_as_event_default()
     test_explicit_pr_head_checkout_ref_is_unchanged()
+    test_checkout_action_coordinate_is_case_insensitive()
     test_same_repository_checkouts_without_ref_use_the_event_sha()
     test_pr_target_same_repository_checkout_without_ref_uses_trusted_base()
     test_mixed_pr_trigger_same_repository_checkout_requires_manual_review()
