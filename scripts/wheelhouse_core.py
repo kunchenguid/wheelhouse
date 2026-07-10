@@ -2169,7 +2169,13 @@ def _close_pending_target(slug, number, record, now):
 
 
 def _pr_conflicting_for_cleanup(pr):
-    """True when a scanned PR has an in-scope rebase-nudge cleanup ask.
+    """Whether a scanned PR may have an eligible rebase-nudge cleanup record.
+
+    `needs-rebase` is always eligible for proof lookup.
+    The ci-noop exception is eligible only for a cross-repo
+    `needs-ci-approval` PR whose scan-time mergeability is conclusively
+    `CONFLICTING`.
+    The caller must still prove the nudge itself before it can act.
     """
     if pr.get("bucket") == "needs-rebase":
         return True
@@ -2179,6 +2185,11 @@ def _pr_conflicting_for_cleanup(pr):
 
 
 def _is_ci_noop_cleanup_candidate(pr):
+    """Identify the fork ci-noop route without treating it as an ask or action.
+
+    A later conflict check and a provable rebase-nudge record are both required
+    before stale cleanup can do anything for this fast CI-approval lane.
+    """
     return (
         pr.get("bucket") == "needs-ci-approval"
         and pr.get("cross_repo") is True
@@ -2193,6 +2204,13 @@ def _is_ci_approval_cleanup_lane(pr):
 
 
 def _ci_noop_conflict_is_current(owner, repo, pr):
+    """Re-check ci-noop mergeability immediately before a cleanup write.
+
+    Standard rebase cleanup already routes from a current `needs-rebase` scan
+    bucket.
+    The ci-noop exception must instead fail closed unless a fresh re-read is
+    still conclusively `CONFLICTING`.
+    """
     if not _is_ci_noop_cleanup_candidate(pr):
         return True
     return _mergeable_is_conflicting(_settle_mergeable(owner, repo, pr["number"]))
@@ -2345,12 +2363,11 @@ def sweep_pending_contributor_actions(
             continue
         conflicting = _pr_conflicting_for_cleanup(pr)
         is_ci_approval = _is_ci_approval_cleanup_lane(pr)
-        # ci-approval is a fast security gate, not a stale-contributor lane, so it
-        # stays out of scope EXCEPT for a provably-conflicting fork PR: a fork PR
-        # with no CI still routes here (ci-noop) yet gets a deterministic rebase
-        # nudge when conflicting, and that nudge is a valid cleanup ask. A
-        # non-conflicting ci-approval PR is ignored even with a pending label, so
-        # the close path never fires without a fresh, authoritative conflict.
+        # ci-approval is a fast security gate, not a stale-contributor lane.
+        # The narrow ci-noop exception requires both a proven rebase nudge and a
+        # conclusively conflicting cross-repo PR.
+        # A non-conflicting ci-approval PR is ignored even with a pending label,
+        # so the close path never fires without a fresh, authoritative conflict.
         if is_ci_approval and not conflicting:
             continue
         maybe_pending = (

@@ -568,19 +568,15 @@ still appears where it's plain English, e.g. "triage the queue".)
   Every global setting has a per-repo override, including the enable flag,
   thresholds, and targets.
   It is intentionally scoped to provable contributor-action asks:
-  successful `/request-changes` reviews and merge-conflict rebase nudges. The
-  ASK is the nudge, not the routing bucket: a conflicting fork PR that routes to
-  `needs-ci-approval` because the repo has no CI workflows (the ci-noop case)
-  still gets a deterministic rebase nudge, and the sweep now covers it too. The
-  sibling ci-noop nudge deliberately does NOT arm cleanup state (arming a
-  `needs-ci-approval` PR the sweep used to skip would orphan the marker), so the
-  widened provable-ask set keys off the nudge evidence itself via the legacy
-  retrofit plus a fresh authoritative `mergeable == CONFLICTING`
-  (`_pr_conflicting_for_cleanup`; the enriched scan dict now carries `mergeable`
-  for this). A `needs-ci-approval` PR is entered ONLY when it is authoritatively
-  CONFLICTING this scan - a non-conflicting one is ignored even with a pending
-  label (so the fast security-gate lane is untouched and the close path is
-  fail-closed on current conflict); UNKNOWN/MERGEABLE/None never qualify.
+  successful `/request-changes` reviews and merge-conflict rebase nudges.
+  The ASK is the nudge, not the routing bucket.
+  A conflicting fork PR in the `needs-ci-approval` ci-noop route is eligible only when the sweep can prove an existing rebase nudge.
+  Routing alone never creates or proves an ask.
+  Its nudge is deliberately treated through the legacy retrofit rather than requiring cleanup state, so an unarmed nudge is not orphaned.
+  `_pr_conflicting_for_cleanup` gates this widened proof path with the scan's authoritative `mergeable == CONFLICTING` result, carried in the enriched scan dict.
+  A `needs-ci-approval` PR is entered ONLY when it is authoritatively CONFLICTING this scan.
+  A non-conflicting one is ignored even with a pending label, so the fast security-gate lane is untouched and the close path is fail-closed on current conflict.
+  UNKNOWN, MERGEABLE, and None never qualify.
   It never handles issue-triage, never runs from
   ingest, never runs in Claude/LLM paths, and never uses `READONLY_TOKEN`.
   The sweep runs inside `wheelhouse_core.py scan` under `FLEET_TOKEN`, before
@@ -616,13 +612,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   the field missing so the downstream check still fails open. A GENUINELY
   unexplained target `updated_at` (no readable activity at that time) still fails
   open - that safety net is intentional, not a bug to remove.
-  Legacy `<!-- wheelhouse-rebase-nudge:<head_sha> -->` comments (the un-armed,
-  pre-arming nudge backlog) are the widened provable-ask set: every nudged
-  conflicting fork PR enters the lifecycle via this retrofit, not just asks that
-  happened to arm. They are retrofitted
-  only when a trusted author, the original comment timestamp/id, and unchanged
-  head can be proven; the first eligible pass reminds and adds the active label,
-  and only a later pass with that reminder may close.
+  Legacy `<!-- wheelhouse-rebase-nudge:<head_sha> -->` comments form the unarmed, pre-arming nudge backlog and can be retrofitted into the lifecycle.
+  The retrofit requires a trusted author, the original comment timestamp/id, an unchanged head, and a cleanup-eligible conflict path.
+  The first eligible pass reminds and adds the active label, and only a later pass with that reminder may close.
 - NL conversation memory is owner-scoped, and the scoping IS the security
   boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
   `github.token`) and `apply_decision.py assemble_history` renders it as a

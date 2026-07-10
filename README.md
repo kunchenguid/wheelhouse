@@ -138,11 +138,14 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 
 > **Heads-up - `pending_contributor_cleanup` defaults OFF.**
 > When this key is absent Wheelhouse never auto-closes a target for contributor inactivity.
-> When enabled, the scheduled scan watches only PRs with a provable pending-contributor ask created by Wheelhouse: a successful `/request-changes` review or a normal `needs-rebase` merge-conflict nudge.
-> The fork-CI no-op conflict nudge does not arm that cleanup state.
+> When enabled, the scheduled scan watches only PRs with a provable pending-contributor ask created by Wheelhouse: a successful `/request-changes` review or a merge-conflict rebase nudge.
+> A provable legacy rebase nudge that predates cleanup arming is eligible too, so an already-nudged conflicting PR can join the same reminder-then-close lifecycle without a new contributor-facing ask.
+> The CI-approval security lane remains out of scope except for a cross-repo `needs-ci-approval` ci-noop PR with both a provable rebase nudge and an authoritative current `CONFLICTING` mergeability result.
+> The scan re-checks that exception's mergeability immediately before a reminder or close, so a non-conflicting, `UNKNOWN`, or unreadable PR is skipped rather than acted on.
 > It posts one reminder at `pending_contributor_reminder_days` and closes at `pending_contributor_cleanup_days` only if the reminder already exists.
 > It skips instead of closing if any required target timeline or PR edit-history read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if the target has the `wheelhouse:keep-open` label.
 > Maintainer and bot activity never reset the clock.
+> A missing review timestamp is re-read by review ID when possible; a failed re-read or a genuinely unexplained target update still skips cleanup.
 > Set it to `true` globally or on a single repo, and keep `pending_contributor_cleanup_targets: ["pr"]` for the current PR-only behavior.
 > The reminder days, cleanup days, and targets can also be overridden per repo.
 
@@ -308,7 +311,9 @@ There is one fork-CI exception: when safe automatic CI approval verifies that no
 An actual CI approval is unchanged and does not post a conflict nudge.
 An `UNKNOWN` mergeability value is settled before this exception can nudge, and a missing or still-indeterminate value does not nudge.
 If stale pending-contributor cleanup is enabled, a rebase nudge from the normal `needs-rebase` path is also a provable ask for the reminder and close sweep.
-The fork-CI no-op exception deliberately does not arm pending-contributor cleanup.
+The sweep also recognizes an existing provable rebase nudge on a currently conflicting cross-repo `needs-ci-approval` ci-noop PR.
+That narrow exception does not change CI routing or create a nudge from the CI-approval state alone.
+It re-checks mergeability immediately before a reminder or close, so a non-conflicting, `UNKNOWN`, or unreadable PR is skipped.
 Apply `wheelhouse:keep-open` on the target PR when you want to exempt it from that sweep.
 By default the scan also **auto-approves fork-CI runs it proves safe** (`auto_approve_ci`, on unless you opt out), so an *Approve the CI run* card now appears only for contributor fork PRs with risky or uncertain cases - a run that changes CI/action files, targets a non-default base branch, has unreadable safety state, hits an approval error, has unknown fork status, or whose repo has a `pull_request_target` workflow (see [Security notes](#security-notes)).
 Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop path, but risky or uncertain cases are logged with `suppressed-card` and do not emit decision cards.
@@ -330,7 +335,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   A conflicting PR that would otherwise become a merge-ready or review-needed PR-review card leaves the maintainer queue as `needs-rebase`.
   Classification never rewrites a fork `needs-ci-approval` target to `needs-rebase`, because CI approval and eventual mergeability are independent.
   However, if automatic approval for a non-excluded contributor fork verifies `noop` because no matching CI run is awaiting approval, and that PR's mergeability is conclusively `CONFLICTING`, the scan posts the same one-per-head rebase nudge while still emitting no decision card.
-  This narrow exception does not apply when a CI run was actually approved, and it does not arm pending-contributor cleanup.
+  This narrow exception does not apply when a CI run was actually approved, and it does not write the structured pending-contributor cleanup state.
   GitHub's explicit `UNKNOWN` value is a pending computation, not a routing answer: Wheelhouse polls an otherwise merge-ready or review-needed candidate and freezes that PR-review card's membership if it cannot settle the result, so `UNKNOWN` never creates, closes, or consumes that card.
   For the fork-CI no-op exception, `UNKNOWN` is likewise only a pending value: the scan settles it before nudging, never nudges an unresolved or missing value, and treats a settlement-query error as an unhealthy scan rather than guessing.
   A missing mergeability value still fails open and routes normally.
@@ -346,8 +351,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   A "changes requested" review is a slightly larger effect on the target repo than a plain comment: under branch-protection required-reviews, it can put the target PR into a merge-blocked state until it is dismissed or a new review clears it.
 - **Pending-contributor cleanup is deterministic and fail-open.** The scheduled scan runs the stale cleanup sweep under `FLEET_TOKEN`, the same deterministic target-side context that posts normal `needs-rebase` merge-conflict nudges and approves safe fork CI.
   It never runs in a Claude path and never uses `READONLY_TOKEN`.
-  It closes only PRs with a structured target-side marker plus active `wheelhouse:pending-contributor-action` label, or legacy normal `needs-rebase` nudges whose original hidden per-head marker and timestamp can still be proven.
-  The CI-noop conflict-nudge exception carries only its rebase idempotence marker and is not a cleanup target.
+  It closes only PRs with a structured target-side marker plus active `wheelhouse:pending-contributor-action` label, or legacy rebase nudges whose original hidden per-head marker and timestamp can still be proven.
+  A ci-noop fork PR with `needs-ci-approval` is eligible through that legacy-nudge proof only when scan-time and pre-write mergeability reads are both conclusively `CONFLICTING`.
+  CI routing alone is never treated as a cleanup ask.
   It also requires a prior visible reminder, an open target, no `wheelhouse:keep-open` label, the same PR head SHA, a verified original ask, and complete target timeline and PR edit-history reads.
   Any uncertainty skips the close.
   Contributor comments, reviews, review comments, edits, or head pushes after the ask stop cleanup and clear the active pending label.
@@ -370,7 +376,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Verified runs are deduped by stable `workflowDatabaseId` when GitHub exposes it, keeping the highest run ID for that workflow; same-named distinct workflows and runs without that identity are not collapsed.
   If no matching run is awaiting approval, Wheelhouse normally emits no worklist item and lets reconcile consume any stale CI-approval card; a later pending run re-enters the normal approve, card, or suppressed-card path.
   For a contributor fork whose no-op PR is conclusively `CONFLICTING`, that no-card path also posts the existing fire-once-per-head rebase nudge before it drops the PR from the worklist.
-  It does not change the CI-approval bucket, affect an `approved` path with real workflows, or arm pending-contributor cleanup.
+  It does not change the CI-approval bucket, affect an `approved` path with real workflows, or write the structured pending-contributor cleanup state.
   An explicit `UNKNOWN` mergeability is settled before this nudge can be sent, while a missing value or an unresolved value produces no nudge.
   A settlement-query error also produces no nudge, marks the repo scan unhealthy, and preserves existing cards rather than letting reconcile consume them.
   Every contributor uncertainty fails closed to a card (unknown fork status, unreadable PR files, a non-default PR base branch, unreadable workflows, or an approve error).
@@ -444,9 +450,10 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Wheelhouse paginates open PRs, open issues, PR closing references, and hub cards; if any repo page or closing-reference page cannot be read completely, it reports the warning, suppresses new issue-triage cards that might be duplicates of PR-addressed issues, and refuses to self-heal close existing cards for that repo until a complete scan succeeds.
 - **A pending-contributor PR did not get reminded or closed.**
   Check that `pending_contributor_cleanup` is enabled globally or for that repo, and that the effective `pending_contributor_cleanup_targets` contains `pr`.
-  The cleanup sweep is intentionally narrow: it only handles PRs where Wheelhouse can prove a `/request-changes` review or normal `needs-rebase` merge-conflict nudge happened.
-  The CI-noop conflict nudge does not arm cleanup.
+  The cleanup sweep is intentionally narrow: it only handles PRs where Wheelhouse can prove a `/request-changes` review or merge-conflict rebase nudge happened, including an unarmed legacy nudge.
+  A `needs-ci-approval` fork PR is considered only when it is currently `CONFLICTING` and the nudge is proven; this does not widen the normal CI-approval lane.
   It skips if the target has `wheelhouse:keep-open`, if the PR head changed, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if any required target timeline or PR edit-history read is missing or ambiguous.
+  When a review list item or `reviewed` timeline event lacks a timestamp, the scan re-reads that review by ID; if it still cannot prove the time, it skips cleanup by design.
   Search the latest `scan-backstop` log for `pending-contributor cleanup skipped`, `pending-contributor cleanup reminded`, or `pending-contributor cleanup closed`.
 - **An Approve-CI card disappeared before I acted.**
   Search the latest `scan-backstop` logs for `approve_ci noop`.
@@ -507,8 +514,8 @@ tests/test_decision.py         offline unit test for parse/route logic, accept-r
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, and self-healing
-tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, fork-CI no-op conflict handling, cleanup arming, and stale-card self-healing
-tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, retro rebase markers, and fail-open timeline proof
+tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
+tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
