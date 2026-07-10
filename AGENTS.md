@@ -882,11 +882,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   G6 a fresh structured `automerge_verdict` for the CURRENT head SHA
   (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
   alignment, ruling out an ineligible existing/default behavior change, and
-  recommending merge (class C also requires an explicit strictly-opt-in +
-  default-off flag); G7 an immediate live re-check of head SHA + mergeable +
-  clean state right before `do_merge`. Any missing/stale/malformed/uncertain/
-  unreadable input HOLDS for human review (fail-closed), and an ok:false /
-  truncated / `indeterminate_pr_numbers` repo is frozen exactly like reconcile.
+  recommending merge (class C also requires an explicit strictly-opt-in + default-off flag).
+  G7 is an immediate live re-check of head SHA, base SHA, default-branch VISION.md SHA, mergeable, clean state, and configured compliance/test contexts right before `do_merge`.
+  Any missing/stale/malformed/uncertain/unreadable input HOLDS for human review (fail-closed), and an ok:false / truncated / `indeterminate_pr_numbers` repo is frozen exactly like reconcile.
+  A target repository without GitHub's "require branches to be up to date" branch protection has an irreducible sub-second window between those final GETs and GitHub's merge PUT: GitHub's merge API accepts no base-SHA precondition.
+  That residual risk is bounded by the final CLEAN state, green configured checks, blast-radius caps, and unconditional exclusions.
+  Enabling "require branches to be up to date" branch protection, or using a merge queue, closes it server-side because GitHub's `mergeStateStatus` becomes `BEHIND` while auto-merge requires a CLEAN merge state.
   The behavior verdict is PRODUCED by extending the pr-review triage
   (`triage.yml` fetches base-branch VISION.md - the contents API with NO `?ref`,
   never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md
