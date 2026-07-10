@@ -840,7 +840,23 @@ def cmd_validate(cards_path):
 # --------------------------------------------------------------------------- #
 # G7: act (live re-check immediately before merging, then do_merge)
 # --------------------------------------------------------------------------- #
-def act_merge(owner, repo, number, head_sha, vision_sha, base_sha, expected_card):
+def _read_card_with_card_token(number, card_token):
+    if not str(card_token or "").strip():
+        return None
+    original_token = os.environ.get("GH_TOKEN")
+    try:
+        os.environ["GH_TOKEN"] = card_token
+        return render_card.get_card(number)
+    finally:
+        if original_token is None:
+            os.environ.pop("GH_TOKEN", None)
+        else:
+            os.environ["GH_TOKEN"] = original_token
+
+
+def act_merge(
+    owner, repo, number, head_sha, vision_sha, base_sha, expected_card, card_token
+):
     """G7. Immediately re-read head SHA + mergeability + clean merge state, then
     call the existing do_merge (which does its own head re-check and runs on the
     ambient FLEET_TOKEN with the unchanged owner-safety / thank-you model).
@@ -869,7 +885,9 @@ def act_merge(owner, repo, number, head_sha, vision_sha, base_sha, expected_card
     mc_ok, mc_reason = mergeable_clean(pr)
     if not mc_ok:
         return ("held", "final re-check: %s" % mc_reason, "")
-    current_card = render_card.get_card(expected_card.get("issue"))
+    current_card = _read_card_with_card_token(expected_card.get("issue"), card_token)
+    if current_card is None and not str(card_token or "").strip():
+        return ("held", "final card re-check: default card token is unavailable", "")
     card_ok, card_reason = _current_claim_matches(
         expected_card, current_card, repo, str(number)
     )
@@ -910,6 +928,7 @@ def act_on_scan(scan, cards):
     cfg = core.load_config()
     global_auto_merge = cfg["auto_merge"]
     maintainer_logins = {m.casefold() for m in core.maintainers()}
+    card_token = os.environ.get("WHEELHOUSE_CARD_TOKEN", "")
     index = _card_index(cards)
     merges = []
     holds = []
@@ -983,6 +1002,7 @@ def act_on_scan(scan, cards):
                 result["audit"]["vision_sha"],
                 result["base_sha"],
                 card_entry,
+                card_token,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
             outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")

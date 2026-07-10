@@ -358,18 +358,33 @@ jobs:
           TRIGGER_BODY: ${{ github.event.issue.body }}
           TRIGGER_UPDATED_AT: ${{ github.event.issue.updated_at }}
           TRIGGER_LABELS: ${{ toJSON(github.event.issue.labels) }}
+          TRIGGER_COMMENTS: ${{ github.event.issue.comments }}
         run: |
           set -euo pipefail
-          card="$(gh issue view "$ISSUE" --json state,labels,body,updatedAt)"
+          card="$(gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments)"
           allowed=false
           if [ -n "$TRIGGER_UPDATED_AT" ] && jq -e \
             --arg trigger_body "$TRIGGER_BODY" \
-            --arg trigger_updated_at "$TRIGGER_UPDATED_AT" '
+            --arg trigger_updated_at "$TRIGGER_UPDATED_AT" \
+            --argjson trigger_labels "$TRIGGER_LABELS" \
+            --argjson trigger_comments "${TRIGGER_COMMENTS:-0}" '
             ([.labels[].name] | sort | unique) as $labels
             | ($trigger_labels | map(.name) | sort | unique) as $trigger_labels
+            | ["processing", "wheelhouse:auto-merge-claim"] as $claim_labels
+            | ($labels - $claim_labels) as $stable_labels
+            | ($trigger_labels - $claim_labels) as $stable_trigger_labels
             | (.body // "") == $trigger_body
-            and (.updatedAt // "") == $trigger_updated_at
-            and $labels == $trigger_labels
+            and ([.comments[]?] | length) == $trigger_comments
+            and $stable_labels == $stable_trigger_labels
+            and (
+              ($labels == $trigger_labels and (.updatedAt // "") == $trigger_updated_at)
+              or (
+                ($trigger_labels | index("processing") != null)
+                and ($trigger_labels | index("wheelhouse:auto-merge-claim") != null)
+                and ($labels | index("processing") == null)
+                and ($labels | index("wheelhouse:auto-merge-claim") == null)
+              )
+            )
             and .state == "OPEN"
             and ($labels | index("needs-decision") != null)
             and ($labels | index("processing") == null)

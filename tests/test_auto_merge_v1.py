@@ -181,6 +181,8 @@ class World:
         self.last_pr = {}
         self.files = {}  # (slug, str(number)) -> (files, ok, complete)
         self.do_merge_calls = []
+        self.card_token_reads = []
+        self.merge_tokens = []
         self.do_merge_returns = {}  # (repo, number) -> (message, terminal)
         self.merge_commits = {}  # (repo, number) -> merge endpoint sha
 
@@ -215,6 +217,7 @@ class World:
 
     def do_merge(self, owner, repo, number, head, return_merge_commit=False):
         self.do_merge_calls.append((owner, repo, number, head))
+        self.merge_tokens.append(os.environ.get("GH_TOKEN"))
         result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
         )
@@ -223,7 +226,7 @@ class World:
         return result
 
 
-def run_act(world, items, cards, has_token=True):
+def run_act(world, items, cards, has_token=True, has_card_token=True):
     """Install stubs, run act_on_scan, capture stderr, restore. Returns
     (payload, stderr_text)."""
     saved = {
@@ -237,6 +240,7 @@ def run_act(world, items, cards, has_token=True):
         "maint": core.maintainers,
         "owner": core.get_owner,
         "token": os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN"),
+        "card_token": os.environ.get("WHEELHOUSE_CARD_TOKEN"),
     }
     am.vision_on_default_branch = world.vision_on_default_branch
     am.has_prior_merged_pr = lambda slug, author: world.merged_authors.get(
@@ -254,6 +258,7 @@ def run_act(world, items, cards, has_token=True):
     cards_by_number = {str(card["number"]): card for card in cards}
 
     def get_card(number):
+        world.card_token_reads.append(os.environ.get("GH_TOKEN"))
         sequence = getattr(world, "card_seq", {}).get(str(number))
         if sequence:
             return sequence.pop(0) if len(sequence) > 1 else sequence[0]
@@ -261,6 +266,10 @@ def run_act(world, items, cards, has_token=True):
 
     render_card.get_card = get_card
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true" if has_token else "false"
+    if has_card_token:
+        os.environ["WHEELHOUSE_CARD_TOKEN"] = "card-token"
+    else:
+        os.environ.pop("WHEELHOUSE_CARD_TOKEN", None)
     scan = {
         "repos": {
             it["repo"]: world.repos_scan.get(it["repo"], {"ok": True})
@@ -288,6 +297,10 @@ def run_act(world, items, cards, has_token=True):
             os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
         else:
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = saved["token"]
+        if saved["card_token"] is None:
+            os.environ.pop("WHEELHOUSE_CARD_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_CARD_TOKEN"] = saved["card_token"]
     return payload, buf.getvalue()
 
 
@@ -322,6 +335,38 @@ def test_auto_merge_enabled_default_off_and_overrides():
         "config: absent falls through to global",
         core._auto_merge_enabled({}, True) is True,
     )
+    for value in ("true", "false", 1, 0, [], {}):
+        check(
+            "config: malformed global %r fails closed" % (value,),
+            core._auto_merge_enabled({}, value) is False,
+        )
+        check(
+            "config: malformed repo value %r fails closed" % (value,),
+            core._auto_merge_enabled({"auto_merge": value}, True) is False,
+        )
+
+
+def test_load_config_auto_merge_requires_real_boolean_true():
+    saved = core.config_path
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wheelhouse.config.yml")
+            core.config_path = lambda: path
+            for value, expected in (
+                ("true", True),
+                ("false", False),
+                ('"true"', False),
+                ('"false"', False),
+                ("1", False),
+            ):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("repos: []\nauto_merge: %s\n" % value)
+                check(
+                    "config: loaded auto_merge %s is %s" % (value, expected),
+                    core.load_config()["auto_merge"] is expected,
+                )
+    finally:
+        core.config_path = saved
 
 
 def test_exclusions_cover_every_category():
@@ -371,6 +416,11 @@ def test_exclusions_cover_every_category():
         ("scripts/migrate.py", "migration"),
         ("scripts/migrate_data.py", "migration"),
         ("tools/migrate.py", "migration"),
+        ("scripts/migrate_users.ts", "migration"),
+        ("db/migrate_users.js", "migration"),
+        ("migrate_roles.rb", "migration"),
+        ("db/migrate/001_users.sql", "migration"),
+        ("migrations/001_users.go", "migration"),
     ):
         check(
             "exclusion: component filename %s is held" % path,
@@ -1146,6 +1196,32 @@ def test_G7_card_activity_after_claim_holds_and_releases_claim():
     )
 
 
+def test_G7_card_read_uses_dedicated_default_token():
+    w, items, cards = default_world(head="tk" * 20)
+    saved = os.environ.get("GH_TOKEN")
+    try:
+        os.environ["GH_TOKEN"] = "fleet-token"
+        payload, _ = run_act(w, items, cards)
+        check(
+            "G7: card re-read uses only the dedicated default token",
+            bool(payload["merges"])
+            and w.card_token_reads == ["card-token"]
+            and w.merge_tokens == ["fleet-token"],
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("GH_TOKEN", None)
+        else:
+            os.environ["GH_TOKEN"] = saved
+
+
+def test_G7_missing_default_card_token_holds():
+    w, items, cards = default_world(head="nt" * 20)
+    payload, _ = run_act(w, items, cards, has_card_token=False)
+    check("G7: missing default card token holds", not payload["merges"])
+    check("G7: missing default card token does not merge", not w.do_merge_calls)
+
+
 def test_vision_is_rechecked_per_candidate_and_before_acting():
     w, items, cards = default_world(head="vv" * 20)
     w.vision_seq = {"fmt": [(True, "vsha"), (True, "new-vision")]}
@@ -1861,6 +1937,12 @@ def test_scan_backstop_wiring_and_token_discipline():
         in act.get("run", ""),
     )
     check(
+        "wiring: act re-reads cards with a separate default-token credential",
+        act
+        and "FLEET_TOKEN" in (act.get("env") or {}).get("GH_TOKEN", "")
+        and "github.token" in (act.get("env") or {}).get("WHEELHOUSE_CARD_TOKEN", ""),
+    )
+    check(
         "wiring: absent triage token disables both claim and act",
         claim
         and act
@@ -1913,9 +1995,12 @@ def test_scan_backstop_wiring_and_token_discipline():
         and "TRIGGER_BODY" in (current.get("env") or {})
         and "TRIGGER_UPDATED_AT" in (current.get("env") or {})
         and "TRIGGER_LABELS" in (current.get("env") or {})
-        and "body,updatedAt" in current.get("run", "")
+        and "TRIGGER_COMMENTS" in (current.get("env") or {})
+        and "body,updatedAt,comments" in current.get("run", "")
         and "trigger_updated_at" in current.get("run", "")
-        and "$labels == $trigger_labels" in current.get("run", "")
+        and '--argjson trigger_labels "$TRIGGER_LABELS"' in current.get("run", "")
+        and "wheelhouse:auto-merge-claim" in current.get("run", "")
+        and "$stable_labels == $stable_trigger_labels" in current.get("run", "")
         and "steps.current-card.outputs.allowed == 'true'" in json.dumps(handler_steps),
     )
 

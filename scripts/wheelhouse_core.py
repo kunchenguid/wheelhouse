@@ -271,7 +271,7 @@ def load_config():
         # and higher-stakes than a fork-CI approval, so a repo never auto-merges
         # until the owner opts in globally or per repo AND commits a VISION.md on
         # the target's default branch (see auto_merge.py / AGENTS.md "Auto-merge").
-        "auto_merge": bool(cfg.get("auto_merge", False)),
+        "auto_merge": cfg.get("auto_merge", False) is True,
         # Advisory LLM triage is DEFAULT ON when the Claude token exists. The
         # flag is only a spend-control opt-out; absence keeps fresh forks useful.
         "auto_triage": bool(cfg.get("auto_triage", True)),
@@ -1072,7 +1072,7 @@ def _auto_merge_enabled(repo_cfg, global_default):
     auto-merge can act. A per-repo `auto_merge: false` is the portable one-repo
     kill switch even when the fleet-wide default is on."""
     v = repo_cfg.get("auto_merge")
-    return global_default if v is None else bool(v)
+    return global_default is True if v is None else v is True
 
 
 def _auto_triage_enabled(repo_cfg, global_default):
@@ -3445,7 +3445,9 @@ _AM_EXCLUDE_PATH_COMPONENTS = {
     "authentication": re.compile(
         r"(?:^|/)(?:auth|authentication|authorization|authn|authz|permissions?|iam|rbac|acl)(?:[._/-]|$)"
     ),
-    "migration": re.compile(r"(?:^|/)(?:scripts/)?migrate[^/]*\.py$"),
+    "migration": re.compile(
+        r"(?:^|/)(?:scripts/)?migrate[^/]*\.(?:py|ts|tsx|js|jsx|mjs|cjs|rb|go|sql)$"
+    ),
 }
 
 
@@ -3496,6 +3498,12 @@ def _auto_merge_exclusions(files):
             continue
         if base.endswith(".mk") or (base.startswith("setup") and base.endswith(".sh")):
             hits.add("install-bootstrap:%s" % f)
+            continue
+        if (
+            _AM_EXCLUDE_PATH_COMPONENTS["migration"].search(low)
+            or any(n in low for n in _AM_EXCLUDE_PATH_SUBSTRINGS["migration"])
+        ):
+            hits.add("migration:%s" % f)
             continue
         # 5) persistence / schema: raw SQL and schema definition files.
         if low.endswith(".sql") or low.endswith(".prisma") or base.startswith("schema."):
