@@ -3590,6 +3590,10 @@ def _approve_warning_suffix(verdict):
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_-]*)")
 _SECRETS_INHERIT_RE = re.compile(r"secrets:\s*inherit\b", re.I)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CI_SUMMARY_MAX_FILES = 24
+CI_SUMMARY_MAX_FLAGS = 48
+CI_SUMMARY_MAX_VALUES = 16
+CI_SUMMARY_MAX_CHARS = 12000
 
 # Returned as the summary BODY when the workflow/action changes cannot be
 # analyzed deterministically. It keeps the manual review required (fail closed).
@@ -3690,7 +3694,7 @@ def _permission_specs(doc):
     if isinstance(jobs, dict):
         for name, job in jobs.items():
             if isinstance(job, dict) and "permissions" in job:
-                specs.append(("job `%s`" % name, job.get("permissions")))
+                specs.append(("job `%s`" % _safe_inline(name), job.get("permissions")))
     return specs
 
 
@@ -3869,25 +3873,38 @@ def _file_fact_lines(analysis):
         lines.append("  - Could not parse this file as YAML - review manually")
         return lines
 
+    omitted = []
     triggers = analysis["triggers"]
     if triggers:
-        trig = ", ".join("`%s`" % _safe_inline(t) for t in triggers)
+        shown, extra = _summary_values(triggers)
+        trig = ", ".join("`%s`" % _safe_inline(t) for t in shown)
+        if extra:
+            trig += " (+%d omitted)" % extra
+            omitted.append("triggers")
         lines.append("  - Triggers: %s" % trig)
     else:
         lines.append("  - Triggers: none / not a workflow (e.g. composite action)")
 
     if analysis["permissions"]:
+        shown, extra = _summary_values(analysis["permissions"])
         perms = "; ".join(
             "%s -> %s" % (label, _safe_inline(_format_permission(spec)))
-            for label, spec in analysis["permissions"]
+            for label, spec in shown
         )
+        if extra:
+            perms += " (+%d omitted)" % extra
+            omitted.append("permission blocks")
         lines.append("  - Permissions: %s" % perms)
     else:
         lines.append("  - Permissions: not set (inherits the repo default)")
 
     if analysis["secrets"] or analysis["secrets_inherit"]:
-        names = ", ".join("`%s`" % _safe_inline(s) for s in analysis["secrets"])
+        shown, extra = _summary_values(analysis["secrets"])
+        names = ", ".join("`%s`" % _safe_inline(s) for s in shown)
         detail = names or "referenced"
+        if extra:
+            detail += " (+%d omitted)" % extra
+            omitted.append("secret names")
         if analysis["secrets_inherit"]:
             detail += (", " if names else "") + "`secrets: inherit`"
         lines.append("  - Secrets/token: %s" % detail)
@@ -3896,7 +3913,8 @@ def _file_fact_lines(analysis):
 
     if analysis["checkouts"]:
         counts = []  # preserve order, collapse identical labels with a count
-        for co in analysis["checkouts"]:
+        shown, extra = _summary_values(analysis["checkouts"])
+        for co in shown:
             label = _checkout_ref_label(co["ref"])
             if co["repository"]:
                 label += " from `%s`" % _safe_inline(co["repository"])
@@ -3907,22 +3925,34 @@ def _file_fact_lines(analysis):
             else:
                 counts.append([label, 1])
         parts = [lab + (" (x%d)" % n if n > 1 else "") for lab, n in counts]
-        lines.append("  - Checkout: %s" % "; ".join(parts))
+        checkout = "; ".join(parts)
+        if extra:
+            checkout += " (+%d omitted)" % extra
+            omitted.append("checkout steps")
+        lines.append("  - Checkout: %s" % checkout)
     else:
         lines.append("  - Checkout: no explicit `actions/checkout` step")
 
     third = [a for a in analysis["actions"] if a["category"] in ("third", "docker")]
     local = [a for a in analysis["actions"] if a["category"] == "local"]
     if third:
+        shown, extra = _summary_values(third)
         parts = []
-        for a in third:
+        for a in shown:
             pin = "SHA-pinned" if a["pinned"] else "NOT SHA-pinned"
             parts.append("`%s` (%s)" % (_safe_inline(_uses_display(a)), pin))
+        if extra:
+            parts.append("+%d omitted" % extra)
+            omitted.append("third-party actions")
         lines.append("  - Third-party actions: %s" % ", ".join(parts))
     else:
         lines.append("  - Third-party actions: none (first-party only)")
     if local:
-        parts = ", ".join("`%s`" % _safe_inline(a["name"]) for a in local)
+        shown, extra = _summary_values(local)
+        parts = ", ".join("`%s`" % _safe_inline(a["name"]) for a in shown)
+        if extra:
+            parts += ", +%d omitted" % extra
+            omitted.append("local actions")
         lines.append(
             "  - Local actions (contributor-controlled code): %s" % parts
         )
@@ -3931,20 +3961,53 @@ def _file_fact_lines(analysis):
         lines.append(
             "  - Run steps: %d (execute checked-out code)" % analysis["run_steps"]
         )
+    if omitted:
+        lines.append(
+            "  - Additional %s omitted to keep this card concise - review the diff manually"
+            % ", ".join(omitted)
+        )
     return lines
 
 
-def _format_ci_security_summary(analyses, complete):
+def _summary_values(values):
+    """The displayed prefix of a fact list and how many values were omitted."""
+    shown = values[:CI_SUMMARY_MAX_VALUES]
+    return (shown, len(values) - len(shown))
+
+
+def _bounded_ci_security_summary(lines):
+    """Keep the advisory body comfortably below GitHub's issue-body limit."""
+    text = "\n".join(lines)
+    if len(text) <= CI_SUMMARY_MAX_CHARS:
+        return text
+    note = (
+        "\n\n_Note: This automated summary was truncated to keep the card concise "
+        "- review the full diff manually._"
+    )
+    prefix = text[: CI_SUMMARY_MAX_CHARS - len(note)].rsplit("\n", 1)[0]
+    return prefix + note
+
+
+def _format_ci_security_summary(analyses, complete, omitted_files=0):
     """Assemble the advisory findings body from per-file analyses."""
     flags = []
     for a in analyses:
         if not (a.get("unreadable") or a.get("unparsed")):
             flags.extend(_summary_flags(a))
+    incomplete = not complete or any(
+        a.get("unreadable") or a.get("unparsed") for a in analyses
+    )
+    shown_flags = flags[:CI_SUMMARY_MAX_FLAGS]
+    omitted_flags = len(flags) - len(shown_flags)
 
     lines = []
-    if flags:
+    if incomplete:
+        lines.append("**Automated analysis incomplete - review the full diff manually.**")
+    elif shown_flags:
         lines.append("**Flags (most-severe first):**")
-        lines.extend("- %s" % f for f in flags)
+        lines.extend("- %s" % f for f in shown_flags)
+    elif omitted_files:
+        lines.append("**Flags:** none in the summarized files - review the full diff.")
     else:
         lines.append(
             "**Flags:** none detected by the automated scan - still review the diff."
@@ -3953,12 +4016,23 @@ def _format_ci_security_summary(analyses, complete):
     lines.append("**Changed workflow/action files:**")
     for a in analyses:
         lines.extend(_file_fact_lines(a))
-    if not complete:
+    if incomplete:
         lines.append(
-            "- _Note: the changed-file list was incomplete; some changes may not "
-            "be summarized above - review the full diff._"
+            "- _Note: automated analysis was incomplete; review the full diff manually._"
         )
-    return "\n".join(lines)
+    elif omitted_files:
+        lines.append(
+            "- _Note: %d changed workflow/action file%s omitted to keep this card concise "
+            "- review the full diff manually._"
+            % (omitted_files, "s" if omitted_files != 1 else "")
+        )
+    if omitted_flags:
+        lines.append(
+            "- _Note: %d additional flag%s omitted to keep this card concise - review "
+            "the full diff manually._"
+            % (omitted_flags, "s" if omitted_flags != 1 else "")
+        )
+    return _bounded_ci_security_summary(lines)
 
 
 def ci_security_summary(slug, pr, head_sha, changed_files=None):
@@ -3972,18 +4046,20 @@ def ci_security_summary(slug, pr, head_sha, changed_files=None):
     try:
         owner = slug.split("/", 1)[0]
         changes, ok, complete = _list_pr_file_changes(slug, pr, changed_files)
-        if not ok:
+        if not ok or not complete:
             return CI_SUMMARY_UNANALYZABLE
         risky = [c for c in changes if _risky_ci_files([c["filename"]])]
         if not risky:
-            # No workflow/action change to summarize. Only claim "nothing" when
-            # the file list was provably complete; otherwise fail closed.
-            return "" if complete else CI_SUMMARY_UNANALYZABLE
+            return ""
         analyses = [
             _analyze_ci_file(slug, c["filename"], head_sha, c["status"], owner)
-            for c in risky
+            for c in risky[:CI_SUMMARY_MAX_FILES]
         ]
-        return _format_ci_security_summary(analyses, complete)
+        if any(a.get("unreadable") or a.get("unparsed") for a in analyses):
+            return CI_SUMMARY_UNANALYZABLE
+        return _format_ci_security_summary(
+            analyses, complete, omitted_files=len(risky) - len(analyses)
+        )
     except Exception as e:  # never let a summary bug break the scan
         print(
             "::warning::wheelhouse ci security summary error for %s#%s: %s"

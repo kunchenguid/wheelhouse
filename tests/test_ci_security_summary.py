@@ -188,6 +188,33 @@ def test_value_sanitizer_neutralizes_markdown_breakout():
     check("sanitize: newlines collapsed", "\n" not in v)
 
 
+def test_permission_job_name_is_sanitized_before_markdown_formatting():
+    job = "bad`\n### injected"
+    specs = core._permission_specs(
+        {"jobs": {job: {"permissions": {"contents": "write"}}}}
+    )
+    check("sanitize: permission job label has no newlines", "\n" not in specs[0][0])
+    summary = core._format_ci_security_summary(
+        [{
+            "path": WF,
+            "status": "modified",
+            "triggers": [],
+            "pr_target": False,
+            "checks_head": False,
+            "permissions": specs,
+            "perms_write": True,
+            "secrets": [],
+            "secrets_inherit": False,
+            "checkouts": [],
+            "actions": [],
+            "run_steps": 0,
+        }],
+        True,
+    )
+    check("sanitize: permission job cannot inject a Markdown heading",
+          "\n### injected" not in summary)
+
+
 # --------------------------------------------------------------------------- #
 # Benign inputs.
 # --------------------------------------------------------------------------- #
@@ -231,18 +258,43 @@ def test_incomplete_file_list_without_risky_fails_closed():
           s == core.CI_SUMMARY_UNANALYZABLE)
 
 
+def test_incomplete_file_list_with_risky_file_fails_closed():
+    s = summary_for(
+        [{"filename": WF, "status": "modified"}], {WF: SAFE_WF}, changed_files=2
+    )
+    check("fail-closed: incomplete list + risky file -> unanalyzable note",
+          s == core.CI_SUMMARY_UNANALYZABLE)
+
+
 def test_unreadable_risky_file_notes_manual_review():
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: None})
-    check("fail-closed: unreadable risky file -> a summary is still produced",
-          bool(s) and s != core.CI_SUMMARY_UNANALYZABLE)
-    check("fail-closed: unreadable risky file -> per-file manual-review note",
-          "Could not read this file at the PR head" in s)
+    check("fail-closed: unreadable risky file -> unanalyzable note",
+          s == core.CI_SUMMARY_UNANALYZABLE)
 
 
 def test_unparseable_risky_file_notes_manual_review():
     s = summary_for([{"filename": WF, "status": "modified"}], {WF: "a: [unterminated"})
-    check("fail-closed: unparseable risky file -> manual-review note",
-          "Could not parse this file as YAML" in s)
+    check("fail-closed: unparseable risky file -> unanalyzable note",
+          s == core.CI_SUMMARY_UNANALYZABLE)
+
+
+def test_summary_output_is_bounded_with_manual_diff_notice():
+    actions = "\n".join(
+        "      - uses: org/action%d@main" % n for n in range(200)
+    )
+    files = [
+        {"filename": ".github/workflows/%03d.yml" % n, "status": "modified"}
+        for n in range(core.CI_SUMMARY_MAX_FILES + 4)
+    ]
+    texts = {
+        f["filename"]: "name: x\non:\n  pull_request:\njobs:\n  a:\n    steps:\n" + actions
+        for f in files
+    }
+    s = summary_for(files, texts)
+    check("bound: rendered summary has a strict character cap",
+          len(s) <= core.CI_SUMMARY_MAX_CHARS)
+    check("bound: omitted facts require manual diff review",
+          "review the full diff manually" in s)
 
 
 def test_never_raises_even_when_reads_throw():
@@ -386,12 +438,15 @@ def main():
     test_composite_action_file_is_analyzed()
     test_secret_values_are_never_echoed()
     test_value_sanitizer_neutralizes_markdown_breakout()
+    test_permission_job_name_is_sanitized_before_markdown_formatting()
     test_safe_first_party_workflow_has_no_flags()
     test_no_workflow_change_returns_empty()
     test_file_list_read_failure_fails_closed()
     test_incomplete_file_list_without_risky_fails_closed()
+    test_incomplete_file_list_with_risky_file_fails_closed()
     test_unreadable_risky_file_notes_manual_review()
     test_unparseable_risky_file_notes_manual_review()
+    test_summary_output_is_bounded_with_manual_diff_notice()
     test_never_raises_even_when_reads_throw()
     test_summary_is_read_only_and_never_approves()
     test_render_ci_approval_card_shows_advisory_section()
