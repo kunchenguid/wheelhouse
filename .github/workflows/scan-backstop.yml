@@ -116,8 +116,7 @@ jobs:
       # Durable audit trail + resolved decision record for every auto-merge, in
       # THIS repo (default token, never FLEET_TOKEN - this repo's own
       # bookkeeping). Runs AFTER reconcile so the resolve is the last write and
-      # wins over any cosmetic refresh reconcile may have done. Fail-open: an
-      # audit hiccup never un-merges anything.
+      # wins over any cosmetic refresh reconcile may have done.
       - name: Record auto-merges
         if: always()
         env:

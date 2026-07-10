@@ -42,7 +42,8 @@ Two CLIs, run as separate workflow steps so each uses the right token:
   auto_merge.py record <results.json>
       Under GITHUB_TOKEN. Append each auto-merge to the durable ledger issue in
       THIS repo and resolve each merged PR's decision card with an audit record
-      of why it qualified. Fail-open: an audit hiccup never un-merges anything.
+      of why it qualified. Audit writes retry transient failures and report
+      unrecoverable errors after the merge.
 
 Owner is derived from $GITHUB_REPOSITORY_OWNER. Cross-repo reads and the merge
 itself use the ambient GH_TOKEN (FLEET_TOKEN in the act step); the ledger and
@@ -55,6 +56,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -75,6 +77,9 @@ MAX_VISION_BYTES = 40000
 ELIGIBLE_BEHAVIOR_CLASSES = ("A", "B", "C")
 CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
 AUTO_MERGE_CLAIM_LABEL = "wheelhouse:auto-merge-claim"
+AUDIT_WRITE_MAX_ATTEMPTS = 3
+AUDIT_WRITE_BACKOFF_SECONDS = 0.25
+_audit_sleep = time.sleep
 
 # Durable audit ledger (mirrors the scan-health ledger: a dedicated CLOSED issue
 # in THIS cards repo carrying a hidden marker; state lives in GitHub, not disk).
@@ -159,11 +164,16 @@ def blast_radius_ok(changed_files, additions, deletions):
 
 
 def _pr_author_login(pr):
-    return str(((pr or {}).get("user") or {}).get("login") or "").strip()
+    return core._author_login(((pr or {}).get("user") or {}))
 
 
-def _is_bot_login(login):
-    return login.endswith("[bot]")
+def _pr_author_is_provably_human(pr):
+    author = (pr or {}).get("user")
+    if not isinstance(author, dict) or core._author_is_bot(author):
+        return False
+    return core._author_typename(author).casefold() == "user" and bool(
+        core._author_login(author)
+    )
 
 
 def _pr_label_names(pr):
@@ -337,6 +347,10 @@ def _card_is_claimed(labels):
     )
 
 
+def _card_has_pending_decision(labels):
+    return any(str(label).startswith("decision:") for label in labels or ())
+
+
 def _selected_card_option(body):
     return bool(
         re.search(r"(?m)^\s*[-*]\s+\[[xX]\].*<!--\s*opt:[^>]+-->", body or "")
@@ -354,6 +368,18 @@ def _fresh_verdict_for_head(state, head_sha):
         return (False, "", "behavior verdict is stale (not for the current head SHA)")
     if str(state.get("head_sha") or "") != head_sha:
         return (False, "", "card head SHA is not current")
+    recommendation = state.get("triage_recommendation")
+    action = (
+        render_card.normalize_recommendation_action(recommendation.get("action"))
+        if isinstance(recommendation, dict)
+        else ""
+    )
+    if action != "merge":
+        return (
+            False,
+            "",
+            "top-level triage recommendation is not an explicit merge",
+        )
     return verdict_eligible(state.get("automerge_verdict"))
 
 
@@ -385,6 +411,7 @@ def _card_index(cards):
             "state": state,
             "labels": labels,
             "body": card.get("body") or "",
+            "updated_at": render_card.card_updated_at(card),
         }
     for key in duplicate_keys:
         index.pop(key, None)
@@ -495,7 +522,7 @@ def evaluate_candidate(
     author = _pr_author_login(pr)
     if not author:
         return hold("G3 PR author unknown")
-    if _is_bot_login(author) or author.casefold() in maintainer_logins:
+    if not _pr_author_is_provably_human(pr) or author.casefold() in maintainer_logins:
         return hold("G3 author %s is a bot/maintainer, not a returning contributor"
                     % author)
     if not has_prior_merged_pr(slug, author):
@@ -600,12 +627,20 @@ def _current_claim_matches(expected, current, repo, number):
     current_entry = _card_index([current]).get((repo, number))
     if not current_entry:
         return (False, "card is no longer a trusted pr-review card")
+    expected_updated_at = str(expected.get("updated_at") or "")
+    current_updated_at = str(current_entry.get("updated_at") or "")
+    if not expected_updated_at or not current_updated_at:
+        return (False, "card updatedAt is unavailable")
+    if current_updated_at != expected_updated_at:
+        return (False, "card changed after the claim")
     if current_entry["body"] != expected.get("body", ""):
         return (False, "card body changed")
     if current_entry["state"] != expected.get("state"):
         return (False, "card state changed")
     if not _card_is_claimed(current_entry["labels"]):
         return (False, "card claim is no longer current")
+    if _card_has_pending_decision(current_entry["labels"]):
+        return (False, "a pending owner decision label is present")
     if _selected_card_option(current_entry["body"]):
         return (False, "an owner selected a card option")
     return (True, "")
@@ -641,6 +676,8 @@ def claim_cards(scan, cards):
                 or not render_card.issue_is_open(current)
                 or not render_card.is_refreshable(current_entry["labels"])
                 or current_entry["state"] != expected["state"]
+                or current_entry.get("updated_at") != expected.get("updated_at")
+                or _card_has_pending_decision(current_entry["labels"])
                 or _selected_card_option(current.get("body"))
                 or not verdict_ok
             ):
@@ -670,6 +707,7 @@ def claim_cards(scan, cards):
                 or not render_card.issue_is_open(claimed_card)
                 or claimed_entry["state"] != expected["state"]
                 or not _card_is_claimed(claimed_entry["labels"])
+                or _card_has_pending_decision(claimed_entry["labels"])
                 or _selected_card_option(claimed_card.get("body"))
                 or not claimed_verdict_ok
             ):
@@ -1008,7 +1046,20 @@ def append_ledger_entries(
     """Pure ledger update: previous entries + this run's records, newest last,
     capped to the most recent `cap`."""
     prev = prev if isinstance(prev, list) else []
-    combined = list(prev) + [_ledger_entry(r) for r in records or []]
+    combined = list(prev)
+    known = {
+        _ledger_entry_identity(entry)
+        for entry in combined
+        if _ledger_entry_identity(entry)
+    }
+    for record in records or []:
+        entry = _ledger_entry(record)
+        identity = _ledger_entry_identity(entry)
+        if identity and identity in known:
+            continue
+        combined.append(entry)
+        if identity:
+            known.add(identity)
     if cap and len(combined) > cap:
         combined = combined[-cap:]
     while (
@@ -1018,6 +1069,16 @@ def append_ledger_entries(
     ):
         combined.pop(0)
     return combined
+
+
+def _ledger_entry_identity(entry):
+    if not isinstance(entry, dict):
+        return None
+    values = tuple(
+        str(entry.get(field) or "")
+        for field in ("repo", "number", "head_sha")
+    )
+    return values if all(values) else None
 
 
 def render_ledger_body(entries, updated_at=""):
@@ -1117,13 +1178,37 @@ def _create_ledger_issue(slug, body):
     return issue
 
 
+def _is_transient_audit_error(error):
+    text = str(error or "")
+    return core._is_transient_stderr(text) or bool(
+        re.search(r"(?:^|\\D)(?:408|409|429|500|502|503|504)(?:\\D|$)", text)
+    )
+
+
+def _retry_audit_write(operation, description):
+    for attempt in range(1, AUDIT_WRITE_MAX_ATTEMPTS + 1):
+        try:
+            return operation()
+        except SystemExit:
+            raise
+        except Exception as error:
+            if attempt < AUDIT_WRITE_MAX_ATTEMPTS and _is_transient_audit_error(error):
+                _audit_sleep(AUDIT_WRITE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                continue
+            print(
+                "::error::wheelhouse auto-merge %s failed: %s"
+                % (description, str(error)[:200]),
+                file=sys.stderr,
+            )
+            raise RuntimeError("%s failed" % description) from error
+
+
 def append_to_ledger(records):
-    """Persist this run's auto-merges into the durable ledger issue in THIS repo
-    (GITHUB_TOKEN bookkeeping). Fail-open: a ledger error is logged and never
-    raised, so it can never un-merge anything."""
+    """Persist this run's auto-merges into the durable ledger issue in THIS repo."""
     if not records:
         return
-    try:
+
+    def write():
         slug = core._this_repo_slug()
         issue = _find_ledger_issue(slug)
         prev = parse_ledger(issue.get("body") if issue else None)
@@ -1138,13 +1223,8 @@ def append_to_ledger(records):
             )
         else:
             _create_ledger_issue(slug, body)
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(
-            "::warning::wheelhouse auto-merge ledger update failed: %s" % str(e)[:200],
-            file=sys.stderr,
-        )
+
+    _retry_audit_write(write, "ledger update")
 
 
 def audit_comment(record):
@@ -1177,23 +1257,18 @@ def audit_comment(record):
 
 
 def resolve_card(record):
-    """Leave a resolved decision record on the merged PR's card (GITHUB_TOKEN):
-    a comment explaining why it qualified, then close it resolved. Best-effort -
-    a missing card or a write error is logged, never raised."""
+    """Leave a resolved decision record on the merged PR's card (GITHUB_TOKEN)."""
     card = record.get("card_issue")
     if not card:
         return
-    try:
+
+    def close():
         current = render_card.get_card(card)
         if current is None or not render_card.issue_is_open(current):
             return
         render_card.close_card(card, audit_comment(record), label="resolved")
-    except Exception as e:
-        print(
-            "::warning::wheelhouse auto-merge could not resolve card #%s: %s"
-            % (card, str(e)[:200]),
-            file=sys.stderr,
-        )
+
+    _retry_audit_write(close, "resolved-card audit #%s" % card)
 
 
 def release_card_claim(record):
@@ -1217,14 +1292,23 @@ def cmd_record(results_path):
     if not records and not releases:
         print("wheelhouse auto-merge record: no auto-merges to record")
         return
-    append_to_ledger(records)
+    errors = []
+    try:
+        append_to_ledger(records)
+    except Exception as error:
+        errors.append(error)
     for record in records:
-        resolve_card(record)
+        try:
+            resolve_card(record)
+        except Exception as error:
+            errors.append(error)
         release_card_claim(record)
     resolved_cards = {record.get("card_issue") for record in records}
     for record in releases:
         if record.get("card_issue") not in resolved_cards:
             release_card_claim(record)
+    if errors:
+        raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[0]
     print("wheelhouse auto-merge record: recorded %d auto-merge(s)" % len(records))
 
 

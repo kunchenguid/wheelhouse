@@ -77,6 +77,7 @@ def make_pr(
     deletions=10,
     changed_files=2,
     author="alice",
+    author_type="User",
     labels=None,
     merged=False,
     state="open",
@@ -89,7 +90,7 @@ def make_pr(
         "additions": additions,
         "deletions": deletions,
         "changed_files": changed_files,
-        "user": {"login": author},
+        "user": {"login": author, "type": author_type},
         "labels": [{"name": n} for n in (labels or [])],
         "merged": merged,
         "state": state,
@@ -106,6 +107,7 @@ def make_card(
     automerge_verdict=None,
     held=False,
     kind="pr-review",
+    triage_recommendation="merge",
     labels=None,
     author=am.CARD_AUTOMATION_AUTHOR,
 ):
@@ -121,6 +123,11 @@ def make_card(
         state["held"] = True
     if automerge_verdict is not None:
         state["automerge_verdict"] = automerge_verdict
+    if triage_recommendation:
+        state["triage_recommendation"] = {
+            "action": triage_recommendation,
+            "reason": "",
+        }
     body = "Card\n\n<!-- wheelhouse-state: %s -->" % json.dumps(state)
     if labels is None:
         labels = [
@@ -139,7 +146,7 @@ def make_card(
         "body": body,
         "labels": [{"name": n} for n in labels],
         "author": author,
-        "updated_at": "",
+        "updatedAt": "2026-07-10T00:00:00Z",
     }
 
 
@@ -327,6 +334,11 @@ def test_exclusions_cover_every_category():
     for path, category in (
         ("src/auth.py", "authentication"),
         ("src/authentication.py", "authentication"),
+        ("src/permissions.py", "authentication"),
+        ("src/permission.ts", "authentication"),
+        ("src/iam.py", "authentication"),
+        ("src/rbac.go", "authentication"),
+        ("src/acl.rs", "authentication"),
         ("src/security.py", "security"),
         ("pom.xml", "dependency"),
         ("build.gradle", "dependency"),
@@ -507,6 +519,16 @@ def test_G3_bot_and_maintainer_author_hold():
     payload, _ = run_act(w, items, cards)
     check("G3: bot author holds", "G3" in _held_reason(payload))
 
+    w_type, items_type, cards_type = default_world(head="bt" * 20)
+    w_type.set_pr(
+        slug,
+        5,
+        make_pr(head="bt" * 20, author="automation", author_type="Bot"),
+    )
+    w_type.merged_authors = {(slug, "automation"): True}
+    payload_type, _ = run_act(w_type, items_type, cards_type)
+    check("G3: REST Bot type author holds", "G3" in _held_reason(payload_type))
+
     w2, items2, cards2 = default_world(head="hm" * 20)
     w2.set_pr("owner/fmt", 5, make_pr(head="hm" * 20, author="owner"))
     w2.merged_authors = {("owner/fmt", "owner"): True}
@@ -601,6 +623,21 @@ def test_G6_stale_absent_and_held_verdict_hold():
                           automerge_verdict=ELIGIBLE_A)
     payload4, _ = run_act(w4, items4, cards4)
     check("G6: held card holds", "held" in _held_reason(payload4).lower())
+
+    w5, items5, cards5 = default_world(head="rm" * 20)
+    cards5[0] = make_card(
+        101,
+        "fmt",
+        5,
+        "rm" * 20,
+        automerge_verdict=ELIGIBLE_A,
+        triage_recommendation="hold",
+    )
+    payload5, _ = run_act(w5, items5, cards5)
+    check(
+        "G6: non-merge triage recommendation contradicts verdict and holds",
+        "top-level triage recommendation" in _held_reason(payload5),
+    )
 
 
 def test_G1_no_card_holds():
@@ -865,6 +902,48 @@ def test_validate_claimed_card_rechecks_owner_selection_before_acting():
         render_card._gh = saved["gh"]
 
 
+def test_validate_claimed_card_rejects_pending_decisions_and_newer_activity():
+    saved = {"get": render_card.get_card, "gh": render_card._gh}
+    try:
+        for label, current_change in (
+            ("newer card activity", lambda card: card.update({"updatedAt": "2026-07-10T00:01:00Z"})),
+            (
+                "decision label",
+                lambda card: card["labels"].append({"name": "decision:hold"}),
+            ),
+        ):
+            claimed = make_card(
+                101, "fmt", 5, "vd" * 20, automerge_verdict=ELIGIBLE_A
+            )
+            current = dict(claimed, state="OPEN", labels=list(claimed["labels"]))
+            current_change(current)
+            render_card.get_card = lambda number: current
+
+            def edit(args, check=False):
+                remove = {
+                    args[i + 1]
+                    for i, arg in enumerate(args[:-1])
+                    if arg == "--remove-label"
+                }
+                current["labels"] = [
+                    value for value in current["labels"] if value.get("name") not in remove
+                ]
+                return type("R", (), {"returncode": 0, "stderr": ""})()
+
+            render_card._gh = edit
+            validated = am.validate_claimed_cards([claimed])
+            labels = am._card_label_names(current)
+            check(
+                "validate: %s releases the claim" % label,
+                validated == []
+                and "processing" not in labels
+                and am.AUTO_MERGE_CLAIM_LABEL not in labels,
+            )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card._gh = saved["gh"]
+
+
 def test_stale_claim_release_failure_is_recovered_on_next_scan():
     stale = make_card(101, "fmt", 5, "st" * 20, automerge_verdict=ELIGIBLE_A)
     current = dict(stale, state="OPEN")
@@ -931,6 +1010,19 @@ def test_G7_card_changed_before_acting_holds_and_releases_claim():
     check("G7: card change before acting does not call merge", not w.do_merge_calls)
     check(
         "G7: card change is queued for default-token claim release",
+        payload["releases"] == [{"card_issue": 101}],
+    )
+
+
+def test_G7_card_activity_after_claim_holds_and_releases_claim():
+    w, items, cards = default_world(head="ua" * 20)
+    changed = dict(cards[0], updatedAt="2026-07-10T00:01:00Z")
+    w.card_seq = {"101": [changed]}
+    payload, _ = run_act(w, items, cards)
+    check("G7: later card activity holds", not payload["merges"])
+    check("G7: later card activity does not call merge", not w.do_merge_calls)
+    check(
+        "G7: later card activity is queued for claim release",
         payload["releases"] == [{"card_issue": 101}],
     )
 
@@ -1260,6 +1352,11 @@ def test_ledger_parse_append_render_and_cap():
         and byte_capped[-1]["number"] == "11"
         and len(byte_capped) < len(oversized),
     )
+    duplicate = am.append_ledger_entries(entries, [_merge_record(5)])
+    check(
+        "ledger: retrying an already-persisted merge does not duplicate it",
+        len(duplicate) == len(entries),
+    )
 
 
 def test_audit_comment_explains_why_it_qualified():
@@ -1301,9 +1398,66 @@ def test_record_cli_resolves_card_and_appends_ledger():
         render_card.close_card = saved["close"]
 
 
-def test_resolve_card_is_best_effort():
-    # No card issue -> silent no-op. Closed card -> no close. get_card raising ->
-    # swallowed (never re-merges / never crashes).
+def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
+    saved = {
+        "this_repo": core._this_repo_slug,
+        "find": am._find_ledger_issue,
+        "rest": core.gh_rest,
+        "get": render_card.get_card,
+        "close": render_card.close_card,
+        "sleep": am._audit_sleep,
+    }
+    ledger_attempts = [0]
+    card_attempts = [0]
+    am._audit_sleep = lambda seconds: None
+    core._this_repo_slug = lambda: "owner/wheelhouse"
+    am._find_ledger_issue = lambda slug: {"number": 77, "body": ""}
+
+    def patch_ledger(*args, **kwargs):
+        ledger_attempts[0] += 1
+        if ledger_attempts[0] == 1:
+            raise RuntimeError("HTTP 503 service unavailable")
+        return {}
+
+    core.gh_rest = patch_ledger
+    render_card.get_card = lambda number: {"state": "OPEN"}
+
+    def close_card(*args, **kwargs):
+        card_attempts[0] += 1
+        if card_attempts[0] == 1:
+            raise RuntimeError("HTTP 502 bad gateway")
+
+    render_card.close_card = close_card
+    try:
+        am.append_to_ledger([_merge_record()])
+        am.resolve_card(_merge_record())
+        check("audit: ledger write retries a transient failure", ledger_attempts == [2])
+        check("audit: card resolution retries a transient failure", card_attempts == [2])
+
+        core.gh_rest = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("HTTP 422 validation failed")
+        )
+        stderr = io.StringIO()
+        failed = False
+        with redirect_stderr(stderr):
+            try:
+                am.append_to_ledger([_merge_record()])
+            except RuntimeError:
+                failed = True
+        check(
+            "audit: unrecoverable ledger write emits an error and fails",
+            failed and "::error::" in stderr.getvalue(),
+        )
+    finally:
+        core._this_repo_slug = saved["this_repo"]
+        am._find_ledger_issue = saved["find"]
+        core.gh_rest = saved["rest"]
+        render_card.get_card = saved["get"]
+        render_card.close_card = saved["close"]
+        am._audit_sleep = saved["sleep"]
+
+
+def test_resolve_card_errors_fail_the_record_path():
     saved_get, saved_close = render_card.get_card, render_card.close_card
     closed = []
     render_card.close_card = lambda n, m, label="resolved": closed.append(n)
@@ -1318,8 +1472,17 @@ def test_resolve_card_is_best_effort():
             raise RuntimeError("gh down")
 
         render_card.get_card = boom
-        am.resolve_card(_merge_record())  # must not raise
-        check("record: get_card error is swallowed (best-effort)", closed == [])
+        failed = False
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            try:
+                am.resolve_card(_merge_record())
+            except RuntimeError:
+                failed = True
+        check(
+            "record: card audit failure is surfaced",
+            failed and closed == [] and "::error::" in stderr.getvalue(),
+        )
     finally:
         render_card.get_card = saved_get
         render_card.close_card = saved_close
