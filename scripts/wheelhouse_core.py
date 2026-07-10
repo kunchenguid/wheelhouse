@@ -1100,12 +1100,15 @@ def arm_pending_contributor_action(
 def _rebase_nudge_body(repo, number, head_sha):
     marker = _rebase_nudge_marker(head_sha)
     short = str(head_sha or "").strip()[:8] or "current head"
+    # Contributor-facing only: plain language, no product name, no queue jargon.
+    # See AGENTS.md "Contributor-facing copy". Mechanics (hidden marker below)
+    # stay load-bearing for fire-once-per-head-SHA idempotence.
     return (
-        "Thanks for the PR! It looks like this branch has a merge conflict "
-        "with the base branch right now. When you get a chance, could you "
-        "rebase onto (or merge in) the latest base branch, resolve the "
-        "conflict, and push? Once GitHub shows the PR as mergeable again, "
-        "it'll be picked back up for review.\n\n"
+        "Thanks for the PR! This branch currently has a merge conflict with "
+        "the base branch.\n\n"
+        "When you get a chance, please rebase onto (or merge) the latest base "
+        "branch, resolve the conflict, and push. After that, checks will "
+        "re-run and the PR will get looked at again.\n\n"
         "<sub>Noted for %s#%s at `%s`.</sub>\n"
         "%s" % (repo, number, short, marker)
     )

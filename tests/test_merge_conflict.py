@@ -380,8 +380,15 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     check("nudge: second scan posts no duplicate", calls2["posts"] == [])
     body = calls1["posts"][0]["body"] if calls1["posts"] else ""
     check("nudge: body names the rebase action", "rebase" in body and "resolve the conflict" in body)
+    check("nudge: body mentions checks re-run after fix", "checks will re-run" in body)
     check("nudge: body has no internal product name", "Wheelhouse" not in body)
-    check("nudge: body has no internal-state jargon", "maintainer queue" not in body and "resurface" not in body)
+    check(
+        "nudge: body has no internal-state jargon",
+        "maintainer queue" not in body
+        and "resurface" not in body
+        and "stepping out" not in body
+        and "triage" not in body.lower(),
+    )
     check("nudge: body carries a head-specific marker", core._rebase_nudge_marker("sha42") in body)
     check("nudge: comment fetch uses pagination slurp", calls1["fetches"] and calls1["fetches"][0]["slurp"] is True)
     check("nudge: marker persists in stored comments", len(comments.get(42, [])) == 1)
@@ -428,6 +435,29 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
     )
     check("nudge: cleanup state is not armed when cleanup targets are null",
           null_target_calls["patches"] == [] and null_target_calls["labels"] == [])
+
+
+def test_rebase_nudge_body_is_contributor_plain_language():
+    """Direct pin on the template: copy stays contributor-facing; marker stays."""
+    head = "abcdef0123456789deadbeef"
+    body = core._rebase_nudge_body("demo", 42, head)
+    marker = core._rebase_nudge_marker(head)
+    check("nudge-body: explains the merge conflict", "merge conflict" in body and "base branch" in body)
+    check("nudge-body: asks contributor to rebase/merge and push", "rebase" in body and "push" in body)
+    check("nudge-body: says checks re-run and PR is looked at again",
+          "checks will re-run" in body and "looked at again" in body)
+    check("nudge-body: no product name", "Wheelhouse" not in body)
+    check(
+        "nudge-body: no internal queue jargon",
+        "maintainer queue" not in body
+        and "resurface" not in body
+        and "stepping out" not in body
+        and "card" not in body.lower()
+        and "triage" not in body.lower(),
+    )
+    check("nudge-body: hidden idempotence marker survives rewrite", marker in body)
+    check("nudge-body: marker is HTML-comment form",
+          body.rstrip().endswith(marker) and marker.startswith("<!-- "))
 
 
 def test_untrusted_rebase_marker_does_not_suppress_nudge():
@@ -500,6 +530,7 @@ def main():
     test_classify_conflict_routes_pr_review_to_rebase()
     test_unknown_mergeability_fails_open()
     test_ci_approval_not_rerouted_by_conflict()
+    test_rebase_nudge_body_is_contributor_plain_language()
     test_conflicted_pr_suppresses_card_and_nudges_once_per_head()
     test_untrusted_rebase_marker_does_not_suppress_nudge()
     test_nudge_skips_owner_and_bot_authors()
