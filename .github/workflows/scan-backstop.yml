@@ -123,7 +123,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: python scripts/auto_merge.py record automerge.json
+        run: python scripts/auto_merge.py record automerge.json automerge-valid-claims.json
 
       # Track per-repo consecutive scan failures in a dedicated (closed) ledger
       # issue in THIS repo, and fail the run loudly if a fleet repo has been dark

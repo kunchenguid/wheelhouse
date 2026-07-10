@@ -34,6 +34,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 from contextlib import redirect_stderr
 
 sys.path.insert(
@@ -1372,13 +1373,13 @@ def test_record_cli_resolves_card_and_appends_ledger():
         "ledger": am.append_to_ledger,
         "release": am.release_card_claim,
         "get": render_card.get_card,
-        "close": render_card.close_card,
+        "close": am._strict_audited_close_card,
     }
     am.append_to_ledger = lambda records: calls["ledger"].extend(records)
     am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
     render_card.get_card = lambda n: {"state": "OPEN", "labels": []}
-    render_card.close_card = lambda n, msg, label="resolved": calls["resolved"].append(
-        (n, label)
+    am._strict_audited_close_card = lambda n, msg, close_issue=True: calls["resolved"].append(
+        (n, close_issue)
     )
     tmp = os.path.join(
         os.environ.get("TMPDIR", "/tmp"), "am_results_%d.json" % os.getpid()
@@ -1388,14 +1389,14 @@ def test_record_cli_resolves_card_and_appends_ledger():
             json.dump({"merges": [_merge_record()]}, f)
         am.cmd_record(tmp)
         check("record: ledger got the merge", len(calls["ledger"]) == 1)
-        check("record: card resolved+closed", calls["resolved"] == [(101, "resolved")])
+        check("record: card resolved+closed", calls["resolved"] == [(101, True)])
         check("record: merged card claim is released", calls["released"] == [101])
     finally:
         os.unlink(tmp)
         am.append_to_ledger = saved["ledger"]
         am.release_card_claim = saved["release"]
         render_card.get_card = saved["get"]
-        render_card.close_card = saved["close"]
+        am._strict_audited_close_card = saved["close"]
 
 
 def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
@@ -1404,7 +1405,8 @@ def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
         "find": am._find_ledger_issue,
         "rest": core.gh_rest,
         "get": render_card.get_card,
-        "close": render_card.close_card,
+        "ensure": core._ensure_repo_label,
+        "gh": render_card._gh,
         "sleep": am._audit_sleep,
     }
     ledger_attempts = [0]
@@ -1421,13 +1423,16 @@ def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
 
     core.gh_rest = patch_ledger
     render_card.get_card = lambda number: {"state": "OPEN"}
+    core._ensure_repo_label = lambda *args, **kwargs: None
 
-    def close_card(*args, **kwargs):
-        card_attempts[0] += 1
-        if card_attempts[0] == 1:
+    def gh(args, check=True):
+        if args[:2] == ["issue", "comment"]:
+            card_attempts[0] += 1
+        if args[:2] == ["issue", "comment"] and card_attempts[0] == 1:
             raise RuntimeError("HTTP 502 bad gateway")
+        return type("R", (), {"returncode": 0, "stderr": ""})()
 
-    render_card.close_card = close_card
+    render_card._gh = gh
     try:
         am.append_to_ledger([_merge_record()])
         am.resolve_card(_merge_record())
@@ -1453,20 +1458,26 @@ def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
         am._find_ledger_issue = saved["find"]
         core.gh_rest = saved["rest"]
         render_card.get_card = saved["get"]
-        render_card.close_card = saved["close"]
+        core._ensure_repo_label = saved["ensure"]
+        render_card._gh = saved["gh"]
         am._audit_sleep = saved["sleep"]
 
 
 def test_resolve_card_errors_fail_the_record_path():
-    saved_get, saved_close = render_card.get_card, render_card.close_card
+    saved_get, saved_close = render_card.get_card, am._strict_audited_close_card
     closed = []
-    render_card.close_card = lambda n, m, label="resolved": closed.append(n)
+    am._strict_audited_close_card = lambda n, m, close_issue=True: closed.append(
+        (n, close_issue)
+    )
     try:
         render_card.get_card = lambda n: {"state": "CLOSED"}
-        am.resolve_card(_merge_record())  # already closed -> no close
-        check("record: closed card is not re-closed", closed == [])
+        am.resolve_card(_merge_record())
+        check(
+            "record: closed card still receives its audit record without re-close",
+            closed == [(101, False)],
+        )
         am.resolve_card(dict(_merge_record(), card_issue=None))
-        check("record: no card issue -> no-op", closed == [])
+        check("record: no card issue -> no-op", closed == [(101, False)])
 
         def boom(n):
             raise RuntimeError("gh down")
@@ -1481,11 +1492,128 @@ def test_resolve_card_errors_fail_the_record_path():
                 failed = True
         check(
             "record: card audit failure is surfaced",
-            failed and closed == [] and "::error::" in stderr.getvalue(),
+            failed and closed == [(101, False)] and "::error::" in stderr.getvalue(),
         )
     finally:
         render_card.get_card = saved_get
-        render_card.close_card = saved_close
+        am._strict_audited_close_card = saved_close
+
+
+def test_strict_audited_close_propagates_all_card_write_failures():
+    saved = {
+        "this_repo": core._this_repo_slug,
+        "ensure": core._ensure_repo_label,
+        "gh": render_card._gh,
+        "get": render_card.get_card,
+        "sleep": am._audit_sleep,
+    }
+    calls = []
+    core._this_repo_slug = lambda: "owner/wheelhouse"
+    core._ensure_repo_label = lambda *args: calls.append(("label", args))
+    render_card.get_card = lambda number: {"state": "OPEN"}
+    am._audit_sleep = lambda seconds: None
+
+    def gh(args, check=True):
+        calls.append(("gh", args, check))
+        if args[:2] == ["issue", "close"]:
+            raise RuntimeError("HTTP 422 close failed")
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    render_card._gh = gh
+    try:
+        failed = False
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            try:
+                am.resolve_card(_merge_record())
+            except RuntimeError:
+                failed = True
+        command_calls = [entry for entry in calls if entry[0] == "gh"]
+        check(
+            "audit: strict close runs comment, label update, and issue close",
+            [entry[1][:2] for entry in command_calls[:3]]
+            == [["issue", "comment"], ["issue", "edit"], ["issue", "close"]],
+        )
+        check(
+            "audit: strict close failures emit an error and fail",
+            failed and "::error::" in stderr.getvalue(),
+        )
+    finally:
+        core._this_repo_slug = saved["this_repo"]
+        core._ensure_repo_label = saved["ensure"]
+        render_card._gh = saved["gh"]
+        render_card.get_card = saved["get"]
+        am._audit_sleep = saved["sleep"]
+
+
+def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
+    saved = {
+        "act": am.act_on_scan,
+        "write": am._write_json_atomically,
+        "release": am.release_card_claim,
+        "ledger": am.append_to_ledger,
+        "result_env": os.environ.get("WHEELHOUSE_AUTOMERGE_RESULTS"),
+    }
+    payload = {"merges": [_merge_record()], "holds": [], "releases": []}
+    calls = {"released": [], "ledger": []}
+    am.act_on_scan = lambda scan, cards: payload
+    am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
+    am.append_to_ledger = lambda records: calls["ledger"].extend(records)
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            scan_path = os.path.join(directory, "scan.json")
+            cards_path = os.path.join(directory, "cards.json")
+            results_path = os.path.join(directory, "automerge.json")
+            claims_path = os.path.join(directory, "automerge-valid-claims.json")
+            for path, data in ((scan_path, {}), (cards_path, []), (claims_path, [{"number": 101}])):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            os.environ["WHEELHOUSE_AUTOMERGE_RESULTS"] = results_path
+            try:
+                am.cmd_act(scan_path, cards_path)
+                with open(results_path, encoding="utf-8") as f:
+                    recorded = json.load(f)
+                check("handoff: atomic results file contains the complete payload", recorded == payload)
+                check(
+                    "handoff: atomic write leaves no temporary result file",
+                    not any(name.startswith(".automerge-") for name in os.listdir(directory)),
+                )
+
+                am._write_json_atomically = lambda path, data: (_ for _ in ()).throw(
+                    OSError("disk full")
+                )
+                failed = False
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    try:
+                        am.cmd_act(scan_path, cards_path)
+                    except RuntimeError:
+                        failed = True
+                check(
+                    "handoff: write failure emits an error and fails the act step",
+                    failed and "::error::" in stderr.getvalue(),
+                )
+                os.unlink(results_path)
+                with redirect_stderr(io.StringIO()):
+                    am.cmd_record(results_path, claims_path)
+                check(
+                    "handoff: missing results release validated card claims",
+                    calls["released"] == [101],
+                )
+                check(
+                    "handoff: missing results do not fabricate ledger entries",
+                    calls["ledger"] == [],
+                )
+            finally:
+                if saved["result_env"] is None:
+                    os.environ.pop("WHEELHOUSE_AUTOMERGE_RESULTS", None)
+                else:
+                    os.environ["WHEELHOUSE_AUTOMERGE_RESULTS"] = saved["result_env"]
+    finally:
+        am.act_on_scan = saved["act"]
+        am._write_json_atomically = saved["write"]
+        am.release_card_claim = saved["release"]
+        am.append_to_ledger = saved["ledger"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1564,6 +1692,12 @@ def test_scan_backstop_wiring_and_token_discipline():
     check(
         "wiring: the AUDIT record runs on github.token (this-repo bookkeeping)",
         rec and "github.token" in (rec.get("env") or {}).get("GH_TOKEN", ""),
+    )
+    check(
+        "wiring: missing act results release validated claims under github.token",
+        rec
+        and rec.get("if") == "always()"
+        and "record automerge.json automerge-valid-claims.json" in rec.get("run", ""),
     )
     check(
         "wiring: record does NOT get FLEET_TOKEN",

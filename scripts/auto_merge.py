@@ -39,11 +39,12 @@ Two CLIs, run as separate workflow steps so each uses the right token:
       one ::notice::/::warning:: audit line per candidate. It performs NO
       THIS-repo card writes (token discipline) - those are left to `record`.
 
-  auto_merge.py record <results.json>
+  auto_merge.py record <results.json> [validated-claims.json]
       Under GITHUB_TOKEN. Append each auto-merge to the durable ledger issue in
       THIS repo and resolve each merged PR's decision card with an audit record
       of why it qualified. Audit writes retry transient failures and report
-      unrecoverable errors after the merge.
+      unrecoverable errors after the merge. When the result handoff is missing,
+      the optional validated-claims file releases claims under the default token.
 
 Owner is derived from $GITHUB_REPOSITORY_OWNER. Cross-repo reads and the merge
 itself use the ambient GH_TOKEN (FLEET_TOKEN in the act step); the ledger and
@@ -56,6 +57,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -984,14 +986,14 @@ def cmd_act(scan_path, cards_path):
     payload = act_on_scan(scan, cards)
     out_path = os.environ.get("WHEELHOUSE_AUTOMERGE_RESULTS", "automerge.json")
     try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except OSError as e:
+        _write_json_atomically(out_path, payload)
+    except Exception as e:
         print(
-            "::warning::wheelhouse auto-merge could not write results: %s"
+            "::error::wheelhouse auto-merge could not write results: %s"
             % str(e)[:160],
             file=sys.stderr,
         )
+        raise RuntimeError("could not write auto-merge results") from e
     print(
         "wheelhouse auto-merge: %d merged, %d held"
         % (len(payload["merges"]), len(payload["holds"]))
@@ -1256,6 +1258,24 @@ def audit_comment(record):
     return "\n".join(lines)
 
 
+def _strict_audited_close_card(number, message, close_issue=True):
+    core._ensure_repo_label(core._this_repo_slug(), "resolved")
+    render_card._gh(["issue", "comment", str(number), "--body", message])
+    render_card._gh(
+        [
+            "issue",
+            "edit",
+            str(number),
+            "--add-label",
+            "resolved",
+            "--remove-label",
+            "needs-decision",
+        ]
+    )
+    if close_issue:
+        render_card._gh(["issue", "close", str(number)])
+
+
 def resolve_card(record):
     """Leave a resolved decision record on the merged PR's card (GITHUB_TOKEN)."""
     card = record.get("card_issue")
@@ -1264,9 +1284,13 @@ def resolve_card(record):
 
     def close():
         current = render_card.get_card(card)
-        if current is None or not render_card.issue_is_open(current):
-            return
-        render_card.close_card(card, audit_comment(record), label="resolved")
+        if current is None:
+            raise RuntimeError("could not read card #%s for audit" % card)
+        _strict_audited_close_card(
+            card,
+            audit_comment(record),
+            close_issue=render_card.issue_is_open(current),
+        )
 
     _retry_audit_write(close, "resolved-card audit #%s" % card)
 
@@ -1285,10 +1309,30 @@ def release_card_claim(record):
         )
 
 
-def cmd_record(results_path):
-    payload = _load_json(results_path, {})
-    records = (payload or {}).get("merges") or []
-    releases = (payload or {}).get("releases") or []
+def _fallback_claim_releases(path):
+    claims = _load_json(path, [])
+    if not isinstance(claims, list):
+        return []
+    return [
+        {"card_issue": card.get("number")}
+        for card in claims
+        if isinstance(card, dict) and card.get("number")
+    ]
+
+
+def cmd_record(results_path, validated_claims_path=None):
+    payload = _load_json(results_path, None)
+    handoff_valid = isinstance(payload, dict) and all(
+        isinstance(payload.get(key, []), list) for key in ("merges", "releases")
+    )
+    if handoff_valid:
+        records = payload.get("merges") or []
+        releases = payload.get("releases") or []
+    else:
+        records = []
+        releases = []
+        if validated_claims_path:
+            releases = _fallback_claim_releases(validated_claims_path)
     if not records and not releases:
         print("wheelhouse auto-merge record: no auto-merges to record")
         return
@@ -1313,6 +1357,22 @@ def cmd_record(results_path):
 
 
 # --------------------------------------------------------------------------- #
+def _write_json_atomically(path, payload):
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temp_path = tempfile.mkstemp(prefix=".automerge-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
 def _load_json(path, default):
     try:
         with open(path, encoding="utf-8") as f:
@@ -1333,8 +1393,8 @@ def main():
         cmd_validate(sys.argv[2])
     elif len(sys.argv) >= 4 and sys.argv[1] == "act":
         cmd_act(sys.argv[2], sys.argv[3])
-    elif len(sys.argv) == 3 and sys.argv[1] == "record":
-        cmd_record(sys.argv[2])
+    elif len(sys.argv) in (3, 4) and sys.argv[1] == "record":
+        cmd_record(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else None)
     else:
         sys.exit(__doc__)
 
