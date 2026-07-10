@@ -3592,6 +3592,9 @@ _SECRET_BRACKET_REF_RE = re.compile(
     r"secrets\s*\[\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"]\s*\]"
 )
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GITHUB_REPOSITORY_EXPR_RE = re.compile(
+    r"^\$\{\{\s*github\.repository\s*\}\}$", re.IGNORECASE
+)
 CI_SUMMARY_MAX_FILES = 24
 CI_SUMMARY_MAX_FLAGS = 48
 CI_SUMMARY_MAX_VALUES = 16
@@ -3886,6 +3889,7 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
     return {
         "path": path,
         "status": status,
+        "target_repository": slug,
         "triggers": triggers,
         "pr_target": "pull_request_target" in triggers,
         "checks_head": _checks_out_pr_head(doc),
@@ -3897,17 +3901,49 @@ def _analyze_ci_file(slug, path, head_sha, status, owner):
         "actions": actions,
         "run_steps": run_steps,
         "action_runtime": action_runtime,
-        "partially_analyzed": bool(action_runtime),
+        "partially_analyzed": bool(action_runtime) or any(
+            _checkout_repository_indeterminate(
+                checkout["repository"], slug
+            )
+            for checkout in checkouts
+            if not checkout["ref"]
+        ),
     }
 
 
-def _checkout_ref_label(ref, repository=""):
+def _checkout_repository_is_same(repository, target_repository):
+    repository = str(repository or "").strip()
+    target_repository = str(target_repository or "").strip()
+    return (
+        not repository
+        or bool(_GITHUB_REPOSITORY_EXPR_RE.match(repository))
+        or bool(target_repository and repository.casefold() == target_repository.casefold())
+    )
+
+
+def _checkout_repository_indeterminate(repository, target_repository):
+    repository = str(repository or "").strip()
+    return (
+        bool(repository)
+        and not _checkout_repository_is_same(repository, target_repository)
+        and ("${{" in repository or "}}" in repository)
+    )
+
+
+def _checkout_ref_label(ref, repository="", target_repository=""):
     """A human label for a checkout `ref` input. Flags a PR-head ref (the
     pwn-request source) without echoing anything but the expression itself."""
     if not ref:
+        if _checkout_repository_is_same(repository, target_repository):
+            return "event default (`GITHUB_SHA`) - contributor PR code"
+        if _checkout_repository_indeterminate(repository, target_repository):
+            return (
+                "indeterminate repository `%s`; default ref cannot be determined - "
+                "review manually" % _safe_inline(repository)
+            )
         if repository:
             return "default branch (mutable) of `%s`" % _safe_inline(repository)
-        return "event default (`GITHUB_SHA`)"
+        return "event default (`GITHUB_SHA`) - contributor PR code"
     if _PR_HEAD_REF_RE.search(ref):
         return "PR head - `%s`" % _safe_inline(ref)
     return "`%s`" % _safe_inline(ref)
@@ -4018,7 +4054,9 @@ def _file_fact_lines(analysis):
         counts = []  # preserve order, collapse identical labels with a count
         shown, extra = _summary_values(analysis["checkouts"])
         for co in shown:
-            label = _checkout_ref_label(co["ref"], co["repository"])
+            label = _checkout_ref_label(
+                co["ref"], co["repository"], analysis.get("target_repository", "")
+            )
             if co["repository"] and co["ref"]:
                 label += " from `%s`" % _safe_inline(co["repository"])
             for entry in counts:

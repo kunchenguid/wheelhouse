@@ -270,8 +270,25 @@ def test_checkout_without_ref_is_labeled_as_event_default():
                     {".github/workflows/ci.yml": SAFE_WF})
     check("checkout default: identifies GitHub event SHA",
           "Checkout: event default (`GITHUB_SHA`)" in s)
+    check("checkout default: identifies contributor PR code",
+          "contributor PR code" in s)
     check("checkout default: does not misstate the base branch",
           "default (base branch)" not in s)
+
+
+def test_same_repository_checkouts_without_ref_use_the_event_sha():
+    for repository in ("kunchenguid/firstmate", "${{ github.repository }}"):
+        wf = (
+            "name: same repository checkout\non:\n  pull_request:\njobs:\n  check:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "        with:\n          repository: %s\n" % repository
+        )
+        s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+        check("same repository checkout: event SHA for %s" % repository,
+              "Checkout: event default (`GITHUB_SHA`) - contributor PR code" in s)
+        check("same repository checkout: not mutable default for %s" % repository,
+              "default branch (mutable)" not in s)
 
 
 def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
@@ -286,6 +303,23 @@ def test_external_checkout_without_ref_is_labeled_as_mutable_default_branch():
           "default branch (mutable) of `evilorg/external-repo`" in s)
     check("external checkout: does not claim the event SHA",
           "event default (`GITHUB_SHA`) from `evilorg/external-repo`" not in s)
+
+
+def test_dynamic_checkout_without_ref_requires_manual_review():
+    repository = "${{ matrix.checkout_repository }}"
+    wf = (
+        "name: dynamic checkout\non:\n  pull_request:\njobs:\n  check:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          repository: %s\n" % repository
+    )
+    s = summary_for([{"filename": WF, "status": "modified"}], {WF: wf})
+    check("dynamic checkout: repository expression is shown safely",
+          "`${{ matrix.checkout_repository }}`" in s)
+    check("dynamic checkout: default ref is indeterminate",
+          "default ref cannot be determined - review manually" in s)
+    check("dynamic checkout: analysis fails closed",
+          "**Automated analysis incomplete - review the full diff manually.**" in s)
 
 
 def test_docker_action_manifest_surfaces_image_and_requires_manual_review():
@@ -594,7 +628,9 @@ def main():
     test_permission_job_name_is_sanitized_before_markdown_formatting()
     test_safe_first_party_workflow_has_no_flags()
     test_checkout_without_ref_is_labeled_as_event_default()
+    test_same_repository_checkouts_without_ref_use_the_event_sha()
     test_external_checkout_without_ref_is_labeled_as_mutable_default_branch()
+    test_dynamic_checkout_without_ref_requires_manual_review()
     test_docker_action_manifest_surfaces_image_and_requires_manual_review()
     test_node_action_manifest_surfaces_entrypoint_and_requires_manual_review()
     test_no_workflow_change_returns_empty()
