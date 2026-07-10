@@ -862,24 +862,26 @@ def _resolve_pr_bucket(
 ):
     """Classify a PR, treating an UNKNOWN mergeable as an expected pending state.
 
-    `classify` fails open to `merge-ready` when mergeability is UNKNOWN/missing.
-    Left alone, that lets a statically-conflicting PR whose mergeability was just
-    invalidated by a base push (see MERGEABLE_SETTLE_READS) read as merge-ready
-    and flip INTO the worklist for one scan - minting a duplicate card that the
-    next scan (once GitHub settles it to CONFLICTING) soft-closes again. So when
-    the fast path lands on `merge-ready` but mergeability is not authoritatively
-    MERGEABLE, poll the single PR to settle it, then re-classify: CONFLICTING ->
-    `needs-rebase` (out, nudged), MERGEABLE -> `merge-ready` (in). If it still
-    can't be settled within the budget, return `MERGEABILITY_PENDING` so
+    `classify` fails open to a worklist bucket when mergeability is UNKNOWN or
+    missing. Left alone, that lets a statically-conflicting PR whose mergeability
+    was just invalidated by a base push (see MERGEABLE_SETTLE_READS) read as
+    `merge-ready` or `review-needed` and flip INTO the worklist for one scan -
+    minting a duplicate card that the next scan (once GitHub settles it to
+    CONFLICTING) soft-closes again. So when the fast path lands on either bucket
+    and mergeability is not authoritatively MERGEABLE, poll the single PR to
+    settle it, then re-classify: CONFLICTING -> `needs-rebase` (out, nudged), a
+    non-conflicting value -> the original worklist bucket (in). If it still can't
+    be settled within the budget, return `MERGEABILITY_PENDING` so
     build_repo FREEZES the PR: an UNKNOWN reading must never flip worklist
     membership (in stays in, out stays out; no card created/closed/consumed)."""
     mergeable = pr.get("mergeable")
     bucket = classify(draft, comp, tests, ci, cross_repo, mergeable)
-    # UNKNOWN only threatens membership where it fails open to merge-ready but is
-    # really CONFLICTING. review-needed + UNKNOWN stays review-needed (no flip),
-    # and needs-rebase already required an authoritative CONFLICTING. Only an
-    # explicit UNKNOWN is polled - a missing value keeps classify's fail-open.
-    if bucket != "merge-ready" or not _mergeable_is_unknown(mergeable):
+    # UNKNOWN threatens membership for every worklist bucket that a conflicting
+    # value would rewrite to needs-rebase. Only an explicit UNKNOWN is polled - a
+    # missing value keeps classify's fail-open.
+    if bucket not in ("merge-ready", "review-needed") or not _mergeable_is_unknown(
+        mergeable
+    ):
         return bucket
     settled = (
         _settle_mergeable(owner, name, pr["number"])
@@ -2363,10 +2365,11 @@ def build_repo(
     emitted, and contributor-authored PRs get at most one rebase nudge per head
     SHA via a hidden comment marker. This runs only on the ok:true success path
     below, so an ok:false repo (early return) is never auto-approved or nudged.
-    A merge-ready candidate whose bulk `mergeable` reads UNKNOWN is polled to a
-    conclusive value (`_resolve_pr_bucket`); if it still cannot be settled it is
-    reported in `indeterminate_pr_numbers` and emits no item, so an UNKNOWN
-    reading never flips worklist membership (reconcile freezes such a card).
+    A merge-ready or review-needed candidate whose bulk `mergeable` reads UNKNOWN
+    is polled to a conclusive value (`_resolve_pr_bucket`); if it still cannot be
+    settled it is reported in `indeterminate_pr_numbers` and emits no item, so an
+    UNKNOWN reading never flips worklist membership (reconcile freezes such a
+    card).
     Open PRs, open issues, and PR closing issue references are paginated; if the
     PR or closing-reference scan is incomplete, issue-triage items are withheld
     because Wheelhouse cannot prove which issues are already addressed by PRs."""
@@ -2454,7 +2457,9 @@ def build_repo(
             pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
         )
         pr_contexts.append((pr, author, comp, tests, ci, cross_repo))
-        if bucket == "merge-ready" and _mergeable_is_unknown(pr.get("mergeable")):
+        if bucket in ("merge-ready", "review-needed") and _mergeable_is_unknown(
+            pr.get("mergeable")
+        ):
             settle_numbers.append(pr["number"])
 
     settled_mergeables = _settle_mergeables(owner, name, settle_numbers)

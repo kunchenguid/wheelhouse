@@ -671,13 +671,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   `UNKNOWN` makes a statically-conflicting PR fail open to `merge-ready` (a new
   card) then settle to `CONFLICTING` (`needs-rebase`, card soft-closed) - one
   create/close oscillation per base push (10 duplicate cards for #111). So a
-  `merge-ready` candidate whose `mergeable` reads exactly `UNKNOWN` is polled with
-  short backoff (`_resolve_pr_bucket` -> `_settle_mergeable` ->
+  `merge-ready` or `review-needed` candidate whose `mergeable` reads exactly
+  `UNKNOWN` is polled with short backoff (`_resolve_pr_bucket` -> `_settle_mergeable` ->
   `gh_graphql_pr_mergeable`; the first read triggers the compute, later reads
-  catch it) until it resolves: `CONFLICTING` -> `needs-rebase` (out, nudged),
-  `MERGEABLE` -> `merge-ready` (in). If it still can't be settled within the
-  budget it returns the `MERGEABILITY_PENDING` sentinel and `build_repo` reports
-  the PR in `indeterminate_pr_numbers` (kept in `open_pr_numbers`, emits NO
+  catch it) until it resolves: `CONFLICTING` -> `needs-rebase` (out, nudged), a
+  non-conflicting value -> its original worklist bucket (in). If it still can't
+  be settled within the budget it returns the `MERGEABILITY_PENDING` sentinel and
+  `build_repo` reports the PR in `indeterminate_pr_numbers` (kept in `open_pr_numbers`, emits NO
   worklist item), and `reconcile.py` FREEZES that card - the **hard invariant is
   that an UNKNOWN reading must NEVER flip worklist membership or create/close/
   consume a card** (in stays in, out stays out). The reconcile freeze is a
@@ -687,7 +687,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   fail-open (GraphQL never returns null for an open PR's `mergeable`).
 - **Merge conflicts leave the maintainer queue.**
   `wheelhouse_core.py` fetches GraphQL `pullRequests.nodes.mergeable` and treats only `CONFLICTING` as authoritative.
-  `UNKNOWN` or missing mergeability fails open because GitHub computes it asynchronously, so the PR classifies normally until a later scan can prove the conflict (see the UNKNOWN-pending bullet above for the merge-ready poll/freeze that keeps this from oscillating).
+  `UNKNOWN` or missing mergeability fails open because GitHub computes it asynchronously, so the PR classifies normally until a later scan can prove the conflict (see the UNKNOWN-pending bullet above for the merge-ready/review-needed poll/freeze that keeps this from oscillating).
   A conflicting PR that would otherwise route to `merge-ready` or `review-needed` becomes waiting-on-contributor `needs-rebase`, which is intentionally absent from `NEEDS_MAINTAINER`.
   This never rewrites `needs-ci-approval`: fork CI approval is independent of whether the eventual merge would conflict, and issue triage is unrelated.
   On the `ok:true` scan path, `build_repo` posts a contributor nudge under `FLEET_TOKEN` for non-owner/non-maintainer/non-bot `needs-rebase` PRs.

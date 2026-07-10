@@ -10,9 +10,10 @@ Unit-exercise the fleet-scan reliability + correctness hardening, NO network:
   `render_scan_health_body` / `cmd_scan_health`): increment/reset, threshold
   alert, run-failing exit, and fail-open on ledger I/O errors.
 - UNKNOWN-mergeability policy (`_settle_mergeable` / `_resolve_pr_bucket` +
-  build_repo): poll a merge-ready candidate whose mergeable reads UNKNOWN until it
-  settles to CONFLICTING (-> needs-rebase) or MERGEABLE (-> merge-ready); if it
-  never settles, return MERGEABILITY_PENDING and freeze the PR
+  build_repo): poll a merge-ready or review-needed candidate whose mergeable
+  reads UNKNOWN until it settles to CONFLICTING (-> needs-rebase) or MERGEABLE
+  (-> its original worklist bucket); if it never settles, return
+  MERGEABILITY_PENDING and freeze the PR
   (`indeterminate_pr_numbers`) so an UNKNOWN reading never flips worklist
   membership. Plus the #111 acceptance that a statically-conflicting PR never
   enters the worklist.
@@ -721,6 +722,31 @@ def test_resolve_bucket_reread_settles_mergeable():
     check("resolve: re-read proves MERGEABLE -> merge-ready", bucket == "merge-ready")
 
 
+def test_resolve_review_needed_unknown_settles_or_freezes():
+    pr = _pr_green(9, "UNKNOWN")
+    checks = (
+        ("CONFLICTING", "needs-rebase"),
+        ("MERGEABLE", "review-needed"),
+        ("UNKNOWN", core.MERGEABILITY_PENDING),
+    )
+    save_read = core.gh_graphql_pr_mergeable
+    save_sleep = core._sleep
+    try:
+        for settled, expected in checks:
+            core.gh_graphql_pr_mergeable = lambda o, n, num, value=settled: value
+            core._sleep = lambda d: None
+            bucket = core._resolve_pr_bucket(
+                "owner", "demo", pr, False, "pass", "none", True, False
+            )
+            check(
+                "resolve-review-needed: UNKNOWN settling %s -> %s" % (settled, expected),
+                bucket == expected,
+            )
+    finally:
+        core.gh_graphql_pr_mergeable = save_read
+        core._sleep = save_sleep
+
+
 # --------------------------------------------------------------------------- #
 # build_repo integration: pagination + UNKNOWN-mergeable in the real scan
 # --------------------------------------------------------------------------- #
@@ -732,7 +758,7 @@ def _green_rollup():
     return {"state": "SUCCESS", "contexts": {"nodes": [_check_run("Gate"), _check_run("test")]}}
 
 
-def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False):
+def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True):
     node = {
         "number": number,
         "title": "PR %d" % number,
@@ -749,7 +775,19 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False):
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"totalCount": 0, "nodes": []},
         "closingIssuesReferences": {"totalCount": 0, "nodes": []},
-        "commits": {"nodes": [{"commit": {"statusCheckRollup": _green_rollup()}}]},
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "statusCheckRollup": (
+                            _green_rollup()
+                            if has_tests
+                            else {"state": "SUCCESS", "contexts": {"nodes": [_check_run("Gate")]}}
+                        )
+                    }
+                }
+            ]
+        },
     }
     return node
 
@@ -915,6 +953,18 @@ def test_build_repo_unknown_mergeable_unsettled_freezes():
     check("build-unknown-frozen: repo scan stays ok", result["ok"] is True)
 
 
+def test_build_repo_review_needed_unknown_settles_conflicting():
+    first = {
+        "totalCount": 1,
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [_full_pr(55, mergeable="UNKNOWN", has_tests=False)],
+    }
+    result, items, posts = _run_build_repo(first, mergeable_reads=["CONFLICTING"])
+    check("build-review-needed-conflict: no card emitted", items == [])
+    check("build-review-needed-conflict: no frozen PR remains", result["indeterminate_pr_numbers"] == [])
+    check("build-review-needed-conflict: contributor was nudged once", len(posts) == 1)
+
+
 def test_build_repo_settles_unknown_prs_in_rounds():
     first = {
         "totalCount": 2,
@@ -997,11 +1047,13 @@ def main():
     test_resolve_bucket_unsettled_returns_pending()
     test_resolve_bucket_known_mergeable_no_reread()
     test_resolve_bucket_reread_settles_mergeable()
+    test_resolve_review_needed_unknown_settles_or_freezes()
     test_build_repo_multipage_ok_and_complete()
     test_build_repo_midpage_failure_truncates()
     test_build_repo_unknown_mergeable_conflict_nudges_no_card()
     test_build_repo_unknown_mergeable_settles_mergeable_card()
     test_build_repo_unknown_mergeable_unsettled_freezes()
+    test_build_repo_review_needed_unknown_settles_conflicting()
     test_build_repo_settles_unknown_prs_in_rounds()
     test_build_repo_static_conflict_never_enters_worklist()
     print()
