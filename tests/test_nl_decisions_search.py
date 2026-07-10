@@ -72,7 +72,9 @@ def hardened_shell_env(step):
 
 
 def test_handle_checkout_does_not_persist_default_token():
-    checkouts = [s for s in handle_steps() if "actions/checkout" in str(s.get("uses", ""))]
+    checkouts = [
+        s for s in handle_steps() if "actions/checkout" in str(s.get("uses", ""))
+    ]
 
     check("workflow: handle job checkout exists", len(checkouts) >= 1)
     for checkout in checkouts:
@@ -97,8 +99,7 @@ def test_readonly_gate_and_prompt_gating():
         )
         check(
             "workflow: nl-readonly emits an enabled output",
-            'echo "enabled=$HAS_READONLY_TOKEN"' in run
-            and "$GITHUB_OUTPUT" in run,
+            'echo "enabled=$HAS_READONLY_TOKEN"' in run and "$GITHUB_OUTPUT" in run,
         )
 
     check("workflow: nl-prompt step exists", prompt is not None)
@@ -267,7 +268,10 @@ def test_claude_steps_split_legacy_vs_search():
             "git -C",
             "--open-files-in-pager",
         ):
-            check("workflow: search step does not allow %s" % forbidden, forbidden not in args)
+            check(
+                "workflow: search step does not allow %s" % forbidden,
+                forbidden not in args,
+            )
 
     dh = read(".github", "workflows", "decision-handler.yml")
     check(
@@ -399,12 +403,29 @@ def test_search_wrapper_installs_non_writable_tool():
             nls.cmd_install()
             dir_mode = stat.S_IMODE(os.stat(tool_dir).st_mode)
             tool_mode = stat.S_IMODE(os.stat(tool).st_mode)
-            check("wrapper: install creates only wheelhouse-search", os.listdir(tool_dir) == ["wheelhouse-search"])
-            check("wrapper: installed directory is executable", bool(dir_mode & stat.S_IXUSR))
-            check("wrapper: installed directory is not owner-writable", not bool(dir_mode & stat.S_IWUSR))
-            check("wrapper: installed tool is executable", bool(tool_mode & stat.S_IXUSR))
-            check("wrapper: installed tool is not owner-writable", not bool(tool_mode & stat.S_IWUSR))
-            check("wrapper: install adds immutable directory to PATH", read_file(path_file).strip() == tool_dir)
+            check(
+                "wrapper: install creates only wheelhouse-search",
+                os.listdir(tool_dir) == ["wheelhouse-search"],
+            )
+            check(
+                "wrapper: installed directory is executable",
+                bool(dir_mode & stat.S_IXUSR),
+            )
+            check(
+                "wrapper: installed directory is not owner-writable",
+                not bool(dir_mode & stat.S_IWUSR),
+            )
+            check(
+                "wrapper: installed tool is executable", bool(tool_mode & stat.S_IXUSR)
+            )
+            check(
+                "wrapper: installed tool is not owner-writable",
+                not bool(tool_mode & stat.S_IWUSR),
+            )
+            check(
+                "wrapper: install adds immutable directory to PATH",
+                read_file(path_file).strip() == tool_dir,
+            )
         finally:
             if os.path.exists(tool):
                 os.chmod(tool, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -448,8 +469,8 @@ def test_claude_output_is_isolated_before_routing():
         )
         check(
             "workflow: trusted tool paths are captured before Claude",
-            "python_path=\"$(command -v python)\"" in run
-            and "gh_path=\"$(command -v gh)\"" in run,
+            'python_path="$(command -v python)"' in run
+            and 'gh_path="$(command -v gh)"' in run,
         )
         check(
             "workflow: trusted safe PATH is exposed as a step output",
@@ -468,7 +489,7 @@ def test_claude_output_is_isolated_before_routing():
         check(
             "workflow: nl-result stores only decision.json in runner temp",
             "${RUNNER_TEMP}/wheelhouse-nl" in run
-            and "cp decision.json \"$out_file\"" in run,
+            and 'cp decision.json "$out_file"' in run,
         )
         check(
             "workflow: nl-result rejects symlink or non-file results",
@@ -568,7 +589,8 @@ def test_claude_output_is_isolated_before_routing():
     )
     check(
         "workflow: trusted deterministic steps run after result isolation",
-        None not in (preserve_i, route_i, execute_i) and preserve_i < route_i < execute_i,
+        None not in (preserve_i, route_i, execute_i)
+        and preserve_i < route_i < execute_i,
     )
 
 
