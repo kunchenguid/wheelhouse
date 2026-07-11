@@ -26,7 +26,8 @@ Every auto-merge requires ALL of (see the numbered contract in AGENTS.md):
       mergeability, clean state, escape hatch, and configured check contexts,
       then do_merge
 Plus a per-PR `wheelhouse:no-auto-merge` escape hatch, global/per-repo switches
-(default OFF), a durable audit ledger, and a resolved decision record.
+(shipped code default OFF; this repository's committed global switch is ON), a
+durable audit ledger, and a resolved decision record.
 
 There are DELIBERATELY no open-PR file-overlap gate and no per-contributor /
 per-scan rate caps (captain override); their absence is asserted by the tests.
@@ -1409,11 +1410,11 @@ def act_on_scan(scan, cards):
         if (repo, number) in recovered_keys:
             continue
         repo_cfg = (cfg["repos"] or {}).get(repo, {})
-        # SILENTLY skip a repo that never opted into auto-merge (the default for
-        # the whole fleet): it is an ordinary merge-ready card, not an auto-merge
-        # candidate, so it must not spam the scan log with a hold warning. Audit
-        # notices/warnings below are reserved for opted-in repos, where "why
-        # didn't this auto-merge?" is a real question.
+        # SILENTLY skip a repo that opts out of this repository's fleet-wide
+        # auto-merge setting: it is an ordinary merge-ready card, not an
+        # auto-merge candidate, so it must not spam the scan log with a hold
+        # warning. Audit notices/warnings below are reserved for enabled repos,
+        # where "why didn't this auto-merge?" is a real question.
         if not core._auto_merge_enabled(repo_cfg, global_auto_merge):
             continue
         ok_repo, ok_reason = _repo_result_ok(scan, repo)

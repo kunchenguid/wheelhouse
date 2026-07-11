@@ -6,7 +6,7 @@ This doc is the optional **fast path**: add a tiny dispatch workflow to a source
 Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card, refreshes a pure pending card when material state has changed, updates the hidden activity stamp when the target `updatedAt` advanced, re-renders when Wheelhouse's internal card render version is stale, or publishes a held card when auto triage is no longer eligible; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
-An ingest dispatch never performs scan-time auto-merge; if the target repository has opted into `auto_merge`, only a later `scan-backstop` pass can evaluate and merge its card after every live safety gate passes.
+An ingest dispatch never performs scan-time auto-merge; this fork enables `auto_merge` fleet-wide, but only a later `scan-backstop` pass can evaluate a target repository after it has practically opted in with a non-empty default-branch `VISION.md` and every live safety gate passes.
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
 That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
 When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
@@ -49,7 +49,7 @@ Omit it to follow the hub's global and per-repo `auto_triage` config.
 Set it to `false` for high-volume or sensitive dispatched PR-review items that should not spend a Claude turn.
 It cannot force auto triage on when the hub or repo config disables it.
 `auto_triage_issues` is the INDEPENDENT equivalent for dispatched `issue-triage` items - same item-level-opt-out-only rule, own global/per-repo config, never affects `auto_triage` or vice versa.
-For a PR-review item in a repository that enables `auto_merge`, include `head_sha` as usual so triage can bind any behavior verdict to that exact revision; the scheduled scan still obtains the live base, default-branch `VISION.md`, checks, and safety data itself.
+For a PR-review item in a repository covered by the fleet-wide `auto_merge` setting, include `head_sha` as usual so triage can bind any behavior verdict to that exact revision; the scheduled scan still requires and obtains the live base, default-branch `VISION.md`, checks, and safety data itself.
 Pass `updated_at` on every dispatch when you have the target's GitHub `updatedAt`, so the hub can reflect target activity onto the Wheelhouse card's own updated time for recently-updated queue sorting.
 For `issue-triage`, `updated_at` is also the triage revision because issues have no head SHA; omit it and the item is simply never eligible for automatic issue triage.
 
