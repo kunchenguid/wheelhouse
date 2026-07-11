@@ -932,6 +932,7 @@ def claim_cards(scan, cards):
                 or not render_card.is_refreshable(current_entry["labels"])
                 or current_entry["state"] != expected["state"]
                 or current_entry.get("updated_at") != expected.get("updated_at")
+                or current_entry.get("comment_count") != expected.get("comment_count")
                 or current_entry.get("comment_count") is None
                 or _card_has_pending_decision(current_entry["labels"])
                 or _selected_card_option(current.get("body"))

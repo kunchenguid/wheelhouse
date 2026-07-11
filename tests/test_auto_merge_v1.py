@@ -951,6 +951,58 @@ def test_claim_rechecks_and_locks_current_card():
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
 
 
+def test_claim_vetoes_owner_comment_since_scan_snapshot():
+    _, items, _ = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    initial["comments"] = 0
+    current = dict(
+        initial,
+        state="OPEN",
+        comments=[{"author": {"login": "owner"}, "body": "/hold"}],
+    )
+    calls = []
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+    }
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
+    render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        claims = am.claim_cards({"items": items}, [initial])
+        check(
+            "claim: owner comment since scan snapshot vetoes the claim",
+            claims == [] and calls == [],
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
 def test_claim_rejects_changed_decision_card():
     w, items, cards = default_world()
     initial = make_card(
