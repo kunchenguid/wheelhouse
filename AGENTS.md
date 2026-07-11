@@ -883,16 +883,17 @@ still appears where it's plain English, e.g. "triage the queue".)
   executor, the durable ledger, and the resolved-card recorder); the merge itself
   reuses `apply_decision.do_merge` unchanged. The SHIPPED CODE DEFAULT is OFF:
   `wheelhouse_core._auto_merge_enabled` returns false when the `auto_merge` key is
-  absent, so a fresh fork-and-own inherits auto-merge disabled. A repo
+  absent; that absent-key fallback is the fork-and-own product default. A repo
   auto-merges nothing until it BOTH sets `auto_merge: true` (global or per-repo)
   AND commits a `VISION.md`
   on its DEFAULT branch (the alignment rubric doubles as the opt-in signal). THIS
-  fork's committed `wheelhouse.config.yml` sets the GLOBAL `auto_merge: true`, so
-  the fleet-wide switch is on and a committed default-branch `VISION.md` is the
-  practical per-repo opt-in; no fleet repo has one yet, so the fleet is inert
-  until the captain commits a `VISION.md`. The code default stays false - only
-  this fork's committed config value flipped; a per-repo `auto_merge: false`
-  opts one repo back out. A
+  repository's committed `wheelhouse.config.yml` sets the GLOBAL
+  `auto_merge: true`, so forks of this repository inherit the fleet-wide switch
+  on and a committed default-branch `VISION.md` is the practical per-repo opt-in;
+  no fleet repo has one yet, so the fleet is inert until the captain commits a
+  `VISION.md`. The absent-key code fallback stays false - only this repository's
+  committed config value flipped; a per-repo `auto_merge: false` opts one repo
+  back out. A
   merge-ready `pr-review` candidate is merged only when EVERY gate passes:
   G0 repo opted-in + VISION.md present; G1 a pure `needs-decision` pr-review card
   (not held); G2 the PR touches none of the unconditional exclusions

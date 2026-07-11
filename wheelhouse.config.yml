@@ -347,13 +347,12 @@ thank_on_merge: true
 
 # Scan-time auto-merge (V1) - a strict subset of the manual merge gate. The
 # SHIPPED CODE DEFAULT is OFF (when this key is entirely absent -> false), because
-# a merge is irreversible and higher-stakes than a fork-CI approval; that is the
-# fork-and-own product default any fresh fork inherits. In THIS fork's committed
-# config the fleet-wide switch is turned ON below, which makes each target repo's
-# committed default-branch VISION.md the PRACTICAL per-repo opt-in: with the
-# switch on, a repo still auto-merges nothing until it ALSO commits a non-empty
-# VISION.md on its default branch (the alignment rubric AND the per-repo opt-in
-# signal), so repos without one stay fully inert. When both hold, a merge-ready
+# a merge is irreversible and higher-stakes than a fork-CI approval; that
+# absent-key fallback is the fork-and-own product default. This repository's
+# committed config turns the fleet-wide switch ON below, so forks inherit the
+# switch on but remain fully inert until a target repo commits a non-empty
+# default-branch VISION.md. That VISION.md is the PRACTICAL per-repo opt-in (the
+# alignment rubric AND the per-repo opt-in signal). When both hold, a merge-ready
 # pr-review PR is merged automatically ONLY if it ALSO clears every deterministic
 # gate AND a fresh structured behavior verdict for the current head SHA assigns an
 # eligible A/B/C class and recommends merge. See README.md's `auto_merge` setup
