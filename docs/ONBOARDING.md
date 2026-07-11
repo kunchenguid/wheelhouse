@@ -54,6 +54,8 @@ Pass `updated_at` on every dispatch when you have the target's GitHub `updatedAt
 For `issue-triage`, `updated_at` is also the triage revision because issues have no head SHA; omit it and the item is simply never eligible for automatic issue triage.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
+Like a scan-created `pr-review` card, a dispatched card never API-merges a PR that touched `.github/workflows/**` in its net diff or commit history.
+`FLEET_TOKEN` intentionally has no Workflows write, so that retryable merge refusal leaves the card actionable with GitHub UI merge guidance; after a rebase removes every workflow touch, `/merge` may proceed normally.
 Do not send `accept-recommendation` in `options`; Wheelhouse inserts that checkbox only from a fresh successful structured auto-triage recommendation, and never for `ci-approval`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
 If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
