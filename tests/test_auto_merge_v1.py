@@ -185,10 +185,13 @@ class World:
         self.check_status_seq = {}
         self.do_merge_calls = []
         self.do_merge_clean_guards = []
+        self.do_merge_final_guards = []
         self.card_token_reads = []
         self.merge_tokens = []
         self.do_merge_returns = {}  # (repo, number) -> (message, terminal)
         self.merge_commits = {}  # (repo, number) -> merge endpoint sha
+        self.final_prs = {}
+        self.before_final_guard = None
 
     def set_pr(self, slug, number, prs):
         self.pr_seq[(slug, str(number))] = prs if isinstance(prs, list) else [prs]
@@ -235,10 +238,25 @@ class World:
         return_merge_commit=False,
         expected_base_sha=None,
         require_clean_merge_state=False,
+        auto_merge_guard=None,
     ):
         self.do_merge_calls.append((owner, repo, number, head, expected_base_sha))
         self.do_merge_clean_guards.append(require_clean_merge_state)
         self.merge_tokens.append(os.environ.get("GH_TOKEN"))
+        if self.before_final_guard:
+            self.before_final_guard()
+        if auto_merge_guard is not None:
+            final_pr = self.final_prs.get(
+                ("%s/%s" % (owner, repo), str(number)),
+                self.last_pr.get(("%s/%s" % (owner, repo), str(number)), {}),
+            )
+            guard_ok, guard_reason = auto_merge_guard(final_pr)
+            self.do_merge_final_guards.append((guard_ok, guard_reason))
+            if guard_ok is not True:
+                result = ("HOLD: %s" % guard_reason, "blocked")
+                if return_merge_commit:
+                    return (*result, "")
+                return result
         result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
         )
@@ -456,6 +474,15 @@ def test_exclusions_cover_every_category():
         ("gradle.lockfile", "dependency"),
         ("packages.lock.json", "dependency"),
         ("Package.resolved", "dependency"),
+        (".terraform.lock.hcl", "dependency"),
+        ("Podfile.lock", "dependency"),
+        ("Cartfile.resolved", "dependency"),
+        ("flake.lock", "dependency"),
+        ("Package.swift", "dependency"),
+        ("pubspec.lock", "dependency"),
+        ("requirements-dev.txt", "dependency"),
+        ("tool.lock.toml", "dependency"),
+        ("constraints-production.txt", "dependency"),
         (".gitmodules", "dependency"),
         ("scripts/migrate.py", "migration"),
         ("scripts/migrate_data.py", "migration"),
@@ -566,6 +593,10 @@ def test_happy_path_class_A_merges():
     check(
         "act: do_merge enables its final CLEAN guard",
         w.do_merge_clean_guards == [True],
+    )
+    check(
+        "act: do_merge receives the final auto-merge guard",
+        w.do_merge_final_guards == [(True, "")],
     )
     check("act: ::notice:: audit line emitted", "auto-merge merged" in err)
 
@@ -1415,6 +1446,39 @@ def test_G7_rechecks_configured_status_contexts():
     check("G7: failed configured check does not call merge", not w.do_merge_calls)
 
 
+def test_G7_final_guard_rechecks_escape_hatch_and_owner_decision():
+    head = "fg" * 20
+    w, items, cards = default_world(head=head)
+    w.final_prs[("owner/fmt", "5")] = make_pr(
+        head=head, labels=[core.NO_AUTO_MERGE_LABEL]
+    )
+    payload, _ = run_act(w, items, cards)
+    check(
+        "G7: final escape hatch guard holds and releases the claim",
+        not payload["merges"]
+        and payload["releases"] == [{"card_issue": 101}]
+        and w.do_merge_final_guards == [
+            (False, "escape hatch label appeared before merging")
+        ],
+    )
+
+    w, items, cards = default_world(head=head)
+
+    def add_owner_decision():
+        cards[0]["labels"].append({"name": "decision:merge"})
+
+    w.before_final_guard = add_owner_decision
+    payload, _ = run_act(w, items, cards)
+    check(
+        "G7: final owner-decision guard holds and releases the claim",
+        not payload["merges"]
+        and payload["releases"] == [{"card_issue": 101}]
+        and w.do_merge_final_guards
+        and w.do_merge_final_guards[0][0] is False
+        and "pending owner decision" in w.do_merge_final_guards[0][1],
+    )
+
+
 def test_premerge_audit_intent_retains_an_ambiguous_handoff():
     head = "ir" * 20
     w, items, cards = default_world(head=head)
@@ -1579,6 +1643,40 @@ def test_pending_audit_recovery_accepts_a_partial_audited_close():
         am.append_to_ledger = saved_ledger
         am.resolve_card = saved_resolve
         am.release_card_claim = saved_release
+        if saved_repo is None:
+            os.environ.pop("GITHUB_REPOSITORY", None)
+        else:
+            os.environ["GITHUB_REPOSITORY"] = saved_repo
+
+
+def test_closed_card_can_stage_and_recover_pending_audit():
+    record = _merge_record()
+    card = make_card(101, "fmt", 5, record["head_sha"])
+    card["state"] = "closed"
+    saved_get = render_card.get_card
+    saved_edit = render_card._edit_issue_body
+    saved_rest = core.gh_rest
+    saved_repo = os.environ.get("GITHUB_REPOSITORY")
+    calls = []
+    try:
+        render_card.get_card = lambda number: card
+        render_card._edit_issue_body = lambda number, body, remove_labels=None: card.update(
+            body=body
+        )
+        am.stage_pending_audit(record)
+        core.gh_rest = lambda path, **kwargs: (calls.append(path) or [[card]])
+        os.environ["GITHUB_REPOSITORY"] = "owner/wheelhouse"
+        check(
+            "audit: closed card persists and recovers its pending record",
+            am._pending_audit_record(core.parse_state_block(card["body"]), 101) == record
+            and am.pending_audit_records() == [record]
+            and calls
+            and "state=all" in calls[0],
+        )
+    finally:
+        render_card.get_card = saved_get
+        render_card._edit_issue_body = saved_edit
+        core.gh_rest = saved_rest
         if saved_repo is None:
             os.environ.pop("GITHUB_REPOSITORY", None)
         else:

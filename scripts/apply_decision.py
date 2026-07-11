@@ -562,6 +562,7 @@ def do_merge(
     return_merge_commit=False,
     expected_base_sha=None,
     require_clean_merge_state=False,
+    auto_merge_guard=None,
 ):
     def outcome(message, terminal, merge_commit=""):
         if return_merge_commit:
@@ -607,6 +608,21 @@ def do_merge(
                 "HOLD: %s#%s is no longer mergeable and CLEAN "
                 "(mergeable=%r, mergeable_state=%r). Re-scan before merging."
                 % (repo, number, pr.get("mergeable"), mergeable_state or "<none>"),
+                "blocked",
+            )
+    if auto_merge_guard is not None:
+        try:
+            guard_ok, guard_reason = auto_merge_guard(pr)
+        except Exception as e:
+            return outcome(
+                "HOLD: final auto-merge guard could not be completed: %s. "
+                "Re-scan before merging." % str(e)[:160],
+                "blocked",
+            )
+        if guard_ok is not True:
+            return outcome(
+                "HOLD: final auto-merge guard: %s. Re-scan before merging."
+                % str(guard_reason or "guard did not approve the merge")[:200],
                 "blocked",
             )
     method = _merge_method(repo)

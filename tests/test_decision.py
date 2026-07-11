@@ -1087,6 +1087,48 @@ def test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge():
     )
 
 
+def test_auto_merge_final_guard_blocks_the_merge_put():
+    pr = open_pr()
+    pr.update(
+        {
+            "base": {"sha": "reviewed-base"},
+            "mergeable": True,
+            "mergeable_state": "clean",
+        }
+    )
+    fake, calls = fake_gh_rest(pr)
+    guarded = []
+
+    def guard(current_pr):
+        guarded.append(current_pr)
+        return (False, "owner decision arrived")
+
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge(
+            "owner-login",
+            "target-repo",
+            5,
+            "abc123",
+            expected_base_sha="reviewed-base",
+            require_clean_merge_state=True,
+            auto_merge_guard=guard,
+        )
+    check(
+        "merge: final auto-merge guard receives the final live PR",
+        guarded == [pr],
+    )
+    check(
+        "merge: final auto-merge guard blocks the merge request",
+        terminal == "blocked"
+        and "owner decision arrived" in message
+        and merge_puts(calls) == [],
+    )
+
+
 def test_thank_on_merge_disabled_globally():
     fake, calls = fake_gh_rest(open_pr())
     with patch_core(
@@ -1899,6 +1941,7 @@ def main():
     test_auto_merge_receives_sha_from_successful_merge_response()
     test_auto_merge_rejects_a_changed_expected_base()
     test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge()
+    test_auto_merge_final_guard_blocks_the_merge_put()
     test_thank_on_merge_disabled_globally()
     test_thank_on_merge_disabled_per_repo()
     test_thank_on_merge_skips_non_success_outcomes()

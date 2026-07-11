@@ -1050,6 +1050,23 @@ def _read_card_with_card_token(number, card_token):
             os.environ["GH_TOKEN"] = original_token
 
 
+def final_auto_merge_guard(expected_card, repo, number, card_token):
+    def guard(pr):
+        if core.NO_AUTO_MERGE_LABEL in _pr_label_names(pr):
+            return (False, "escape hatch label appeared before merging")
+        current_card = _read_card_with_card_token(expected_card.get("issue"), card_token)
+        if current_card is None and not str(card_token or "").strip():
+            return (False, "default card token is unavailable")
+        card_ok, card_reason = _current_claim_matches(
+            expected_card, current_card, repo, str(number)
+        )
+        if not card_ok:
+            return (False, "card claim changed: %s" % card_reason)
+        return (True, "")
+
+    return guard
+
+
 def act_merge(
     owner,
     repo,
@@ -1084,19 +1101,9 @@ def act_merge(
     live_base = str((pr.get("base") or {}).get("sha") or "")
     if not live_base or live_base != base_sha:
         return ("held", "base changed immediately before acting", "")
-    if core.NO_AUTO_MERGE_LABEL in _pr_label_names(pr):
-        return ("held", "escape hatch label appeared before acting", "")
     mc_ok, mc_reason = mergeable_clean(pr)
     if not mc_ok:
         return ("held", "final re-check: %s" % mc_reason, "")
-    current_card = _read_card_with_card_token(expected_card.get("issue"), card_token)
-    if current_card is None and not str(card_token or "").strip():
-        return ("held", "final card re-check: default card token is unavailable", "")
-    card_ok, card_reason = _current_claim_matches(
-        expected_card, current_card, repo, str(number)
-    )
-    if not card_ok:
-        return ("held", "final card re-check: %s" % card_reason, "")
     checks_ok, checks_reason = live_check_status(
         owner, repo, number, head_sha, repo_cfg
     )
@@ -1111,6 +1118,9 @@ def act_merge(
         return_merge_commit=True,
         expected_base_sha=base_sha,
         require_clean_merge_state=True,
+        auto_merge_guard=final_auto_merge_guard(
+            expected_card, repo, number, card_token
+        ),
     )
     if terminal == "resolved" and message.startswith("Merged "):
         merge_commit = str(merge_commit or "").strip()
@@ -1123,6 +1133,8 @@ def act_merge(
         return ("merged", message, merge_commit)
     if terminal == "resolved":
         # do_merge saw already-merged / not-open (a race) - not our merge.
+        return ("held", message, "")
+    if terminal == "blocked":
         return ("held", message, "")
     return ("error", message, "")
 
@@ -1736,8 +1748,8 @@ def stage_pending_audit(record):
     if not card_issue:
         raise RuntimeError("auto-merge audit record has no card issue")
     card = render_card.get_card(card_issue)
-    if not card or not render_card.issue_is_open(card):
-        raise RuntimeError("could not read open card #%s for pending audit" % card_issue)
+    if not card:
+        raise RuntimeError("could not read card #%s for pending audit" % card_issue)
     state = core.parse_state_block(card.get("body") or "")
     if not state:
         raise RuntimeError("card #%s has no state for pending audit" % card_issue)
@@ -1792,7 +1804,7 @@ def pending_audit_records():
         return []
     cards = core._flatten_paginated_comments(
         core.gh_rest(
-            "repos/%s/issues?state=open&labels=%s&per_page=100"
+            "repos/%s/issues?state=all&labels=%s&per_page=100"
             % (slug, core.quote(AUTO_MERGE_CLAIM_LABEL)),
             paginate=True,
             slurp=True,

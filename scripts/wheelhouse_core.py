@@ -3400,6 +3400,8 @@ _AM_EXCLUDE_SUFFIXES = {
         "gradle.lockfile",
         "packages.lock.json",
         "package.resolved",
+        "cartfile.resolved",
+        "package.swift",
         "go.mod",
         "go.sum",
         "cargo.toml",
@@ -3476,6 +3478,13 @@ _AM_EXCLUDE_PATH_COMPONENTS = {
     ),
 }
 
+_AM_DEPENDENCY_LOCKFILE_RE = re.compile(
+    r"(?:\.lock(?:b|file)?|\.lock\.(?:json|ya?ml|toml|hcl))$"
+)
+_AM_DEPENDENCY_MANIFEST_RE = re.compile(
+    r"(?:requirements|constraints)(?:[-_.][a-z0-9][a-z0-9_.-]*)?\.txt$"
+)
+
 
 def _am_basename(path):
     return path.rsplit("/", 1)[-1]
@@ -3514,6 +3523,12 @@ def _auto_merge_exclusions(files):
                 matched = True
                 break
         if matched:
+            continue
+        if (
+            _AM_DEPENDENCY_LOCKFILE_RE.search(base)
+            or _AM_DEPENDENCY_MANIFEST_RE.fullmatch(base)
+        ):
+            hits.add("dependency:%s" % f)
             continue
         # 4) dependency directories and other supply-chain / build entrypoints.
         if low.startswith("vendor/") or "/vendor/" in low:
