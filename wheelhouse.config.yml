@@ -345,19 +345,23 @@ thank_on_merge: true
 # A per-repo `thank_on_merge_message` (see `repos:` above) overrides this.
 # thank_on_merge_message: "Thanks @{author} - merged! Really appreciate the contribution."
 
-# Scan-time auto-merge (V1) - a strict subset of the manual merge gate. DEFAULT
-# OFF (this key absent -> false), because a merge is irreversible and higher-
-# stakes than a fork-CI approval. When true, a merge-ready pr-review PR is merged
-# automatically ONLY if it ALSO clears every deterministic gate AND a fresh
-# structured behavior verdict for the current head SHA assigns an eligible A/B/C
-# class and recommends merge. Turning this on is NOT sufficient on its own: a
-# repo still auto-merges nothing until it ALSO commits a VISION.md on its default
-# branch (the alignment rubric AND the per-repo opt-in signal). See README.md's
-# `auto_merge` setup notes for the full user-facing gate list. Override per repo with `auto_merge: true`
-# on an entry under `repos:` above; a per-repo `auto_merge: false` is the
-# portable one-repo kill switch. Kill switches (layered): this flag, the per-repo
+# Scan-time auto-merge (V1) - a strict subset of the manual merge gate. The
+# SHIPPED CODE DEFAULT is OFF (when this key is entirely absent -> false), because
+# a merge is irreversible and higher-stakes than a fork-CI approval; that is the
+# fork-and-own product default any fresh fork inherits. In THIS fork's committed
+# config the fleet-wide switch is turned ON below, which makes each target repo's
+# committed default-branch VISION.md the PRACTICAL per-repo opt-in: with the
+# switch on, a repo still auto-merges nothing until it ALSO commits a non-empty
+# VISION.md on its default branch (the alignment rubric AND the per-repo opt-in
+# signal), so repos without one stay fully inert. When both hold, a merge-ready
+# pr-review PR is merged automatically ONLY if it ALSO clears every deterministic
+# gate AND a fresh structured behavior verdict for the current head SHA assigns an
+# eligible A/B/C class and recommends merge. See README.md's `auto_merge` setup
+# notes for the full user-facing gate list. Opt a single repo back out with a
+# per-repo `auto_merge: false` on its entry under `repos:` above (the portable
+# one-repo kill switch). Kill switches (layered): this flag, the per-repo
 # override, deleting a repo's VISION.md, removing CLAUDE_CODE_OAUTH_TOKEN (no
 # behavior verdict -> everything holds), and a per-PR `wheelhouse:no-auto-merge`
 # label on the target PR. Auto-merge never auto-reverts; each merge leaves a
 # resolved decision card plus an entry in the durable auto-merge ledger issue.
-auto_merge: false
+auto_merge: true

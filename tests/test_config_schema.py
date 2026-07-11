@@ -87,6 +87,35 @@ def test_every_repo_entry_is_well_formed():
         )
 
 
+def test_global_auto_merge_is_enabled():
+    # This fork commits the fleet-wide `auto_merge: true` switch, so the loaded
+    # config must expose it as a REAL boolean True (not the string "true", which
+    # `load_config` deliberately treats as false). A committed default-branch
+    # VISION.md is the practical per-repo opt-in on top of this switch.
+    cfg = core.load_config()
+    check(
+        "committed config global auto_merge is real boolean True",
+        cfg.get("auto_merge") is True,
+    )
+    # The SHIPPED CODE DEFAULT is unchanged: an absent global key is still OFF, so
+    # a fresh fork-and-own inherits auto-merge disabled - only this fork's
+    # committed VALUE flipped, never the `_auto_merge_enabled` code default.
+    check(
+        "code default unchanged: absent auto_merge key -> disabled",
+        core._auto_merge_enabled({}, False) is False,
+    )
+    # A repo relying purely on the fleet-wide switch is opted in, while a per-repo
+    # `auto_merge: false` remains the one-repo opt-out against the true global.
+    check(
+        "global true opts a no-override repo in",
+        core._auto_merge_enabled({}, cfg["auto_merge"]) is True,
+    )
+    check(
+        "per-repo auto_merge:false still overrides the true global",
+        core._auto_merge_enabled({"auto_merge": False}, cfg["auto_merge"]) is False,
+    )
+
+
 def test_repo_names_are_unique():
     # load_config keys by name, so a duplicate name would silently drop an entry.
     # Re-read the raw list to prove the file itself has no dup that the mapping
@@ -113,6 +142,7 @@ def test_repo_names_are_unique():
 def main():
     test_real_config_loads()
     test_every_repo_entry_is_well_formed()
+    test_global_auto_merge_is_enabled()
     test_repo_names_are_unique()
     print()
     if _failures:

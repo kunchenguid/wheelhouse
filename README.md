@@ -131,9 +131,11 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > Owner, maintainer, and bot-authored fork PRs are excluded from the decision queue, so Wheelhouse still runs the safety-gated approve/noop path for safe CI and suppresses their cards.
 > See [Security notes](#security-notes).
 
-> **Heads-up - `auto_merge` defaults OFF.**
-> To opt in, set `auto_merge: true` globally or on one `repos:` entry **and** commit a non-empty `VISION.md` on that target repository's default branch.
-> A per-repo `auto_merge: false` overrides a fleet-wide setting, and applying `wheelhouse:no-auto-merge` to a target PR stops scan-time auto-merge for that PR without affecting manual `/merge`.
+> **Heads-up - `auto_merge` is ON fleet-wide in this fork; `VISION.md` is the practical opt-in.**
+> The shipped product default is OFF (when the key is absent it is treated as `false`), so a fresh fork inherits no auto-merge until you enable it - the generic example above shows that fork-and-own default.
+> This fork's committed `wheelhouse.config.yml` sets `auto_merge: true` globally, so the effective per-repo opt-in is now a single signal: a target repository auto-merges nothing until it commits a non-empty `VISION.md` on its default branch.
+> No fleet repository has a `VISION.md` yet, so today every repo stays fully inert and no PR can be auto-merged until you add one.
+> A per-repo `auto_merge: false` still overrides the fleet-wide setting to opt one repo back out, and applying `wheelhouse:no-auto-merge` to a target PR stops scan-time auto-merge for that PR without affecting manual `/merge`.
 > The hourly `scan-backstop`, not an ingest dispatch, can merge an eligible PR.
 > It requires a fresh successful PR auto-triage verdict for the current head, base, and `VISION.md` revision that recommends merge, confirms vision alignment, and assigns eligible behavior class A, B, or C (class C must be strictly opt-in and default off).
 > Before merging, Wheelhouse also requires a clean, merge-ready live PR with configured compliance and tests green, a returning non-maintainer human contributor, no excluded sensitive/governance/release/dependency/security/auth/billing/migration/schema/install/default-surface files, and at most 20 changed files and 1,000 changed lines.

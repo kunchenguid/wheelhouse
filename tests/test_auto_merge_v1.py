@@ -26,6 +26,11 @@ input HOLDS for human review. These tests cover, end-to-end through the
   * the durable audit ledger (parse/append/render + cap) and the resolved
     decision record, plus the per-merge ::notice::/::warning:: audit lines;
   * base-branch-ONLY VISION.md reads (never the PR head);
+  * the fleet-wide `auto_merge: true` switch this fork commits: the global flag
+    alone opts a repo in (no per-repo key needed) yet a base-branch VISION.md is
+    still required (no claim, no merge, no verdict spend without it), the
+    self-authorization exclusion and base-branch read still hold under global
+    true, and the shipped code default stays OFF when the global key is absent;
   * the DELIBERATE ABSENCE of an open-PR file-overlap gate and of any
     per-contributor / per-scan rate cap (captain override).
 """
@@ -2357,6 +2362,138 @@ def test_vision_absent_and_empty_fail_closed():
         )
     finally:
         am._gh_api = save
+
+
+# --------------------------------------------------------------------------- #
+# Global switch ON (this fork commits `auto_merge: true`) - VISION.md is the
+# practical per-repo opt-in and every safety gate is unchanged.
+# --------------------------------------------------------------------------- #
+def test_global_switch_on_is_the_practical_optin_via_vision():
+    # This fork's committed config sets the fleet-wide `auto_merge: true`, so a
+    # repo carrying NO per-repo override is opted in by the global switch alone;
+    # a committed default-branch VISION.md then becomes the real per-repo signal.
+    check(
+        "global switch on: a repo with no per-repo key is opted in by the global",
+        core._auto_merge_enabled({}, True) is True,
+    )
+    check(
+        "global switch on: per-repo auto_merge:false is still the one-repo opt-out",
+        core._auto_merge_enabled({"auto_merge": False}, True) is False,
+    )
+    # The SHIPPED CODE DEFAULT is untouched: an absent global key is still OFF, so
+    # a fresh fork-and-own inherits auto-merge disabled - only this fork's
+    # committed config VALUE flipped, never `_auto_merge_enabled`'s default.
+    check(
+        "shipped code default unchanged: absent global key -> OFF",
+        core._auto_merge_enabled({}, False) is False,
+    )
+
+
+def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
+    # A repo opted in purely by the fleet-wide switch (no per-repo override) still
+    # auto-merges NOTHING until it commits a default-branch VISION.md. G0 holds:
+    # no merge attempt, no claim, and no behavior-verdict spend.
+    w, items, cards = default_world()
+    w.global_auto_merge = True
+    w.repos = {"fmt": {}}  # pure fleet-wide opt-in, no per-repo override
+    w.vision = {}  # no committed VISION.md on the default branch
+    payload, _ = run_act(w, items, cards)
+    check(
+        "global true + no VISION.md: G0 holds on the missing rubric",
+        "VISION.md" in _held_reason(payload),
+    )
+    check(
+        "global true + no VISION.md: no merge attempt",
+        not w.do_merge_calls and not payload["merges"],
+    )
+
+    # No CLAIM: a repo without VISION.md never gets a behavior verdict persisted
+    # (triage only produces one when VISION is present), and the claim phase
+    # requires a fresh eligible verdict, so such a card can never be claimed.
+    no_vision_state = {
+        "repo": "fmt",
+        "number": 5,
+        "kind": "pr-review",
+        "head_sha": "h1" * 20,
+        "triaged_sha": "h1" * 20,
+        "triage_status": "succeeded",
+        "triage_recommendation": {"action": "merge", "reason": ""},
+        # deliberately NO "automerge_verdict" - the no-VISION card state
+    }
+    ok, _, _ = am._fresh_verdict_for_head(no_vision_state, "h1" * 20)
+    check(
+        "global true + no VISION.md: claim gate refuses a verdict-less card",
+        ok is False,
+    )
+
+    # No VERDICT SPEND: the base-branch VISION SHA that triage keys the auto-merge
+    # verdict on is empty when no VISION.md exists, so triage never asks for one.
+    saved = core.gh_rest
+    try:
+        def _absent(path):
+            raise RuntimeError("404 no VISION.md")
+
+        core.gh_rest = _absent
+        check(
+            "global true + no VISION.md: empty vision SHA -> no verdict spend",
+            core._default_branch_vision_sha("owner/fmt") == "",
+        )
+        core.gh_rest = lambda path: {"type": "file", "sha": "vsha"}
+        check(
+            "with VISION.md present: vision SHA is attached (verdict may be produced)",
+            core._default_branch_vision_sha("owner/fmt") == "vsha",
+        )
+    finally:
+        core.gh_rest = saved
+
+
+def test_global_true_self_authorization_still_excluded():
+    # Even with the fleet-wide switch ON, a PR cannot author the very rubric it is
+    # judged against: a PR that ADDS or CHANGES VISION.md is unconditionally
+    # excluded, and the rubric is read from the BASE default branch, never the head.
+    check(
+        "self-authorization: a PR ADDING VISION.md is a vision: exclusion",
+        any(h.startswith("vision:") for h in core._auto_merge_exclusions(["VISION.md"])),
+    )
+    check(
+        "self-authorization: VISION.md CHANGED among other files still excludes",
+        any(
+            h.startswith("vision:")
+            for h in core._auto_merge_exclusions(["src/a.py", "VISION.md", "docs/x.md"])
+        ),
+    )
+    # End-to-end, with the global switch ON: a merge-ready PR touching VISION.md
+    # holds at G2 and is never merged.
+    w, items, cards = default_world()
+    w.global_auto_merge = True
+    w.repos = {"fmt": {}}  # opted in by the fleet-wide switch alone
+    w.files[("owner/fmt", "5")] = (["VISION.md", "src/a.py"], True, True)
+    payload, _ = run_act(w, items, cards)
+    check(
+        "global true: PR editing VISION.md holds at G2 (self-authorization guard)",
+        "G2" in _held_reason(payload) and not w.do_merge_calls,
+    )
+
+    # The VISION.md rubric read is base-branch-only (contents API, no ?ref), so a
+    # PR-head edit of VISION.md can never be the version judged/gated against.
+    captured = {}
+
+    def fake_gh_api(path):
+        captured["path"] = path
+        return type("R", (), {"returncode": 1, "stdout": ""})()
+
+    save = am._gh_api
+    am._gh_api = fake_gh_api
+    try:
+        am.vision_on_default_branch("owner/fmt")
+    finally:
+        am._gh_api = save
+    check(
+        "self-authorization: rubric read targets the default branch (no ?ref, no head)",
+        captured.get("path") == "/repos/owner/fmt/contents/VISION.md"
+        and "ref=" not in captured.get("path", "")
+        and "head" not in captured.get("path", ""),
+    )
 
 
 def test_vision_oversized_or_incomplete_fails_closed():
