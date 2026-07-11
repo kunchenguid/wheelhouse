@@ -60,7 +60,7 @@ Security: the caller owner/maintainer-gates the whole job; only
 owner/maintainer-authored text ever reaches this script (and the LLM). Merge and
 request-changes re-check the PR head SHA against the card's state block and
 refuse if the PR moved. Card-driven merge also pre-detects `.github/workflows/**`
-touches (net diff or PR commit history) and returns a retryable result with
+touches (net diff or PR commit history) and returns terminal `blocked` with
 manual UI-merge guidance instead of attempting a doomed API merge - FLEET_TOKEN
 intentionally has no Workflows write. request-changes cleanup arming is best-effort and
 fail-open: if the review posts but the target-side marker cannot be proven or
@@ -686,13 +686,17 @@ def _read_commit_file_paths(slug, sha):
 
 
 def _workflow_merge_block(owner, repo, number, pr):
-    """If this PR must not be API-merged, return a retryable result; else None.
+    """If this PR must not be API-merged, return terminal `blocked`; else None.
 
     Detects `.github/workflows/**` in the PR's net three-dot file list OR in any
     commit in the PR's history (history-only touches 403 the same way as net-diff
-    touches when the automation token lacks Workflows write). Every /merge
-    re-runs this check fresh so a later rebase that drops workflow touches can
-    proceed. Fail closed when the answer is unknowable.
+    touches when the automation token lacks Workflows write). Terminal `blocked`
+    applies the durable open `blocked` label (not pure needs-decision), so the
+    card is soft-heal-protected and ineligible for auto-merge claim; hard-close
+    still auto-cleans once the target is genuinely merged/closed. Detection is
+    re-run on every subsequent `/merge` once the card is actionable again, so a
+    later rebase that drops workflow touches can proceed. Fail closed when the
+    answer is unknowable (same terminal `blocked` + manual UI-merge guidance).
     """
     slug = "%s/%s" % (owner, repo)
     url = _target_pr_url(owner, repo, number, pr)
@@ -702,7 +706,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "BLOCKED: could not verify whether %s#%s touches workflow files (%s). "
             "Not merging. Review and merge by hand in the GitHub UI if "
             "appropriate: %s" % (repo, number, err, url),
-            "retryable",
+            "blocked",
         )
     net_hits = core._workflow_merge_gated_files(paths)
     if net_hits:
@@ -713,7 +717,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "token intentionally has no Workflows write permission, so an API "
             "merge would fail with 403. Review the workflow changes and merge "
             "by hand in the GitHub UI: %s" % (repo, number, sample, more, url),
-            "retryable",
+            "blocked",
         )
     shas, err = _read_pr_commit_shas(slug, number, (pr or {}).get("commits"))
     if err:
@@ -721,7 +725,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "BLOCKED: could not verify whether %s#%s's commit history touches "
             "workflow files (%s). Not merging. Review and merge by hand in the "
             "GitHub UI if appropriate: %s" % (repo, number, err, url),
-            "retryable",
+            "blocked",
         )
     for sha in shas:
         cpaths, err = _read_commit_file_paths(slug, sha)
@@ -730,7 +734,7 @@ def _workflow_merge_block(owner, repo, number, pr):
                 "BLOCKED: could not verify commit %s on %s#%s for workflow "
                 "touches (%s). Not merging. Review and merge by hand in the "
                 "GitHub UI if appropriate: %s" % (sha[:8], repo, number, err, url),
-                "retryable",
+                "blocked",
             )
         hits = core._workflow_merge_gated_files(cpaths)
         if hits:
@@ -742,7 +746,7 @@ def _workflow_merge_block(owner, repo, number, pr):
                 "token intentionally has no Workflows write permission, so an "
                 "API merge would fail with 403. Review and merge by hand in the "
                 "GitHub UI: %s" % (repo, number, sha[:8], sample, more, url),
-                "retryable",
+                "blocked",
             )
     return None
 
@@ -819,8 +823,8 @@ def do_merge(
                 "blocked",
             )
     # Option B: never attempt API merge of a workflow-touching PR. FLEET_TOKEN
-    # intentionally has no Workflows write; pre-detect and leave the card
-    # open/actionable with manual UI-merge guidance instead of a doomed 403.
+    # intentionally has no Workflows write; pre-detect and leave the card open
+    # and clearly blocked with manual UI-merge guidance instead of a doomed 403.
     workflow_block = _workflow_merge_block(owner, repo, number, pr)
     if workflow_block:
         return outcome(*workflow_block)

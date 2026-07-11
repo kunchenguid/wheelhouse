@@ -1107,8 +1107,8 @@ def test_workflow_merge_gate_blocks_net_diff_workflow_touch():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: net-diff workflow touch keeps the card actionable",
-        terminal == "retryable",
+        "wf-gate: net-diff workflow touch is terminal blocked",
+        terminal == "blocked",
     )
     check(
         "wf-gate: net-diff message names workflow files and manual UI merge",
@@ -1151,8 +1151,8 @@ def test_workflow_merge_gate_blocks_history_only_workflow_touch():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 9, "abc123")
     check(
-        "wf-gate: history-only workflow touch keeps the card actionable",
-        terminal == "retryable",
+        "wf-gate: history-only workflow touch is terminal blocked",
+        terminal == "blocked",
     )
     check(
         "wf-gate: history message cites the workflow-touching commit",
@@ -1185,8 +1185,8 @@ def test_workflow_merge_gate_blocks_workflow_file_rename_out_of_net_diff():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: net workflow rename out of workflows is retryable",
-        terminal == "retryable" and "`.github/workflows/ci.yml`" in message,
+        "wf-gate: net workflow rename out of workflows is terminal blocked",
+        terminal == "blocked" and "`.github/workflows/ci.yml`" in message,
     )
     check(
         "wf-gate: net workflow rename never attempts the merge API",
@@ -1216,8 +1216,8 @@ def test_workflow_merge_gate_blocks_workflow_file_rename_out_of_history():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: history workflow rename out of workflows is retryable",
-        terminal == "retryable" and "`.github/workflows/ci.yml`" in message,
+        "wf-gate: history workflow rename out of workflows is terminal blocked",
+        terminal == "blocked" and "`.github/workflows/ci.yml`" in message,
     )
     check(
         "wf-gate: history workflow rename never attempts the merge API",
@@ -1249,7 +1249,7 @@ def test_workflow_merge_gate_pages_commit_files():
     ]
     check(
         "wf-gate: later commit-file page is inspected",
-        terminal == "retryable" and ".github/workflows/late.yml" in message,
+        terminal == "blocked" and ".github/workflows/late.yml" in message,
     )
     check(
         "wf-gate: commit files use paginated slurped reads",
@@ -1312,8 +1312,8 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: files-read failure is retryable (fail closed)",
-        terminal == "retryable" and "could not verify" in message.lower(),
+        "wf-gate: files-read failure is terminal blocked (fail closed)",
+        terminal == "blocked" and "could not verify" in message.lower(),
     )
     check(
         "wf-gate: files-read failure never attempts merge",
@@ -1333,8 +1333,8 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
     ):
         message2, terminal2 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: commits-read failure is retryable",
-        terminal2 == "retryable" and "could not verify" in message2.lower(),
+        "wf-gate: commits-read failure is terminal blocked",
+        terminal2 == "blocked" and "could not verify" in message2.lower(),
     )
     check(
         "wf-gate: commits-read failure never attempts merge",
@@ -1355,8 +1355,8 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
     ):
         message3, terminal3 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: per-commit read failure is retryable",
-        terminal3 == "retryable" and "could not verify" in message3.lower(),
+        "wf-gate: per-commit read failure is terminal blocked",
+        terminal3 == "blocked" and "could not verify" in message3.lower(),
     )
     check(
         "wf-gate: per-commit read failure never attempts merge",
@@ -1373,8 +1373,8 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
     ):
         message4, terminal4 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: incomplete file list is retryable",
-        terminal4 == "retryable" and "incomplete" in message4.lower(),
+        "wf-gate: incomplete file list is terminal blocked",
+        terminal4 == "blocked" and "incomplete" in message4.lower(),
     )
     check(
         "wf-gate: incomplete file list never attempts merge",
@@ -1399,7 +1399,7 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
         message5, terminal5 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
         "wf-gate: renamed file paths do not inflate completeness",
-        terminal5 == "retryable" and "incomplete (1 of 2)" in message5,
+        terminal5 == "blocked" and "incomplete (1 of 2)" in message5,
     )
     check(
         "wf-gate: incomplete renamed file list never attempts merge",
@@ -1420,8 +1420,8 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
     ):
         message6, terminal6 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
-        "wf-gate: commit file cap is retryable",
-        terminal6 == "retryable" and "API cap (3000)" in message6,
+        "wf-gate: commit file cap is terminal blocked",
+        terminal6 == "blocked" and "API cap (3000)" in message6,
     )
     check(
         "wf-gate: commit file cap never attempts merge",
@@ -1430,7 +1430,7 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
 
 
 def test_workflow_merge_gate_retry_after_rebase_merges():
-    # First attempt: history still carries a workflow-touching commit -> retryable.
+    # First attempt: history still carries a workflow-touching commit -> blocked.
     pr_dirty = open_pr(changed_files=1, commits=2, head_sha="oldhead01")
     fake_dirty, calls_dirty = fake_gh_rest(
         pr_dirty,
@@ -1448,8 +1448,8 @@ def test_workflow_merge_gate_retry_after_rebase_merges():
     ):
         msg1, term1 = ad.do_merge("owner-login", "target-repo", 5, "oldhead01")
     check(
-        "wf-gate: pre-rebase remains actionable",
-        term1 == "retryable" and "workflow" in msg1,
+        "wf-gate: pre-rebase is terminal blocked",
+        term1 == "blocked" and "workflow" in msg1,
     )
     check("wf-gate: pre-rebase sends no merge", merge_puts(calls_dirty) == [])
 
@@ -1477,7 +1477,7 @@ def test_workflow_merge_gate_retry_after_rebase_merges():
     )
 
 
-def test_workflow_merge_gate_logs_retriable_block():
+def test_workflow_merge_gate_logs_blocked_result():
     pr = open_pr(changed_files=1, commits=0)
     fake, _ = fake_gh_rest(pr, pr_files=[".github/workflows/ci.yml"])
     with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
@@ -1492,11 +1492,11 @@ def test_workflow_merge_gate_logs_retriable_block():
                 }
             )
     check(
-        "wf-gate: retryable result keeps command unsuccessful",
-        out["terminal_state"] == "retryable" and out["success"] == "false",
+        "wf-gate: workflow refusal is terminal blocked",
+        out["terminal_state"] == "blocked",
     )
     check(
-        "wf-gate: retryable result is logged",
+        "wf-gate: blocked result is logged",
         "decision result: BLOCKED:" in stream.getvalue()
         and ".github/workflows/ci.yml" in stream.getvalue(),
     )
@@ -2484,7 +2484,7 @@ def main():
     test_workflow_merge_gate_clean_pr_proceeds_to_merge()
     test_workflow_merge_gate_detection_read_failure_blocks()
     test_workflow_merge_gate_retry_after_rebase_merges()
-    test_workflow_merge_gate_logs_retriable_block()
+    test_workflow_merge_gate_logs_blocked_result()
     test_workflow_merge_gated_files_helper_is_workflows_only()
     test_auto_merge_receives_sha_from_successful_merge_response()
     test_auto_merge_rejects_a_changed_expected_base()

@@ -276,8 +276,8 @@ You drive the queue three ways - whichever fits the decision:
   The repo owner can also apply the `needs-deep-review` label by hand or run the `deep-review` workflow from Actions with only the card issue number; those manual paths parse the current card body before resolving the target.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
-    PRs that change `.github/workflows/**` (in the net diff **or** in any commit in the PR history) are never API-merged: the card stays open with guidance to review and merge by hand in the GitHub UI.
-    That is intentional - `FLEET_TOKEN` keeps no Workflows write permission - and is re-checked on every `/merge`, so a later rebase that drops the workflow touch can merge normally.
+    PRs that change `.github/workflows/**` (in the net diff **or** in any commit in the PR history) are never API-merged: the card stays open and `blocked` with guidance to review and merge by hand in the GitHub UI (or retry after a rebase drops the workflow touch).
+    That is intentional - `FLEET_TOKEN` keeps no Workflows write permission.
   - `/approve-ci` - approve the fork-CI run (security-gated; CI/action-file changes are held, while non-default bases and `pull_request_target` posture add warnings).
   - `/close` - close the target PR/issue.
   - `/decline <reason>` - post your reason on the target, then close it.
@@ -307,7 +307,8 @@ You drive the queue three ways - whichever fits the decision:
 
 An item is **consumed** when the handler closes its card after a successful resolving action; the card is labeled `resolved` for audit.
 A `/hold` or a non-retryable action error leaves the card open with the `blocked` label for manual follow-up.
-A retryable merge refusal - a stale head, a workflow touch, or an unable-to-verify workflow history - leaves the card as `needs-decision` so you can retry after it is current or merge it by hand in the GitHub UI.
+A workflow-touch or unable-to-verify workflow-history merge refusal also lands `blocked` (will not API-merge; merge by hand in the GitHub UI, or retry after a rebase drops the workflow touch).
+A retryable merge refusal for a stale head leaves the card as `needs-decision` so you can retry after the card is current.
 For the "what changed most recently?" view, use the Issues list sorted by Recently updated, or bookmark `https://github.com/<owner>/<wheelhouse-repo>/issues?q=is%3Aissue%20is%3Aopen%20label%3Aneeds-decision%20sort%3Aupdated-desc`.
 Wheelhouse bumps a pure pending card's own updated time when the target PR or issue's GitHub `updatedAt` advances, so recently active targets rise to the top.
 That signal is target-level GitHub activity and may include owner, maintainer, or bot activity.
@@ -373,7 +374,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Token scope.** The default `GITHUB_TOKEN` only reaches this repo and is used for all card activity (so it can't recursively re-trigger the handler).
   Acting on your other repos uses `FLEET_TOKEN`, which is never printed and is only used in cross-repo scan, approval, execution, and read-only fetch steps.
   Scope it to just your fleet with Actions, Contents, Issues, and Pull requests read/write on the target repos.
-  Deliberately leave Workflows write unset: a card-driven merge of a PR that touches `.github/workflows/**` stays actionable with manual GitHub UI merge guidance instead of attempting an API merge that GitHub would reject.
+  Deliberately leave Workflows write unset: a card-driven merge of a PR that touches `.github/workflows/**` leaves the card open and `blocked` with manual GitHub UI merge guidance instead of attempting an API merge that GitHub would reject.
   The optional `READONLY_TOKEN` is used only by search-enabled Claude steps, only when present, and should have public read scope with no write permissions.
 - **`request-changes` reuses `FLEET_TOKEN`, no new scope.** `/request-changes <text>` (pr-review only) submits a GitHub "changes requested" review on the target PR through the same `execute`-step `FLEET_TOKEN` wiring `/merge`/`/comment` already use - no new secret, no new token scope.
   It is deterministic, owner-gated, and non-terminal exactly like `/comment`, and it is also selectable by the natural-language intent-mapper (unlike `investigate`, which is checkbox-only).
@@ -477,9 +478,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The card stays open with an error comment and the `blocked` label after a non-retryable action error, so it remains visible for manual follow-up instead of being soft-closed when an open target leaves the worklist.
   It still closes automatically if that target is later genuinely merged or closed.
   A `/merge` refused with a "head moved" note is working as intended - the PR changed after the card was rendered, so re-scan before merging.
-  A `/merge` that reports the PR changes CI workflow files is also working as intended: `FLEET_TOKEN` intentionally has no Workflows write, so Wheelhouse never attempts that doomed API merge.
-  Review the workflow changes and merge the target PR by hand in the GitHub UI (the card comment includes the PR URL).
-  Re-tick `/merge` after a rebase that drops the workflow touch - the gate re-runs fresh and will merge a workflow-clean PR.
+  A `/merge` that leaves the card `blocked` saying the PR changes CI workflow files (or that Wheelhouse could not verify workflow history) is also working as intended: `FLEET_TOKEN` intentionally has no Workflows write, so Wheelhouse never attempts that doomed API merge.
+  Review the workflow changes and merge the target PR by hand in the GitHub UI (the card comment includes the PR URL), or after a rebase drops the workflow touch clear the hold and retry `/merge` - the gate re-runs fresh and will merge a workflow-clean PR.
   A `/request-changes` refused for a moved head leaves the card pending; the next scan refreshes it to the new code automatically, then you can re-review and request changes again if needed.
   A `/request-changes` refused because it is your own PR is also working as intended - GitHub does not allow self-review, and scan-built queues normally filter those PRs out.
   A `/merge` that fails with a merge-conflict message means the contributor must rebase or merge the base branch, resolve the conflict, and push before Wheelhouse can merge it.
