@@ -912,6 +912,7 @@ def fake_gh_rest(
     files_error=None,
     commits_error=None,
     commit_error=None,
+    pr_sequence=None,
 ):
     """A no-network stand-in for core.gh_rest covering the calls do_merge and
     _thank_contributor make: GET the PR, list files/commits for the workflow
@@ -926,6 +927,12 @@ def fake_gh_rest(
     pr_files = list(pr_files or [])
     pr_commits = list(pr_commits or [])
     commit_files = dict(commit_files or {})
+    pr_sequence = list(pr_sequence or [pr])
+
+    def raise_api_error(error):
+        if isinstance(error, BaseException):
+            raise error
+        raise RuntimeError(error)
 
     def _slurp_pages(items):
         # gh --paginate --slurp yields an array of per-page arrays.
@@ -948,7 +955,7 @@ def fake_gh_rest(
                 return {"id": 9001, "submitted_at": review_submitted_at}
             if "/pulls/" in path and "/files" in path:
                 if files_error:
-                    raise RuntimeError(files_error)
+                    raise_api_error(files_error)
                 rows = [
                     name if isinstance(name, dict) else {"filename": name}
                     for name in pr_files
@@ -956,12 +963,12 @@ def fake_gh_rest(
                 return _slurp_pages(rows) if slurp else rows
             if "/pulls/" in path and "/commits" in path:
                 if commits_error:
-                    raise RuntimeError(commits_error)
+                    raise_api_error(commits_error)
                 rows = [{"sha": sha} for sha in pr_commits]
                 return _slurp_pages(rows) if slurp else rows
             if "/commits/" in path and "/pulls/" not in path:
                 if commit_error:
-                    raise RuntimeError(commit_error)
+                    raise_api_error(commit_error)
                 sha = path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
                 names = commit_files.get(sha, commit_files.get(sha[:8], []))
                 pages = (
@@ -982,7 +989,7 @@ def fake_gh_rest(
                     for page in pages
                 ]
                 return payloads if slurp else payloads[0]
-            return pr
+            return pr_sequence.pop(0) if len(pr_sequence) > 1 else pr_sequence[0]
         if method == "PUT":
             if merge_error:
                 raise RuntimeError(merge_error)
@@ -1164,6 +1171,53 @@ def test_workflow_merge_gate_blocks_history_only_workflow_touch():
     check(
         "wf-gate: history-only never attempts the merge API",
         merge_puts(calls) == [],
+    )
+
+
+def test_workflow_merge_gate_sanitizes_displayed_workflow_paths():
+    unsafe_path = ".github/workflows/ci`\n@contributor.yml"
+    pr = open_pr(changed_files=1, commits=1)
+    fake, calls = fake_gh_rest(pr, pr_files=[unsafe_path])
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        net_message, net_terminal = ad.do_merge(
+            "owner-login", "target-repo", 5, "abc123"
+        )
+    check(
+        "wf-gate: net-diff workflow path stays in one safe inline-code span",
+        net_terminal == "blocked"
+        and "`%s`" % ad.core._safe_inline(unsafe_path) in net_message
+        and unsafe_path not in net_message,
+    )
+    check("wf-gate: sanitized net-diff path never merges", merge_puts(calls) == [])
+
+    history_pr = open_pr(changed_files=1, commits=1)
+    history_fake, history_calls = fake_gh_rest(
+        history_pr,
+        pr_files=["src/app.py"],
+        pr_commits=["abc123"],
+        commit_files={"abc123": [unsafe_path]},
+    )
+    with patch_core(
+        gh_rest=history_fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        history_message, history_terminal = ad.do_merge(
+            "owner-login", "target-repo", 5, "abc123"
+        )
+    check(
+        "wf-gate: history workflow path stays in one safe inline-code span",
+        history_terminal == "blocked"
+        and "`%s`" % ad.core._safe_inline(unsafe_path) in history_message
+        and unsafe_path not in history_message,
+    )
+    check(
+        "wf-gate: sanitized history path never merges",
+        merge_puts(history_calls) == [],
     )
 
 
@@ -1427,6 +1481,158 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
         "wf-gate: commit file cap never attempts merge",
         merge_puts(calls6) == [],
     )
+
+
+def test_workflow_merge_gate_malformed_reads_block():
+    malformed = json.JSONDecodeError("Expecting value", "not json", 0)
+    cases = [
+        (
+            "files",
+            open_pr(changed_files=1, commits=0),
+            {"files_error": malformed},
+        ),
+        (
+            "commits",
+            open_pr(changed_files=0, commits=1),
+            {"pr_files": [], "commits_error": malformed},
+        ),
+        (
+            "commit files",
+            open_pr(changed_files=1, commits=1),
+            {
+                "pr_files": ["src/app.py"],
+                "pr_commits": ["abc123"],
+                "commit_error": malformed,
+            },
+        ),
+    ]
+    for name, pr, kwargs in cases:
+        fake, calls = fake_gh_rest(pr, **kwargs)
+        with patch_core(
+            gh_rest=fake,
+            load_config=lambda: thank_cfg(),
+            maintainers=lambda: {"owner-login"},
+        ):
+            message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+        check(
+            "wf-gate: malformed %s response is terminal blocked" % name,
+            terminal == "blocked" and "could not verify" in message.lower(),
+        )
+        check(
+            "wf-gate: malformed %s response never merges" % name,
+            merge_puts(calls) == [],
+        )
+
+
+def test_workflow_merge_gate_rechecks_head_after_scan():
+    start = open_pr(changed_files=1, commits=1, head_sha="oldhead01")
+    moved = open_pr(changed_files=1, commits=1, head_sha="newhead99")
+    fake, calls = fake_gh_rest(
+        start,
+        pr_files=["src/app.py"],
+        pr_commits=["oldhead01"],
+        commit_files={"oldhead01": ["src/app.py"]},
+        pr_sequence=[start, moved],
+    )
+    with patch_core(
+        gh_rest=fake,
+        get_owner=lambda: "owner-login",
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        out = run_execute(
+            {
+                "DECISION": "merge",
+                "TARGET_REPO": "target-repo",
+                "TARGET_NUMBER": "5",
+                "HEAD_SHA": "oldhead01",
+            }
+        )
+    pr_reads = [
+        call
+        for call in calls
+        if call["method"] is None
+        and call["path"] == "/repos/owner-login/target-repo/pulls/5"
+    ]
+    check(
+        "wf-gate: post-scan head move remains retryable",
+        out["terminal_state"] == "retryable"
+        and out["success"] == "false"
+        and "oldhead" in out["result_message"]
+        and "newhead" in out["result_message"],
+    )
+    check("wf-gate: post-scan head move re-reads the PR", len(pr_reads) == 2)
+    check("wf-gate: post-scan head move never merges", merge_puts(calls) == [])
+
+
+def test_workflow_merge_gate_rechecks_auto_merge_base_after_scan():
+    start = open_pr(changed_files=1, commits=1, head_sha="abc123")
+    start["base"] = {"sha": "reviewedbase"}
+    start["mergeable"] = True
+    start["mergeable_state"] = "clean"
+    moved = open_pr(changed_files=1, commits=1, head_sha="abc123")
+    moved["base"] = {"sha": "newbase"}
+    moved["mergeable"] = True
+    moved["mergeable_state"] = "clean"
+    fake, calls = fake_gh_rest(
+        start,
+        pr_files=["src/app.py"],
+        pr_commits=["abc123"],
+        commit_files={"abc123": ["src/app.py"]},
+        pr_sequence=[start, moved],
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge(
+            "owner-login",
+            "target-repo",
+            5,
+            "abc123",
+            expected_base_sha="reviewedbase",
+            require_clean_merge_state=True,
+        )
+    check(
+        "wf-gate: post-scan auto-merge base move is blocked",
+        terminal == "blocked" and "base moved" in message,
+    )
+    check("wf-gate: post-scan auto-merge base move never merges", merge_puts(calls) == [])
+
+
+def test_workflow_merge_gate_reclassifies_merge_head_race():
+    start = open_pr(changed_files=1, commits=1, head_sha="oldhead01")
+    moved = open_pr(changed_files=1, commits=1, head_sha="newhead99")
+    fake, calls = fake_gh_rest(
+        start,
+        merge_error="merge failed: HTTP 409",
+        pr_files=["src/app.py"],
+        pr_commits=["oldhead01"],
+        commit_files={"oldhead01": ["src/app.py"]},
+        pr_sequence=[start, start, moved],
+    )
+    with patch_core(
+        gh_rest=fake,
+        get_owner=lambda: "owner-login",
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        out = run_execute(
+            {
+                "DECISION": "merge",
+                "TARGET_REPO": "target-repo",
+                "TARGET_NUMBER": "5",
+                "HEAD_SHA": "oldhead01",
+            }
+        )
+    check(
+        "wf-gate: confirmed merge-race head move remains retryable",
+        out["terminal_state"] == "retryable"
+        and out["success"] == "false"
+        and "head moved" in out["result_message"],
+    )
+    check("wf-gate: merge-race tries the SHA-bound merge once", len(merge_puts(calls)) == 1)
 
 
 def test_workflow_merge_gate_retry_after_rebase_merges():
@@ -2478,11 +2684,16 @@ def main():
     test_thank_on_merge_posts_after_successful_merge()
     test_workflow_merge_gate_blocks_net_diff_workflow_touch()
     test_workflow_merge_gate_blocks_history_only_workflow_touch()
+    test_workflow_merge_gate_sanitizes_displayed_workflow_paths()
     test_workflow_merge_gate_blocks_workflow_file_rename_out_of_net_diff()
     test_workflow_merge_gate_blocks_workflow_file_rename_out_of_history()
     test_workflow_merge_gate_pages_commit_files()
     test_workflow_merge_gate_clean_pr_proceeds_to_merge()
     test_workflow_merge_gate_detection_read_failure_blocks()
+    test_workflow_merge_gate_malformed_reads_block()
+    test_workflow_merge_gate_rechecks_head_after_scan()
+    test_workflow_merge_gate_rechecks_auto_merge_base_after_scan()
+    test_workflow_merge_gate_reclassifies_merge_head_race()
     test_workflow_merge_gate_retry_after_rebase_merges()
     test_workflow_merge_gate_logs_blocked_result()
     test_workflow_merge_gated_files_helper_is_workflows_only()
