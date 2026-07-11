@@ -695,8 +695,13 @@ def test_retryable_terminal_keeps_card_actionable():
     steps = handle_steps()
     block = step_by_name(steps, "Block card label")
     drop = step_by_name(steps, "Drop needs-decision on terminal")
-    check("workflow: Block card label step exists for retryable state", block is not None)
-    check("workflow: Drop needs-decision step exists for retryable state", drop is not None)
+    check(
+        "workflow: Block card label step exists for retryable state", block is not None
+    )
+    check(
+        "workflow: Drop needs-decision step exists for retryable state",
+        drop is not None,
+    )
     if block:
         check(
             "workflow: retryable merge result does not add blocked",

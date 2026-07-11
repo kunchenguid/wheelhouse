@@ -639,13 +639,10 @@ def _read_pr_commit_shas(slug, number, expected_count=None):
             shas.append(row.strip())
     if count is not None and len(shas) < count:
         return None, "PR commit list incomplete (%s of %s)" % (len(shas), count)
-    if len(shas) >= core.PR_COMMITS_API_CAP and (
-        count is None or count > len(shas)
-    ):
+    if len(shas) >= core.PR_COMMITS_API_CAP and (count is None or count > len(shas)):
         return (
             None,
-            "PR commit list may be truncated at API cap (%s)"
-            % core.PR_COMMITS_API_CAP,
+            "PR commit list may be truncated at API cap (%s)" % core.PR_COMMITS_API_CAP,
         )
     return shas, None
 
@@ -732,8 +729,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             return (
                 "BLOCKED: could not verify commit %s on %s#%s for workflow "
                 "touches (%s). Not merging. Review and merge by hand in the "
-                "GitHub UI if appropriate: %s"
-                % (sha[:8], repo, number, err, url),
+                "GitHub UI if appropriate: %s" % (sha[:8], repo, number, err, url),
                 "retryable",
             )
         hits = core._workflow_merge_gated_files(cpaths)

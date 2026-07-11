@@ -1245,9 +1245,7 @@ def test_workflow_merge_gate_pages_commit_files():
     ):
         message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     detail_calls = [
-        call
-        for call in calls
-        if "/commits/abc123?per_page=100" in call["path"]
+        call for call in calls if "/commits/abc123?per_page=100" in call["path"]
     ]
     check(
         "wf-gate: later commit-file page is inspected",
