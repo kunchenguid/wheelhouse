@@ -67,6 +67,7 @@ repos:
     compliance_check: "required-policy-check"  # exact required gate check, or null
     test_check_patterns: ["test", "build", "e2e"]  # substrings that identify your test/CI checks
     # auto_approve_ci: false              # optional per-repo override
+    # auto_merge: true                    # optional scan-time merge opt-in (also needs VISION.md)
     # auto_triage: false                  # optional per-repo LLM spend opt-out (pr-review)
     # auto_triage_issues: false           # optional per-repo LLM spend opt-out (issue-triage)
     # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
@@ -85,6 +86,7 @@ auto_triage_issues: true  # LLM side-job: quick advisory issue-card triage (DEFA
 nl_decisions: false       # LLM side-job: reply to a card in plain English (off by default)
 card_issues: true         # also scan un-addressed issues, not just PRs; owner/maintainer/bot authors are skipped
 auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON; see Security notes)
+auto_merge: false         # scan-time merge (DEFAULT OFF; requires per-repo VISION.md and a fresh triage verdict)
 thank_on_merge: true      # post a friendly @-mention thank-you on a merged contributor PR (DEFAULT ON)
 # thank_on_merge_message: "Thanks @{author} - merged! Really appreciate the contribution."  # optional wording override
 pending_contributor_cleanup: false       # stale pending-contributor PR cleanup (DEFAULT OFF)
@@ -128,6 +130,15 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > Set it to `false` to opt out for contributor PRs (every contributor fork-CI candidate raises a card, as you click to approve each), or add `auto_approve_ci: false` to a single `repos:` entry to opt that one repo out.
 > Owner, maintainer, and bot-authored fork PRs are excluded from the decision queue, so Wheelhouse still runs the safety-gated approve/noop path for safe CI and suppresses their cards.
 > See [Security notes](#security-notes).
+
+> **Heads-up - `auto_merge` defaults OFF.**
+> To opt in, set `auto_merge: true` globally or on one `repos:` entry **and** commit a non-empty `VISION.md` on that target repository's default branch.
+> A per-repo `auto_merge: false` overrides a fleet-wide setting, and applying `wheelhouse:no-auto-merge` to a target PR stops scan-time auto-merge for that PR without affecting manual `/merge`.
+> The hourly `scan-backstop`, not an ingest dispatch, can merge an eligible PR.
+> It requires a fresh successful PR auto-triage verdict for the current head, base, and `VISION.md` revision that recommends merge, confirms vision alignment, and assigns eligible behavior class A, B, or C (class C must be strictly opt-in and default off).
+> Before merging, Wheelhouse also requires a clean, merge-ready live PR with configured compliance and tests green, a returning non-maintainer human contributor, no excluded sensitive/governance/release/dependency/security/auth/billing/migration/schema/install/default-surface files, and at most 20 changed files and 1,000 changed lines.
+> It re-reads the head, base, `VISION.md`, merge state, checks, escape-hatch label, and card activity immediately before the existing deterministic merge call, so any uncertainty leaves the PR for normal review.
+> Wheelhouse never auto-reverts; every automatic merge closes its decision card with an audit record and appends to a closed, durable auto-merge ledger issue in the hub.
 
 > **Heads-up - `thank_on_merge` defaults ON (no Claude token needed).**
 > When this key is absent it is treated as `true`, so merging a fleet contributor's PR through a decision card - checkbox *Merge* or a natural-language "merge it" - posts one short, friendly comment on that PR that `@`-mentions the contributor.
@@ -182,6 +193,8 @@ Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TO
   Existing pure pending PR-review cards that predate the feature backfill once on the next scan.
   Set `auto_triage: false` globally or per repo when you want to control token spend.
   Issue-triage cards get the same treatment under the INDEPENDENT `auto_triage_issues` flag (also default-on): since issues have no head SHA, it caches by the issue's `updatedAt` instead, checks out the repo's default branch read-only for a little code context, uses an issue-safe recommendation action set, and is opt-out the same way with `auto_triage_issues: false`.
+  When a repository independently opts into scan-time `auto_merge`, successful PR triage can also return a structured behavior verdict for the deterministic merge gate.
+  That verdict is read from the trusted default-branch `VISION.md` and current immutable PR diff, is bound to the PR head and base plus the `VISION.md` revision, and still cannot merge anything by itself.
 - **Deep review (always-on)** - tick a card's *Investigate* box and Claude reviews the target's checked-out code without executing it.
   The repo owner can also apply the `needs-deep-review` label or run the `deep-review` workflow with only the decision-card issue number; that manual workflow path fetches the current card body with this repo's token.
   The workflow captures Claude's final response and posts it as the code-grounded merit/triage verdict.
@@ -246,6 +259,10 @@ You drive the queue three ways - whichever fits the decision:
   A newly created eligible card may first show `pending-triage` and a placeholder instead of decision boxes; decide after the `Triage` section or unavailable note appears and the boxes publish.
   A fresh successful structured recommendation can prepend *Accept recommendation* to the decision boxes; ticking it maps the recommendation to the same deterministic action that a checkbox or slash-command would have used.
   Auto triage itself is still advisory: it gives you context before deciding and never acts without your tick.
+- **Optional scan-time auto-merge.** When a repository has opted into `auto_merge` and committed `VISION.md`, the hourly scan may merge only a PR that clears the separate fail-closed gate described in [step 2](#2-edit-wheelhouseconfigyml).
+  It first claims the pure pending decision card, then rechecks the live PR and card before merging, so an owner/maintainer action or a new decision on the card wins instead.
+  Apply `wheelhouse:no-auto-merge` to the target PR to stop one pending automatic merge; this label does not block your normal `/merge` or *Merge it* decision.
+  Each automatic merge resolves the card with its qualifying evidence and adds a row to Wheelhouse's closed auto-merge ledger issue.
 - **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*).
   Tick exactly one; a successful resolving action closes the card, while `/hold` and failed actions remain open and `blocked` for manual follow-up.
   *Accept recommendation*, when present, is also a checkbox, but it only appears for fresh successful structured auto-triage recommendations on PR-review and issue-triage cards.
@@ -376,6 +393,12 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   If `auto_triage` (pr-review) or `auto_triage_issues` (issue-triage) is false, or `CLAUDE_CODE_OAUTH_TOKEN` is absent, no workflow is dispatched and cards render without a triage section; the two flags are independent, so disabling one never disables the other.
   For an issue-triage card the target checkout is the repo's default branch, read-only, the same way `deep-review.yml` checks out an issue card.
   The model never receives `FLEET_TOKEN`; target checkout uses `persist-credentials: false`, and optional search uses only `READONLY_TOKEN` through `wheelhouse-search`.
+- **Scan-time auto-merge is a narrow, audited opt-in.** `auto_merge` is false unless explicitly enabled globally or per repository, and an enabled repository still needs a default-branch `VISION.md`, a fresh successful behavior verdict, and every deterministic gate to pass.
+  The gate rejects sensitive, governance, release, dependency, security/auth, billing, migration, persistence, installation, and public-default surfaces; requires a returning human contributor, clean live mergeability, configured green checks, and a 20-file/1,000-line cap; and fails closed on every missing or stale read.
+  `VISION.md` is fetched only from the default branch and a PR changing it is excluded, so a contribution cannot author the policy used to approve itself.
+  Immediately before the merge, Wheelhouse rechecks the head, base, vision revision, live clean state, configured checks, target escape-hatch label, and card activity.
+  The cross-repo merge uses `FLEET_TOKEN`, while the claim, audit record, decision-card close, and closed hub ledger issue use the default `GITHUB_TOKEN`.
+  Applying `wheelhouse:no-auto-merge` to a target PR is an immediate per-PR kill switch, and an automatic merge is never reverted automatically.
 - **Fork-CI / pwn-request HOLD.** Approving a fork PR's CI runs that PR's own workflow/action code with your permissions. Any approval that touches `.github/workflows`, `.github/actions`, or `action.yml`/`action.yaml` is **held** for manual review, never auto-approved (it fails closed if the file list can't be read).
 - **CI-approval security review is advisory.** When the scheduled scan creates a contributor CI-approval card for a fork PR that changes those workflow/action files, the card includes a deterministic *Security review (advisory)* section for the affected workflow/action files at the PR head.
   It reports only structured facts, such as triggers, write permissions, secret names or `secrets: inherit`, checkout provenance, action or reusable-workflow pins, action runtimes, and run steps - never source lines or secret values.
@@ -424,7 +447,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   So a malicious PR that tries to prompt-inject through its own source can at worst produce a wrong verdict comment - never run code or exfiltrate a secret.
   The Investigate trigger is owner/maintainer-gated like every other acting path, while direct manual label and issue-only workflow runs remain repo-owner-only.
 - **Public = world-readable.** A public Wheelhouse repo makes your queue and decisions visible to everyone. That transparency is a feature, but state it plainly to yourself before listing private work here; use a private repo if you need it.
-- **Least privilege.** Every workflow declares a minimal `permissions:` block, and each card is serialized with per-issue `concurrency` so concurrent ticks can't race.
+- **Least privilege.** Every workflow declares a minimal `permissions:` block, and `decision-handler` plus `scan-backstop` share the queued `wheelhouse-backstop` concurrency group so card claims, decisions, and reconciliation cannot race.
 
 ## Troubleshooting
 
@@ -520,6 +543,7 @@ scripts/
   wheelhouse_core.py           resilient GraphQL scan/classify, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
   render_card.py               build decision cards, including held pending-triage placeholders and advisory CI security reviews; create/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
+  auto_merge.py                claim, validate, merge, and audit strictly eligible scan-time PR auto-merges
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, reflect target activity, close consumed ones
@@ -533,6 +557,7 @@ tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-a
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, activity-stamp interaction, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
+tests/test_auto_merge_v1.py    offline unit test for scan-time auto-merge gates, claims, live rechecks, audit records, and ledger recovery
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting, including ref qualification and automated-status labeling
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification

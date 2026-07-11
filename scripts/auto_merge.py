@@ -13,7 +13,7 @@ the scan-time fork-CI auto-approve architecture (`ci_safety` /
 
 Every auto-merge requires ALL of (see the numbered contract in AGENTS.md):
   G0  repo `auto_merge: true` AND a committed VISION.md on its DEFAULT branch
-  G1  the candidate is a merge-ready pr-review decision (from the scan worklist)
+  G1  a trusted pure pending pr-review card is claimed from the merge-ready scan worklist
   G2  the PR touches none of the deterministic unconditional exclusions
   G3  the author has >= 1 previously merged PR in the same repo (non-bot human)
   G4  compliance + tests green (worst-wins, already encoded by merge-ready),
@@ -22,18 +22,31 @@ Every auto-merge requires ALL of (see the numbered contract in AGENTS.md):
   G6  fresh structured verdict for the current head SHA: eligible A/B/C class,
       aligns with the base VISION.md, no ineligible existing/default behavior
       change, recommends merge (class C also strictly opt-in + default off)
-  G7  immediately re-check head SHA + mergeability + clean state, then do_merge
+  G7  immediately re-check the card, head SHA, base SHA, default-branch VISION.md,
+      mergeability, clean state, escape hatch, and configured check contexts,
+      then do_merge
 Plus a per-PR `wheelhouse:no-auto-merge` escape hatch, global/per-repo switches
 (default OFF), a durable audit ledger, and a resolved decision record.
 
 There are DELIBERATELY no open-PR file-overlap gate and no per-contributor /
 per-scan rate caps (captain override); their absence is asserted by the tests.
 
-Two CLIs, run as separate workflow steps so each uses the right token:
+Four CLI phases run as separate workflow steps so each uses the right token:
 
-  auto_merge.py act <scan.json> <cards.json>
+  auto_merge.py claim <scan.json> <cards.json>
+      Under GITHUB_TOKEN. Reclaim stale claims, then claim only stable pure
+      pending cards that could be eligible. Writes the handoff file from
+      $WHEELHOUSE_AUTOMERGE_CLAIMS (default automerge-claims.json).
+
+  auto_merge.py validate <claims.json>
+      Under GITHUB_TOKEN. Re-read every claimed card and discard or release a
+      claim if a trusted owner/maintainer decision, comment, or card change
+      appeared. Writes $WHEELHOUSE_AUTOMERGE_VALIDATED_CLAIMS (default
+      automerge-valid-claims.json).
+
+  auto_merge.py act <scan.json> <validated-claims.json>
       Under FLEET_TOKEN. Identify merge-ready pr-review candidates from the scan,
-      join the persisted behavior verdict from the card bodies, run G0-G7, and
+      join the validated persisted behavior verdict from the card bodies, run G0-G7, and
       call do_merge for the ones that qualify. Writes a machine-readable results
       file (path from $WHEELHOUSE_AUTOMERGE_RESULTS, default automerge.json) and
       one ::notice::/::warning:: audit line per candidate. Uses the separate

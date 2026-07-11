@@ -352,8 +352,8 @@ thank_on_merge: true
 # structured behavior verdict for the current head SHA assigns an eligible A/B/C
 # class and recommends merge. Turning this on is NOT sufficient on its own: a
 # repo still auto-merges nothing until it ALSO commits a VISION.md on its default
-# branch (the alignment rubric AND the per-repo opt-in signal). See AGENTS.md
-# "Auto-merge" for the full gate list. Override per repo with `auto_merge: true`
+# branch (the alignment rubric AND the per-repo opt-in signal). See README.md's
+# `auto_merge` setup notes for the full user-facing gate list. Override per repo with `auto_merge: true`
 # on an entry under `repos:` above; a per-repo `auto_merge: false` is the
 # portable one-repo kill switch. Kill switches (layered): this flag, the per-repo
 # override, deleting a repo's VISION.md, removing CLAUDE_CODE_OAUTH_TOKEN (no
