@@ -90,8 +90,9 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/auto_merge.py validate automerge-claims.json
 
-      # Scan-time auto-merge (default OFF; strict subset of the manual merge
-      # gate). Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
+      # Scan-time auto-merge (shipped code default OFF, enabled fleet-wide by
+      # this repository's config; strict subset of the manual merge gate).
+      # Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
       # it reads the persisted per-card behavior verdict from cards.json (a local
       # file, no token needed to read it). Its separate default-token credential
       # persists the pre-merge audit intent; the resolved decision record and

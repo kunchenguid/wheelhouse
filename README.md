@@ -132,7 +132,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > See [Security notes](#security-notes).
 
 > **Heads-up - `auto_merge` is ON fleet-wide in this fork; `VISION.md` is the practical opt-in.**
-> The fork-and-own code fallback is OFF: when the key is absent, Wheelhouse treats it as `false`; the generic example above shows that absent-key posture.
+> The fork-and-own code fallback is OFF: when the key is absent, Wheelhouse treats it as `false`; the generic example above preserves that shipped-default posture by setting it explicitly to `false`.
 > This repository's committed `wheelhouse.config.yml` sets `auto_merge: true` globally, so forks of this repository inherit the fleet-wide switch on, while remaining fully inert until a target repository commits a non-empty `VISION.md` on its default branch.
 > No fleet repository has a `VISION.md` yet, so today every repo stays fully inert and no PR can be auto-merged until you add one.
 > A per-repo `auto_merge: false` still overrides the fleet-wide setting to opt one repo back out, and applying `wheelhouse:no-auto-merge` to a target PR stops scan-time auto-merge for that PR without affecting manual `/merge`.
