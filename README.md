@@ -174,6 +174,7 @@ Only you can mint it (it's tied to your account).
 1. GitHub ▸ **Settings** ▸ **Developer settings** ▸ **Personal access tokens** ▸ **Fine-grained tokens** ▸ **Generate new token**.
 2. **Repository access** ▸ **Only select repositories** ▸ pick every repo you listed in `wheelhouse.config.yml` (and this repo too, if it is private).
 3. **Permissions** ▸ Repository permissions: **Actions → Read and write**, **Contents → Read and write**, **Issues → Read and write**, **Pull requests → Read and write**.
+   Leave **Workflows** unset (no access). Card-driven merges of PRs that touch `.github/workflows/**` are deliberately blocked for a manual UI merge instead of granting the fleet token Workflows write.
 4. Generate, copy the token.
 5. In **this** repo: **Settings** ▸ **Secrets and variables** ▸ **Actions** ▸ **New repository secret** ▸ name it exactly `FLEET_TOKEN`, paste the value.
 
@@ -275,6 +276,8 @@ You drive the queue three ways - whichever fits the decision:
   The repo owner can also apply the `needs-deep-review` label by hand or run the `deep-review` workflow from Actions with only the card issue number; those manual paths parse the current card body before resolving the target.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
+    PRs that change `.github/workflows/**` (in the net diff **or** in any commit in the PR history) are never API-merged: the card stays open and `blocked` with guidance to review and merge by hand in the GitHub UI.
+    That is intentional - `FLEET_TOKEN` keeps no Workflows write permission - and is re-checked on every `/merge`, so a later rebase that drops the workflow touch can merge normally.
   - `/approve-ci` - approve the fork-CI run (security-gated; CI/action-file changes are held, while non-default bases and `pull_request_target` posture add warnings).
   - `/close` - close the target PR/issue.
   - `/decline <reason>` - post your reason on the target, then close it.
@@ -472,6 +475,9 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The card stays open with an error comment and the `blocked` label when an action fails, so it remains visible for manual follow-up instead of being soft-closed when an open target leaves the worklist.
   It still closes automatically if that target is later genuinely merged or closed.
   A `/merge` refused with a "head moved" note is working as intended - the PR changed after the card was rendered, so re-scan before merging.
+  A `/merge` that leaves the card `blocked` saying the PR changes CI workflow files is also working as intended: `FLEET_TOKEN` intentionally has no Workflows write, so Wheelhouse never attempts that doomed API merge.
+  Review the workflow changes and merge the target PR by hand in the GitHub UI (the card comment includes the PR URL).
+  Re-tick `/merge` after a rebase that drops the workflow touch - the gate re-runs fresh and will merge a workflow-clean PR.
   A `/request-changes` refused for a moved head leaves the card pending; the next scan refreshes it to the new code automatically, then you can re-review and request changes again if needed.
   A `/request-changes` refused because it is your own PR is also working as intended - GitHub does not allow self-review, and scan-built queues normally filter those PRs out.
   A `/merge` that fails with a merge-conflict message means the contributor must rebase or merge the base branch, resolve the conflict, and push before Wheelhouse can merge it.

@@ -132,7 +132,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   on CI-approval HOLD cards (`_security_review_section`), plus trusted
   triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
-  `execute`; non-checkbox actions including `comment`, `decline`, and
+  `execute`; pre-merge workflow-touch gate in `do_merge` that blocks
+  `.github/workflows/**` PRs for manual UI merge; non-checkbox actions including
+  `comment`, `decline`, and
   pr-review-only `request-changes` with optional cleanup arming after a successful
   GitHub review; the virtual `accept-recommendation` checkbox
   routing into existing deterministic actions; the NON-CONSUMING `investigate`
@@ -192,9 +194,19 @@ still appears where it's plain English, e.g. "triage the queue".)
   leaves the worklist. Hard-close still auto-cleans a `blocked` card once the
   target is genuinely merged/closed. Guarded by the YAML-inspection in
   `tests/test_nl_decisions_search.py` (`test_error_terminal_state_labels_as_blocked`)
-  and the soft/hard-close cases in `tests/test_reconcile.py`. The FLEET_TOKEN
-  merge-permission gap that can *trigger* a 403 is a separate config concern;
-  this coupling only makes that failure loud.
+  and the soft/hard-close cases in `tests/test_reconcile.py`.
+- **Workflow-touching PRs are manual UI merges by design (Option B; cards
+  #442/#447).** `FLEET_TOKEN` intentionally has no Workflows write. Before any
+  card-driven `do_merge` API call, `apply_decision._workflow_merge_block`
+  inspects the PR's net file list **and** each commit in its history for
+  `.github/workflows/**` paths (`wheelhouse_core._workflow_merge_gated_files` -
+  narrower than `_risky_ci_files`; composite `action.yml` is Contents-gated and
+  not blocked here). On a hit, merge is skipped and the card lands terminal
+  `blocked` with owner-facing manual-UI-merge guidance (includes the PR URL).
+  Detection errors and truncated lists fail closed the same way. The check is
+  re-run on every `/merge` so a later rebase that drops workflow touches can
+  proceed. Auto-merge V1 exclusions, the pwn-request HOLD, and token scopes
+  are unchanged. Covered by `tests/test_decision.py` workflow-merge-gate cases.
 - Decision cards are machine-created.
   The target author is shown as plain text (`by <login>`), never as a GitHub
   `@mention`.
@@ -1068,7 +1080,7 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the pre-merge workflow-touch gate (net-diff + history `.github/workflows/**` -> terminal `blocked` with manual UI-merge guidance; fail-closed on incomplete reads; retry-after-rebase merges; action.yml not Workflows-gated), the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, and stale-card self-healing, no network.

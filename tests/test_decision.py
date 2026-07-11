@@ -906,18 +906,66 @@ def fake_gh_rest(
     calls=None,
     review_submitted_at="2026-01-01T00:00:00Z",
     review_get_error=None,
+    pr_files=None,
+    pr_commits=None,
+    commit_files=None,
+    files_error=None,
+    commits_error=None,
+    commit_error=None,
 ):
     """A no-network stand-in for core.gh_rest covering the calls do_merge and
-    _thank_contributor make: GET the PR, PUT the merge, POST the comment."""
+    _thank_contributor make: GET the PR, list files/commits for the workflow
+    merge gate, PUT the merge, POST the comment.
+
+    pr_files: list of filename strings for the PR net diff (default empty).
+    pr_commits: list of commit SHA strings (default empty).
+    commit_files: dict sha -> list of filenames (default empty per commit).
+    """
     calls = calls if calls is not None else []
+    pr_files = list(pr_files or [])
+    pr_commits = list(pr_commits or [])
+    commit_files = dict(commit_files or {})
+
+    def _slurp_pages(items):
+        # gh --paginate --slurp yields an array of per-page arrays.
+        return [items] if items else [[]]
 
     def fake(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
-        calls.append({"path": path, "method": method, "fields": fields})
+        calls.append(
+            {
+                "path": path,
+                "method": method,
+                "fields": fields,
+                "paginate": paginate,
+                "slurp": slurp,
+            }
+        )
         if method in (None, "GET"):
             if "/reviews/" in path:
                 if review_get_error:
                     raise RuntimeError(review_get_error)
                 return {"id": 9001, "submitted_at": review_submitted_at}
+            if "/pulls/" in path and "/files" in path:
+                if files_error:
+                    raise RuntimeError(files_error)
+                rows = [{"filename": name} for name in pr_files]
+                return _slurp_pages(rows) if slurp else rows
+            if "/pulls/" in path and "/commits" in path:
+                if commits_error:
+                    raise RuntimeError(commits_error)
+                rows = [{"sha": sha} for sha in pr_commits]
+                return _slurp_pages(rows) if slurp else rows
+            # Single-commit detail: /repos/.../commits/<sha> (not a PR commits list).
+            if "/commits/" in path and "/pulls/" not in path:
+                if commit_error:
+                    raise RuntimeError(commit_error)
+                sha = path.rstrip("/").rsplit("/", 1)[-1]
+                names = commit_files.get(sha, commit_files.get(sha[:8], []))
+                return {
+                    "sha": sha,
+                    "files": [{"filename": name} for name in names],
+                    "stats": {"total": len(names)},
+                }
             return pr
         if method == "PUT":
             if merge_error:
@@ -962,11 +1010,25 @@ def cleanup_cfg(repo="target-repo", repo_cfg=None, enabled=True, targets=("pr",)
     )
 
 
-def open_pr(login="contributor", head_sha="abc123", user_type=None):
+def open_pr(
+    login="contributor",
+    head_sha="abc123",
+    user_type=None,
+    changed_files=None,
+    commits=None,
+    html_url=None,
+):
     user = {"login": login}
     if user_type is not None:
         user["type"] = user_type
-    return {"merged": False, "state": "open", "head": {"sha": head_sha}, "user": user}
+    pr = {"merged": False, "state": "open", "head": {"sha": head_sha}, "user": user}
+    if changed_files is not None:
+        pr["changed_files"] = changed_files
+    if commits is not None:
+        pr["commits"] = commits
+    if html_url is not None:
+        pr["html_url"] = html_url
+    return pr
 
 
 def posts(calls):
@@ -1004,6 +1066,285 @@ def test_thank_on_merge_posts_after_successful_merge():
     check(
         "merge: API precondition binds the expected head SHA",
         len(m) == 1 and m[0]["fields"].get("sha") == "abc123",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Option B: pre-merge workflow-touch gate (no Workflows write on FLEET_TOKEN)
+# --------------------------------------------------------------------------- #
+def test_workflow_merge_gate_blocks_net_diff_workflow_touch():
+    pr = open_pr(
+        changed_files=2,
+        commits=1,
+        html_url="https://github.com/owner-login/target-repo/pull/5",
+    )
+    fake, calls = fake_gh_rest(
+        pr,
+        pr_files=["README.md", ".github/workflows/ci.yml"],
+        pr_commits=["abc123"],
+        commit_files={"abc123": ["README.md", ".github/workflows/ci.yml"]},
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: net-diff workflow touch is terminal blocked",
+        terminal == "blocked",
+    )
+    check(
+        "wf-gate: net-diff message names workflow files and manual UI merge",
+        "workflow" in message.lower()
+        and "by hand" in message.lower()
+        and "https://github.com/owner-login/target-repo/pull/5" in message
+        and "`.github/workflows/ci.yml`" in message,
+    )
+    check(
+        "wf-gate: net-diff never attempts the merge API",
+        merge_puts(calls) == [],
+    )
+    check(
+        "wf-gate: net-diff posts no thank-you (merge did not happen)",
+        posts(calls) == [],
+    )
+
+
+def test_workflow_merge_gate_blocks_history_only_workflow_touch():
+    # Clean net three-dot diff, but a history commit touches a workflow file
+    # (the firstmate#134 shape).
+    pr = open_pr(
+        changed_files=2,
+        commits=2,
+        html_url="https://github.com/owner-login/target-repo/pull/9",
+    )
+    fake, calls = fake_gh_rest(
+        pr,
+        pr_files=["README.md", "src/main.py"],
+        pr_commits=["deadbeef01", "cafebabe02"],
+        commit_files={
+            "deadbeef01": [".github/workflows/ci.yml"],
+            "cafebabe02": ["README.md", "src/main.py"],
+        },
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 9, "abc123")
+    check(
+        "wf-gate: history-only workflow touch is terminal blocked",
+        terminal == "blocked",
+    )
+    check(
+        "wf-gate: history message cites the workflow-touching commit",
+        "deadbeef" in message
+        and "workflow" in message.lower()
+        and "by hand" in message.lower()
+        and "https://github.com/owner-login/target-repo/pull/9" in message,
+    )
+    check(
+        "wf-gate: history-only never attempts the merge API",
+        merge_puts(calls) == [],
+    )
+
+
+def test_workflow_merge_gate_clean_pr_proceeds_to_merge():
+    pr = open_pr(changed_files=1, commits=1)
+    fake, calls = fake_gh_rest(
+        pr,
+        pr_files=["src/ok.py"],
+        pr_commits=["abc123"],
+        commit_files={"abc123": ["src/ok.py"]},
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: clean PR still merges",
+        terminal == "resolved" and "Merged" in message,
+    )
+    check("wf-gate: clean PR still hits the merge API", len(merge_puts(calls)) == 1)
+    # action.yml is Contents-gated, not Workflows-gated - must not block merge.
+    pr2 = open_pr(changed_files=1, commits=1)
+    fake2, calls2 = fake_gh_rest(
+        pr2,
+        pr_files=[".github/actions/setup/action.yml"],
+        pr_commits=["abc123"],
+        commit_files={"abc123": [".github/actions/setup/action.yml"]},
+    )
+    with patch_core(
+        gh_rest=fake2,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message2, terminal2 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: action.yml alone is not Workflows-gated for merge",
+        terminal2 == "resolved" and len(merge_puts(calls2)) == 1,
+    )
+
+
+def test_workflow_merge_gate_detection_read_failure_blocks():
+    pr = open_pr(changed_files=1, commits=1)
+    fake, calls = fake_gh_rest(
+        pr,
+        files_error="gh api .../files failed: HTTP 502",
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: files-read failure is terminal blocked (fail closed)",
+        terminal == "blocked" and "could not verify" in message.lower(),
+    )
+    check(
+        "wf-gate: files-read failure never attempts merge",
+        merge_puts(calls) == [],
+    )
+
+    pr2 = open_pr(changed_files=0, commits=1)
+    fake2, calls2 = fake_gh_rest(
+        pr2,
+        pr_files=[],
+        commits_error="gh api .../commits failed: HTTP 500",
+    )
+    with patch_core(
+        gh_rest=fake2,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message2, terminal2 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: commits-read failure is terminal blocked",
+        terminal2 == "blocked" and "could not verify" in message2.lower(),
+    )
+    check(
+        "wf-gate: commits-read failure never attempts merge",
+        merge_puts(calls2) == [],
+    )
+
+    pr3 = open_pr(changed_files=1, commits=1)
+    fake3, calls3 = fake_gh_rest(
+        pr3,
+        pr_files=["src/a.py"],
+        pr_commits=["abc123"],
+        commit_error="gh api .../commits/abc123 failed: HTTP 404",
+    )
+    with patch_core(
+        gh_rest=fake3,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message3, terminal3 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: per-commit read failure is terminal blocked",
+        terminal3 == "blocked" and "could not verify" in message3.lower(),
+    )
+    check(
+        "wf-gate: per-commit read failure never attempts merge",
+        merge_puts(calls3) == [],
+    )
+
+    # Incomplete net-diff list relative to changed_files also fails closed.
+    pr4 = open_pr(changed_files=5, commits=0)
+    fake4, calls4 = fake_gh_rest(pr4, pr_files=["a.py", "b.py"])
+    with patch_core(
+        gh_rest=fake4,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message4, terminal4 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: incomplete file list is terminal blocked",
+        terminal4 == "blocked" and "incomplete" in message4.lower(),
+    )
+    check(
+        "wf-gate: incomplete file list never attempts merge",
+        merge_puts(calls4) == [],
+    )
+
+
+def test_workflow_merge_gate_retry_after_rebase_merges():
+    # First attempt: history still carries a workflow-touching commit -> blocked.
+    pr_dirty = open_pr(changed_files=1, commits=2, head_sha="oldhead01")
+    fake_dirty, calls_dirty = fake_gh_rest(
+        pr_dirty,
+        pr_files=["src/app.py"],
+        pr_commits=["wftouch01", "oldhead01"],
+        commit_files={
+            "wftouch01": [".github/workflows/ci.yml"],
+            "oldhead01": ["src/app.py"],
+        },
+    )
+    with patch_core(
+        gh_rest=fake_dirty,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        msg1, term1 = ad.do_merge("owner-login", "target-repo", 5, "oldhead01")
+    check("wf-gate: pre-rebase is blocked", term1 == "blocked" and "workflow" in msg1)
+    check("wf-gate: pre-rebase sends no merge", merge_puts(calls_dirty) == [])
+
+    # Later re-fire after rebase: clean history -> merge proceeds (retryable).
+    pr_clean = open_pr(changed_files=1, commits=1, head_sha="newhead99")
+    fake_clean, calls_clean = fake_gh_rest(
+        pr_clean,
+        pr_files=["src/app.py"],
+        pr_commits=["newhead99"],
+        commit_files={"newhead99": ["src/app.py"]},
+    )
+    with patch_core(
+        gh_rest=fake_clean,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        msg2, term2 = ad.do_merge("owner-login", "target-repo", 5, "newhead99")
+    check(
+        "wf-gate: post-rebase clean PR merges",
+        term2 == "resolved" and "Merged" in msg2,
+    )
+    check(
+        "wf-gate: post-rebase hits the merge API once",
+        len(merge_puts(calls_clean)) == 1,
+    )
+
+
+def test_workflow_merge_gated_files_helper_is_workflows_only():
+    hits = ad.core._workflow_merge_gated_files(
+        [
+            "README.md",
+            ".github/workflows/ci.yml",
+            ".github/workflows/nested/deploy.yaml",
+            ".github/actions/setup/action.yml",
+            "action.yml",
+            "pkg/action.yaml",
+        ]
+    )
+    check(
+        "wf-gate: helper only matches .github/workflows/**",
+        hits
+        == [
+            ".github/workflows/ci.yml",
+            ".github/workflows/nested/deploy.yaml",
+        ],
+    )
+    check(
+        "wf-gate: helper is empty on clean list",
+        ad.core._workflow_merge_gated_files(["src/a.py"]) == [],
+    )
+    check(
+        "wf-gate: helper tolerates None/empty",
+        ad.core._workflow_merge_gated_files(None) == []
+        and ad.core._workflow_merge_gated_files([]) == [],
     )
 
 
@@ -1949,6 +2290,12 @@ def main():
     test_request_changes_route_decision()
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()
+    test_workflow_merge_gate_blocks_net_diff_workflow_touch()
+    test_workflow_merge_gate_blocks_history_only_workflow_touch()
+    test_workflow_merge_gate_clean_pr_proceeds_to_merge()
+    test_workflow_merge_gate_detection_read_failure_blocks()
+    test_workflow_merge_gate_retry_after_rebase_merges()
+    test_workflow_merge_gated_files_helper_is_workflows_only()
     test_auto_merge_receives_sha_from_successful_merge_response()
     test_auto_merge_rejects_a_changed_expected_base()
     test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge()

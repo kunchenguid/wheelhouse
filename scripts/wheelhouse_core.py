@@ -3376,6 +3376,32 @@ def _risky_ci_files(files):
     return risky
 
 
+# GitHub's "List commits on a pull request" REST endpoint returns at most 250
+# commits. Card-driven merge must fail closed rather than optimistically merge
+# when a larger history cannot be fully inspected for workflow touches.
+PR_COMMITS_API_CAP = 250
+
+
+def _workflow_merge_gated_files(files):
+    """Of `files`, the ones that require the fine-grained PAT *Workflows* write
+    permission to merge via the API.
+
+    Proven: without Workflows write, GitHub returns 403 on
+    `PUT .../pulls/{n}/merge` when the PR carries a change under
+    `.github/workflows/` - either in the net three-dot diff or in a commit in
+    the PR's history (even when the net diff is clean). Composite `action.yml`
+    and `.github/actions/` paths are Contents-gated, not Workflows-gated, so
+    they stay out of this set; `_risky_ci_files` still covers them for fork-CI
+    approval safety. Reuse this helper from the card-driven merge path only.
+    """
+    gated = []
+    for f in files or []:
+        path = str(f or "")
+        if path.startswith(".github/workflows/"):
+            gated.append(path)
+    return gated
+
+
 # Auto-merge unconditional file exclusions. A merge-ready PR touching ANY of
 # these holds for a human (no LLM involved) - a strict SUPERSET of the
 # pwn-request `_risky_ci_files` set, extended into every category the auto-merge
