@@ -186,9 +186,11 @@ That is the only secret the deterministic machine needs.
 
 Skip this for the deterministic machine.
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
+Auto triage and deep review keep their action prompts independent of target size by writing fetched target content to runner files for Claude to read; PR diffs are bounded to 1,500,000 bytes on disk instead of being embedded in the action input.
 
 - **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and a Recommended next step into the card.
   The workflow asks for structured `recommended_action` and `recommended_reason` fields; trusted code normalizes them and only adds *Accept recommendation* when the action is safe for that card kind and any required reason text is present.
+  It also requires source evidence and checks at least one quoted anchor against the fetched target text before publishing the advisory result.
   If a captured field is one of the known claude-code-action harness polling/status lines, trusted rendering preserves it and labels it `[automated status]`.
   It is cached by PR head SHA, so an unchanged hourly scan does not re-run it.
   Newly created eligible cards are rendered as `pending-triage` placeholders and queued for that first triage attempt in the same scan or ingest run that creates them.
@@ -568,6 +570,7 @@ tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-a
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, activity-stamp interaction, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
+tests/test_triage_prompt_size.py offline regression test for bounded pass-by-reference triage and deep-review prompts
 tests/test_auto_merge_v1.py    offline unit test for scan-time auto-merge gates, claims, live rechecks, audit records, and ledger recovery
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting, including ref qualification and automated-status labeling
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse

@@ -528,6 +528,7 @@ def test_render_version_refresh_preserves_triage_section():
         triage={
             "summary": "Still useful context.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - still safe.",
         },
     )
@@ -597,6 +598,7 @@ def test_render_version_refresh_labels_preserved_triage_status_lines():
         triage={
             "summary": "Waited for background terminal 60s.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - still safe.",
         },
     )
@@ -680,6 +682,7 @@ def test_render_version_refresh_qualifies_stale_triage_refs():
         triage={
             "summary": "Landed in #127 already.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - fixed by #127.",
         },
     )
@@ -764,6 +767,7 @@ def test_render_version_current_and_qualified_triage_is_noop():
         triage={
             "summary": "Landed in kunchenguid/lavish-axi#127 already.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - fixed by kunchenguid/lavish-axi#127.",
         },
     )
@@ -826,6 +830,7 @@ def test_preserve_triage_leaves_already_qualified_urls_and_non_refs_untouched():
         triage={
             "summary": mixed,
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - still safe.",
         },
     )
@@ -861,6 +866,7 @@ def test_preserve_triage_uses_state_repo_not_item_repo():
         triage={
             "summary": "See #127 for details.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - still safe.",
         },
     )
@@ -1098,6 +1104,7 @@ def test_refresh_preserves_same_head_triage_cache_and_section():
         triage={
             "summary": "Keeps useful context.",
             "product_implications": "No product risk.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - still safe.",
         },
     )
@@ -1153,6 +1160,7 @@ def test_refresh_drops_triage_when_head_changes():
         triage={
             "summary": "Old head context.",
             "product_implications": "No longer current.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - old head.",
         },
     )
@@ -1209,6 +1217,7 @@ def test_refresh_drops_triage_when_kind_changes():
         triage={
             "summary": "PR review context.",
             "product_implications": "Only valid for PR review.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - old kind.",
         },
     )
