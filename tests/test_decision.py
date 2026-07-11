@@ -1383,6 +1383,53 @@ def test_workflow_merge_gate_detection_read_failure_blocks():
         merge_puts(calls4) == [],
     )
 
+    pr5 = open_pr(changed_files=2, commits=0)
+    fake5, calls5 = fake_gh_rest(
+        pr5,
+        pr_files=[
+            {
+                "filename": "ci.yml",
+                "previous_filename": ".github/workflows/ci.yml",
+            }
+        ],
+    )
+    with patch_core(
+        gh_rest=fake5,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message5, terminal5 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: renamed file paths do not inflate completeness",
+        terminal5 == "retryable" and "incomplete (1 of 2)" in message5,
+    )
+    check(
+        "wf-gate: incomplete renamed file list never attempts merge",
+        merge_puts(calls5) == [],
+    )
+
+    pr6 = open_pr(changed_files=0, commits=1)
+    fake6, calls6 = fake_gh_rest(
+        pr6,
+        pr_files=[],
+        pr_commits=["abc123"],
+        commit_files={"abc123": ["src/%s.py" % n for n in range(3000)]},
+    )
+    with patch_core(
+        gh_rest=fake6,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message6, terminal6 = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: commit file cap is retryable",
+        terminal6 == "retryable" and "API cap (3000)" in message6,
+    )
+    check(
+        "wf-gate: commit file cap never attempts merge",
+        merge_puts(calls6) == [],
+    )
+
 
 def test_workflow_merge_gate_retry_after_rebase_merges():
     # First attempt: history still carries a workflow-touching commit -> retryable.
@@ -1675,7 +1722,7 @@ def test_thank_on_merge_skips_non_success_outcomes():
     fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
     with patch_core(gh_rest=fake, **common):
         _, terminal = ad.do_merge("owner-login", "target-repo", 5, "oldsha")
-    check("thank: head-moved is blocked, not resolved", terminal == "blocked")
+    check("thank: head-moved is retryable, not resolved", terminal == "retryable")
     check("thank: no comment on head-moved", posts(calls) == [])
 
     fake, calls = fake_gh_rest(open_pr(), merge_error="422: merge conflict")
@@ -2056,7 +2103,7 @@ def test_accept_decline_execute_comments_then_closes_issue():
     )
 
 
-def test_accept_merge_execute_reuses_stale_head_guard():
+def test_accept_merge_execute_keeps_stale_head_retryable():
     parsed = run_parse(
         _tick_accept(
             accept_card(
@@ -2090,8 +2137,10 @@ def test_accept_merge_execute_reuses_stale_head_guard():
             }
         )
     check(
-        "accept execute(pr merge): stale head blocks the merge",
-        out["terminal_state"] == "blocked" and "head moved" in out["result_message"],
+        "accept execute(pr merge): stale head keeps the card actionable",
+        out["terminal_state"] == "retryable"
+        and out["success"] == "false"
+        and "head moved" in out["result_message"],
     )
     check(
         "accept execute(pr merge): no merge PUT when stale",
@@ -2460,7 +2509,7 @@ def main():
     test_cmd_execute_request_changes_requires_text()
     test_cmd_execute_request_changes_keeps_stale_head_refreshable()
     test_accept_decline_execute_comments_then_closes_issue()
-    test_accept_merge_execute_reuses_stale_head_guard()
+    test_accept_merge_execute_keeps_stale_head_retryable()
     test_accept_request_changes_execute_posts_review()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()

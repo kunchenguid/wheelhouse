@@ -552,7 +552,7 @@ def _stale_pr_head_result(repo, number, expected, current, action):
         return (
             "HOLD: %s#%s head moved since this card (was %s, now %s). Re-scan before %s."
             % (repo, number, expected[:8], current[:8], action),
-            "blocked",
+            "retryable",
         )
     return None
 
@@ -606,8 +606,8 @@ def _read_pr_file_paths(slug, number, expected_count=None):
     if err:
         return None, err
     count = core._changed_file_count(expected_count)
-    if count is not None and len(paths) < count:
-        return None, "PR file list incomplete (%s of %s)" % (len(paths), count)
+    if count is not None and len(rows) < count:
+        return None, "PR file list incomplete (%s of %s)" % (len(rows), count)
     return paths, None
 
 
@@ -667,16 +667,24 @@ def _read_commit_file_paths(slug, sha):
     if not pages or not all(isinstance(page, dict) for page in pages):
         return None, "commit %s returned unexpected data" % sha[:8]
     paths = []
+    file_rows = 0
     for page in pages:
         if "files" not in page:
             return None, "commit %s file list missing" % sha[:8]
         files = page.get("files")
         if not isinstance(files, list):
             return None, "commit %s file list unexpected" % sha[:8]
+        file_rows += len(files)
         page_paths, err = _changed_file_paths(files, "commit %s" % sha[:8])
         if err:
             return None, err
         paths.extend(page_paths)
+    if file_rows >= core.COMMIT_FILES_API_CAP:
+        return (
+            None,
+            "commit %s file list may be truncated at API cap (%s)"
+            % (sha[:8], core.COMMIT_FILES_API_CAP),
+        )
     return paths, None
 
 

@@ -3380,6 +3380,7 @@ def _risky_ci_files(files):
 # commits. Card-driven merge must fail closed rather than optimistically merge
 # when a larger history cannot be fully inspected for workflow touches.
 PR_COMMITS_API_CAP = 250
+COMMIT_FILES_API_CAP = 3000
 
 
 def _workflow_merge_gated_files(files):
