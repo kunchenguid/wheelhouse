@@ -60,7 +60,8 @@ Security: the caller owner/maintainer-gates the whole job; only
 owner/maintainer-authored text ever reaches this script (and the LLM). Merge and
 request-changes re-check the PR head SHA against the card's state block and
 refuse if the PR moved. Card-driven merge also pre-detects `.github/workflows/**`
-touches (net diff or PR commit history) and returns terminal `blocked` with
+touches (net diff or PR commit history, including either side of a rename) and
+returns terminal `blocked` with
 manual UI-merge guidance instead of attempting a doomed API merge - FLEET_TOKEN
 intentionally has no Workflows write. request-changes cleanup arming is best-effort and
 fail-open: if the review posts but the target-side marker cannot be proven or
@@ -576,6 +577,12 @@ def _workflow_path_sample(paths):
 
 
 def _changed_file_paths(rows, source):
+    """Collect current paths plus `previous_filename` for renames.
+
+    The workflow-merge gate must treat a rename into or out of
+    `.github/workflows/` as a workflow touch, while completeness remains based
+    on file records rather than the two collected paths of a renamed file.
+    """
     paths = []
     for row in rows:
         if isinstance(row, str) and row.strip():
@@ -696,8 +703,9 @@ def _workflow_merge_block(owner, repo, number, pr):
     """If this PR must not be API-merged, return terminal `blocked`; else None.
 
     Detects `.github/workflows/**` in the PR's net three-dot file list OR in any
-    commit in the PR's history (history-only touches 403 the same way as net-diff
-    touches when the automation token lacks Workflows write). Terminal `blocked`
+    commit in the PR's history, including either name of a renamed file.
+    History-only touches 403 the same way as net-diff touches when the automation
+    token lacks Workflows write. Terminal `blocked`
     applies the durable open `blocked` label (not pure needs-decision), so the
     card is soft-heal-protected and ineligible for auto-merge claim; hard-close
     still auto-cleans once the target is genuinely merged/closed. Detection is

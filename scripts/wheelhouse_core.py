@@ -3390,7 +3390,9 @@ def _workflow_merge_gated_files(files):
     Proven: without Workflows write, GitHub returns 403 on
     `PUT .../pulls/{n}/merge` when the PR carries a change under
     `.github/workflows/` - either in the net three-dot diff or in a commit in
-    the PR's history (even when the net diff is clean). Composite `action.yml`
+    the PR's history (even when the net diff is clean). Callers also pass both
+    names of a rename, so a rename into or out of this directory is gated.
+    Composite `action.yml`
     and `.github/actions/` paths are Contents-gated, not Workflows-gated, so
     they stay out of this set; `_risky_ci_files` still covers them for fork-CI
     approval safety. Reuse this helper from the card-driven merge path only.

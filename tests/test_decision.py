@@ -31,6 +31,9 @@ Covers:
   * the optional READONLY_TOKEN search prompt: when enabled it tells the LLM how
     to use read-only gh for answer context, and when disabled the prompt
     stays in the legacy no-shell/no-search mode.
+  * the card-driven workflow-merge gate: net-diff and history-only workflow
+    touches, including either side of a rename, fail closed as terminal
+    `blocked` with manual UI-merge guidance and no merge API call.
 """
 
 import contextlib

@@ -277,6 +277,7 @@ You drive the queue three ways - whichever fits the decision:
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
     PRs that change `.github/workflows/**` (in the net diff **or** in any commit in the PR history) are never API-merged: the card stays open and `blocked` with guidance to review and merge by hand in the GitHub UI (or retry after a rebase drops the workflow touch).
+    A rename into or out of `.github/workflows/` also counts as a workflow touch.
     That is intentional - `FLEET_TOKEN` keeps no Workflows write permission.
   - `/approve-ci` - approve the fork-CI run (security-gated; CI/action-file changes are held, while non-default bases and `pull_request_target` posture add warnings).
   - `/close` - close the target PR/issue.
@@ -555,7 +556,7 @@ scripts/
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, reflect target activity, close consumed ones
-tests/test_decision.py         offline unit test for parse/route logic, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
+tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, and self-healing
