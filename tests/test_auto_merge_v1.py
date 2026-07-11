@@ -2233,7 +2233,9 @@ def test_do_merge_race_and_error_outcomes():
         and payload3["holds"]
         and not payload3["ambiguous_outcomes"],
     )
-    check("act: blocked workflow outcome emits a ::warning::", "auto-merge held" in err3)
+    check(
+        "act: blocked workflow outcome emits a ::warning::", "auto-merge held" in err3
+    )
 
 
 # --------------------------------------------------------------------------- #

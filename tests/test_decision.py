@@ -1601,7 +1601,9 @@ def test_workflow_merge_gate_rechecks_auto_merge_base_after_scan():
         "wf-gate: post-scan auto-merge base move is blocked",
         terminal == "blocked" and "base moved" in message,
     )
-    check("wf-gate: post-scan auto-merge base move never merges", merge_puts(calls) == [])
+    check(
+        "wf-gate: post-scan auto-merge base move never merges", merge_puts(calls) == []
+    )
 
 
 def test_workflow_merge_gate_reclassifies_merge_head_race():
@@ -1635,7 +1637,10 @@ def test_workflow_merge_gate_reclassifies_merge_head_race():
         and out["success"] == "false"
         and "head moved" in out["result_message"],
     )
-    check("wf-gate: merge-race tries the SHA-bound merge once", len(merge_puts(calls)) == 1)
+    check(
+        "wf-gate: merge-race tries the SHA-bound merge once",
+        len(merge_puts(calls)) == 1,
+    )
 
 
 def test_workflow_merge_gate_retry_after_rebase_merges():
