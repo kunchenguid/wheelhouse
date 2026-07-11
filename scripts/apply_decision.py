@@ -568,6 +568,27 @@ def _flatten_rest_pages(data):
     return core._flatten_paginated_comments(data)
 
 
+def _changed_file_paths(rows, source):
+    paths = []
+    for row in rows:
+        if isinstance(row, str) and row.strip():
+            paths.append(row.strip())
+            continue
+        if not isinstance(row, dict):
+            return None, "%s file entry unexpected" % source
+        filename = row.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            return None, "%s file entry missing filename" % source
+        paths.append(filename.strip())
+        if "previous_filename" not in row:
+            continue
+        previous = row["previous_filename"]
+        if not isinstance(previous, str) or not previous.strip():
+            return None, "%s file entry has invalid previous filename" % source
+        paths.append(previous.strip())
+    return paths, None
+
+
 def _read_pr_file_paths(slug, number, expected_count=None):
     """Return (paths, error_or_None). Fail closed when the list is incomplete."""
     try:
@@ -581,12 +602,9 @@ def _read_pr_file_paths(slug, number, expected_count=None):
     rows = _flatten_rest_pages(data)
     if not isinstance(rows, list):
         return None, "PR file list returned unexpected data"
-    paths = []
-    for row in rows:
-        if isinstance(row, dict) and row.get("filename"):
-            paths.append(str(row["filename"]))
-        elif isinstance(row, str) and row.strip():
-            paths.append(row.strip())
+    paths, err = _changed_file_paths(rows, "PR")
+    if err:
+        return None, err
     count = core._changed_file_count(expected_count)
     if count is not None and len(paths) < count:
         return None, "PR file list incomplete (%s of %s)" % (len(paths), count)
@@ -655,11 +673,10 @@ def _read_commit_file_paths(slug, sha):
         files = page.get("files")
         if not isinstance(files, list):
             return None, "commit %s file list unexpected" % sha[:8]
-        for row in files:
-            if isinstance(row, dict) and row.get("filename"):
-                paths.append(str(row["filename"]))
-            elif isinstance(row, str) and row.strip():
-                paths.append(row.strip())
+        page_paths, err = _changed_file_paths(files, "commit %s" % sha[:8])
+        if err:
+            return None, err
+        paths.extend(page_paths)
     return paths, None
 
 

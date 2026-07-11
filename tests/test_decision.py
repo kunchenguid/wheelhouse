@@ -917,9 +917,10 @@ def fake_gh_rest(
     _thank_contributor make: GET the PR, list files/commits for the workflow
     merge gate, PUT the merge, POST the comment.
 
-    pr_files: list of filename strings for the PR net diff (default empty).
+    pr_files: list of filename strings or file records for the PR net diff
+    (default empty).
     pr_commits: list of commit SHA strings (default empty).
-    commit_files: dict sha -> filenames or pages of filenames (default empty).
+    commit_files: dict sha -> file entries or pages of file entries (default empty).
     """
     calls = calls if calls is not None else []
     pr_files = list(pr_files or [])
@@ -948,7 +949,10 @@ def fake_gh_rest(
             if "/pulls/" in path and "/files" in path:
                 if files_error:
                     raise RuntimeError(files_error)
-                rows = [{"filename": name} for name in pr_files]
+                rows = [
+                    name if isinstance(name, dict) else {"filename": name}
+                    for name in pr_files
+                ]
                 return _slurp_pages(rows) if slurp else rows
             if "/pulls/" in path and "/commits" in path:
                 if commits_error:
@@ -969,7 +973,10 @@ def fake_gh_rest(
                 payloads = [
                     {
                         "sha": sha,
-                        "files": [{"filename": name} for name in page],
+                        "files": [
+                            name if isinstance(name, dict) else {"filename": name}
+                            for name in page
+                        ],
                         "stats": {"total": total},
                     }
                     for page in pages
@@ -1156,6 +1163,64 @@ def test_workflow_merge_gate_blocks_history_only_workflow_touch():
     )
     check(
         "wf-gate: history-only never attempts the merge API",
+        merge_puts(calls) == [],
+    )
+
+
+def test_workflow_merge_gate_blocks_workflow_file_rename_out_of_net_diff():
+    pr = open_pr(changed_files=1, commits=0)
+    fake, calls = fake_gh_rest(
+        pr,
+        pr_files=[
+            {
+                "filename": "ci.yml",
+                "previous_filename": ".github/workflows/ci.yml",
+            }
+        ],
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: net workflow rename out of workflows is retryable",
+        terminal == "retryable" and "`.github/workflows/ci.yml`" in message,
+    )
+    check(
+        "wf-gate: net workflow rename never attempts the merge API",
+        merge_puts(calls) == [],
+    )
+
+
+def test_workflow_merge_gate_blocks_workflow_file_rename_out_of_history():
+    pr = open_pr(changed_files=1, commits=1)
+    fake, calls = fake_gh_rest(
+        pr,
+        pr_files=["ci.yml"],
+        pr_commits=["abc123"],
+        commit_files={
+            "abc123": [
+                {
+                    "filename": "ci.yml",
+                    "previous_filename": ".github/workflows/ci.yml",
+                }
+            ]
+        },
+    )
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check(
+        "wf-gate: history workflow rename out of workflows is retryable",
+        terminal == "retryable" and "`.github/workflows/ci.yml`" in message,
+    )
+    check(
+        "wf-gate: history workflow rename never attempts the merge API",
         merge_puts(calls) == [],
     )
 
@@ -2366,6 +2431,8 @@ def main():
     test_thank_on_merge_posts_after_successful_merge()
     test_workflow_merge_gate_blocks_net_diff_workflow_touch()
     test_workflow_merge_gate_blocks_history_only_workflow_touch()
+    test_workflow_merge_gate_blocks_workflow_file_rename_out_of_net_diff()
+    test_workflow_merge_gate_blocks_workflow_file_rename_out_of_history()
     test_workflow_merge_gate_pages_commit_files()
     test_workflow_merge_gate_clean_pr_proceeds_to_merge()
     test_workflow_merge_gate_detection_read_failure_blocks()
