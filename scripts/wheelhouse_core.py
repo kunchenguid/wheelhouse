@@ -3516,18 +3516,15 @@ def _auto_merge_exclusions(files):
         # 3) known exact-name / suffix categories.
         matched = False
         for category, names in _AM_EXCLUDE_SUFFIXES.items():
-            if base in names or any(
-                low == n or low.endswith("/" + n) for n in names
-            ):
+            if base in names or any(low == n or low.endswith("/" + n) for n in names):
                 hits.add("%s:%s" % (category, f))
                 matched = True
                 break
         if matched:
             continue
-        if (
-            _AM_DEPENDENCY_LOCKFILE_RE.search(base)
-            or _AM_DEPENDENCY_MANIFEST_RE.fullmatch(base)
-        ):
+        if _AM_DEPENDENCY_LOCKFILE_RE.search(
+            base
+        ) or _AM_DEPENDENCY_MANIFEST_RE.fullmatch(base):
             hits.add("dependency:%s" % f)
             continue
         # 4) dependency directories and other supply-chain / build entrypoints.
@@ -3540,21 +3537,25 @@ def _auto_merge_exclusions(files):
         if base.endswith(".mk") or (base.startswith("setup") and base.endswith(".sh")):
             hits.add("install-bootstrap:%s" % f)
             continue
-        if (
-            _AM_EXCLUDE_PATH_COMPONENTS["migration"].search(low)
-            or any(n in low for n in _AM_EXCLUDE_PATH_SUBSTRINGS["migration"])
+        if _AM_EXCLUDE_PATH_COMPONENTS["migration"].search(low) or any(
+            n in low for n in _AM_EXCLUDE_PATH_SUBSTRINGS["migration"]
         ):
             hits.add("migration:%s" % f)
             continue
         # 5) persistence / schema: raw SQL and schema definition files.
-        if low.endswith(".sql") or low.endswith(".prisma") or base.startswith("schema."):
+        if (
+            low.endswith(".sql")
+            or low.endswith(".prisma")
+            or base.startswith("schema.")
+        ):
             hits.add("persistence:%s" % f)
             continue
         # 6) public-default surfaces: config-schema / defaults files that set
         #    externally observable defaults. Conservative on purpose.
         if (
             base.endswith((".config.js", ".config.ts", ".config.mjs", ".config.cjs"))
-            or base in ("defaults.yml", "defaults.yaml", "defaults.json", "defaults.toml")
+            or base
+            in ("defaults.yml", "defaults.yaml", "defaults.json", "defaults.toml")
             or low.startswith("config/")
             or "/config/" in low
         ):

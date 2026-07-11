@@ -111,7 +111,8 @@ _LEDGER_RE = re.compile(
 )
 _GIT_OBJECT_ID_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
-_LIVE_STATUS_GQL = """
+_LIVE_STATUS_GQL = (
+    """
 query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
@@ -127,7 +128,9 @@ query($owner:String!, $name:String!, $number:Int!) {
     }
   }
 }
-""" % core.STATUS_CONTEXTS_PAGE_SIZE
+"""
+    % core.STATUS_CONTEXTS_PAGE_SIZE
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -230,9 +233,7 @@ def auto_merge_triage_available():
 # live target reads (FLEET_TOKEN) - thin wrappers so tests can stub them
 # --------------------------------------------------------------------------- #
 def _gh_api(path):
-    return subprocess.run(
-        ["gh", "api", path], capture_output=True, text=True
-    )
+    return subprocess.run(["gh", "api", path], capture_output=True, text=True)
 
 
 def vision_on_default_branch(slug):
@@ -343,7 +344,11 @@ def live_check_status(owner, repo, number, head_sha, repo_cfg):
             return (False, "head moved while re-reading check status")
         commits = pr.get("commits") or {}
         commit_nodes = commits.get("nodes") if isinstance(commits, dict) else None
-        commit = commit_nodes[0].get("commit") if isinstance(commit_nodes, list) and commit_nodes else None
+        commit = (
+            commit_nodes[0].get("commit")
+            if isinstance(commit_nodes, list) and commit_nodes
+            else None
+        )
         rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
         contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
         page_info = contexts.get("pageInfo") if isinstance(contexts, dict) else None
@@ -386,7 +391,9 @@ def mergeable_clean(pr):
 def immutable_compare_files(slug, base_sha, head_sha, expected_count):
     base_sha = str(base_sha or "").strip()
     head_sha = str(head_sha or "").strip()
-    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha) or not _GIT_OBJECT_ID_RE.fullmatch(head_sha):
+    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha) or not _GIT_OBJECT_ID_RE.fullmatch(
+        head_sha
+    ):
         return ([], False, False)
     try:
         comparison = core.gh_rest(
@@ -394,7 +401,9 @@ def immutable_compare_files(slug, base_sha, head_sha, expected_count):
         )
     except RuntimeError:
         return ([], False, False)
-    if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
+    if not isinstance(comparison, dict) or not isinstance(
+        comparison.get("files"), list
+    ):
         return ([], False, False)
     files = []
     entry_count = 0
@@ -478,10 +487,9 @@ def _trusted_card(card, state, labels):
 
 def _card_is_claimed(labels):
     names = set(labels or ())
-    return (
-        {"needs-decision", "processing", AUTO_MERGE_CLAIM_LABEL}.issubset(names)
-        and names.isdisjoint({"resolved", "blocked"})
-    )
+    return {"needs-decision", "processing", AUTO_MERGE_CLAIM_LABEL}.issubset(
+        names
+    ) and names.isdisjoint({"resolved", "blocked"})
 
 
 def _card_has_pending_decision(labels):
@@ -489,9 +497,7 @@ def _card_has_pending_decision(labels):
 
 
 def _selected_card_option(body):
-    return bool(
-        re.search(r"(?m)^\s*[-*]\s+\[[xX]\].*<!--\s*opt:[^>]+-->", body or "")
-    )
+    return bool(re.search(r"(?m)^\s*[-*]\s+\[[xX]\].*<!--\s*opt:[^>]+-->", body or ""))
 
 
 _NATURAL_HOLD_OR_CLOSE_RE = re.compile(
@@ -723,8 +729,9 @@ def evaluate_candidate(
     if not author:
         return hold("G3 PR author unknown")
     if not _pr_author_is_provably_human(pr) or author.casefold() in maintainer_logins:
-        return hold("G3 author %s is a bot/maintainer, not a returning contributor"
-                    % author)
+        return hold(
+            "G3 author %s is a bot/maintainer, not a returning contributor" % author
+        )
     if not has_prior_merged_pr(slug, author):
         return hold("G3 author %s has no prior merged PR in %s" % (author, repo))
     result["audit"]["contributor"] = author
@@ -806,7 +813,9 @@ def _audit_state_record(state, field, card_issue=None, require_merge_commit=Fals
     record = state.get(field)
     if not isinstance(record, dict):
         return None
-    if card_issue is not None and str(record.get("card_issue") or "") != str(card_issue):
+    if card_issue is not None and str(record.get("card_issue") or "") != str(
+        card_issue
+    ):
         return None
     if str(record.get("repo") or "") != str(state.get("repo") or ""):
         return None
@@ -854,7 +863,10 @@ def stage_audit_intent(expected_card, record, card_token):
         (str(record.get("repo") or ""), str(record.get("number") or ""))
     )
     matches, reason = _current_claim_matches(
-        expected_card, card, str(record.get("repo") or ""), str(record.get("number") or "")
+        expected_card,
+        card,
+        str(record.get("repo") or ""),
+        str(record.get("number") or ""),
     )
     if not matches or not current:
         raise RuntimeError("could not stage audit intent: %s" % reason)
@@ -960,10 +972,9 @@ def claim_cards(scan, cards):
     claimed = []
     recover_stale_card_claims(cards)
     for (repo, number), expected in index.items():
-        if (
-            not _card_is_claimed(expected.get("labels") or set())
-            or not _audit_intent_record(expected.get("state"), expected.get("issue"))
-        ):
+        if not _card_is_claimed(
+            expected.get("labels") or set()
+        ) or not _audit_intent_record(expected.get("state"), expected.get("issue")):
             continue
         try:
             current = render_card.get_card(expected["issue"])
@@ -1072,9 +1083,7 @@ def validate_claimed_cards(cards):
         issue = expected.get("issue")
         try:
             current = render_card.get_card(issue)
-            current_matches, _ = _current_claim_matches(
-                expected, current, repo, number
-            )
+            current_matches, _ = _current_claim_matches(expected, current, repo, number)
             if current_matches:
                 validated.append(current)
                 continue
@@ -1126,7 +1135,9 @@ def final_auto_merge_guard(expected_card, repo, number, card_token):
     def guard(pr):
         if core.NO_AUTO_MERGE_LABEL in _pr_label_names(pr):
             return (False, "escape hatch label appeared before merging")
-        current_card = _read_card_with_card_token(expected_card.get("issue"), card_token)
+        current_card = _read_card_with_card_token(
+            expected_card.get("issue"), card_token
+        )
         if current_card is None and not str(card_token or "").strip():
             return (False, "default card token is unavailable")
         card_ok, card_reason = _current_claim_matches(
@@ -1410,10 +1421,9 @@ def act_on_scan(scan, cards):
             _warn(repo, number, ok_reason)
             holds.append({"repo": repo, "number": number, "hold_reason": ok_reason})
             continue
-        indeterminate = (
-            ((scan.get("repos") or {}).get(repo) or {}).get("indeterminate_pr_numbers")
-            or []
-        )
+        indeterminate = ((scan.get("repos") or {}).get(repo) or {}).get(
+            "indeterminate_pr_numbers"
+        ) or []
         if item["number"] in indeterminate:
             reason = "mergeability indeterminate this scan (frozen)"
             _warn(repo, number, reason)
@@ -1473,7 +1483,11 @@ def act_on_scan(scan, cards):
                 repo_cfg,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
-            outcome, detail, merge_commit = ("error", "act raised: %s" % str(e)[:160], "")
+            outcome, detail, merge_commit = (
+                "error",
+                "act raised: %s" % str(e)[:160],
+                "",
+            )
         if outcome == "post-merge-error":
             confirmed = live_pr("%s/%s" % (owner, repo), number)
             confirmed_commit = str((confirmed or {}).get("merge_commit_sha") or "")
@@ -1516,8 +1530,11 @@ def act_on_scan(scan, cards):
         else:
             _warn(repo, number, "%s (%s)" % (detail, outcome))
             holds.append(
-                {"repo": repo, "number": number, "hold_reason": "%s: %s"
-                 % (outcome, detail)}
+                {
+                    "repo": repo,
+                    "number": number,
+                    "hold_reason": "%s: %s" % (outcome, detail),
+                }
             )
             if outcome == "post-merge-error":
                 post_merge_errors.append("%s#%s: %s" % (repo, number, detail))
@@ -1556,8 +1573,7 @@ def cmd_act(scan_path, cards_path):
         _write_json_atomically(out_path, payload)
     except Exception as e:
         print(
-            "::error::wheelhouse auto-merge could not write results: %s"
-            % str(e)[:160],
+            "::error::wheelhouse auto-merge could not write results: %s" % str(e)[:160],
             file=sys.stderr,
         )
         raise RuntimeError("could not write auto-merge results") from e
@@ -1570,7 +1586,10 @@ def cmd_act(scan_path, cards_path):
     )
     if audit_errors:
         for error in audit_errors:
-            print("::error::wheelhouse auto-merge audit handoff failed: %s" % error, file=sys.stderr)
+            print(
+                "::error::wheelhouse auto-merge audit handoff failed: %s" % error,
+                file=sys.stderr,
+            )
         raise RuntimeError("could not record one or more completed auto-merges")
 
 
@@ -1651,8 +1670,7 @@ def _ledger_entry_identity(entry):
     if not isinstance(entry, dict):
         return None
     values = tuple(
-        str(entry.get(field) or "")
-        for field in ("repo", "number", "head_sha")
+        str(entry.get(field) or "") for field in ("repo", "number", "head_sha")
     )
     return values if all(values) else None
 
@@ -1662,8 +1680,7 @@ def render_ledger_body(entries, updated_at=""):
     the hidden machine-readable marker carrying every stored entry."""
     entries = entries if isinstance(entries, list) else []
     lines = [
-        "Automated ledger of Wheelhouse scan-time auto-merges - do not edit by "
-        "hand.",
+        "Automated ledger of Wheelhouse scan-time auto-merges - do not edit by hand.",
         "",
         "Each row is one PR merged automatically as a strict subset of the manual "
         "merge gate, with the contributor trust proof, head SHA, base VISION.md "
@@ -1827,8 +1844,10 @@ def audit_comment(record):
     if gates:
         lines.append("- Gates: %s" % json.dumps(gates, separators=(",", ":")))
     lines.append("")
-    lines.append("Wheelhouse never auto-reverts; revert the merge commit above "
-                 "if this merge was not wanted.")
+    lines.append(
+        "Wheelhouse never auto-reverts; revert the merge commit above "
+        "if this merge was not wanted."
+    )
     return "\n".join(lines)
 
 
@@ -1948,11 +1967,15 @@ def clear_closed_audit_intent(record):
         raise RuntimeError("closed-card audit recovery has no card issue")
     card = render_card.get_card(card_issue)
     if not card or render_card.issue_is_open(card):
-        raise RuntimeError("could not read closed card #%s for audit recovery" % card_issue)
+        raise RuntimeError(
+            "could not read closed card #%s for audit recovery" % card_issue
+        )
     state = core.parse_state_block(card.get("body") or "") or {}
     intent = _audit_intent_record(state, card_issue)
     if not intent or _ledger_entry_identity(intent) != _ledger_entry_identity(record):
-        raise RuntimeError("closed card #%s no longer has the expected audit intent" % card_issue)
+        raise RuntimeError(
+            "closed card #%s no longer has the expected audit intent" % card_issue
+        )
     new_state = dict(state)
     new_state.pop(AUDIT_INTENT_FIELD, None)
     render_card._edit_issue_body(
@@ -1964,7 +1987,9 @@ def clear_closed_audit_intent(record):
 def clear_audit_intent(card_issue):
     card = render_card.get_card(card_issue)
     if not card or not render_card.issue_is_open(card):
-        raise RuntimeError("could not read open card #%s to clear audit intent" % card_issue)
+        raise RuntimeError(
+            "could not read open card #%s to clear audit intent" % card_issue
+        )
     state = core.parse_state_block(card.get("body") or "")
     if not state:
         raise RuntimeError("card #%s has no state to clear audit intent" % card_issue)
@@ -2082,7 +2107,9 @@ def cmd_record(results_path, validated_claims_path=None):
             errors.append(error)
     if not staged and not releases:
         if errors:
-            raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[0]
+            raise RuntimeError("wheelhouse auto-merge audit record failed") from errors[
+                0
+            ]
         print("wheelhouse auto-merge record: no auto-merges to record")
         return
     ledger_written = not staged
@@ -2131,7 +2158,9 @@ def cmd_record(results_path, validated_claims_path=None):
 # --------------------------------------------------------------------------- #
 def _write_json_atomically(path, payload):
     directory = os.path.dirname(os.path.abspath(path))
-    fd, temp_path = tempfile.mkstemp(prefix=".automerge-", suffix=".json", dir=directory)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".automerge-", suffix=".json", dir=directory
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)

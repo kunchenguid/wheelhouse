@@ -1001,15 +1001,20 @@ def test_thank_on_merge_posts_after_successful_merge():
         p and "wheelhouse" not in (p[0]["fields"] or {}).get("body", "").lower(),
     )
     m = merge_puts(calls)
-    check("merge: API precondition binds the expected head SHA",
-          len(m) == 1 and m[0]["fields"].get("sha") == "abc123")
+    check(
+        "merge: API precondition binds the expected head SHA",
+        len(m) == 1 and m[0]["fields"].get("sha") == "abc123",
+    )
 
 
 def test_auto_merge_receives_sha_from_successful_merge_response():
     merge_sha = "d" * 40
     fake, _ = fake_gh_rest(open_pr(), merge_response={"sha": merge_sha})
-    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
-                    maintainers=lambda: {"owner-login"}):
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
         message, terminal, returned_sha = ad.do_merge(
             "owner-login", "target-repo", 5, "abc123", return_merge_commit=True
         )
@@ -1023,8 +1028,11 @@ def test_auto_merge_rejects_a_changed_expected_base():
     pr = open_pr()
     pr["base"] = {"sha": "new-base"}
     fake, calls = fake_gh_rest(pr)
-    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
-                    maintainers=lambda: {"owner-login"}):
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
         message, terminal = ad.do_merge(
             "owner-login",
             "target-repo",
@@ -1032,8 +1040,13 @@ def test_auto_merge_rejects_a_changed_expected_base():
             "abc123",
             expected_base_sha="reviewed-base",
         )
-    check("merge: changed expected base is blocked", terminal == "blocked" and "base moved" in message)
-    check("merge: changed expected base sends no merge request", merge_puts(calls) == [])
+    check(
+        "merge: changed expected base is blocked",
+        terminal == "blocked" and "base moved" in message,
+    )
+    check(
+        "merge: changed expected base sends no merge request", merge_puts(calls) == []
+    )
 
 
 def test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge():
@@ -1074,9 +1087,7 @@ def test_auto_merge_rechecks_final_mergeability_without_changing_manual_merge():
         load_config=lambda: thank_cfg(),
         maintainers=lambda: {"owner-login"},
     ):
-        _, manual_terminal = ad.do_merge(
-            "owner-login", "target-repo", 5, "abc123"
-        )
+        _, manual_terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
     check(
         "merge: manual path leaves the auto-merge CLEAN guard disabled",
         manual_terminal == "resolved",

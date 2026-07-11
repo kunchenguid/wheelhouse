@@ -345,9 +345,8 @@ def main():
             current = current_card(ex)
             if current is None:
                 continue
-            if (
-                current["state"].get("automerge_audit_pending")
-                or current["state"].get("automerge_audit_intent")
+            if current["state"].get("automerge_audit_pending") or current["state"].get(
+                "automerge_audit_intent"
             ):
                 continue
             card_number = current["number"]

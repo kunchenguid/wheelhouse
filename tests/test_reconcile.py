@@ -470,9 +470,7 @@ def test_automerge_audit_state_survives_stale_snapshot_hard_close():
     current = dict(snapshot)
     state = reconcile.core.parse_state_block(current["body"])
     state["automerge_audit_pending"] = {"repo": "wheelhouse", "number": 42}
-    current["body"] = reconcile.render_card._replace_state_block(
-        current["body"], state
-    )
+    current["body"] = reconcile.render_card._replace_state_block(current["body"], state)
     calls = run_reconcile(
         scan_payload(items=[], open_pr_numbers=[]),
         [snapshot],

@@ -65,9 +65,7 @@ ELIGIBLE_A = {
     "base_sha": "b1" * 20,
 }
 ELIGIBLE_B = dict(ELIGIBLE_A, behavior_class="B")
-ELIGIBLE_C = dict(
-    ELIGIBLE_A, behavior_class="C", optin_default_off=True
-)
+ELIGIBLE_C = dict(ELIGIBLE_A, behavior_class="C", optin_default_off=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -325,8 +323,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         os.environ.pop("WHEELHOUSE_CARD_TOKEN", None)
     scan = {
         "repos": {
-            it["repo"]: world.repos_scan.get(it["repo"], {"ok": True})
-            for it in items
+            it["repo"]: world.repos_scan.get(it["repo"], {"ok": True}) for it in items
         }
         if hasattr(world, "repos_scan")
         else {it["repo"]: {"ok": True} for it in items},
@@ -369,7 +366,9 @@ def default_world(head="h1" * 20, verdict=None, repo="fmt", number=5):
     w.merged_authors = {(slug, "alice"): True}
     w.files[(slug, str(number))] = (["src/a.py", "README.md"], True, True)
     w.set_pr(slug, number, make_pr(head=head))
-    cards = [make_card(101, repo, number, head, automerge_verdict=verdict or ELIGIBLE_A)]
+    cards = [
+        make_card(101, repo, number, head, automerge_verdict=verdict or ELIGIBLE_A)
+    ]
     items = [make_item(repo, number, head)]
     return w, items, cards
 
@@ -558,9 +557,7 @@ def test_verdict_normalization_and_persistence_fail_closed():
     )
     check(
         "verdict: normalize coerces + upper-cases class",
-        good
-        and good["behavior_class"] == "B"
-        and good["aligns_with_vision"] is True,
+        good and good["behavior_class"] == "B" and good["aligns_with_vision"] is True,
     )
 
 
@@ -591,10 +588,14 @@ def test_happy_path_class_A_merges():
     m = payload["merges"][0]
     check("act: merge record carries behavior class", m["behavior_class"] == "A")
     check("act: merge record carries contributor proof", bool(m["contributor_proof"]))
-    check("act: merge record carries head + vision + commit",
-          m["head_sha"] and m["vision_sha"] == "vsha" and m["merge_commit"])
-    check("act: do_merge receives the reviewed base SHA",
-          w.do_merge_calls[0][-1] == "b1" * 20)
+    check(
+        "act: merge record carries head + vision + commit",
+        m["head_sha"] and m["vision_sha"] == "vsha" and m["merge_commit"],
+    )
+    check(
+        "act: do_merge receives the reviewed base SHA",
+        w.do_merge_calls[0][-1] == "b1" * 20,
+    )
     check(
         "act: do_merge enables its final CLEAN guard",
         w.do_merge_clean_guards == [True],
@@ -610,8 +611,11 @@ def test_happy_path_classes_B_and_C():
     for label, v in (("B", ELIGIBLE_B), ("C", ELIGIBLE_C)):
         w, items, cards = default_world(verdict=v)
         payload, _ = run_act(w, items, cards)
-        check("act: class %s PR merges" % label, len(payload["merges"]) == 1
-              and payload["merges"][0]["behavior_class"] == label)
+        check(
+            "act: class %s PR merges" % label,
+            len(payload["merges"]) == 1
+            and payload["merges"][0]["behavior_class"] == label,
+        )
 
 
 def test_class_C_without_optin_holds_end_to_end():
@@ -634,14 +638,21 @@ def test_G0_repo_not_opted_in_is_silently_skipped():
     w, items, cards = default_world()
     w.repos = {"fmt": {"auto_merge": False}}
     payload, err = run_act(w, items, cards)
-    check("G0: per-repo auto_merge off -> silent skip",
-          not payload["merges"] and not payload["holds"])
+    check(
+        "G0: per-repo auto_merge off -> silent skip",
+        not payload["merges"] and not payload["holds"],
+    )
     check("G0: per-repo off -> no merge", not w.do_merge_calls)
     check("G0: per-repo off -> no warning spam", "auto-merge held" not in err)
     # But evaluate_candidate still fails closed on G0a as defense in depth.
-    r = am.evaluate_candidate("owner", items[0], {"issue": 1, "state": {}, "labels":
-                              {"needs-decision"}}, {"auto_merge": False}, False,
-                              set())
+    r = am.evaluate_candidate(
+        "owner",
+        items[0],
+        {"issue": 1, "state": {}, "labels": {"needs-decision"}},
+        {"auto_merge": False},
+        False,
+        set(),
+    )
     check("G0: evaluate_candidate G0a defense-in-depth", "G0" in r["hold_reason"])
 
 
@@ -650,8 +661,10 @@ def test_G0_global_off_is_silently_skipped():
     w.global_auto_merge = False
     w.repos = {"fmt": {}}  # no per-repo override -> global (off)
     payload, _ = run_act(w, items, cards)
-    check("G0: global off + no override -> silent skip",
-          not payload["merges"] and not payload["holds"] and not w.do_merge_calls)
+    check(
+        "G0: global off + no override -> silent skip",
+        not payload["merges"] and not payload["holds"] and not w.do_merge_calls,
+    )
 
 
 def test_G0_no_vision_holds():
@@ -698,8 +711,10 @@ def test_G2_excluded_file_holds():
     w, items, cards = default_world()
     w.files[("owner/fmt", "5")] = ([".github/workflows/ci.yml", "src/a.py"], True, True)
     payload, _ = run_act(w, items, cards)
-    check("G2: workflow file holds", "G2" in _held_reason(payload)
-          and "excluded" in _held_reason(payload))
+    check(
+        "G2: workflow file holds",
+        "G2" in _held_reason(payload) and "excluded" in _held_reason(payload),
+    )
     check("G2: excluded file -> no merge", not w.do_merge_calls)
 
 
@@ -708,8 +723,10 @@ def test_G2_vision_self_authorization_excluded():
     # A PR that edits the very rubric it is judged against must never auto-merge.
     w.files[("owner/fmt", "5")] = (["VISION.md", "src/a.py"], True, True)
     payload, _ = run_act(w, items, cards)
-    check("G2: PR editing VISION.md is held (self-authorization guard)",
-          "G2" in _held_reason(payload))
+    check(
+        "G2: PR editing VISION.md is held (self-authorization guard)",
+        "G2" in _held_reason(payload),
+    )
 
 
 def test_G2_unreadable_file_list_fails_closed():
@@ -764,9 +781,7 @@ def test_G2_immutable_comparison_checks_renamed_old_path():
 
     core.gh_rest = gh_rest
     try:
-        files, ok, complete = am.immutable_compare_files(
-            "owner/fmt", base, head, 1
-        )
+        files, ok, complete = am.immutable_compare_files("owner/fmt", base, head, 1)
         check(
             "G2: renamed paths include both the old and new filename",
             files == ["src/util.py", "src/auth.py"] and ok and complete,
@@ -794,8 +809,10 @@ def test_G4_not_mergeable_or_not_clean_holds():
         ("mergeable false", make_pr(head="h4" * 20, mergeable=False)),
         ("state blocked", make_pr(head="h4" * 20, mergeable_state="blocked")),
         ("state behind", make_pr(head="h4" * 20, mergeable_state="behind")),
-        ("state unknown", make_pr(head="h4" * 20, mergeable=None,
-                                  mergeable_state="unknown")),
+        (
+            "state unknown",
+            make_pr(head="h4" * 20, mergeable=None, mergeable_state="unknown"),
+        ),
     ):
         w, items, cards = default_world(head="h4" * 20)
         w.set_pr("owner/fmt", 5, pr)
@@ -817,8 +834,11 @@ def test_G5_blast_radius_holds_and_boundary_merges():
 
     # Exact boundary: 20 files + 1000 lines merges.
     w3, items3, cards3 = default_world(head="h7" * 20)
-    w3.set_pr("owner/fmt", 5,
-              make_pr(head="h7" * 20, changed_files=20, additions=500, deletions=500))
+    w3.set_pr(
+        "owner/fmt",
+        5,
+        make_pr(head="h7" * 20, changed_files=20, additions=500, deletions=500),
+    )
     payload3, _ = run_act(w3, items3, cards3)
     check("G5: 20 files / 1000 lines boundary merges", len(payload3["merges"]) == 1)
 
@@ -826,8 +846,7 @@ def test_G5_blast_radius_holds_and_boundary_merges():
 def test_G6_stale_absent_and_held_verdict_hold():
     # Stale: card triaged_sha != current head.
     w, items, cards = default_world(head="cur" * 13 + "x")
-    cards[0] = make_card(101, "fmt", 5, "old" * 13 + "y",
-                         automerge_verdict=ELIGIBLE_A)
+    cards[0] = make_card(101, "fmt", 5, "old" * 13 + "y", automerge_verdict=ELIGIBLE_A)
     # item/live head is the current one; card is for the old one.
     payload, _ = run_act(w, items, cards)
     check("G6: stale verdict (head mismatch) holds", "G6" in _held_reason(payload))
@@ -840,15 +859,17 @@ def test_G6_stale_absent_and_held_verdict_hold():
 
     # triage_status not succeeded.
     w3, items3, cards3 = default_world(head="qd" * 20)
-    cards3[0] = make_card(101, "fmt", 5, "qd" * 20, triage_status="queued",
-                          automerge_verdict=ELIGIBLE_A)
+    cards3[0] = make_card(
+        101, "fmt", 5, "qd" * 20, triage_status="queued", automerge_verdict=ELIGIBLE_A
+    )
     payload3, _ = run_act(w3, items3, cards3)
     check("G6: queued (not succeeded) verdict holds", "G6" in _held_reason(payload3))
 
     # Held card (auto-triage not published) never auto-merges.
     w4, items4, cards4 = default_world(head="he" * 20)
-    cards4[0] = make_card(101, "fmt", 5, "he" * 20, held=True,
-                          automerge_verdict=ELIGIBLE_A)
+    cards4[0] = make_card(
+        101, "fmt", 5, "he" * 20, held=True, automerge_verdict=ELIGIBLE_A
+    )
     payload4, _ = run_act(w4, items4, cards4)
     check("G6: held card holds", "held" in _held_reason(payload4).lower())
 
@@ -879,8 +900,14 @@ def test_G1_non_pure_card_holds():
     # the manual/decision-handler path.
     for lbl in ("processing", "resolved", "blocked"):
         w, items, cards = default_world(head="pu" * 20)
-        cards[0] = make_card(101, "fmt", 5, "pu" * 20, automerge_verdict=ELIGIBLE_A,
-                             labels=["needs-decision", lbl])
+        cards[0] = make_card(
+            101,
+            "fmt",
+            5,
+            "pu" * 20,
+            automerge_verdict=ELIGIBLE_A,
+            labels=["needs-decision", lbl],
+        )
         payload, _ = run_act(w, items, cards)
         check("G1: %s card is not pure -> holds" % lbl, "G1" in _held_reason(payload))
         check("G1: %s card -> no merge" % lbl, not w.do_merge_calls)
@@ -920,10 +947,18 @@ def test_claim_rechecks_and_locks_current_card():
     current["state"] = "OPEN"
     calls = []
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    saved = {"get": render_card.get_card, "ensure": render_card.ensure_labels,
-             "gh": render_card._gh, "cfg": core.load_config,
-             "owner": core.get_owner, "maint": core.maintainers}
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+        "owner": core.get_owner,
+        "maint": core.maintainers,
+    }
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     core.get_owner = lambda: "owner"
     core.maintainers = lambda: {"owner"}
     render_card.get_card = lambda number: current
@@ -991,7 +1026,10 @@ def test_claim_vetoes_owner_comment_since_scan_snapshot():
         "cfg": core.load_config,
     }
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     render_card.get_card = lambda number: current
     render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
     render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
@@ -1043,7 +1081,10 @@ def test_claim_vetoes_existing_trusted_hold_or_close_comment():
         "maint": core.maintainers,
     }
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     core.get_owner = lambda: "owner"
     core.maintainers = lambda: {"owner"}
     render_card.get_card = lambda number: current
@@ -1097,7 +1138,10 @@ def test_claim_rejects_changed_decision_card():
     current["body"] += "\n- [x] Hold <!-- opt:hold -->"
     saved = {"get": render_card.get_card, "cfg": core.load_config}
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     render_card.get_card = lambda number: current
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
@@ -1136,7 +1180,10 @@ def test_claim_rechecks_owner_selection_after_locking():
         "cfg": core.load_config,
     }
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     render_card.get_card = lambda number: current
     render_card.ensure_labels = lambda labels: None
 
@@ -1148,9 +1195,14 @@ def test_claim_rechecks_owner_selection_after_locking():
             ]
             current["body"] += "\n- [x] Hold <!-- opt:hold -->"
         elif "--remove-label" in args:
-            remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
-            current["labels"] = [label for label in current["labels"]
-                                 if label.get("name") not in remove]
+            remove = {
+                args[i + 1]
+                for i, arg in enumerate(args[:-1])
+                if arg == "--remove-label"
+            }
+            current["labels"] = [
+                label for label in current["labels"] if label.get("name") not in remove
+            ]
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     render_card._gh = edit
@@ -1158,9 +1210,12 @@ def test_claim_rechecks_owner_selection_after_locking():
     try:
         claims = am.claim_cards({"items": items}, [initial])
         labels = am._card_label_names(current)
-        check("claim: post-lock owner selection cancels the claim",
-              claims == [] and "processing" not in labels
-              and am.AUTO_MERGE_CLAIM_LABEL not in labels)
+        check(
+            "claim: post-lock owner selection cancels the claim",
+            claims == []
+            and "processing" not in labels
+            and am.AUTO_MERGE_CLAIM_LABEL not in labels,
+        )
     finally:
         render_card.get_card = saved["get"]
         render_card.ensure_labels = saved["ensure"]
@@ -1196,7 +1251,10 @@ def test_claim_rechecks_owner_comment_activity_after_locking():
         "cfg": core.load_config,
     }
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     render_card.get_card = lambda number: current
     render_card.ensure_labels = lambda labels: None
 
@@ -1208,9 +1266,14 @@ def test_claim_rechecks_owner_comment_activity_after_locking():
             ]
             current["comments"] = [{"id": "owner-hold"}]
         elif "--remove-label" in args:
-            remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
-            current["labels"] = [label for label in current["labels"]
-                                 if label.get("name") not in remove]
+            remove = {
+                args[i + 1]
+                for i, arg in enumerate(args[:-1])
+                if arg == "--remove-label"
+            }
+            current["labels"] = [
+                label for label in current["labels"] if label.get("name") not in remove
+            ]
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     render_card._gh = edit
@@ -1220,7 +1283,8 @@ def test_claim_rechecks_owner_comment_activity_after_locking():
         labels = am._card_label_names(current)
         check(
             "claim: post-lock owner comment cancels the claim",
-            claims == [] and "processing" not in labels
+            claims == []
+            and "processing" not in labels
             and am.AUTO_MERGE_CLAIM_LABEL not in labels,
         )
     finally:
@@ -1259,7 +1323,10 @@ def test_claim_requires_fresh_verdict_before_locking_card():
         "cfg": core.load_config,
     }
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
-    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.load_config = lambda: {
+        "auto_merge": True,
+        "repos": {"fmt": {"auto_merge": True}},
+    }
     render_card.get_card = lambda number: current
     render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
     render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
@@ -1290,9 +1357,7 @@ def test_validate_claimed_card_rechecks_owner_selection_before_acting():
 
     def edit(args, check=False):
         remove = {
-            args[i + 1]
-            for i, arg in enumerate(args[:-1])
-            if arg == "--remove-label"
+            args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"
         }
         current["labels"] = [
             label for label in current["labels"] if label.get("name") not in remove
@@ -1318,7 +1383,10 @@ def test_validate_claimed_card_rejects_pending_decisions_and_newer_activity():
     saved = {"get": render_card.get_card, "gh": render_card._gh}
     try:
         for label, current_change in (
-            ("newer card activity", lambda card: card.update({"updatedAt": "2026-07-10T00:01:00Z"})),
+            (
+                "newer card activity",
+                lambda card: card.update({"updatedAt": "2026-07-10T00:01:00Z"}),
+            ),
             (
                 "same-second card comment",
                 lambda card: card.update({"comments": [{"id": "owner-hold"}]}),
@@ -1328,9 +1396,7 @@ def test_validate_claimed_card_rejects_pending_decisions_and_newer_activity():
                 lambda card: card["labels"].append({"name": "decision:hold"}),
             ),
         ):
-            claimed = make_card(
-                101, "fmt", 5, "vd" * 20, automerge_verdict=ELIGIBLE_A
-            )
+            claimed = make_card(101, "fmt", 5, "vd" * 20, automerge_verdict=ELIGIBLE_A)
             current = dict(claimed, state="OPEN", labels=list(claimed["labels"]))
             current_change(current)
             render_card.get_card = lambda number: current
@@ -1342,7 +1408,9 @@ def test_validate_claimed_card_rejects_pending_decisions_and_newer_activity():
                     if arg == "--remove-label"
                 }
                 current["labels"] = [
-                    value for value in current["labels"] if value.get("name") not in remove
+                    value
+                    for value in current["labels"]
+                    if value.get("name") not in remove
                 ]
                 return type("R", (), {"returncode": 0, "stderr": ""})()
 
@@ -1371,9 +1439,12 @@ def test_stale_claim_release_failure_is_recovered_on_next_scan():
         attempts[0] += 1
         if attempts[0] == 1:
             return type("R", (), {"returncode": 1, "stderr": "transient failure"})()
-        remove = {args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"}
-        current["labels"] = [label for label in current["labels"]
-                             if label.get("name") not in remove]
+        remove = {
+            args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--remove-label"
+        }
+        current["labels"] = [
+            label for label in current["labels"] if label.get("name") not in remove
+        ]
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     render_card._gh = edit
@@ -1386,9 +1457,12 @@ def test_stale_claim_release_failure_is_recovered_on_next_scan():
         recovered = am.recover_stale_card_claims([stale])
         labels = am._card_label_names(current)
         check("claim: release failure is surfaced", failed)
-        check("claim: next scan releases the stale claim",
-              recovered == [101] and "processing" not in labels
-              and am.AUTO_MERGE_CLAIM_LABEL not in labels)
+        check(
+            "claim: next scan releases the stale claim",
+            recovered == [101]
+            and "processing" not in labels
+            and am.AUTO_MERGE_CLAIM_LABEL not in labels,
+        )
     finally:
         render_card.get_card = saved["get"]
         render_card._gh = saved["gh"]
@@ -1441,9 +1515,7 @@ def test_post_merge_missing_endpoint_sha_fails_audit_handoff():
             "audit: invalid merge endpoint SHA retains the recovery intent",
             payload["post_merge_errors"]
             and payload["releases"] == []
-            and am._audit_intent_record(
-                core.parse_state_block(cards[0]["body"]), 101
-            ),
+            and am._audit_intent_record(core.parse_state_block(cards[0]["body"]), 101),
         )
 
 
@@ -1517,7 +1589,8 @@ def test_card_reader_includes_comment_activity():
         card = render_card.get_card(101)
         check(
             "claim: card reads include comment activity",
-            calls and any("comments" in str(arg) for arg in calls[0])
+            calls
+            and any("comments" in str(arg) for arg in calls[0])
             and card.get("comments") == [{"id": "owner-hold"}],
         )
     finally:
@@ -1582,9 +1655,8 @@ def test_G7_final_guard_rechecks_escape_hatch_and_owner_decision():
         "G7: final escape hatch guard holds and releases the claim",
         not payload["merges"]
         and payload["releases"] == [{"card_issue": 101}]
-        and w.do_merge_final_guards == [
-            (False, "escape hatch label appeared before merging")
-        ],
+        and w.do_merge_final_guards
+        == [(False, "escape hatch label appeared before merging")],
     )
 
     w, items, cards = default_world(head=head)
@@ -1676,8 +1748,8 @@ def test_open_pr_audit_intent_releases_claim_without_remerge():
     }
     try:
         render_card.get_card = lambda number: current
-        render_card._edit_issue_body = lambda number, body, remove_labels=None: current.update(
-            body=body
+        render_card._edit_issue_body = (
+            lambda number, body, remove_labels=None: current.update(body=body)
         )
         am.pending_audit_records = lambda: []
         am.release_card_claim = lambda record: released.append(record["card_issue"])
@@ -1688,9 +1760,7 @@ def test_open_pr_audit_intent_releases_claim_without_remerge():
             am.cmd_record(path)
         check(
             "audit: record clears the proven-open intent and releases its claim",
-            not am._audit_intent_record(
-                core.parse_state_block(current["body"]), 101
-            )
+            not am._audit_intent_record(core.parse_state_block(current["body"]), 101)
             and released == [101],
         )
     finally:
@@ -1709,9 +1779,7 @@ def test_successful_merge_stages_audit_before_result_handoff():
         len(payload["merges"]) == 1
         and staged is not None
         and staged["merge_commit"] == "c" * 40
-        and not am._audit_intent_record(
-            core.parse_state_block(cards[0]["body"]), 101
-        ),
+        and not am._audit_intent_record(core.parse_state_block(cards[0]["body"]), 101),
     )
 
 
@@ -1785,15 +1853,16 @@ def test_closed_card_can_stage_and_recover_pending_audit():
     calls = []
     try:
         render_card.get_card = lambda number: card
-        render_card._edit_issue_body = lambda number, body, remove_labels=None: card.update(
-            body=body
+        render_card._edit_issue_body = (
+            lambda number, body, remove_labels=None: card.update(body=body)
         )
         am.stage_pending_audit(record)
         core.gh_rest = lambda path, **kwargs: (calls.append(path) or [[card]])
         os.environ["GITHUB_REPOSITORY"] = "owner/wheelhouse"
         check(
             "audit: closed card persists and recovers its pending record",
-            am._pending_audit_record(core.parse_state_block(card["body"]), 101) == record
+            am._pending_audit_record(core.parse_state_block(card["body"]), 101)
+            == record
             and am.pending_audit_records() == [record]
             and calls
             and "state=all" in calls[0],
@@ -1852,8 +1921,8 @@ def test_closed_audit_intent_backfills_ledger_without_relabeling_card():
         am.append_to_ledger = lambda records: ledger.extend(records)
         am.pending_audit_records = lambda: []
         render_card.get_card = lambda number: card
-        render_card._edit_issue_body = lambda number, body, remove_labels=None: card.update(
-            body=body
+        render_card._edit_issue_body = (
+            lambda number, body, remove_labels=None: card.update(body=body)
         )
         am.resolve_card = lambda record: resolved.append(record)
         am.release_card_claim = lambda record: released.append(record)
@@ -1871,9 +1940,7 @@ def test_closed_audit_intent_backfills_ledger_without_relabeling_card():
             and resolved == []
             and released == []
             and card["labels"] == original_labels
-            and not am._audit_intent_record(
-                core.parse_state_block(card["body"]), 101
-            ),
+            and not am._audit_intent_record(core.parse_state_block(card["body"]), 101),
         )
     finally:
         core.gh_rest = saved["rest"]
@@ -1923,7 +1990,7 @@ def test_live_check_status_reads_current_configured_contexts():
                                                         "conclusion": "FAILURE",
                                                         "status": "COMPLETED",
                                                     },
-                                                ]
+                                                ],
                                             },
                                         }
                                     }
@@ -2051,20 +2118,28 @@ def test_escape_hatch_label_holds():
     w, items, cards = default_world(head="lb" * 20)
     w.set_pr("owner/fmt", 5, make_pr(head="lb" * 20, labels=[core.NO_AUTO_MERGE_LABEL]))
     payload, _ = run_act(w, items, cards)
-    check("kill: wheelhouse:no-auto-merge label holds",
-          "escape hatch" in _held_reason(payload))
+    check(
+        "kill: wheelhouse:no-auto-merge label holds",
+        "escape hatch" in _held_reason(payload),
+    )
 
 
 def test_G6_token_kill_switch_holds():
     w, items, cards = default_world()
     payload, _ = run_act(w, items, cards, has_token=False)
-    check("G6: absent triage token holds persisted verdict", "TOKEN" in _held_reason(payload))
+    check(
+        "G6: absent triage token holds persisted verdict",
+        "TOKEN" in _held_reason(payload),
+    )
 
 
 def test_G6_vision_revision_mismatch_holds():
     w, items, cards = default_world(verdict=dict(ELIGIBLE_A, vision_sha="old"))
     payload, _ = run_act(w, items, cards)
-    check("G6: stale VISION.md revision holds", "VISION.md revision" in _held_reason(payload))
+    check(
+        "G6: stale VISION.md revision holds",
+        "VISION.md revision" in _held_reason(payload),
+    )
 
 
 def test_G6_base_revision_missing_or_mismatch_holds():
@@ -2072,9 +2147,7 @@ def test_G6_base_revision_missing_or_mismatch_holds():
     payload, _ = run_act(w, items, cards)
     check("G6: verdict without a base SHA holds", "base SHA" in _held_reason(payload))
 
-    w2, items2, cards2 = default_world(
-        verdict=dict(ELIGIBLE_A, base_sha="a2" * 20)
-    )
+    w2, items2, cards2 = default_world(verdict=dict(ELIGIBLE_A, base_sha="a2" * 20))
     payload2, _ = run_act(w2, items2, cards2)
     check(
         "G6: verdict for a superseded base SHA holds",
@@ -2091,7 +2164,9 @@ def test_triage_persists_trusted_policy_revisions():
         "automerge": ELIGIBLE_A,
     }
     body = render_card.body_with_triage_result(
-        render_card.render(item)["body"], item["head_sha"], triage=triage,
+        render_card.render(item)["body"],
+        item["head_sha"],
+        triage=triage,
         vision_sha="trusted-vision-sha",
         base_sha="b" * 40,
     )
@@ -2132,17 +2207,21 @@ def test_scan_freeze_invariants():
 # --------------------------------------------------------------------------- #
 def test_do_merge_race_and_error_outcomes():
     w, items, cards = default_world(head="rc" * 20)
-    w.do_merge_returns = {("fmt", "5"): ("Target fmt#5 is already merged - nothing "
-                                         "to do.", "resolved")}
+    w.do_merge_returns = {
+        ("fmt", "5"): ("Target fmt#5 is already merged - nothing to do.", "resolved")
+    }
     payload, _ = run_act(w, items, cards)
-    check("act: already-merged race is NOT recorded as our merge",
-          not payload["merges"])
+    check(
+        "act: already-merged race is NOT recorded as our merge", not payload["merges"]
+    )
 
     w2, items2, cards2 = default_world(head="er" * 20)
     w2.do_merge_returns = {("fmt", "5"): ("Merge of fmt#5 failed: boom", "error")}
     payload2, err2 = run_act(w2, items2, cards2)
-    check("act: do_merge error is a hold, not a recorded merge",
-          not payload2["merges"] and payload2["holds"])
+    check(
+        "act: do_merge error is a hold, not a recorded merge",
+        not payload2["merges"] and payload2["holds"],
+    )
     check("act: error emits a ::warning::", "auto-merge held" in err2)
 
 
@@ -2167,10 +2246,14 @@ def test_no_open_pr_overlap_gate():
         make_card(102, "fmt", 6, "o6" * 20, automerge_verdict=ELIGIBLE_A),
     ]
     payload, _ = run_act(w, items, cards)
-    check("absence: overlapping-file PRs BOTH auto-merge (no overlap gate)",
-          len(payload["merges"]) == 2)
-    check("absence: no overlap helper exists in auto_merge",
-          not any("overlap" in n for n in dir(am)))
+    check(
+        "absence: overlapping-file PRs BOTH auto-merge (no overlap gate)",
+        len(payload["merges"]) == 2,
+    )
+    check(
+        "absence: no overlap helper exists in auto_merge",
+        not any("overlap" in n for n in dir(am)),
+    )
 
 
 def test_no_rate_cap_same_contributor_or_scan():
@@ -2188,10 +2271,14 @@ def test_no_rate_cap_same_contributor_or_scan():
         items.append(make_item("fmt", n, head))
         cards.append(make_card(100 + i, "fmt", n, head, automerge_verdict=ELIGIBLE_A))
     payload, _ = run_act(w, items, cards)
-    check("absence: 4 PRs from one contributor in one scan all merge",
-          len(payload["merges"]) == 4)
-    check("absence: no rate/cap helper exists in auto_merge",
-          not any(("cap" in n or "rate" in n) for n in dir(am)))
+    check(
+        "absence: 4 PRs from one contributor in one scan all merge",
+        len(payload["merges"]) == 4,
+    )
+    check(
+        "absence: no rate/cap helper exists in auto_merge",
+        not any(("cap" in n or "rate" in n) for n in dir(am)),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2217,7 +2304,10 @@ def test_vision_read_is_base_branch_only():
         present, sha = am.vision_on_default_branch("owner/fmt")
     finally:
         am._gh_api = save
-    check("vision: present read from default branch", present is True and sha == "visionsha")
+    check(
+        "vision: present read from default branch",
+        present is True and sha == "visionsha",
+    )
     check(
         "vision: read uses the contents API with NO ?ref (default branch = base)",
         captured["path"] == "/repos/owner/fmt/contents/VISION.md"
@@ -2231,18 +2321,27 @@ def test_vision_absent_and_empty_fail_closed():
         return type("R", (), {"returncode": 1, "stdout": ""})()
 
     def gh_empty(path):
-        payload = {"type": "file", "sha": "s", "encoding": "base64",
-                   "size": 3,
-                   "content": __import__("base64").b64encode(b"   ").decode()}
+        payload = {
+            "type": "file",
+            "sha": "s",
+            "encoding": "base64",
+            "size": 3,
+            "content": __import__("base64").b64encode(b"   ").decode(),
+        }
         return type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})()
 
     save = am._gh_api
     try:
         am._gh_api = gh_404
-        check("vision: 404 -> not present", am.vision_on_default_branch("o/r") == (False, ""))
+        check(
+            "vision: 404 -> not present",
+            am.vision_on_default_branch("o/r") == (False, ""),
+        )
         am._gh_api = gh_empty
-        check("vision: blank VISION.md -> not present (fail-closed)",
-              am.vision_on_default_branch("o/r") == (False, ""))
+        check(
+            "vision: blank VISION.md -> not present (fail-closed)",
+            am.vision_on_default_branch("o/r") == (False, ""),
+        )
     finally:
         am._gh_api = save
 
@@ -2251,7 +2350,9 @@ def test_vision_oversized_or_incomplete_fails_closed():
     saved = am._gh_api
 
     def content(payload):
-        return lambda path: type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})()
+        return lambda path: type(
+            "R", (), {"returncode": 0, "stdout": json.dumps(payload)}
+        )()
 
     try:
         oversized = b"x" * (am.MAX_VISION_BYTES + 1)
@@ -2310,15 +2411,19 @@ def test_ledger_parse_append_render_and_cap():
     body = am.render_ledger_body(entries, "2026-07-10T00:00:00Z")
     parsed = am.parse_ledger(body)
     check("ledger: two entries round-trip", len(parsed) == 2)
-    check("ledger: entry carries all audit fields",
-          parsed[0]["contributor"] == "alice"
-          and parsed[0]["head_sha"]
-          and parsed[0]["vision_sha"] == "vsha"
-          and parsed[0]["behavior_class"] == "A"
-          and parsed[0]["merge_commit"])
+    check(
+        "ledger: entry carries all audit fields",
+        parsed[0]["contributor"] == "alice"
+        and parsed[0]["head_sha"]
+        and parsed[0]["vision_sha"] == "vsha"
+        and parsed[0]["behavior_class"] == "A"
+        and parsed[0]["merge_commit"],
+    )
     check("ledger: human summary names the merged PR", "fmt#5" in body)
-    check("ledger: missing/blank ledger parses to []",
-          am.parse_ledger("") == [] and am.parse_ledger("no marker here") == [])
+    check(
+        "ledger: missing/blank ledger parses to []",
+        am.parse_ledger("") == [] and am.parse_ledger("no marker here") == [],
+    )
     # Cap keeps only the most recent entries.
     many = [_merge_record(n) for n in range(300)]
     capped = am.append_ledger_entries([], many, cap=am.LEDGER_ENTRY_CAP)
@@ -2356,8 +2461,14 @@ def test_ledger_parse_append_render_and_cap():
 
 def test_audit_comment_explains_why_it_qualified():
     text = am.audit_comment(_merge_record())
-    for token in ("Auto-merged fmt#5", "alice", "Behavior class: A",
-                  "Merge commit", "VISION.md SHA", "never auto-reverts"):
+    for token in (
+        "Auto-merged fmt#5",
+        "alice",
+        "Behavior class: A",
+        "Merge commit",
+        "VISION.md SHA",
+        "never auto-reverts",
+    ):
         check("audit-comment: mentions %r" % token, token in text)
 
 
@@ -2372,13 +2483,15 @@ def test_record_cli_resolves_card_and_appends_ledger():
         "close": am._strict_audited_close_card,
     }
     am.append_to_ledger = lambda records: calls["ledger"].extend(records)
-    am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
+    am.release_card_claim = lambda record: calls["released"].append(
+        record["card_issue"]
+    )
     am.pending_audit_records = lambda: []
     am.stage_pending_audit = lambda record: record
     render_card.get_card = lambda n: {"state": "OPEN", "labels": []}
-    am._strict_audited_close_card = lambda n, msg, close_issue=True: calls["resolved"].append(
-        (n, close_issue)
-    )
+    am._strict_audited_close_card = lambda n, msg, close_issue=True: calls[
+        "resolved"
+    ].append((n, close_issue))
     tmp = os.path.join(
         os.environ.get("TMPDIR", "/tmp"), "am_results_%d.json" % os.getpid()
     )
@@ -2491,7 +2604,9 @@ def test_audit_writes_retry_transient_failures_and_surface_unrecoverable_ones():
         am.append_to_ledger([_merge_record()])
         am.resolve_card(_merge_record())
         check("audit: ledger write retries a transient failure", ledger_attempts == [2])
-        check("audit: card resolution retries a transient failure", card_attempts == [2])
+        check(
+            "audit: card resolution retries a transient failure", card_attempts == [2]
+        )
 
         core.gh_rest = lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("HTTP 422 validation failed")
@@ -2611,7 +2726,9 @@ def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
     payload = {"merges": [_merge_record()], "holds": [], "releases": []}
     calls = {"released": [], "ledger": []}
     am.act_on_scan = lambda scan, cards: payload
-    am.release_card_claim = lambda record: calls["released"].append(record["card_issue"])
+    am.release_card_claim = lambda record: calls["released"].append(
+        record["card_issue"]
+    )
     am.append_to_ledger = lambda records: calls["ledger"].extend(records)
     try:
         with tempfile.TemporaryDirectory() as directory:
@@ -2619,7 +2736,11 @@ def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
             cards_path = os.path.join(directory, "cards.json")
             results_path = os.path.join(directory, "automerge.json")
             claims_path = os.path.join(directory, "automerge-valid-claims.json")
-            for path, data in ((scan_path, {}), (cards_path, []), (claims_path, [{"number": 101}])):
+            for path, data in (
+                (scan_path, {}),
+                (cards_path, []),
+                (claims_path, [{"number": 101}]),
+            ):
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f)
             os.environ["WHEELHOUSE_AUTOMERGE_RESULTS"] = results_path
@@ -2627,10 +2748,15 @@ def test_atomic_results_handoff_fails_loudly_and_releases_claims_by_fallback():
                 am.cmd_act(scan_path, cards_path)
                 with open(results_path, encoding="utf-8") as f:
                     recorded = json.load(f)
-                check("handoff: atomic results file contains the complete payload", recorded == payload)
+                check(
+                    "handoff: atomic results file contains the complete payload",
+                    recorded == payload,
+                )
                 check(
                     "handoff: atomic write leaves no temporary result file",
-                    not any(name.startswith(".automerge-") for name in os.listdir(directory)),
+                    not any(
+                        name.startswith(".automerge-") for name in os.listdir(directory)
+                    ),
                 )
 
                 am._write_json_atomically = lambda path, data: (_ for _ in ()).throw(
@@ -2717,7 +2843,8 @@ def test_atomic_claim_handoffs_release_claims_and_fail_loudly():
                     except RuntimeError:
                         failed = True
                 check(
-                    "handoff: failed %s write releases known claims and fails loudly" % label,
+                    "handoff: failed %s write releases known claims and fails loudly"
+                    % label,
                     failed and released == [101] and "::error::" in stderr.getvalue(),
                 )
     finally:
@@ -2784,14 +2911,18 @@ def test_only_merge_ready_pr_review_items_are_candidates():
     w, items, cards = default_world(head="nc" * 20)
     items[0]["bucket"] = "review-needed"  # not merge-ready
     payload, _ = run_act(w, items, cards)
-    check("scope: non-merge-ready item is not a candidate",
-          not payload["merges"] and not payload["holds"])
+    check(
+        "scope: non-merge-ready item is not a candidate",
+        not payload["merges"] and not payload["holds"],
+    )
 
     w2, items2, cards2 = default_world(head="ci" * 20)
     items2[0]["kind"] = "ci-approval"
     payload2, _ = run_act(w2, items2, cards2)
-    check("scope: ci-approval item is not a candidate",
-          not payload2["merges"] and not payload2["holds"])
+    check(
+        "scope: ci-approval item is not a candidate",
+        not payload2["merges"] and not payload2["holds"],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2817,8 +2948,10 @@ def test_scan_backstop_wiring_and_token_discipline():
     act = by_name.get("Auto-merge eligible PRs")
     rec = by_name.get("Record auto-merges")
     check("wiring: auto-merge act step exists", act is not None)
-    check("wiring: card list records card author provenance",
-          listed and "author: (.user.login" in listed.get("run", ""))
+    check(
+        "wiring: card list records card author provenance",
+        listed and "author: (.user.login" in listed.get("run", ""),
+    )
     check(
         "wiring: card list records comment count for claim validation",
         listed and "comments: (.comments // 0)" in listed.get("run", ""),
@@ -2857,8 +2990,10 @@ def test_scan_backstop_wiring_and_token_discipline():
         "wiring: absent triage token disables both claim and act",
         claim
         and act
-        and "CLAUDE_CODE_OAUTH_TOKEN != ''" in (claim.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", "")
-        and "CLAUDE_CODE_OAUTH_TOKEN != ''" in (act.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", ""),
+        and "CLAUDE_CODE_OAUTH_TOKEN != ''"
+        in (claim.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", "")
+        and "CLAUDE_CODE_OAUTH_TOKEN != ''"
+        in (act.get("env") or {}).get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", ""),
     )
     check(
         "wiring: the AUDIT record runs on github.token (this-repo bookkeeping)",
@@ -2889,8 +3024,9 @@ def test_scan_backstop_wiring_and_token_discipline():
     )
     handler = yaml.safe_load(_read(".github/workflows/decision-handler.yml"))
     handler_steps = handler["jobs"]["handle"]["steps"]
-    handler_by_name = {s.get("name") or s.get("id"): s for s in handler_steps
-                       if isinstance(s, dict)}
+    handler_by_name = {
+        s.get("name") or s.get("id"): s for s in handler_steps if isinstance(s, dict)
+    }
     current = handler_by_name.get("current-card")
     check(
         "wiring: manual decisions share the auto-merge concurrency lock",
@@ -2943,9 +3079,9 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     check(
         "triage: binds verdict storage to the fetched VISION.md SHA",
         "vision_sha=$VISION_SHA" in text
-        and "--vision-sha \"$VISION_SHA\"" in text
+        and '--vision-sha "$VISION_SHA"' in text
         and "base_sha=$BASE_SHA" in text
-        and "--base-sha \"$BASE_SHA\"" in text,
+        and '--base-sha "$BASE_SHA"' in text,
     )
     check(
         "triage: incomplete diffs suppress auto-merge verdict storage",

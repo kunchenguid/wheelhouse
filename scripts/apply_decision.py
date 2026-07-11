@@ -650,7 +650,9 @@ def do_merge(
     merge_commit = (
         str(merge_result.get("sha") or "") if isinstance(merge_result, dict) else ""
     )
-    return outcome("Merged %s#%s (%s)." % (repo, number, method), "resolved", merge_commit)
+    return outcome(
+        "Merged %s#%s (%s)." % (repo, number, method), "resolved", merge_commit
+    )
 
 
 def do_approve_ci(owner, repo, number):
@@ -946,7 +948,9 @@ def build_nl_prompt(
         "  - Only use an action verb from the allowed list. If what they asked for",
         "    is not in that list, use mode=clarify.",
     ]
-    text_bearing = [v for v in ("decline", "comment", "request-changes") if v in allowed]
+    text_bearing = [
+        v for v in ("decline", "comment", "request-changes") if v in allowed
+    ]
     if text_bearing:
         parts += [
             "  - For `%s`, put the prose to post on the target in `free_text`."
@@ -955,8 +959,10 @@ def build_nl_prompt(
     if target_slug:
         parts += [
             "  - This card is posted in a DIFFERENT repository than the target",
-            "    (%s). If `answer` references any issue or PR number, write it" % target_slug,
-            "    fully qualified as %s#N (never a bare #N), or it will link to" % target_slug,
+            "    (%s). If `answer` references any issue or PR number, write it"
+            % target_slug,
+            "    fully qualified as %s#N (never a bare #N), or it will link to"
+            % target_slug,
             "    the wrong repository.",
         ]
     if search_enabled:
@@ -1128,7 +1134,9 @@ def cmd_nl_prompt():
         os.environ.get("TRIGGER_COMMENT_ID", ""),
     )
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-    target_slug = "%s/%s" % (owner, state["repo"]) if owner and state.get("repo") else ""
+    target_slug = (
+        "%s/%s" % (owner, state["repo"]) if owner and state.get("repo") else ""
+    )
     search_enabled = os.environ.get("READONLY_SEARCH_ENABLED", "") == "true"
     search_repos = []
     if search_enabled:
