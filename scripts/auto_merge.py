@@ -481,6 +481,59 @@ def _selected_card_option(body):
     )
 
 
+_NATURAL_HOLD_OR_CLOSE_RE = re.compile(
+    r"""(?ix)
+    \b(?:please|kindly)\s+(?:hold|close)\b
+    |\b(?:hold(?:ing)?|pause|wait)\s+(?:off|on|this|it|the\s+(?:pr|pull\s+request|card|merge))\b
+    |\b(?:close|decline)\s+(?:this|it|the\s+(?:pr|pull\s+request|card))\b
+    |\b(?:do\s+not|don't|dont|never)\s+(?:auto[-\s]*)?merge\b
+    |\b(?:stop|cancel|block)\s+(?:the\s+)?(?:auto[-\s]*)?merge\b
+    |\b(?:handle|take\s+care\s+of)\s+(?:this|it)\s+manually\b
+    """
+)
+
+
+def _trusted_decider_logins():
+    try:
+        owner = str(core.get_owner() or "").strip()
+        maintainers = core.maintainers()
+    except (Exception, SystemExit):
+        return None
+    logins = {owner.casefold()} if owner else set()
+    if not isinstance(maintainers, (set, frozenset, list, tuple)):
+        return None
+    logins.update(str(login).strip().casefold() for login in maintainers if login)
+    return logins or None
+
+
+def _card_has_pending_owner_action(card):
+    comments = (card or {}).get("comments")
+    if not isinstance(comments, list):
+        return (True, "card comment contents are unavailable")
+    state = core.parse_state_block((card or {}).get("body") or "") or {}
+    allowed = apply_decision.ALLOWED.get(state.get("kind"))
+    if not isinstance(allowed, set):
+        return (True, "card decision kind is unavailable")
+    trusted_logins = _trusted_decider_logins()
+    if not trusted_logins:
+        return (True, "trusted owner/maintainer identities are unavailable")
+    for comment in comments:
+        if not isinstance(comment, dict):
+            return (True, "card comment contents are malformed")
+        author = _card_author_login(comment)
+        if not author:
+            return (True, "card comment author is unavailable")
+        if author.casefold() not in trusted_logins:
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            return (True, "trusted owner/maintainer comment is unreadable")
+        action, _ = apply_decision.parse_slash(body, allowed)
+        if action or _NATURAL_HOLD_OR_CLOSE_RE.search(body):
+            return (True, "a trusted owner/maintainer action is pending")
+    return (False, "")
+
+
 def _fresh_verdict_for_head(state, head_sha):
     state = state if isinstance(state, dict) else {}
     head_sha = str(head_sha or "")
@@ -875,6 +928,9 @@ def _current_claim_matches(expected, current, repo, number):
         return (False, "card comment activity is unavailable")
     if current_comment_count != expected_comment_count:
         return (False, "card comment activity changed after the claim")
+    owner_action, owner_action_reason = _card_has_pending_owner_action(current)
+    if owner_action:
+        return (False, owner_action_reason)
     if not _card_is_claimed(current_entry["labels"]):
         return (False, "card claim is no longer current")
     if _card_has_pending_decision(current_entry["labels"]):
@@ -936,6 +992,7 @@ def claim_cards(scan, cards):
                 or current_entry.get("comment_count") is None
                 or _card_has_pending_decision(current_entry["labels"])
                 or _selected_card_option(current.get("body"))
+                or _card_has_pending_owner_action(current)[0]
                 or not verdict_ok
             ):
                 continue
@@ -968,6 +1025,7 @@ def claim_cards(scan, cards):
                 or not _card_is_claimed(claimed_entry["labels"])
                 or _card_has_pending_decision(claimed_entry["labels"])
                 or _selected_card_option(claimed_card.get("body"))
+                or _card_has_pending_owner_action(claimed_card)[0]
                 or not claimed_verdict_ok
             ):
                 _release_card_claim(expected["issue"])
@@ -1165,15 +1223,76 @@ def _audit_record(result, merge_commit="", merged_at="", detail=""):
     }
 
 
-def recover_audit_intents(owner, index):
+def closed_audit_intent_entries(card_token):
+    slug = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not slug or "/" not in slug:
+        raise RuntimeError("cards repository is unavailable for audit recovery")
+    cards = _with_card_token(
+        card_token,
+        lambda: core._flatten_paginated_comments(
+            core.gh_rest(
+                "repos/%s/issues?state=closed&per_page=100" % slug,
+                paginate=True,
+                slurp=True,
+            )
+        ),
+    )
+    entries = {}
+    duplicate_keys = set()
+    for card in cards:
+        if not isinstance(card, dict) or "pull_request" in card:
+            continue
+        if render_card.issue_is_open(card):
+            continue
+        labels = _card_label_names(card)
+        state = core.parse_state_block(card.get("body") or "") or {}
+        if not _trusted_card_identity(card, state, labels):
+            continue
+        intent = _audit_intent_record(state, card.get("number"))
+        if not intent:
+            continue
+        key = (str(state.get("repo") or ""), str(state.get("number") or ""))
+        if key in entries:
+            duplicate_keys.add(key)
+            continue
+        entries[key] = {
+            "issue": card.get("number"),
+            "state": state,
+            "labels": labels,
+        }
+    for key in duplicate_keys:
+        entries.pop(key, None)
+    return entries
+
+
+def _closed_intent_audit_record(intent, pr):
+    merged_head = str(((pr or {}).get("head") or {}).get("sha") or "")
+    if merged_head != str(intent.get("head_sha") or ""):
+        return None
+    merge_commit = str((pr or {}).get("merge_commit_sha") or "")
+    if not _GIT_OBJECT_ID_RE.fullmatch(merge_commit):
+        return None
+    record = dict(intent)
+    record["merge_commit"] = merge_commit
+    record["merged_at"] = str((pr or {}).get("merged_at") or _now())
+    record["detail"] = "ledger backfilled from a closed-card audit intent"
+    record["_closed_intent_recovery"] = True
+    return record
+
+
+def recover_audit_intents(owner, index, closed_intents=None):
     merges = []
     releases = []
     holds = []
     ambiguous = []
     recovered = set()
-    for (repo, number), entry in index.items():
+    entries = [(False, key, entry) for key, entry in index.items()]
+    entries.extend((True, key, entry) for key, entry in (closed_intents or {}).items())
+    for closed_card, (repo, number), entry in entries:
         intent = _audit_intent_record(entry.get("state"), entry.get("issue"))
-        if not intent or not _card_is_claimed(entry.get("labels") or set()):
+        if not intent or (
+            not closed_card and not _card_is_claimed(entry.get("labels") or set())
+        ):
             continue
         pr = live_pr("%s/%s" % (owner, repo), number)
         if pr is None:
@@ -1186,9 +1305,28 @@ def recover_audit_intents(owner, index):
             )
             continue
         if pr.get("merged"):
+            if closed_card:
+                record = _closed_intent_audit_record(intent, pr)
+                if record:
+                    merges.append(record)
+                    recovered.add((repo, number))
+                    continue
+                reason = "could not confirm merged target for closed-card audit intent"
+                holds.append({"repo": repo, "number": number, "hold_reason": reason})
+                ambiguous.append("%s#%s: %s" % (repo, number, reason))
+                continue
             reason = "audit outcome is ambiguous after target merge"
             holds.append({"repo": repo, "number": number, "hold_reason": reason})
             ambiguous.append("%s#%s: %s" % (repo, number, reason))
+            continue
+        if closed_card:
+            holds.append(
+                {
+                    "repo": repo,
+                    "number": number,
+                    "hold_reason": "closed-card audit intent target is not merged",
+                }
+            )
             continue
         releases.append({"card_issue": entry["issue"]})
         recovered.add((repo, number))
@@ -1209,14 +1347,22 @@ def act_on_scan(scan, cards):
     merges = []
     holds = []
     post_merge_errors = []
+    recovery_discovery_errors = []
+    try:
+        closed_intents = closed_audit_intent_entries(card_token)
+    except Exception as error:
+        closed_intents = {}
+        recovery_discovery_errors.append(
+            "closed-card audit intent discovery failed: %s" % str(error)[:160]
+        )
     (
         recovered_merges,
         recovered_releases,
         recovery_holds,
         recovery_ambiguous,
         recovered_keys,
-    ) = recover_audit_intents(owner, index)
-    ambiguous_outcomes = list(recovery_ambiguous)
+    ) = recover_audit_intents(owner, index, closed_intents)
+    ambiguous_outcomes = recovery_discovery_errors + list(recovery_ambiguous)
     merges.extend(recovered_merges)
     releases = list(recovered_releases)
     holds.extend(recovery_holds)
@@ -1779,6 +1925,29 @@ def stage_pending_audit_with_card_token(record, card_token):
     )
 
 
+def _closed_intent_recovery(record):
+    return isinstance(record, dict) and record.get("_closed_intent_recovery") is True
+
+
+def clear_closed_audit_intent(record):
+    card_issue = record.get("card_issue")
+    if not card_issue:
+        raise RuntimeError("closed-card audit recovery has no card issue")
+    card = render_card.get_card(card_issue)
+    if not card or render_card.issue_is_open(card):
+        raise RuntimeError("could not read closed card #%s for audit recovery" % card_issue)
+    state = core.parse_state_block(card.get("body") or "") or {}
+    intent = _audit_intent_record(state, card_issue)
+    if not intent or _ledger_entry_identity(intent) != _ledger_entry_identity(record):
+        raise RuntimeError("closed card #%s no longer has the expected audit intent" % card_issue)
+    new_state = dict(state)
+    new_state.pop(AUDIT_INTENT_FIELD, None)
+    render_card._edit_issue_body(
+        card_issue,
+        render_card._replace_state_block(card.get("body") or "", new_state),
+    )
+
+
 def clear_audit_intent(card_issue):
     card = render_card.get_card(card_issue)
     if not card or not render_card.issue_is_open(card):
@@ -1889,7 +2058,11 @@ def cmd_record(results_path, validated_claims_path=None):
         if identity in known:
             continue
         try:
-            staged.append(stage_pending_audit(record))
+            staged.append(
+                record
+                if _closed_intent_recovery(record)
+                else stage_pending_audit(record)
+            )
             known.add(identity)
             protected_cards.add(record.get("card_issue"))
         except Exception as error:
@@ -1911,6 +2084,9 @@ def cmd_record(results_path, validated_claims_path=None):
         for record in staged:
             protected_cards.add(record.get("card_issue"))
             try:
+                if _closed_intent_recovery(record):
+                    clear_closed_audit_intent(record)
+                    continue
                 resolve_card(record)
                 resolved_cards.add(record.get("card_issue"))
                 release_card_claim(dict(record, _audit_finalized=True))

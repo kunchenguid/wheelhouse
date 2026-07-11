@@ -277,6 +277,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         "domerge": apply_decision.do_merge,
         "get_card": render_card.get_card,
         "edit_body": render_card._edit_issue_body,
+        "closed_intents": am.closed_audit_intent_entries,
         "cfg": core.load_config,
         "maint": core.maintainers,
         "owner": core.get_owner,
@@ -291,6 +292,9 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
     am.immutable_compare_files = world.immutable_compare_files
     am.live_check_status = world.live_check_status
     apply_decision.do_merge = world.do_merge
+    am.closed_audit_intent_entries = lambda card_token: getattr(
+        world, "closed_audit_intents", {}
+    )
     core.load_config = lambda: {
         "auto_merge": world.global_auto_merge,
         "repos": world.repos,
@@ -341,6 +345,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         apply_decision.do_merge = saved["domerge"]
         render_card.get_card = saved["get_card"]
         render_card._edit_issue_body = saved["edit_body"]
+        am.closed_audit_intent_entries = saved["closed_intents"]
         core.load_config = saved["cfg"]
         core.maintainers = saved["maint"]
         core.get_owner = saved["owner"]
@@ -916,8 +921,11 @@ def test_claim_rechecks_and_locks_current_card():
     calls = []
     token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
     saved = {"get": render_card.get_card, "ensure": render_card.ensure_labels,
-             "gh": render_card._gh, "cfg": core.load_config}
+             "gh": render_card._gh, "cfg": core.load_config,
+             "owner": core.get_owner, "maint": core.maintainers}
     core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.get_owner = lambda: "owner"
+    core.maintainers = lambda: {"owner"}
     render_card.get_card = lambda number: current
     render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
@@ -945,6 +953,8 @@ def test_claim_rechecks_and_locks_current_card():
         render_card.ensure_labels = saved["ensure"]
         render_card._gh = saved["gh"]
         core.load_config = saved["cfg"]
+        core.get_owner = saved["owner"]
+        core.maintainers = saved["maint"]
         if token is None:
             os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
         else:
@@ -997,6 +1007,69 @@ def test_claim_vetoes_owner_comment_since_scan_snapshot():
         render_card.ensure_labels = saved["ensure"]
         render_card._gh = saved["gh"]
         core.load_config = saved["cfg"]
+        if token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = token
+
+
+def test_claim_vetoes_existing_trusted_hold_or_close_comment():
+    _, items, _ = default_world()
+    initial = make_card(
+        101,
+        "fmt",
+        5,
+        items[0]["head_sha"],
+        automerge_verdict=ELIGIBLE_A,
+        labels=[
+            "needs-decision",
+            "repo:fmt",
+            "kind:pr-review",
+            "priority:med",
+            "target:fmt-5",
+        ],
+    )
+    initial["comments"] = [
+        {"author": {"login": "owner"}, "body": "Please hold this PR."}
+    ]
+    current = dict(initial, state="OPEN")
+    calls = []
+    saved = {
+        "get": render_card.get_card,
+        "ensure": render_card.ensure_labels,
+        "gh": render_card._gh,
+        "cfg": core.load_config,
+        "owner": core.get_owner,
+        "maint": core.maintainers,
+    }
+    token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    core.load_config = lambda: {"auto_merge": True, "repos": {"fmt": {"auto_merge": True}}}
+    core.get_owner = lambda: "owner"
+    core.maintainers = lambda: {"owner"}
+    render_card.get_card = lambda number: current
+    render_card.ensure_labels = lambda labels: calls.append(("ensure", labels))
+    render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        slash_veto, _ = am._card_has_pending_owner_action(
+            dict(
+                current,
+                comments=[{"author": {"login": "owner"}, "body": "/close"}],
+            )
+        )
+        natural_veto, _ = am._card_has_pending_owner_action(current)
+        claims = am.claim_cards({"items": items}, [initial])
+        check(
+            "claim: existing trusted slash and natural-language actions veto the claim",
+            slash_veto and natural_veto and claims == [] and calls == [],
+        )
+    finally:
+        render_card.get_card = saved["get"]
+        render_card.ensure_labels = saved["ensure"]
+        render_card._gh = saved["gh"]
+        core.load_config = saved["cfg"]
+        core.get_owner = saved["owner"]
+        core.maintainers = saved["maint"]
         if token is None:
             os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
         else:
@@ -1733,6 +1806,87 @@ def test_closed_card_can_stage_and_recover_pending_audit():
             os.environ.pop("GITHUB_REPOSITORY", None)
         else:
             os.environ["GITHUB_REPOSITORY"] = saved_repo
+
+
+def test_closed_audit_intent_backfills_ledger_without_relabeling_card():
+    head = "ci" * 20
+    card = make_card(101, "fmt", 5, head)
+    card["state"] = "CLOSED"
+    state = core.parse_state_block(card["body"])
+    intent = _merge_record()
+    intent.update({"head_sha": head, "merge_commit": "", "merged_at": ""})
+    state[am.AUDIT_INTENT_FIELD] = intent
+    card["body"] = render_card._replace_state_block(card["body"], state)
+    original_labels = list(card["labels"])
+    saved = {
+        "rest": core.gh_rest,
+        "repo": os.environ.get("GITHUB_REPOSITORY"),
+        "ledger": am.append_to_ledger,
+        "pending": am.pending_audit_records,
+        "get": render_card.get_card,
+        "edit": render_card._edit_issue_body,
+        "resolve": am.resolve_card,
+        "release": am.release_card_claim,
+    }
+    ledger = []
+    resolved = []
+    released = []
+    try:
+        core.gh_rest = lambda path, **kwargs: [[card]]
+        os.environ["GITHUB_REPOSITORY"] = "owner/wheelhouse"
+        closed_intents = am.closed_audit_intent_entries("card-token")
+        w = World()
+        w.set_pr(
+            "owner/fmt",
+            5,
+            make_pr(
+                head=head,
+                merged=True,
+                state="closed",
+                merge_commit_sha="d" * 40,
+            ),
+        )
+        w.closed_audit_intents = closed_intents
+        payload, _ = run_act(w, [], [])
+        recovered = payload["merges"]
+        am.append_to_ledger = lambda records: ledger.extend(records)
+        am.pending_audit_records = lambda: []
+        render_card.get_card = lambda number: card
+        render_card._edit_issue_body = lambda number, body, remove_labels=None: card.update(
+            body=body
+        )
+        am.resolve_card = lambda record: resolved.append(record)
+        am.release_card_claim = lambda record: released.append(record)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "results.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"merges": recovered, "releases": []}, f)
+            am.cmd_record(path)
+        check(
+            "audit: closed intent confirmed merged backfills the ledger only",
+            len(recovered) == 1
+            and recovered[0].get("merge_commit") == "d" * 40
+            and recovered[0].get("_closed_intent_recovery") is True
+            and ledger == recovered
+            and resolved == []
+            and released == []
+            and card["labels"] == original_labels
+            and not am._audit_intent_record(
+                core.parse_state_block(card["body"]), 101
+            ),
+        )
+    finally:
+        core.gh_rest = saved["rest"]
+        am.append_to_ledger = saved["ledger"]
+        am.pending_audit_records = saved["pending"]
+        render_card.get_card = saved["get"]
+        render_card._edit_issue_body = saved["edit"]
+        am.resolve_card = saved["resolve"]
+        am.release_card_claim = saved["release"]
+        if saved["repo"] is None:
+            os.environ.pop("GITHUB_REPOSITORY", None)
+        else:
+            os.environ["GITHUB_REPOSITORY"] = saved["repo"]
 
 
 def test_live_check_status_reads_current_configured_contexts():
