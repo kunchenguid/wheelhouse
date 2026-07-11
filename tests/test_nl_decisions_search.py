@@ -691,6 +691,26 @@ def test_error_terminal_state_labels_as_blocked():
         )
 
 
+def test_retryable_terminal_keeps_card_actionable():
+    steps = handle_steps()
+    block = step_by_name(steps, "Block card label")
+    drop = step_by_name(steps, "Drop needs-decision on terminal")
+    check("workflow: Block card label step exists for retryable state", block is not None)
+    check("workflow: Drop needs-decision step exists for retryable state", drop is not None)
+    if block:
+        check(
+            "workflow: retryable merge result does not add blocked",
+            "'retryable'" not in str(block.get("if", ""))
+            and '"retryable"' not in str(block.get("if", "")),
+        )
+    if drop:
+        check(
+            "workflow: retryable merge result keeps needs-decision",
+            "'retryable'" not in str(drop.get("if", ""))
+            and '"retryable"' not in str(drop.get("if", "")),
+        )
+
+
 def test_nl_prompt_instructs_fully_qualified_refs():
     prompt_with_slug = ad.build_nl_prompt(
         "card body", "merge it", "target content", "pr-review", target_slug="acme/repo"
@@ -764,6 +784,7 @@ def main():
     test_claude_output_is_isolated_before_routing()
     test_route_and_execute_stay_deterministic()
     test_error_terminal_state_labels_as_blocked()
+    test_retryable_terminal_keeps_card_actionable()
     test_nl_prompt_instructs_fully_qualified_refs()
     test_nl_route_qualifies_answer_with_deterministic_state_not_model_text()
     print()

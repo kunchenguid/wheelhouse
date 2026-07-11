@@ -2224,6 +2224,17 @@ def test_do_merge_race_and_error_outcomes():
     )
     check("act: error emits a ::warning::", "auto-merge held" in err2)
 
+    w3, items3, cards3 = default_world(head="rt" * 20)
+    w3.do_merge_returns = {("fmt", "5"): ("workflow review required", "retryable")}
+    payload3, err3 = run_act(w3, items3, cards3)
+    check(
+        "act: retryable workflow merge outcome is held, not an error",
+        not payload3["merges"]
+        and payload3["holds"]
+        and not payload3["ambiguous_outcomes"],
+    )
+    check("act: retryable outcome emits a ::warning::", "auto-merge held" in err3)
+
 
 # --------------------------------------------------------------------------- #
 # DELIBERATE ABSENCE of an overlap gate and any rate cap (captain override)

@@ -1217,7 +1217,7 @@ def act_merge(
     if terminal == "resolved":
         # do_merge saw already-merged / not-open (a race) - not our merge.
         return ("held", message, "")
-    if terminal == "blocked":
+    if terminal in ("blocked", "retryable"):
         return ("held", message, "")
     return ("error", message, "")
 

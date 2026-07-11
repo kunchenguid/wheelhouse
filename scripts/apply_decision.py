@@ -60,7 +60,7 @@ Security: the caller owner/maintainer-gates the whole job; only
 owner/maintainer-authored text ever reaches this script (and the LLM). Merge and
 request-changes re-check the PR head SHA against the card's state block and
 refuse if the PR moved. Card-driven merge also pre-detects `.github/workflows/**`
-touches (net diff or PR commit history) and returns terminal `blocked` with
+touches (net diff or PR commit history) and returns a retryable result with
 manual UI-merge guidance instead of attempting a doomed API merge - FLEET_TOKEN
 intentionally has no Workflows write. request-changes cleanup arming is best-effort and
 fail-open: if the review posts but the target-side marker cannot be proven or
@@ -557,11 +557,6 @@ def _stale_pr_head_result(repo, number, expected, current, action):
     return None
 
 
-# GitHub's commit REST payload includes at most 300 files; beyond that the
-# file list is truncated and we cannot prove the commit is workflow-clean.
-_COMMIT_FILES_API_CAP = 300
-
-
 def _target_pr_url(owner, repo, number, pr=None):
     html = str((pr or {}).get("html_url") or "").strip()
     if html:
@@ -640,40 +635,36 @@ def _read_pr_commit_shas(slug, number, expected_count=None):
 def _read_commit_file_paths(slug, sha):
     """Return (paths, error_or_None) for one commit. Fail closed on truncation."""
     try:
-        data = core.gh_rest("/repos/%s/commits/%s" % (slug, sha))
+        data = core.gh_rest(
+            "/repos/%s/commits/%s?per_page=100" % (slug, sha),
+            paginate=True,
+            slurp=True,
+        )
     except RuntimeError as e:
         return None, "could not list files for commit %s: %s" % (
             sha[:8],
             str(e)[:100],
         )
-    if not isinstance(data, dict):
+    pages = data if isinstance(data, list) else [data]
+    if not pages or not all(isinstance(page, dict) for page in pages):
         return None, "commit %s returned unexpected data" % sha[:8]
-    if "files" not in data:
-        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
-        if stats.get("total") in (0, "0"):
-            return [], None
-        return None, "commit %s file list missing" % sha[:8]
-    files = data.get("files")
-    if files is None:
-        return [], None
-    if not isinstance(files, list):
-        return None, "commit %s file list unexpected" % sha[:8]
-    if len(files) >= _COMMIT_FILES_API_CAP:
-        return None, "commit %s file list may be truncated at %s" % (
-            sha[:8],
-            _COMMIT_FILES_API_CAP,
-        )
     paths = []
-    for row in files:
-        if isinstance(row, dict) and row.get("filename"):
-            paths.append(str(row["filename"]))
-        elif isinstance(row, str) and row.strip():
-            paths.append(row.strip())
+    for page in pages:
+        if "files" not in page:
+            return None, "commit %s file list missing" % sha[:8]
+        files = page.get("files")
+        if not isinstance(files, list):
+            return None, "commit %s file list unexpected" % sha[:8]
+        for row in files:
+            if isinstance(row, dict) and row.get("filename"):
+                paths.append(str(row["filename"]))
+            elif isinstance(row, str) and row.strip():
+                paths.append(row.strip())
     return paths, None
 
 
 def _workflow_merge_block(owner, repo, number, pr):
-    """If this PR must not be API-merged, return (message, 'blocked'); else None.
+    """If this PR must not be API-merged, return a retryable result; else None.
 
     Detects `.github/workflows/**` in the PR's net three-dot file list OR in any
     commit in the PR's history (history-only touches 403 the same way as net-diff
@@ -689,7 +680,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "BLOCKED: could not verify whether %s#%s touches workflow files (%s). "
             "Not merging. Review and merge by hand in the GitHub UI if "
             "appropriate: %s" % (repo, number, err, url),
-            "blocked",
+            "retryable",
         )
     net_hits = core._workflow_merge_gated_files(paths)
     if net_hits:
@@ -700,7 +691,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "token intentionally has no Workflows write permission, so an API "
             "merge would fail with 403. Review the workflow changes and merge "
             "by hand in the GitHub UI: %s" % (repo, number, sample, more, url),
-            "blocked",
+            "retryable",
         )
     shas, err = _read_pr_commit_shas(slug, number, (pr or {}).get("commits"))
     if err:
@@ -708,7 +699,7 @@ def _workflow_merge_block(owner, repo, number, pr):
             "BLOCKED: could not verify whether %s#%s's commit history touches "
             "workflow files (%s). Not merging. Review and merge by hand in the "
             "GitHub UI if appropriate: %s" % (repo, number, err, url),
-            "blocked",
+            "retryable",
         )
     for sha in shas:
         cpaths, err = _read_commit_file_paths(slug, sha)
@@ -718,7 +709,7 @@ def _workflow_merge_block(owner, repo, number, pr):
                 "touches (%s). Not merging. Review and merge by hand in the "
                 "GitHub UI if appropriate: %s"
                 % (sha[:8], repo, number, err, url),
-                "blocked",
+                "retryable",
             )
         hits = core._workflow_merge_gated_files(cpaths)
         if hits:
@@ -730,7 +721,7 @@ def _workflow_merge_block(owner, repo, number, pr):
                 "token intentionally has no Workflows write permission, so an "
                 "API merge would fail with 403. Review and merge by hand in the "
                 "GitHub UI: %s" % (repo, number, sha[:8], sample, more, url),
-                "blocked",
+                "retryable",
             )
     return None
 
@@ -808,7 +799,7 @@ def do_merge(
             )
     # Option B: never attempt API merge of a workflow-touching PR. FLEET_TOKEN
     # intentionally has no Workflows write; pre-detect and leave the card
-    # open/blocked with manual UI-merge guidance instead of a doomed 403.
+    # open/actionable with manual UI-merge guidance instead of a doomed 403.
     workflow_block = _workflow_merge_block(owner, repo, number, pr)
     if workflow_block:
         return outcome(*workflow_block)
@@ -1022,7 +1013,8 @@ def cmd_execute():
 
     set_output("result_message", message)
     set_output("terminal_state", terminal)
-    set_output("success", "true" if terminal not in ("error",) else "false")
+    set_output("success", "true" if terminal not in ("error", "retryable") else "false")
+    print("decision result: %s" % re.sub(r"[\r\n]+", " ", str(message)))
 
 
 # --------------------------------------------------------------------------- #
