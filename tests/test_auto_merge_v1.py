@@ -2165,6 +2165,7 @@ def test_triage_persists_trusted_policy_revisions():
     triage = {
         "summary": "A focused change.",
         "product_implications": "No broad behavior change.",
+        "evidence": "target.txt: quoted a line from the change",
         "recommended_next_step": "merge - narrow and safe.",
         "automerge": ELIGIBLE_A,
     }

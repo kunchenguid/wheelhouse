@@ -397,6 +397,7 @@ def test_render_triage_section_has_no_mentions_and_caches_sha():
         triage={
             "summary": "Updates @alice-facing copy.",
             "product_implications": "Routine internal polish for @bob.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - low product risk.",
         }
     )
@@ -431,6 +432,7 @@ def test_render_triage_section_qualifies_cross_repo_refs():
         triage={
             "summary": "Landed in #127 per the linked comment.",
             "product_implications": "Already superseded by #128.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "decline - fixed by #127's hook rewrite.",
         }
     )
@@ -458,6 +460,7 @@ def test_structured_recommendation_persists_and_renders_accept():
         triage={
             "summary": "Reporter hit a duplicate of #127.",
             "product_implications": "Routine duplicate closure.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "decline",
             "recommended_reason": "Duplicate of #127; fixed on default.",
         }
@@ -510,6 +513,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Ready to merge.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "merge",
             "recommended_reason": "Green checks.",
         }
@@ -524,6 +528,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Ready to merge.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - green checks.",
         }
     )
@@ -541,6 +546,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Close it.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "merge",
             "recommended_reason": "Issues cannot merge.",
         }
@@ -554,6 +560,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Close it.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "decline",
             "recommended_reason": "",
         }
@@ -567,6 +574,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Needs maintainer discussion.",
             "product_implications": "Owner should decide whether to comment.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "discuss",
             "recommended_reason": "This should not become a target comment.",
         }
@@ -598,6 +606,7 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         triage={
             "summary": "Safe.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "approve-ci",
             "recommended_reason": "Checks are waiting.",
         },
@@ -615,6 +624,7 @@ def test_triage_section_owner_repo_drive_qualification_not_model_text():
         {
             "summary": "Duplicate of other/repo#9 and bare #9.",
             "product_implications": "n/a.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - trivial.",
         }
     )
@@ -641,6 +651,7 @@ def test_body_with_triage_result_threads_owner_to_target_slug():
         triage={
             "summary": "See #7 for background.",
             "product_implications": "Routine.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - safe.",
         },
         owner="acme",
@@ -656,6 +667,7 @@ def test_recommended_next_step_is_conservative_when_unexpected():
         {
             "summary": "Adds a feature.",
             "product_implications": "Needs product review.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "ship eventually after discussion.",
         }
     )
@@ -677,6 +689,7 @@ def test_triage_requires_complete_structured_json():
             {
                 "summary": "Adds a feature.",
                 "product_implications": "Routine work.",
+                "evidence": "target.txt: quoted a line from the change",
             }
         )
         is None,
@@ -687,6 +700,7 @@ def test_triage_requires_complete_structured_json():
             {
                 "summary": "Adds a feature.",
                 "product_implications": "",
+                "evidence": "target.txt: quoted a line from the change",
                 "recommended_next_step": "merge - safe.",
             }
         )
@@ -698,6 +712,7 @@ def test_triage_requires_complete_structured_json():
             {
                 "summary": "Adds a feature.",
                 "product_implications": ["routine"],
+                "evidence": "target.txt: quoted a line from the change",
                 "recommended_next_step": "merge - safe.",
             }
         )
@@ -706,6 +721,92 @@ def test_triage_requires_complete_structured_json():
     check(
         "parse: error JSON text rejected",
         rc.parse_triage_json('{"error":"timeout"}') is None,
+    )
+
+
+def test_triage_requires_evidence_field():
+    """Pass-by-reference: the prompt ships NO PR content, so a valid triage MUST
+    carry the required `evidence` field (verbatim quotes the model copied from
+    the on-disk files it read). A run that never opened the files cannot produce
+    it, so normalize_triage fails closed - the same no-result path the missing/
+    invalid-schema cases already take. Evidence is validation-only: it must not
+    leak into the rendered triage dict."""
+    complete = {
+        "summary": "Adds a feature.",
+        "product_implications": "Routine.",
+        "recommended_next_step": "merge - safe.",
+        "evidence": 'target.txt: "def grok(): ..."',
+    }
+    check("evidence: complete result accepted", rc.normalize_triage(complete) is not None)
+    check(
+        "evidence: rendered triage does not leak the raw evidence field",
+        "evidence" not in (rc.normalize_triage(complete) or {}),
+    )
+    missing = dict(complete)
+    missing.pop("evidence")
+    check("evidence: missing evidence rejected", rc.normalize_triage(missing) is None)
+    blank = dict(complete, evidence="   ")
+    check("evidence: blank evidence rejected", rc.normalize_triage(blank) is None)
+    nonstr = dict(complete, evidence=["target.txt: quote"])
+    check("evidence: non-string evidence rejected", rc.normalize_triage(nonstr) is None)
+    check(
+        "evidence: parse_triage_json rejects a complete-but-evidence-less result",
+        rc.parse_triage_json(
+            json.dumps(
+                {
+                    "summary": "Adds a feature.",
+                    "product_implications": "Routine.",
+                    "recommended_next_step": "merge - safe.",
+                }
+            )
+        )
+        is None,
+    )
+
+
+def test_evidence_anchor_ok_catches_fabrication():
+    """The deterministic lazy/fabrication guard the trusted triage-apply step
+    runs against the on-disk target.txt. A quote genuinely present in the target
+    content passes (whitespace/case-insensitively); a fully fabricated quote is
+    rejected; and a checker-side empty target is fail-open handled by the caller
+    (evidence_anchor_ok itself returns False on an empty haystack, and
+    _triage_evidence_verified turns an unreadable target.txt into a skip)."""
+    target = (
+        "<target-content repo=\"acme/widgets\" number=\"7\">\n"
+        "# Add Grok support\n\n"
+        "+def grok_request(prompt):\n"
+        "+    return call_model('grok', prompt)\n"
+        "</target-content>\n"
+    )
+    good = 'target.txt: "def grok_request(prompt):" and "call_model(\'grok\', prompt)"'
+    check("anchor: a genuine on-disk quote verifies", rc.evidence_anchor_ok(good, target))
+    check(
+        "anchor: whitespace/case differences still verify",
+        rc.evidence_anchor_ok('target.txt: "DEF   grok_request(prompt):"', target),
+    )
+    fabricated = 'target.txt: "def totally_made_up_symbol(xyz):" was added here'
+    check(
+        "anchor: a fabricated quote is rejected",
+        rc.evidence_anchor_ok(fabricated, target) is False,
+    )
+    check(
+        "anchor: evidence with no quoted spans is rejected",
+        rc.evidence_anchor_ok("I read the files, trust me", target) is False,
+    )
+    check(
+        "anchor: empty on-disk target -> not verifiable (False)",
+        rc.evidence_anchor_ok(good, "") is False,
+    )
+    check(
+        "anchor: trivially short quotes do not count as evidence",
+        rc.evidence_anchor_ok('target.txt: "def"', target) is False,
+    )
+    # _triage_evidence_verified fails OPEN when target.txt cannot be read, so a
+    # checker-side infra failure never rejects a genuine triage (the required
+    # non-empty evidence schema field remains the primary guard).
+    check(
+        "anchor: unreadable target.txt -> verification skipped (fail open)",
+        rc._triage_evidence_verified({"evidence": good}, "/no/such/target.txt") is True,
     )
 
 
@@ -729,6 +830,7 @@ def test_body_helpers_queue_and_apply_result():
         triage={
             "summary": "Adds lightweight context.",
             "product_implications": "Routine internal change; no product discussion needed.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - checks are green and scope is small.",
         },
     )
@@ -746,6 +848,7 @@ def test_body_helpers_queue_and_apply_result():
         triage={
             "summary": "Adds lightweight context.",
             "product_implications": "Routine internal change.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_action": "request-changes",
             "recommended_reason": "Please add a regression test for #7.",
         },
@@ -774,6 +877,7 @@ def test_body_helpers_queue_and_apply_result():
             {
                 "summary": "Adds lightweight context.",
                 "product_implications": "Routine internal change.",
+                "evidence": "target.txt: quoted a line from the change",
                 "recommended_action": "request-changes",
                 "recommended_reason": "Please add a regression test for #8.",
             }
@@ -862,6 +966,7 @@ def test_automated_status_lines_are_labeled_only_on_allowlist():
     triage = {
         "summary": "Waited for background terminal 60s.",
         "product_implications": "Routine product note.",
+        "evidence": "target.txt: quoted a line from the change",
         "recommended_next_step": "merge - safe.",
     }
     section = rc.triage_section(triage)
@@ -957,6 +1062,7 @@ def test_triage_completion_preserves_queued_pr_context():
     successful = {
         "summary": "Adds lightweight context.",
         "product_implications": "Routine internal change.",
+        "evidence": "target.txt: quoted a line from the change",
         "recommended_next_step": "merge - scope is small.",
     }
     for label, triage, error in (
@@ -1454,6 +1560,7 @@ def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
         triage={
             "summary": "Requests @alice-facing dark mode support.",
             "product_implications": "Routine feature ask from @bob.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "look closer - low effort, decent signal.",
         }
     )
@@ -1554,6 +1661,7 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         triage={
             "summary": "Wants a bulk export option.",
             "product_implications": "Modest ask; a few users would benefit.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "discuss - worth a quick maintainer opinion.",
         },
     )
@@ -1575,6 +1683,7 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         triage={
             "summary": "Stale.",
             "product_implications": "Stale.",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "discuss - stale.",
         },
     )
@@ -2086,8 +2195,14 @@ def test_triage_workflow_security_wiring():
             and 'echo "prompt<<$delimiter"' in run,
         )
         check(
-            "workflow: target diff is capped before prompt output",
-            "diff_limit_bytes=120000" in run
+            # Pass-by-reference: the cap now bounds the on-disk target.txt the
+            # model READS, not the Claude action prompt/ALL_INPUTS (the diff is
+            # never inlined), so it is generous (>= 1 MB) rather than the old
+            # 120000 execve-limited embed cap. It still fails closed on a diff
+            # that exceeds even this cap (truncated -> DIFF_COMPLETE=false).
+            "workflow: on-disk target diff is generously capped, not embed-capped",
+            "diff_limit_bytes=1500000" in run
+            and "diff_limit_bytes=120000" not in run
             and 'head -c "$((diff_limit_bytes + 1))"' in run
             and "[diff truncated after %s bytes]" in run,
         )
@@ -2427,6 +2542,7 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
         triage={
             "summary": "does X",
             "product_implications": "low risk",
+            "evidence": "target.txt: quoted a line from the change",
             "recommended_next_step": "merge - straightforward",
         },
         owner="acme",
@@ -3033,6 +3149,7 @@ def test_update_card_triage_publishes_held_card_on_success():
                 triage={
                     "summary": "does X",
                     "product_implications": "low risk",
+                    "evidence": "target.txt: quoted a line from the change",
                     "recommended_next_step": "merge - straightforward",
                 },
                 owner="acme",
@@ -3181,6 +3298,7 @@ def test_update_card_triage_unheld_card_behavior_unchanged():
             triage={
                 "summary": "does X",
                 "product_implications": "low risk",
+                "evidence": "target.txt: quoted a line from the change",
                 "recommended_next_step": "merge - straightforward",
             },
             owner="acme",
@@ -3239,6 +3357,8 @@ def main():
     test_structured_recommendation_persists_and_renders_accept()
     test_accept_checkbox_is_conditional_and_never_ci_approval()
     test_triage_requires_complete_structured_json()
+    test_triage_requires_evidence_field()
+    test_evidence_anchor_ok_catches_fabrication()
     test_body_helpers_queue_and_apply_result()
     test_automated_status_lines_are_labeled_only_on_allowlist()
     test_body_helpers_queue_and_apply_result_for_issue()

@@ -211,6 +211,10 @@ ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
 )
 
 TRIAGE_FIELDS = ("summary", "product_implications")
+# Required by the pass-by-reference prompt: verbatim quotes the model copied
+# from the on-disk target.txt / target-src it read. Validation-only, never
+# rendered on the card (see normalize_triage / evidence_anchor_ok).
+EVIDENCE_FIELD = "evidence"
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
 TRIAGE_UNAVAILABLE = "Auto triage unavailable for this version."
@@ -686,6 +690,18 @@ def normalize_triage(data):
         if not cleaned:
             return None
         triage[field] = cleaned
+    # Pass-by-reference triage ships NO PR content in the prompt: the model must
+    # Read target.txt / target-src to say anything grounded. Require a non-empty
+    # `evidence` field (2-4 short verbatim quotes it copied from what it read) so
+    # a run that never opened the files cannot yield a valid structured result -
+    # it fails closed to the existing no-result path (fail-open publish), the
+    # same user-visible outcome as today's missing advisory section. The value
+    # is validation-only and is deliberately NOT rendered on the card;
+    # triage-apply additionally anchor-checks it against the on-disk target.txt
+    # so fabricated quotes are rejected too (see evidence_anchor_ok).
+    evidence = data.get(EVIDENCE_FIELD)
+    if not isinstance(evidence, str) or not evidence.strip():
+        return None
     action = normalize_recommendation_action(data.get("recommended_action"))
     reason = ""
     if isinstance(data.get("recommended_reason"), str):
@@ -714,6 +730,75 @@ def normalize_triage(data):
     if am:
         triage["automerge_verdict"] = am
     return triage
+
+
+_EVIDENCE_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"')
+
+
+def _normalize_evidence_text(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def evidence_anchor_ok(evidence, target_text, min_quote_len=12):
+    """Deterministic lazy/fabrication guard for pass-by-reference triage.
+
+    The prompt requires the model to return `evidence`: 2-4 short verbatim
+    quotes, each copied from the on-disk target.txt (the pre-fetched PR
+    title/body/diff) or a target-src file it Read. This confirms that at least
+    one meaningful double-quoted span in `evidence` actually appears
+    (whitespace- and case-insensitively) in the on-disk target.txt. A run that
+    never opened the files can only fabricate quotes, so its anchors are absent
+    and this returns False -> the trusted triage-apply step treats it as no
+    valid structured result (fail-open publish), exactly like today's no-JSON
+    outcome.
+
+    Lenient on purpose so a genuine triage is never regressed: it requires only
+    ONE genuine quote (paraphrase or format drift in the others is fine, and
+    context-only quotes from target-src simply do not count toward the bar since
+    the diff itself lives in target.txt). It catches wholesale fabrication,
+    which is the failure this defends against. The caller invokes it only when
+    target.txt was actually read from disk; a checker-side read failure skips
+    the check (see _triage_evidence_verified) rather than rejecting a real
+    result."""
+    quotes = _EVIDENCE_QUOTE_RE.findall(evidence or "")
+    if not quotes:
+        return False
+    hay = _normalize_evidence_text(target_text)
+    if not hay:
+        return False
+    for quote in quotes:
+        needle = _normalize_evidence_text(quote)
+        if len(needle) >= min_quote_len and needle in hay:
+            return True
+    return False
+
+
+def _read_target_text(path, limit=4_000_000):
+    """Read the on-disk target.txt for the evidence anchor check, size-bounded.
+    Returns "" on any read failure so the caller can fail open (skip the anchor
+    check) rather than rejecting a genuine triage over a checker-side hiccup."""
+    if not path:
+        return ""
+    try:
+        if not os.path.isfile(path):
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(limit)
+    except OSError:
+        return ""
+
+
+def _triage_evidence_verified(data, target_file):
+    """Anchor-check the parsed triage's evidence quotes against the on-disk
+    target.txt. Fail-OPEN when target.txt is unreadable/empty (the required
+    non-empty `evidence` schema field in normalize_triage is the primary guard,
+    and a checker-side infra failure must never reject a real triage);
+    fail-CLOSED only when target.txt is readable AND no quote matches it."""
+    target_text = _read_target_text(target_file)
+    if not target_text:
+        return True
+    evidence = data.get(EVIDENCE_FIELD) if isinstance(data, dict) else ""
+    return evidence_anchor_ok(evidence, target_text)
 
 
 def _coerce_verdict_bool(value):
@@ -1814,6 +1899,14 @@ def main():
     ta.add_argument("--execution-file", required=True)
     ta.add_argument("--vision-sha", default="")
     ta.add_argument("--base-sha", default="")
+    ta.add_argument(
+        "--target-file",
+        default="",
+        help="Path to the on-disk target.txt used to anchor-check the model's "
+        "evidence quotes (pass-by-reference lazy/fabrication guard). Optional: "
+        "when absent or unreadable the anchor check is skipped and the required "
+        "non-empty evidence schema field remains the primary guard.",
+    )
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
@@ -1866,6 +1959,12 @@ def main():
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         result_text = extract_claude_result(args.execution_file)
         triage = parse_triage_json(result_text)
+        if triage and not _triage_evidence_verified(triage, args.target_file):
+            print(
+                "::warning::auto triage evidence quotes did not match the "
+                "fetched target content"
+            )
+            triage = None
         if triage:
             if update_card_triage(
                 args.issue,
