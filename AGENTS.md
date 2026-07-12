@@ -985,20 +985,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   malformed/stale verdicts, the 20-file/1000-line boundaries, base-branch-only
   VISION reads, the self-authorization exclusion, live re-checks, the audit
   ledger/resolved record, and the kill switches, all offline).
-  **Claim-time author duality (fleet-wide silent-no-merge bug, report §5.1).**
-  `cards.json` is built from the REST issues API (`.user.login ==
-  "github-actions[bot]"`), but the claim/validate/recover path re-reads each card
-  LIVE through `render_card.get_card` (`gh issue view --json author`), whose
-  `author.login` is the GraphQL bot-actor spelling `app/github-actions`. The
-  trust check compares against `CARD_AUTOMATION_AUTHOR = "github-actions[bot]"`,
-  so before the fix EVERY live-re-read card failed identity and auto-merge never
-  claimed or merged anything. `auto_merge._canonical_card_author` collapses ONLY
-  that one documented duality (`app/github-actions` -> `github-actions[bot]`) at
-  the `_trusted_card_identity` boundary; it is NOT a general normalizer (no
-  prefix stripping, case folding, or allowlist), so fail-closed rejection of
-  every other author is preserved. Regression fixtures MUST be real
-  `get_card`-shaped (`author` a `{"login": ...}` dict) or they will mock past
-  this bug, which is exactly how the original suite missed it.
+  Claim-time card identity must account for GitHub's one API-specific automation
+  actor duality: REST issue rows use `github-actions[bot]`, while
+  `render_card.get_card` returns `app/github-actions` from GraphQL.
+  `auto_merge._canonical_card_author` may map only that exact GraphQL spelling to
+  the REST spelling at the `_trusted_card_identity` boundary.
+  It must not strip prefixes, fold case, or accept any other alias.
+  Keep the regression fixtures in `tests/test_auto_merge_v1.py`
+  `get_card`-shaped, with `author` as a `{"login": ...}` dict.
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`
   also listens for the legacy `triage-item` (`types: [wheelhouse-item,
   triage-item]`). It is a cross-repo wire contract: source repos onboarded before
