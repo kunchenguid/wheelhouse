@@ -44,14 +44,7 @@ CFG = {
     "test_check_patterns": ["build-and-test"],
 }
 
-# axi's live config (card #543 fix): the JS SDK gate `build-and-test` and the
-# catalog-consistency gate `drift`, which run on disjoint paths. Verified against
-# live axi PRs on 2026-07-11: an SDK PR (e.g. #84) runs `build-and-test` and NOT
-# `drift`; a catalog/docs PR (e.g. #87/#89) runs `drift` and NOT `build-and-test`.
-AXI_CFG = {
-    "compliance_check": "PR must be raised via no-mistakes",
-    "test_check_patterns": ["build-and-test", "drift"],
-}
+AXI_CFG = core.load_config()["repos"]["axi"]
 
 
 def check_run(name, conclusion="SUCCESS", status="COMPLETED"):
