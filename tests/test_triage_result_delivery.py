@@ -135,8 +135,14 @@ def test_extract_result_survives_oversize_transcript():
         # the RAW verdict dict) -> update_card_triage(triage=<raw dict>).
         result_text = rc.extract_claude_result(out_file)
         parsed = rc.parse_triage_json(result_text)
-        check("deliver: extract_claude_result recovers the verdict text", bool(result_text))
-        check("deliver: parse_triage_json accepts the delivered verdict", parsed is not None)
+        check(
+            "deliver: extract_claude_result recovers the verdict text",
+            bool(result_text),
+        )
+        check(
+            "deliver: parse_triage_json accepts the delivered verdict",
+            parsed is not None,
+        )
         check(
             "deliver: normalize_triage confirms a valid structured verdict",
             rc.normalize_triage(parsed) is not None if parsed else False,
@@ -221,7 +227,10 @@ def test_extract_result_cli_roundtrip():
             capture_output=True,
             text=True,
         )
-        check("cli: extract-result exits 0 on a valid oversize transcript", proc.returncode == 0)
+        check(
+            "cli: extract-result exits 0 on a valid oversize transcript",
+            proc.returncode == 0,
+        )
         check("cli: extract-result wrote the compact file", os.path.exists(out_file))
         if os.path.exists(out_file):
             check(
@@ -246,7 +255,10 @@ def test_extract_result_cli_roundtrip():
             capture_output=True,
             text=True,
         )
-        check("cli: extract-result exits non-zero when no result exists", proc2.returncode != 0)
+        check(
+            "cli: extract-result exits non-zero when no result exists",
+            proc2.returncode != 0,
+        )
 
 
 def test_triage_yml_extracts_before_size_gate():

@@ -1034,13 +1034,8 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   Optional `READONLY_TOKEN` search uses the unchanged `wheelhouse-search` wrapper and remains untrusted evidence only.
   The Claude action allows only `github-actions[bot]`, never `*`, because scan/ingest dispatches use `github.token`.
   `render_card.py triage-apply`/`triage-fail` take a kind-agnostic `--revision` CLI argument (a PR's head SHA or an issue's `updated_at`), replacing the old pr-review-only `--head-sha` flag name.
-  **A valid model verdict is never discarded because the transcript is bulky (card #556, delivered-result-drop).**
-  Under pass-by-reference the agentic `claude-execution-output.json` legitimately grows into the hundreds of KB (every file the model Reads is recorded), so the old `triage-result` step that dropped the whole execution file once it exceeded 262144 bytes was throwing away already-produced, successful structured results.
-  The fix is STRUCTURAL, not a bigger cap: `triage-result` now calls `render_card.py extract-result` (`extract_result_to_file`) to pull the COMPACT final result event out of the transcript FIRST, independent of any size gate, and writes only that tiny events file to `result_path` for `triage-apply` to consume unchanged.
-  The 262144 cap survives but now bounds only a retained debug `transcript.json` copy - it never gates result delivery.
-  This is deliberately scoped to the delivered-then-dropped defect; it does NOT touch the separate #551/#547 `parse_triage_json`/`normalize_triage` schema-miss class (a verdict that was delivered under the cap but failed to parse/normalize).
-  `deep-review.yml` already extracts its verdict straight from `execution_file` via `json.load` with no size cap, so this mechanism was never present there.
-  `tests/test_triage_result_delivery.py` pins delivered-result-never-dropped end-to-end.
+  Result delivery is independent of transcript retention: `triage-result` extracts the compact final result event before applying the 262144-byte cap solely to the retained debug transcript.
+  `tests/test_triage_result_delivery.py` guards this ordering and the uncapped direct extraction in `deep-review.yml`.
 - **`deep-review.yml` - ALWAYS-ON, code-grounded (no enable flag).** Triggered by ticking the **Investigate** box on a card, by the repo owner applying the `needs-deep-review` label, or by the repo owner running `workflow_dispatch` with only `issue=...` for direct verification.
   Bot-dispatched Investigate runs use the immutable target inputs passed by `decision-handler.yml`; owner issue-only runs and manual label runs parse the current card body with `github.token`.
   It checks out the TARGET's code read-only (`FLEET_TOKEN`, `persist-credentials: false`, the PR head for a review card / the default branch for an issue card) and runs Claude restricted to `--allowedTools Read,Grep,Glob` over that checkout when search is disabled - so it traces real code paths, never just the diff, and can NEVER execute the target's code.

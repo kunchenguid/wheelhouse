@@ -571,12 +571,8 @@ jobs:
             if [ -L "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
               echo "::warning::auto triage produced no regular execution file"
             else
-              # Card #556 (STRUCTURAL fix, not a bigger cap): extract the COMPACT
-              # final result FIRST, independent of transcript size, so a valid
-              # model verdict is never discarded just because the agentic
-              # (pass-by-reference) transcript grew bulky. extract-result
-              # json.loads the whole file (fine at MB scale) and writes ONLY the
-              # small result event that triage-apply consumes.
+              # Extract the compact final result before considering transcript
+              # retention, so transcript size can never gate verdict delivery.
               if "$TRUSTED_PYTHON" "$TRUSTED_SRC/scripts/render_card.py" \
                    extract-result \
                    --execution-file "$EXECUTION_FILE" \
@@ -585,9 +581,7 @@ jobs:
               else
                 echo "::warning::auto triage produced no extractable result"
               fi
-              # Retain a size-BOUNDED copy of the full transcript as a debug
-              # artifact. This size discipline governs only what transcript we
-              # KEEP for troubleshooting; it never gates result delivery above.
+              # The size cap applies only to the retained debug transcript.
               size=$(wc -c < "$EXECUTION_FILE")
               size=${size//[[:space:]]/}
               if [ "$size" -gt 262144 ]; then

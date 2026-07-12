@@ -1853,19 +1853,11 @@ def extract_claude_result(path):
 
 
 def extract_result_to_file(execution_file, out_file):
-    """Extract the COMPACT final result from a (possibly large) Claude
-    execution transcript and write it as a tiny events file that
-    `extract_claude_result` consumes unchanged.
+    """Write the final result as a compact events file.
 
-    This is deliberately INDEPENDENT of any transcript-size enforcement
-    (card #556). Under the pass-by-reference triage design the agentic
-    transcript legitimately grows into the hundreds of KB (every file the
-    model Reads is recorded), so gating result delivery on transcript size
-    silently discarded valid, already-produced model verdicts. This helper
-    json.loads the whole transcript (fine at MB scale) and writes ONLY the
-    small `result` string, so a bulky transcript can never drop a valid
-    verdict. The size discipline in triage.yml governs only what full
-    transcript is retained as a debug artifact, never this result delivery.
+    Result extraction stays independent of transcript-retention limits so the
+    transcript size cannot gate verdict delivery. The output remains compatible
+    with `extract_claude_result`.
 
     Returns True when a non-empty result was extracted and written.
     """
@@ -1962,7 +1954,7 @@ def main():
         "--out",
         required=True,
         help="Path to write the compact result events file that triage-apply "
-        "consumes. Written independent of transcript size (card #556).",
+        "consumes, independent of transcript size.",
     )
 
     qt = sub.add_parser("queue-triage")
@@ -2025,10 +2017,7 @@ def main():
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
             )
     elif args.cmd == "extract-result":
-        # Card #556: pull the compact final result out of the (possibly large)
-        # Claude transcript BEFORE any transcript-size enforcement, so a valid
-        # verdict is never discarded because the transcript is bulky. Writes a
-        # tiny events file that triage-apply reads unchanged.
+        # Keep result delivery independent of transcript-retention limits.
         if extract_result_to_file(args.execution_file, args.out):
             print("extracted compact auto triage result to %s" % args.out)
         else:
