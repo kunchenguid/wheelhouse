@@ -2566,6 +2566,46 @@ def _mergeable_for_ci_noop_nudge(pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNS
     return None
 
 
+def _ci_wait_refresh_item(slug, name, pr, auto_triage_enabled):
+    """A refresh-ONLY pr-review item for a PR that is mid fork-CI approval/run wait.
+
+    When a source PR's fork CI is auto-approved this scan (or its already-approved
+    checks are still running), the PR emits NO worklist item while it awaits
+    terminal checks (`needs-ci-approval` is consumed by the auto-approve, and
+    `ci-running` is not in `NEEDS_MAINTAINER`). An EXISTING pr-review card for
+    that PR would therefore keep displaying the pre-rebase head's now-superseded
+    state - e.g. a stale `merge-ready`/`tests=green` - masquerading as current.
+    reconcile uses this item to REFRESH that existing card in place to the new
+    head's honest pending state so it can no longer masquerade after the scan
+    observes the head change. It NEVER creates a card from this item (new-card
+    creation still defers until checks are terminal) and reconcile never queues
+    triage for this transient revision. The `comp`/`tests` carried here are the
+    real scanned values at the new head (`none` when CI has not produced a
+    signal yet, or `pending` while checks run - NEVER `green`), so the refreshed
+    card visibly stops claiming a passed revision."""
+    head = pr.get("head_sha", "") or ""
+    return {
+        "repo": name,
+        "number": pr["number"],
+        "kind": "pr-review",
+        "head_sha": head,
+        "updated_at": pr.get("updated_at", "") or "",
+        "title": pr["title"],
+        "author": pr["author"],
+        "bucket": pr["bucket"],
+        "comp": pr["comp"],
+        "tests": pr["tests"],
+        "url": "https://github.com/%s/pull/%d" % (slug, pr["number"]),
+        "summary": "head moved to %s - fork CI was re-approved and its checks "
+        "are re-running; a fresh review is pending." % (head[:8] or "?"),
+        "recommendation": "Checks are re-running at the new head. Wait for them "
+        "to reach a terminal result, then re-review.",
+        "priority": "low",
+        "base_sha": pr.get("base_sha") or "",
+        "auto_triage": auto_triage_enabled,
+    }
+
+
 def build_repo(
     owner,
     repo_cfg,
@@ -2822,6 +2862,15 @@ def build_repo(
 
     items = []
     ci_noop_nudge_candidates = []
+    # PRs whose fork CI this scan FRESHLY auto-approved (a new approval that will
+    # produce pending checks). Combined below with `ci-running` PRs into the
+    # "mid fork-CI approval/run wait" set that reconcile FREEZES (never consume a
+    # card merely because its target is awaiting terminal checks) and refreshes
+    # (anti-masquerade). A `noop`/verified-empty approve is NOT collected - there
+    # is nothing pending to wait for. Author-excluded PRs are excluded so the
+    # existing author-filter self-heal is never blocked (they never carry a
+    # contributor pr-review card anyway).
+    ci_just_approved = []
     for pr in enriched:
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
@@ -2899,6 +2948,11 @@ def build_repo(
                 )
                 if approve_status == "noop" and not author_excluded:
                     ci_noop_nudge_candidates.append(pr)
+                if approve_status == "approved" and not author_excluded:
+                    # This scan just approved this fork PR's CI; its checks are now
+                    # pending. Freeze/refresh any existing card for it until those
+                    # checks reach a terminal result (see `_ci_wait_refresh_item`).
+                    ci_just_approved.append(pr["number"])
                 continue  # provably safe (or nothing to approve) -> NO card
             # Log exactly one per-PR outcome line so a silent approve failure
             # can never hide in the scan log. The card body itself is unchanged
@@ -3000,6 +3054,24 @@ def build_repo(
         )
         if w
     )
+    # PRs mid fork-CI approval/run wait this scan: a fresh auto-approve (checks
+    # now pending) OR a `ci-running` bucket (approved checks executing, not yet
+    # terminal). Both emit no worklist item, so reconcile must NEITHER consume
+    # nor refresh-with-stale an existing card for them - it FREEZES the card
+    # (approve -> wait-for-terminal -> classify continuity) and refreshes its
+    # display to the new head so an old-head card cannot masquerade as current
+    # after the scan observes the head change. Author-excluded PRs are omitted so
+    # the author-filter self-heal is never blocked. Both keys derive from the one
+    # `ci_wait_numbers` source, so they cannot drift.
+    enriched_by_number = {p["number"]: p for p in enriched}
+    ci_wait_numbers = sorted(
+        set(ci_just_approved)
+        | {
+            p["number"]
+            for p in enriched
+            if p["bucket"] == "ci-running" and not p["author_excluded"]
+        }
+    )
     result = {
         "name": name,
         "ok": True,
@@ -3012,6 +3084,20 @@ def build_repo(
         # create/close/consume a card.
         "indeterminate_pr_numbers": [
             p["number"] for p in enriched if p["bucket"] == MERGEABILITY_PENDING
+        ],
+        # Freeze set for the approve/wait window (see above). reconcile skips
+        # consuming a PR-kind card whose target number is here, exactly like the
+        # indeterminate freeze.
+        "ci_wait_pr_numbers": ci_wait_numbers,
+        # Anti-masquerade payload: a refresh-ONLY pr-review item per ci_wait PR so
+        # reconcile can update an existing stale card to the new head's pending
+        # state (never create a card, never queue triage for this revision).
+        "ci_wait_refresh_items": [
+            _ci_wait_refresh_item(
+                slug, name, enriched_by_number[n], triage_enabled
+            )
+            for n in ci_wait_numbers
+            if n in enriched_by_number
         ],
         "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
