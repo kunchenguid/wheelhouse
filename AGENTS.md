@@ -485,8 +485,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   The advisory `### Triage` section and hidden `triage_recommendation` state are
   removed from the trusted card context before the NL prompt is built, so a prior
   model recommendation cannot become an instruction to the intent-mapper.
-  When `READONLY_TOKEN` is absent, the LLM stays in the
-  legacy `--allowedTools Write` mode and receives no shell `GH_TOKEN`. When the
+  When `READONLY_TOKEN` is absent, the LLM receives
+  `Read,Grep,Glob,Write` and no shell `GH_TOKEN`. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
   `GH_TOKEN`, plus a narrow Bash allow-list for `wheelhouse-search`, which wraps
@@ -511,9 +511,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `FLEET_TOKEN`; without `READONLY_TOKEN` it receives no shell credential or
   shell tools, and with `READONLY_TOKEN` it only gets that read credential as the
   action `github_token` input and shell `GH_TOKEN` for context search through
-  `wheelhouse-search`. Target content and any search output reach it only as
-  delimited untrusted data inside the prompt, OR (for triage/deep-review) as code
-  already on disk from a
+  `wheelhouse-search`. Target content reaches every LLM path only as delimited
+  untrusted data in bounded files, while search output reaches the LLM only as
+  delimited untrusted prompt data. Triage/deep-review code is already on disk from a
   `persist-credentials: false` checkout, so NO acting token is left on disk for
   the LLM to read.
   `READONLY_TOKEN` is never used by `execute`, never used by stale
@@ -1054,13 +1054,24 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   Opt-in: inert unless `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN`
   present.
   `READONLY_TOKEN` is optional.
-  If it is absent, Claude stays in the legacy `--allowedTools Write` mode, writes
-  only `decision.json`, and runs no commands.
+  If it is absent, Claude stays in the legacy no-shell mode
+  (`--allowedTools Read,Grep,Glob,Write`), writes only `decision.json`, has no
+  `GH_TOKEN`, and runs no commands.
   If it is present, Claude also uses `READONLY_TOKEN` as the action
   `github_token` input and shell `GH_TOKEN`, plus the
-  `Bash(wheelhouse-search)` allow-list so it can run scoped read-only `gh`
-  searches across the target repo and configured fleet repos for related,
+  `Bash(wheelhouse-search)` allow-list (tools
+  `Read,Grep,Glob,Write,Bash(wheelhouse-search)`) so it can run scoped read-only
+  `gh` searches across the target repo and configured fleet repos for related,
   duplicate, or superseding PRs/issues and code context.
+  Like `triage.yml`/`deep-review.yml`, the NL prompt is pass-by-reference:
+  `nl-fetch` writes target title/body/diff to bounded on-disk `target.txt` with
+  an explicit truncation marker, while `apply_decision.build_nl_prompt` only
+  names the file.
+  Target content must never be inlined into the Claude `prompt:`/`ALL_INPUTS`.
+  If the LLM step fails before routing, the final recovery step posts one
+  bounded, content-free, marker-keyed card note with `github.token` and changes
+  no label, gate, or decision.
+  See `tests/test_nl_prompt_size.py`.
   Because `READONLY_TOKEN` is a fine-grained, public-read PAT, it cannot answer
   `claude-code-action`'s own `GET .../collaborators/{actor}/permission`
   triggering-actor check, so that read-only branch also sets
@@ -1113,6 +1124,7 @@ Run the unit tests:
 - `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network. Also covers the reviewed-event timestamp shape (`_timeline_event_time` reading `submitted_at`, so a maintainer/bot review no longer fails open as "reviewed event missing timestamp" and a review-caused `updated_at` bump is attributable while a truly unexplained bump still fails open), the re-read-by-id recovery (`_backfill_missing_review_times` recovering a missing review/`reviewed`-event timestamp, and a failed re-read failing open), and the widened provable-ask set (an un-armed, maintainer-reviewed, conflicting fork nudge backlog PR reminds first then closes on a later scan, still honoring keep-open and contributor-activity fail-open; and a nudged ci-noop `needs-ci-approval` PR that is authoritatively `mergeable == CONFLICTING` enters the same reminder-then-close lifecycle via `_pr_conflicting_for_cleanup`, while a non-conflicting `needs-ci-approval` PR - None/MERGEABLE/UNKNOWN - is skipped with no reads and honors keep-open).
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, `activity_reflected_at` remaining non-material and being folded into queued writes, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision). Also covers the pass-by-reference `evidence` schema field (`normalize_triage` requires a non-empty `evidence`, rejects missing/blank/non-string, and never leaks it into the rendered triage dict) and the `evidence_anchor_ok`/`_triage_evidence_verified` lazy/fabrication guard (a genuine on-disk quote verifies whitespace/case-insensitively, a fabricated quote or no-quote evidence is rejected, and an unreadable `target.txt` fails OPEN).
 - `python tests/test_triage_prompt_size.py` - the PASS-BY-REFERENCE prompt architecture (card #517 E2BIG fix), offline static YAML inspection: the load-bearing invariant that neither `triage.yml` nor `deep-review.yml` inlines target content into the Claude `prompt.txt` block (no `cat target.txt`/`cat vision.md`/`gh pr diff`/`gh pr view`/`gh api` there), the prompt stays under a small fixed byte budget and far below `MAX_ARG_STRLEN` raw AND json-escaped, a worst-case synthetic PR (diffs up to 5 MB) never enters the prompt and the prompt size is FLAT regardless of diff size (with a demonstration that the OLD inline design WOULD exceed the limit), the prompt names `target.txt`/`target-src/` and directs Read/Grep/Glob, target.txt is always written and its diff/comments are bounded (deep-review's formerly-UNCAPPED diff is now capped), the untrusted-data framing survives when content is read from files, both the READONLY_TOKEN and no-token Claude steps consume the same by-reference prompt (no-token step is Read/Grep/Glob only), the `DIFF_COMPLETE` fail-closed-on-oversize / complete-on-disk semantics, and the `--target-file` anchor-check wiring.
+- `python tests/test_nl_prompt_size.py` - offline guards for the bounded pass-by-reference NL prompt, tool isolation, explicit target truncation, and marker-keyed failure note.
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.

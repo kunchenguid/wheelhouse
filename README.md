@@ -436,7 +436,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
     What it *does* is refuse to *silently* auto-clear a repo that has such a workflow (contributor PRs raise a card with a warning, while excluded-author PRs log `suppressed-card`), and it flags **loudly** the genuine exploit shape - a `pull_request_target` workflow that also checks out the PR head (`ref: github.event.pull_request.head.*` / `github.head_ref`), which runs attacker-controlled code with your secrets.
     Treat that flag as a prompt to fix the upstream workflow, not as something this approval can contain.
 - **LLM injection defense (all LLM features).** Only trusted workflow prompts and owner/maintainer-authored text reach the LLM as instructions; the target diff/issue/code and optional search output are passed as clearly-delimited untrusted data, and the LLM is never given `FLEET_TOKEN` or write access to a fleet repo.
-  For `nl_decisions`, the no-`READONLY_TOKEN` branch keeps the legacy posture: one file-writing tool, no shell, and no model `GH_TOKEN`.
+  For `nl_decisions`, the no-`READONLY_TOKEN` branch can read the bounded on-disk target with `Read`/`Grep`/`Glob` and write `decision.json`, but has no shell or model `GH_TOKEN`.
   For auto triage and deep review, the no-`READONLY_TOKEN` branch is Read/Grep/Glob only, no shell, and no model `GH_TOKEN`.
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
   It cannot run arbitrary `gh` or `git` commands.
