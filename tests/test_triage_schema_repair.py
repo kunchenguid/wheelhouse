@@ -327,6 +327,31 @@ def test_repair_telemetry_and_non_materiality():
     )
 
 
+def test_same_revision_refresh_preserves_repair_telemetry():
+    it, queued = _queued_body()
+    repaired = rc.body_with_triage_result(
+        queued,
+        it["head_sha"],
+        triage=VALID,
+        repair_status="repaired",
+        repair_reason="field 'summary' is empty",
+        repair_candidate="present=[summary] missing=[]",
+    )
+    old_state = core.parse_state_block(repaired)
+    refreshed = rc._preserve_same_revision_triage(
+        rc.render(it)["body"], repaired, it, old_state, owner="kunchenguid"
+    )
+    state = core.parse_state_block(refreshed)
+    check(
+        "telemetry: same-revision refresh preserves all repair fields",
+        all(state.get(key) == old_state.get(key) for key in (
+            "triage_repair_status",
+            "triage_repair_reason",
+            "triage_repair_candidate",
+        )),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 6. No leakage of target/comment content into PERSISTED diagnostics (clause 6)
 # --------------------------------------------------------------------------- #
@@ -543,6 +568,7 @@ def main():
     test_plan_trigger_discipline()
     test_decide_routing()
     test_repair_telemetry_and_non_materiality()
+    test_same_revision_refresh_preserves_repair_telemetry()
     test_no_leak_in_persisted_diagnostics()
     test_cli_repair_prep()
     test_cli_triage_apply_repair_end_to_end()

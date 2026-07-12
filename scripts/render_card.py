@@ -1070,6 +1070,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_status",
         "triage_error",
         "triage_recommendation",
+        "triage_repair_status",
+        "triage_repair_reason",
+        "triage_repair_candidate",
         "automerge_verdict",
     ):
         if key in (old_state or {}):
