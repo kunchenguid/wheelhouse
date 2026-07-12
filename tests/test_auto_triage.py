@@ -2228,16 +2228,38 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: triage result stores only an isolated execution file",
-            "${RUNNER_TEMP}/wheelhouse-triage" in run
-            and 'cp "$EXECUTION_FILE" "$out_file"' in run,
+            "${RUNNER_TEMP}/wheelhouse-triage" in run,
         )
         check(
             "workflow: triage result rejects symlink or non-file output",
             '[ -L "$EXECUTION_FILE" ]' in run and '[ ! -f "$EXECUTION_FILE" ]' in run,
         )
+        # Card #556 (delivered-result-drop): the compact result must be
+        # extracted INDEPENDENT of transcript size, so a bulky transcript can
+        # never discard a valid verdict. The size cap now governs only the
+        # retained debug transcript copy, never `result_path` (delivery).
+        extract_idx = run.find("extract-result")
+        size_idx = run.find("262144")
         check(
-            "workflow: triage result caps execution file size",
-            "262144" in run and 'wc -c < "$EXECUTION_FILE"' in run,
+            "workflow: triage result extracts the compact result via extract-result",
+            extract_idx != -1
+            and 'render_card.py' in run
+            and 'TRUSTED_PYTHON' in env,
+        )
+        check(
+            "workflow: result extraction precedes any transcript-size gate",
+            extract_idx != -1 and size_idx != -1 and extract_idx < size_idx,
+        )
+        check(
+            "workflow: result_path is set from extraction, not gated by the size cap",
+            'result_path="$result_file"' in run
+            and 'auto triage execution file is too large' not in run,
+        )
+        check(
+            "workflow: the transcript size cap only bounds the retained copy",
+            "262144" in run
+            and 'wc -c < "$EXECUTION_FILE"' in run
+            and 'cp "$EXECUTION_FILE" "$transcript_file"' in run,
         )
 
     check("workflow: final card update step exists", update is not None)

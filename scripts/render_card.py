@@ -1852,6 +1852,39 @@ def extract_claude_result(path):
     return ""
 
 
+def extract_result_to_file(execution_file, out_file):
+    """Extract the COMPACT final result from a (possibly large) Claude
+    execution transcript and write it as a tiny events file that
+    `extract_claude_result` consumes unchanged.
+
+    This is deliberately INDEPENDENT of any transcript-size enforcement
+    (card #556). Under the pass-by-reference triage design the agentic
+    transcript legitimately grows into the hundreds of KB (every file the
+    model Reads is recorded), so gating result delivery on transcript size
+    silently discarded valid, already-produced model verdicts. This helper
+    json.loads the whole transcript (fine at MB scale) and writes ONLY the
+    small `result` string, so a bulky transcript can never drop a valid
+    verdict. The size discipline in triage.yml governs only what full
+    transcript is retained as a debug artifact, never this result delivery.
+
+    Returns True when a non-empty result was extracted and written.
+    """
+    result_text = extract_claude_result(execution_file)
+    if not result_text:
+        return False
+    compact = [
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": result_text,
+        }
+    ]
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(compact, f)
+    return True
+
+
 def parse_triage_json(text):
     text = (text or "").strip()
     if text.startswith("```"):
@@ -1923,6 +1956,15 @@ def main():
         "its update step).",
     )
 
+    xr = sub.add_parser("extract-result")
+    xr.add_argument("--execution-file", required=True)
+    xr.add_argument(
+        "--out",
+        required=True,
+        help="Path to write the compact result events file that triage-apply "
+        "consumes. Written independent of transcript size (card #556).",
+    )
+
     qt = sub.add_parser("queue-triage")
     qt.add_argument("--item-file", required=True)
     qt.add_argument(
@@ -1982,6 +2024,16 @@ def main():
             update_card_triage(
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
             )
+    elif args.cmd == "extract-result":
+        # Card #556: pull the compact final result out of the (possibly large)
+        # Claude transcript BEFORE any transcript-size enforcement, so a valid
+        # verdict is never discarded because the transcript is bulky. Writes a
+        # tiny events file that triage-apply reads unchanged.
+        if extract_result_to_file(args.execution_file, args.out):
+            print("extracted compact auto triage result to %s" % args.out)
+        else:
+            print("::warning::auto triage produced no extractable result")
+            sys.exit(1)
     elif args.cmd == "triage-fail":
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
