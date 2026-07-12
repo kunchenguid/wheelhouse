@@ -92,6 +92,17 @@ MAX_VISION_BYTES = 40000
 # Any change to existing/default behavior that is not one of these is ineligible.
 ELIGIBLE_BEHAVIOR_CLASSES = ("A", "B", "C")
 CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
+# GitHub reports the SAME automation actor under two spellings depending on the
+# API surface: the REST issues endpoint (`.user.login`, used to build cards.json)
+# returns "github-actions[bot]", while `gh issue view --json author` (the GraphQL
+# bot-actor form that render_card.get_card re-reads on the claim/validate/recover
+# path) returns "app/github-actions". This is exactly one documented GitHub API
+# duality, not a family of aliases. Normalize ONLY that single spelling to the
+# canonical REST form at the trust-comparison boundary so a card the scan built
+# and trusted is still recognized when re-read live. Every other login is left
+# byte-for-byte unchanged (no prefix stripping, no case folding, no allowlist),
+# so fail-closed rejection of any non-automation author is fully preserved.
+GET_CARD_AUTOMATION_AUTHOR = "app/github-actions"
 AUTO_MERGE_CLAIM_LABEL = "wheelhouse:auto-merge-claim"
 AUDIT_WRITE_MAX_ATTEMPTS = 3
 AUDIT_WRITE_BACKOFF_SECONDS = 0.25
@@ -465,6 +476,17 @@ def _card_author_login(card):
     return ""
 
 
+def _canonical_card_author(login):
+    """Collapse the single documented GitHub API author duality
+    (`app/github-actions` -> `github-actions[bot]`) to the canonical REST-form
+    login used to build cards.json. Any other value is returned exactly as-is,
+    so this is not a general normalizer and cannot relax trust for any other
+    author."""
+    if login == GET_CARD_AUTOMATION_AUTHOR:
+        return CARD_AUTOMATION_AUTHOR
+    return login
+
+
 def _trusted_card_identity(card, state, labels):
     repo = str((state or {}).get("repo") or "").strip()
     number = str((state or {}).get("number") or "").strip()
@@ -474,7 +496,7 @@ def _trusted_card_identity(card, state, labels):
         "target:%s-%s" % (repo, number),
     }
     return (
-        _card_author_login(card) == CARD_AUTOMATION_AUTHOR
+        _canonical_card_author(_card_author_login(card)) == CARD_AUTOMATION_AUTHOR
         and bool(repo)
         and bool(number)
         and required.issubset(labels)
