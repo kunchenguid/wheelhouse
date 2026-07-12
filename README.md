@@ -122,6 +122,8 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > When this key is absent it is treated as `true`, so a fresh fork auto-approves fork-CI runs that the security gate proves safe (no CI-file changes, the PR targets the repo default branch, no `pull_request_target` workflow, and all safety reads succeed) and only raises a card for risky or uncertain contributor-authored runs.
 > A run is approved only after Wheelhouse verifies it is the target PR's awaiting `action_required` run: GitHub-populated `workflow_run.pull_requests` must contain exactly that PR, and fork-originated empty associations must match the PR `head_sha` plus `head_branch`.
 > If multiple verified pending runs share a stable workflow identity, Wheelhouse approves only the newest run; runs without a stable workflow identity stay distinct.
+> After a safe run is approved, Wheelhouse waits for its checks to finish before classifying the PR or creating a card.
+> During that wait, an existing pure PR-review card is kept open and the hourly scan refreshes it to the observed head's non-green pending state; no transient-head triage is queued.
 > If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and the backstop consumes any stale CI-approval card.
 > For a contributor fork whose safe no-op PR is conclusively `CONFLICTING`, it also posts the existing one-per-head rebase nudge before consuming the card; it never does so for an approved run or unresolved mergeability.
 > If the mergeability settlement required for that exception errors, the repo scan is unhealthy and reconcile preserves an existing card instead.
@@ -320,6 +322,7 @@ That signal is target-level GitHub activity and may include owner, maintainer, o
 For refresh, auto-triage, and self-healing, a "pure pending" card means it has `needs-decision` and lacks `processing`, `resolved`, or `blocked`.
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
+The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an existing same-kind PR-review card to the observed head's pending state without creating a card, posting the usual target-updated comment, or queuing triage; terminal checks return the PR to normal classification and refresh handling.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
 The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.

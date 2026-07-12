@@ -784,51 +784,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   same freeze remains in effect.
   Only an explicit `UNKNOWN` is polled; a missing/None value keeps classify's
   fail-open (GraphQL never returns null for an open PR's `mergeable`).
-- **Approve fork CI FIRST, then wait for terminal checks, THEN classify/card -
-  never churn or masquerade in between (the #551 ordering fix; sibling of the
-  UNKNOWN-mergeability freeze).** A rebase re-triggers a first-time contributor's
-  `action_required` fork CI. The scan auto-approves it (safe verdict), but an
-  auto-approved `needs-ci-approval` PR emits NO worklist item, and `ci-running`
-  is not in `NEEDS_MAINTAINER` either - so while the just-approved checks run,
-  the PR is absent from the worklist. Without this fix reconcile self-heal-
-  CONSUMED the existing pr-review card (close-then-recreate churn every rebase),
-  and even a frozen card kept displaying the pre-rebase head's stale
-  `merge-ready`/green (a masquerade). Fix, mirroring the indeterminate freeze
-  machinery (do NOT invent new state): `build_repo` reports PRs mid fork-CI
-  approval/run wait in `ci_wait_pr_numbers` (a fresh `approve_ci` `approved` this
-  scan, OR `bucket == "ci-running"`; author-excluded PRs omitted so the
-  author-filter self-heal still fires; a `noop` is NOT frozen - nothing pending),
-  and `reconcile.py`'s self-heal close loop FREEZES a `PR_KINDS` card whose
-  number is in that set exactly like `indeterminate_pr_numbers`. To kill the
-  stale-head masquerade AT the moment the scan observes the head move, `build_repo`
-  also emits `ci_wait_refresh_items` - one refresh-ONLY pr-review item per ci_wait
-  PR carrying the new head and its real (never-green: `none`/`pending`) comp/tests
-  (`_ci_wait_refresh_item`); reconcile step 1b refreshes an EXISTING same-kind
-  pure `needs-decision` card in place to that honest pending state (dropping the
-  usual "head moved" comment and the now-stale triage via
-  `_preserve_same_revision_triage`'s revision guard), but NEVER creates a card
-  (creation defers until checks are terminal) and never queues triage for the
-  transient revision. Terminal checks always release the freeze: the PR then
-  classifies into a real bucket, emits a normal worklist item, and refreshes via
-  the standard material-change path, so the freeze can never wedge a card
-  permanently. **Security boundary unchanged:** approval eligibility is still the
-  one `ci_safety` verdict + head verification - unsafe/unverifiable fork CI still
-  cards/HOLDs and is never frozen; this fix changes only ORDERING/lifecycle.
-  **Honest detection bound:** Wheelhouse's only self-owned observation of a
-  target head change is the hourly `scan-backstop` (best-effort cron, not relied
-  on for correctness) plus any source-repo `repository_dispatch` to `ingest`
-  (fork-and-own, not guaranteed). The pre-observation window (rebase -> next
-  observation) is irreducible in-repo; the acting path is still safe there because
-  the decision-handler re-checks the pinned head SHA before any merge/
-  request-changes. What IS guaranteed: at/after the first successful
-  observation-driven refresh, the card cannot masquerade as old-head green. If
-  that corrective refresh itself fails, it is logged as `::error::` and the card
-  is left FROZEN and unactable at the stale head (never consumed; the
-  decision-handler still re-checks the pinned head SHA before any merge/
-  request-changes) and retried on the next scan - the same bound class as the
-  irreducible pre-observation window. See
-  `tests/test_ci_autoapprove.py` (emission) and `tests/test_reconcile.py`
-  (freeze/anti-masquerade/release/departed).
+- **Approve safe fork CI, wait for terminal checks, then classify.**
+  `build_repo` reports freshly approved and `ci-running` contributor PRs in `ci_wait_pr_numbers`, and reconcile freezes their existing `PR_KINDS` cards against self-heal consumption just like `indeterminate_pr_numbers`.
+  Author-excluded, unsafe or unverifiable, and verified-noop PRs are not frozen; approval eligibility remains the shared `ci_safety` verdict plus head verification.
+  `ci_wait_refresh_items` are refresh-only `pr-review` items: reconcile may use one to update an existing same-kind pure `needs-decision` card to the observed head's non-green state, but must never create a card or queue triage for that transient revision.
+  Terminal checks release the freeze and resume normal classification.
+  Wheelhouse can first observe a target head change through the best-effort hourly `scan-backstop` or an optional source-repo `repository_dispatch`; neither is guaranteed before the next scan.
+  At or after the first successful observation-driven refresh, a card cannot display the old head as current; before then, and after a failed corrective refresh, acting paths remain safe because the decision-handler rechecks the pinned head SHA.
+  See `tests/test_ci_autoapprove.py` for emission and `tests/test_reconcile.py` for refresh, freeze, and release coverage.
 - **Merge conflicts leave the maintainer queue.**
   `wheelhouse_core.py` fetches GraphQL `pullRequests.nodes.mergeable` and treats only `CONFLICTING` as authoritative.
   An explicit `UNKNOWN` is a pending value - see the UNKNOWN-pending bullet above for the merge-ready/review-needed settlement poll and membership freeze that prevent oscillation.
