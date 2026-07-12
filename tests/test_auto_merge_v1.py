@@ -930,6 +930,78 @@ def test_G1_rejects_untrusted_or_unmanaged_card():
     check("G1: card without managed target labels holds", not payload2["merges"])
 
 
+def test_claim_author_duality_normalizes_only_github_actions():
+    # Fleet-wide bug (report §5.1): the claim/validate/recover path re-reads each
+    # card LIVE via render_card.get_card (`gh issue view --json ...,author`), whose
+    # `author.login` is the GraphQL bot-actor spelling "app/github-actions", while
+    # cards.json is built from the REST issues API whose `.user.login` is
+    # "github-actions[bot]". The equality check against CARD_AUTOMATION_AUTHOR
+    # therefore rejected EVERY live-re-read card, so no card was ever claimed and
+    # auto-merge never merged anything. These fixtures are real get_card-shaped
+    # (author is a dict `{"login": ...}`, exactly as `gh issue view --json author`
+    # returns) and everything but the author login is held constant, so trust
+    # turns solely on the author normalization at the comparison boundary.
+    def card_with_author(login):
+        card = make_card(
+            101,
+            "fmt",
+            5,
+            "cd" * 20,
+            automerge_verdict=ELIGIBLE_A,
+            labels=[
+                "needs-decision",
+                "repo:fmt",
+                "kind:pr-review",
+                "priority:med",
+                "target:fmt-5",
+            ],
+        )
+        card["author"] = {"login": login}  # real `gh issue view --json author` shape
+        return card
+
+    def is_trusted(login):
+        return ("fmt", "5") in am._card_index([card_with_author(login)])
+
+    # The one documented duality: the live GraphQL spelling is accepted, as is the
+    # REST spelling cards.json already carries.
+    check(
+        "claim: live 'app/github-actions' get_card author normalizes and is trusted",
+        is_trusted("app/github-actions"),
+    )
+    check(
+        "claim: canonical 'github-actions[bot]' author stays trusted",
+        is_trusted("github-actions[bot]"),
+    )
+
+    # Fail-closed everywhere else: no prefix stripping, no case folding, no
+    # allowlist growth. Every other identity - a human, a different app slug, the
+    # bare form, and lookalikes - is still rejected.
+    for login in (
+        "contributor",  # a human login
+        "app/other-bot",  # a different app slug (prefix must NOT be stripped)
+        "github-actions",  # bare form (no [bot] suffix)
+        "app/github-actions-bot",  # lookalike suffix
+        "App/GitHub-Actions",  # case-folded lookalike (no case folding)
+        "github-actions[bot]-evil",  # canonical-prefixed lookalike
+        "xapp/github-actions",  # lookalike prefix
+    ):
+        check(
+            "claim: untrusted author %r stays rejected (fail-closed)" % login,
+            not is_trusted(login),
+        )
+
+    # And the normalizer itself collapses ONLY the exact duality string.
+    check(
+        "claim: _canonical_card_author maps exactly the duality string",
+        am._canonical_card_author("app/github-actions") == am.CARD_AUTOMATION_AUTHOR,
+    )
+    for login in ("contributor", "app/other-bot", "github-actions", "App/GitHub-Actions"):
+        check(
+            "claim: _canonical_card_author leaves %r unchanged" % login,
+            am._canonical_card_author(login) == login,
+        )
+
+
 def test_claim_rechecks_and_locks_current_card():
     w, items, cards = default_world()
     initial = make_card(
