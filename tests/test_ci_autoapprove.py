@@ -1450,6 +1450,113 @@ def test_idempotent_non_ci_approval_pr_never_reapproved():
     check("idempotent: merge-ready PR never calls approve", calls["approve"] == [])
 
 
+# --------------------------------------------------------------------------- #
+# approve -> wait-for-terminal -> classify continuity (the #551 ordering fix):
+# a PR mid fork-CI approval/run wait is reported in `ci_wait_pr_numbers` (reconcile
+# FREEZES its card) with a refresh-ONLY pr-review item in `ci_wait_refresh_items`
+# (reconcile refreshes an existing card's display to the new head so it cannot
+# masquerade). The freeze is a STRICT ordering/lifecycle change: approval
+# eligibility (ci_safety) is untouched - unsafe/carded PRs are never frozen.
+# --------------------------------------------------------------------------- #
+def test_auto_approved_pr_is_frozen_with_antimasquerade_item():
+    result, items, calls = run_build_repo([needs_ci_pr(7)])
+    check("ci-wait: safe approved PR raises NO card", items == [])
+    check("ci-wait: approved PR is in the freeze set", result["ci_wait_pr_numbers"] == [7])
+    refresh = result["ci_wait_refresh_items"]
+    check("ci-wait: approved PR gets exactly one refresh item", len(refresh) == 1)
+    check(
+        "ci-wait: refresh item is a same-target pr-review item at the current head",
+        refresh
+        and refresh[0]["kind"] == "pr-review"
+        and refresh[0]["number"] == 7
+        and refresh[0]["head_sha"] == "sha7",
+    )
+    check(
+        "ci-wait: refresh item renders a NON-green pending state (no false green)",
+        refresh
+        and refresh[0]["comp"] != "pass"
+        and refresh[0]["tests"] != "green",
+    )
+
+
+def test_ci_running_pr_is_frozen():
+    running = pr_node(2, rollup([check_run("Gate", None, status="IN_PROGRESS")]))
+    result, items, calls = run_build_repo([running])
+    check("ci-wait: ci-running PR raises no card", items == [])
+    check(
+        "ci-wait: ci-running PR is in the freeze set (approved checks executing)",
+        result["ci_wait_pr_numbers"] == [2],
+    )
+    check(
+        "ci-wait: ci-running PR gets a non-green refresh item",
+        result["ci_wait_refresh_items"]
+        and result["ci_wait_refresh_items"][0]["tests"] != "green",
+    )
+
+
+def test_unsafe_carded_pr_is_not_frozen():
+    # SECURITY BOUNDARY: an unsafe verdict still cards/holds; it is NEVER frozen,
+    # so this fix cannot make an unsafe fork PR masquerade as handled.
+    verdict = {
+        "safe": False,
+        "error": False,
+        "risky_files": [".github/workflows/ci.yml"],
+        "pr_target": False,
+        "exploit": False,
+        "reason": "risky",
+    }
+    result, items, calls = run_build_repo([needs_ci_pr(1)], verdict=verdict)
+    check("ci-wait: unsafe PR still raises a card", len(items) == 1)
+    check("ci-wait: unsafe carded PR is NOT frozen", result["ci_wait_pr_numbers"] == [])
+    check(
+        "ci-wait: unsafe carded PR gets no refresh item",
+        result["ci_wait_refresh_items"] == [],
+    )
+
+
+def test_noop_ci_approval_is_not_frozen():
+    # A verified noop means nothing is pending approval - there is no approve/wait
+    # window to protect, so it is NOT frozen (reconcile consumes any stale card).
+    result, items, calls = run_build_repo(
+        [needs_ci_pr(1)], approve_result=("noop", "no workflow runs awaiting approval")
+    )
+    check("ci-wait: noop approve emits no card", items == [])
+    check("ci-wait: noop approve is NOT frozen", result["ci_wait_pr_numbers"] == [])
+
+
+def test_author_excluded_approved_pr_is_not_frozen():
+    # An owner/maintainer/bot-authored fork PR is auto-approved but never carries a
+    # contributor card; freezing it would block the author-filter self-heal, so it
+    # is deliberately excluded from the freeze set.
+    pr = needs_ci_pr(1)
+    pr["author"] = {"login": "owner", "__typename": "User"}
+    saved = os.environ.get("OWNER")
+    os.environ["OWNER"] = "owner"
+    try:
+        result, items, calls = run_build_repo([pr])
+    finally:
+        if saved is None:
+            os.environ.pop("OWNER", None)
+        else:
+            os.environ["OWNER"] = saved
+    check("ci-wait: excluded-author approved PR raises no card", items == [])
+    check(
+        "ci-wait: excluded-author approved PR is NOT frozen",
+        result["ci_wait_pr_numbers"] == [],
+    )
+
+
+def test_merge_ready_pr_is_not_frozen():
+    mr = pr_node(
+        3, rollup([check_run("Gate", "SUCCESS"), check_run("build-test", "SUCCESS")])
+    )
+    result, items, calls = run_build_repo([mr])
+    check(
+        "ci-wait: terminal merge-ready PR emits a normal card, not a freeze",
+        len(items) == 1 and result["ci_wait_pr_numbers"] == [],
+    )
+
+
 def test_ok_false_repo_is_never_auto_approved():
     result, items, calls = run_build_repo([needs_ci_pr()], graphql_raises=True)
     check(
@@ -1584,6 +1691,12 @@ def main():
     test_opt_out_card_still_carries_pr_target_warning()
     test_per_repo_override_disables_auto_approve()
     test_idempotent_non_ci_approval_pr_never_reapproved()
+    test_auto_approved_pr_is_frozen_with_antimasquerade_item()
+    test_ci_running_pr_is_frozen()
+    test_unsafe_carded_pr_is_not_frozen()
+    test_noop_ci_approval_is_not_frozen()
+    test_author_excluded_approved_pr_is_not_frozen()
+    test_merge_ready_pr_is_not_frozen()
     test_ok_false_repo_is_never_auto_approved()
     test_posture_read_once_per_repo_for_multiple_ci_prs()
     test_config_default_on_when_key_absent()

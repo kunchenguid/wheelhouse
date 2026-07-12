@@ -279,6 +279,51 @@ def main():
         ):
             triage_queued += 1
 
+    # 1b) Anti-masquerade for the approve/wait window. A PR whose fork CI was just
+    #     auto-approved this scan, or whose approved checks are still running, emits
+    #     NO worklist item while it awaits terminal checks - so its existing
+    #     pr-review card would keep displaying the pre-rebase head's (now
+    #     superseded) state, e.g. a stale merge-ready/green that masquerades as
+    #     current. When the scan OBSERVES the head has moved, refresh that existing
+    #     card in place to the new head's honest pending state. This NEVER creates a
+    #     card (creation still defers until checks are terminal), only refreshes a
+    #     same-kind pure needs-decision card, and never queues triage for this
+    #     transient revision. Frozen-from-consumption is handled in the close loop
+    #     below via `ci_wait_pr_numbers`.
+    antimasq_refreshed = 0
+    for repo_name, r in repos.items():
+        if not r or not r.get("ok") or r.get("truncated"):
+            continue
+        for item in r.get("ci_wait_refresh_items", []) or []:
+            key = (item["repo"], int(item["number"]))
+            ex = existing.get(key)
+            if ex is None:
+                continue  # no existing card -> defer creation until checks terminal
+            if ex["state"].get("kind") != item.get("kind"):
+                continue  # only refresh a same-kind (pr-review) card in place
+            if not render_card.is_refreshable(ex["labels"]):
+                continue
+            if not render_card.material_changed(item, ex["state"]):
+                continue  # card already reflects the new head -> no churn
+            try:
+                current = current_card(ex)
+                if (
+                    current is not None
+                    and render_card.is_refreshable(current["labels"])
+                    and current["state"].get("kind") == item.get("kind")
+                    and render_card.material_changed(item, current["state"])
+                ):
+                    render_card.upsert_card(
+                        item, existing=current, has_token=has_triage_token
+                    )
+                    antimasq_refreshed += 1
+            except Exception as e:
+                print(
+                    "::warning::failed anti-masquerade refresh for card #%s "
+                    "(%s#%s): %s"
+                    % (ex["number"], item["repo"], item["number"], str(e)[:160])
+                )
+
     # 2) Close cards whose target is no longer open, and pure pending cards whose
     #    open target no longer appears in the current maintainer worklist (for
     #    example author-excluded targets or conflicted PRs now waiting on
@@ -306,6 +351,18 @@ def main():
             # ok:false / truncated repo skips above (act only on known state) -
             # NOT the separate, out-of-scope K-consecutive-absence soft-close
             # hysteresis.
+            continue
+        if kind in PR_KINDS and number in set(r.get("ci_wait_pr_numbers", [])):
+            # This PR's fork CI was auto-approved this scan (or its approved
+            # checks are still running), so it emitted no worklist item WHILE it
+            # awaits terminal checks. Freeze the card exactly like the
+            # indeterminate case: never consume a card merely because its target
+            # is mid-approval/CI-wait (approve -> wait-for-terminal -> classify
+            # continuity). Step 1b already refreshed its display to the new head;
+            # a later scan, once checks are terminal, reclassifies it into a real
+            # bucket and either refreshes it via a worklist item or self-heals it.
+            # Terminal checks always release the freeze, so it can never wedge a
+            # card permanently.
             continue
         open_set = set(
             r.get("open_pr_numbers", [])
@@ -363,9 +420,16 @@ def main():
             )
 
     print(
-        "reconcile: %d card(s) created, %d refreshed, %d activity reflected, "
-        "%d auto-triage queued, %d card(s) closed"
-        % (created, refreshed, activity_reflected, triage_queued, closed)
+        "reconcile: %d card(s) created, %d refreshed, %d anti-masquerade "
+        "refreshed, %d activity reflected, %d auto-triage queued, %d card(s) closed"
+        % (
+            created,
+            refreshed,
+            antimasq_refreshed,
+            activity_reflected,
+            triage_queued,
+            closed,
+        )
     )
 
 

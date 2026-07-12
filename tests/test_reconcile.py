@@ -151,6 +151,8 @@ def scan_payload(
     ok=True,
     truncated=False,
     indeterminate_pr_numbers=None,
+    ci_wait_pr_numbers=None,
+    ci_wait_refresh_items=None,
 ):
     return {
         "repos": {
@@ -163,10 +165,38 @@ def scan_payload(
                 "indeterminate_pr_numbers": []
                 if indeterminate_pr_numbers is None
                 else indeterminate_pr_numbers,
+                "ci_wait_pr_numbers": []
+                if ci_wait_pr_numbers is None
+                else ci_wait_pr_numbers,
+                "ci_wait_refresh_items": []
+                if ci_wait_refresh_items is None
+                else ci_wait_refresh_items,
                 "truncated": truncated,
             }
         },
         "items": [] if items is None else items,
+    }
+
+
+def ci_wait_refresh_item(number=42, head_sha="newsha", comp="none", tests="none"):
+    """A refresh-ONLY pr-review item for a PR mid fork-CI approval/run wait, as
+    `build_repo` emits it: the new head with an honestly non-green pending state."""
+    return {
+        "repo": "wheelhouse",
+        "number": number,
+        "kind": "pr-review",
+        "head_sha": head_sha,
+        "updated_at": "2024-01-01T00:00:00Z",
+        "title": "Ready PR",
+        "author": "contributor",
+        "bucket": "ci-running",
+        "comp": comp,
+        "tests": tests,
+        "url": "https://github.com/kunchenguid/wheelhouse/pull/%d" % number,
+        "summary": "head moved to %s - fork CI re-approved, checks re-running"
+        % head_sha[:8],
+        "recommendation": "Checks are re-running at the new head; wait, then re-review.",
+        "priority": "low",
     }
 
 
@@ -289,6 +319,182 @@ def test_indeterminate_pr_card_is_frozen():
     check("reconcile-freeze: indeterminate card is NOT closed", calls["close"] == [])
     check(
         "reconcile-freeze: indeterminate card is NOT refreshed", calls["upsert"] == []
+    )
+
+
+def _pr_review_card():
+    return card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        )
+    )
+
+
+def test_ci_wait_card_is_frozen_not_consumed():
+    # #551 core fix: a PR whose fork CI was auto-approved this scan (or whose
+    # approved checks are still running) emits NO worklist item while it awaits
+    # terminal checks. Its existing pr-review card must be FROZEN - never consumed
+    # merely because its target is mid-approval/CI-wait. Same fail-safe family as
+    # the indeterminate freeze. (No refresh item here -> pure freeze, no upsert.)
+    calls = run_reconcile(
+        scan_payload(items=[], ci_wait_pr_numbers=[42]),
+        [_pr_review_card()],
+    )
+    check("ci-wait-freeze: mid-approval-wait card is NOT closed", calls["close"] == [])
+    check(
+        "ci-wait-freeze: no refresh item -> card is left untouched",
+        calls["upsert"] == [],
+    )
+
+
+def test_ci_wait_refresh_kills_stale_head_masquerade():
+    # Anti-masquerade: when the scan OBSERVES the head moved, the existing card
+    # (old head, merge-ready/green) is refreshed in place to the new head's honest
+    # pending state so it can no longer masquerade as current - and it is still
+    # not consumed.
+    calls = run_reconcile(
+        scan_payload(
+            items=[],
+            ci_wait_pr_numbers=[42],
+            ci_wait_refresh_items=[ci_wait_refresh_item(head_sha="newsha")],
+        ),
+        [_pr_review_card()],
+    )
+    check("ci-wait-antimasq: card is NOT closed while frozen", calls["close"] == [])
+    check(
+        "ci-wait-antimasq: existing card is refreshed to the new head once",
+        len(calls["upsert"]) == 1
+        and calls["upsert"][0]["existing"] is not None
+        and calls["upsert"][0]["item"]["head_sha"] == "newsha",
+    )
+    check(
+        "ci-wait-antimasq: refresh renders a non-green (honest pending) state",
+        calls["upsert"]
+        and calls["upsert"][0]["item"]["tests"] != "green"
+        and calls["upsert"][0]["item"]["comp"] != "pass",
+    )
+
+
+def test_ci_wait_refresh_never_creates_a_card():
+    # Defer creation: a ci_wait refresh item with NO existing card must not mint a
+    # new card - new-card creation waits until checks are terminal and the PR
+    # classifies into a real bucket.
+    calls = run_reconcile(
+        scan_payload(
+            items=[],
+            ci_wait_pr_numbers=[42],
+            ci_wait_refresh_items=[ci_wait_refresh_item()],
+        ),
+        [],  # no existing card
+    )
+    check("ci-wait-antimasq: no existing card -> no create", calls["upsert"] == [])
+    check("ci-wait-antimasq: no existing card -> no close", calls["close"] == [])
+
+
+def test_ci_wait_refresh_is_noop_when_card_already_current():
+    # No churn: once the card already reflects the new head's pending state, a
+    # later scan with the same refresh item makes NO further edit.
+    already = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
+        render_version=reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    state = reconcile.core.parse_state_block(already["body"])
+    state.update(
+        {
+            "head_sha": "newsha",
+            "comp": "none",
+            "tests": "none",
+            # Match a card already refreshed once by the anti-masquerade path: the
+            # pending refresh item is priority `low` and carries the full default
+            # option set (incl. `investigate`), so nothing material differs.
+            "priority": "low",
+            "options": reconcile.render_card.card_options({"kind": "pr-review"}),
+        }
+    )
+    already["body"] = reconcile.render_card._replace_state_block(already["body"], state)
+    calls = run_reconcile(
+        scan_payload(
+            items=[],
+            ci_wait_pr_numbers=[42],
+            ci_wait_refresh_items=[
+                ci_wait_refresh_item(head_sha="newsha", comp="none", tests="none")
+            ],
+        ),
+        [already],
+    )
+    check(
+        "ci-wait-antimasq: already-current card is not re-refreshed",
+        calls["upsert"] == [],
+    )
+    check("ci-wait-antimasq: already-current card is not closed", calls["close"] == [])
+
+
+def test_ci_wait_freeze_releases_when_checks_terminal():
+    # The freeze never wedges a card: once checks are terminal the PR classifies
+    # into a real bucket and emits a normal worklist item, so reconcile refreshes
+    # it to the terminal state (here merge-ready/green at the new head) and the
+    # freeze is gone (ci_wait empty).
+    stale = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+        ),
+    )
+    state = reconcile.core.parse_state_block(stale["body"])
+    state.update({"head_sha": "newsha", "comp": "none", "tests": "none"})
+    stale["body"] = reconcile.render_card._replace_state_block(stale["body"], state)
+    calls = run_reconcile(
+        scan_payload(
+            items=[work_item(head_sha="newsha")],  # terminal: merge-ready green
+            ci_wait_pr_numbers=[],
+        ),
+        [stale],
+    )
+    check(
+        "ci-wait-release: terminal checks -> card refreshed to real bucket",
+        len(calls["upsert"]) == 1
+        and calls["upsert"][0]["item"]["head_sha"] == "newsha"
+        and calls["upsert"][0]["item"]["tests"] == "green",
+    )
+    check("ci-wait-release: card not consumed when it reclassifies", calls["close"] == [])
+
+
+def test_departed_target_still_self_heals_despite_freeze_machinery():
+    # Negative: a genuinely-departed target (left the worklist, NOT in ci_wait)
+    # still self-heal-consumes exactly as before - the freeze must not shield it.
+    calls = run_reconcile(
+        scan_payload(items=[], ci_wait_pr_numbers=[]),
+        [_pr_review_card()],
+    )
+    check(
+        "ci-wait: genuinely-departed target is still consumed",
+        len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
+    )
+
+
+def test_ci_wait_freeze_does_not_shield_a_different_pr():
+    # The freeze is keyed by PR number: a ci_wait entry for #99 must not stop the
+    # self-heal of card #42's departed target.
+    calls = run_reconcile(
+        scan_payload(items=[], ci_wait_pr_numbers=[99]),
+        [_pr_review_card()],
+    )
+    check(
+        "ci-wait: freeze for a different PR number does not shield card #42",
+        len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
     )
 
 
@@ -751,6 +957,13 @@ def main():
     test_refresh_uses_current_labels_before_upsert()
     test_open_target_that_left_worklist_is_consumed()
     test_indeterminate_pr_card_is_frozen()
+    test_ci_wait_card_is_frozen_not_consumed()
+    test_ci_wait_refresh_kills_stale_head_masquerade()
+    test_ci_wait_refresh_never_creates_a_card()
+    test_ci_wait_refresh_is_noop_when_card_already_current()
+    test_ci_wait_freeze_releases_when_checks_terminal()
+    test_departed_target_still_self_heals_despite_freeze_machinery()
+    test_ci_wait_freeze_does_not_shield_a_different_pr()
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()
     test_open_target_that_left_worklist_uses_current_labels_before_close()
