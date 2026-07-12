@@ -10,6 +10,15 @@ duplicate-approved-run scenario) must aggregate worst-wins, exactly like
 last silently overwrite the result. Also covers the statusCheckRollup.state
 backstop and a genuinely-green PR regression check.
 
+Also covers card #543's config gap: axi's `test_check_patterns` accepts BOTH
+`build-and-test` (the JS SDK gate) and `drift` (the catalog-consistency gate),
+which run on disjoint paths. A docs/catalog PR (compliance green + drift green,
+no build-and-test) must compute tests=green and classify `merge-ready`, while
+drift RED or PENDING must NOT be merge-ready (test worst-wins still holds); an
+SDK PR must keep today's behavior exactly - build-and-test red/pending blocks,
+green passes - so adding `drift` never weakens the SDK posture. The mixed case
+(both present, either one non-green) stays worst-wins too.
+
 Run: python tests/test_check_status.py
 """
 
@@ -33,6 +42,15 @@ def check(name, cond):
 CFG = {
     "compliance_check": "PR must be raised via no-mistakes",
     "test_check_patterns": ["build-and-test"],
+}
+
+# axi's live config (card #543 fix): the JS SDK gate `build-and-test` and the
+# catalog-consistency gate `drift`, which run on disjoint paths. Verified against
+# live axi PRs on 2026-07-11: an SDK PR (e.g. #84) runs `build-and-test` and NOT
+# `drift`; a catalog/docs PR (e.g. #87/#89) runs `drift` and NOT `build-and-test`.
+AXI_CFG = {
+    "compliance_check": "PR must be raised via no-mistakes",
+    "test_check_patterns": ["build-and-test", "drift"],
 }
 
 
@@ -127,12 +145,145 @@ def test_genuinely_green_pr_still_passes():
     check("genuinely green PR: tests == green (no regression)", tests == "green")
 
 
+# --- card #543: axi accepts both `build-and-test` and `drift` test signals -----
+
+
+def axi_bucket(contexts, rollup_state="SUCCESS", mergeable="MERGEABLE"):
+    """The full path a real axi PR takes: check_status -> classify.
+
+    Returns (comp, tests, bucket). `rollup_state` is held at SUCCESS so the
+    routing is driven purely by the per-context test signal (the card #392
+    rollup backstop is tested separately above); axi PRs are cross-repo forks,
+    so cross_repo=True and a MERGEABLE PR stays in its merge/review bucket.
+    """
+    comp, tests, ci, _ = core.check_status(
+        pr_with(rollup(rollup_state, contexts)), AXI_CFG
+    )
+    bucket = core.classify(False, comp, tests, ci, cross_repo=True, mergeable=mergeable)
+    return comp, tests, bucket
+
+
+def test_axi_catalog_pr_drift_green_is_merge_ready():
+    # A docs/catalog PR: compliance + drift pass, build-and-test never ran.
+    # Before the fix `drift` matched no pattern -> tests=none -> review-needed.
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("Generated files must not be hand-edited"),
+        check_run("drift"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi catalog: comp == pass", comp == "pass")
+    check("axi catalog: drift-green signal makes tests == green", tests == "green")
+    check("axi catalog: green drift classifies merge-ready", bucket == "merge-ready")
+
+
+def test_axi_catalog_pr_drift_red_is_not_merge_ready():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("drift", conclusion="FAILURE"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi catalog drift RED: tests == fail (worst-wins)", tests == "fail")
+    check("axi catalog drift RED: not merge-ready", bucket != "merge-ready")
+    check("axi catalog drift RED: routes to fix-tests", bucket == "fix-tests")
+
+
+def test_axi_catalog_pr_drift_pending_is_not_merge_ready():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("drift", conclusion=None, status="IN_PROGRESS"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi catalog drift PENDING: tests == pending", tests == "pending")
+    check("axi catalog drift PENDING: not merge-ready", bucket != "merge-ready")
+    check("axi catalog drift PENDING: routes to ci-running", bucket == "ci-running")
+
+
+def test_axi_sdk_pr_build_and_test_green_unchanged():
+    # SDK PR: the build-and-test matrix runs, drift never does. Adding `drift`
+    # to the patterns must not change this from today's behavior.
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)"),
+        check_run("build-and-test (macos-latest)"),
+        check_run("build-and-test (windows-latest)"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi SDK green: tests == green (unchanged)", tests == "green")
+    check("axi SDK green: classifies merge-ready (unchanged)", bucket == "merge-ready")
+
+
+def test_axi_sdk_pr_build_and_test_red_still_blocks():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)"),
+        check_run("build-and-test (macos-latest)", conclusion="FAILURE"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi SDK build-and-test RED: tests == fail (unchanged)", tests == "fail")
+    check("axi SDK build-and-test RED: not merge-ready", bucket != "merge-ready")
+    check("axi SDK build-and-test RED: routes to fix-tests", bucket == "fix-tests")
+
+
+def test_axi_sdk_pr_build_and_test_pending_still_blocks():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)", conclusion=None, status="IN_PROGRESS"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi SDK build-and-test PENDING: tests == pending (unchanged)", tests == "pending")
+    check("axi SDK build-and-test PENDING: not merge-ready", bucket != "merge-ready")
+
+
+def test_axi_mixed_both_green_is_merge_ready():
+    # Defensive: if some future PR ever triggered BOTH gates, all-green is green.
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)"),
+        check_run("drift"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi mixed both-green: tests == green", tests == "green")
+    check("axi mixed both-green: merge-ready", bucket == "merge-ready")
+
+
+def test_axi_mixed_build_red_drift_green_not_green():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="FAILURE"),
+        check_run("drift"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi mixed build-RED drift-green: tests == fail (worst-wins)", tests == "fail")
+    check("axi mixed build-RED drift-green: not merge-ready", bucket != "merge-ready")
+
+
+def test_axi_mixed_build_green_drift_red_not_green():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)"),
+        check_run("drift", conclusion="FAILURE"),
+    ]
+    comp, tests, bucket = axi_bucket(contexts)
+    check("axi mixed build-green drift-RED: tests == fail (worst-wins)", tests == "fail")
+    check("axi mixed build-green drift-RED: not merge-ready", bucket != "merge-ready")
+
+
 def main():
     test_duplicate_compliance_contexts_cancelled_then_success()
     test_duplicate_compliance_contexts_success_then_cancelled()
     test_rollup_failure_backstop_downgrades_all_success_read()
     test_rollup_failure_backstop_fails_closed_without_a_compliance_gate()
     test_genuinely_green_pr_still_passes()
+    test_axi_catalog_pr_drift_green_is_merge_ready()
+    test_axi_catalog_pr_drift_red_is_not_merge_ready()
+    test_axi_catalog_pr_drift_pending_is_not_merge_ready()
+    test_axi_sdk_pr_build_and_test_green_unchanged()
+    test_axi_sdk_pr_build_and_test_red_still_blocks()
+    test_axi_sdk_pr_build_and_test_pending_still_blocks()
+    test_axi_mixed_both_green_is_merge_ready()
+    test_axi_mixed_build_red_drift_green_not_green()
+    test_axi_mixed_build_green_drift_red_not_green()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

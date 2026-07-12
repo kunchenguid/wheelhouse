@@ -64,9 +64,13 @@ repos:
     test_check_patterns: ["test (", "e2e"]
 
   - name: axi
-    # axi-sdk-js-ci.yml runs a `build-and-test` job (path-filtered to the JS SDK).
+    # axi-sdk-js-ci.yml runs a `build-and-test` job (path-filtered to the JS SDK);
+    # a catalog/docs PR runs `drift` (the catalog-consistency gate) instead, since
+    # `build-and-test` is path-filtered off docs. Both are accepted test signals so
+    # SDK PRs still gate on `build-and-test` and catalog PRs gate on `drift` - the
+    # two run on disjoint paths, so worst-wins over whichever is present holds.
     compliance_check: "PR must be raised via no-mistakes"
-    test_check_patterns: ["build-and-test"]
+    test_check_patterns: ["build-and-test", "drift"]
 
   - name: chrome-devtools-axi
     # ci.yml runs a single `build-and-test` job.
