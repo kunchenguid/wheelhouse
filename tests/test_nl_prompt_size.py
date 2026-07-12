@@ -84,7 +84,9 @@ def step_by_name(steps, name):
 # --------------------------------------------------------------------------- #
 # End-to-end: run the REAL cmd the workflow runs, with a giant target on disk.
 # --------------------------------------------------------------------------- #
-STATE_BLOCK = '<!-- wheelhouse-state: {"repo":"target","number":442,"kind":"pr-review"} -->'
+STATE_BLOCK = (
+    '<!-- wheelhouse-state: {"repo":"target","number":442,"kind":"pr-review"} -->'
+)
 
 
 def _extract_output(github_output_path, name):
@@ -123,7 +125,9 @@ def _render_nl_prompt(diff_bytes, search_enabled=False):
         # A worst-case on-disk target: the <target-content> wrapper plus a huge
         # diff, exactly what nl-fetch writes for a large PR.
         with open(target, "w", encoding="utf-8") as f:
-            f.write('<target-content repo="owner/target" number="442" kind="pr-review">\n')
+            f.write(
+                '<target-content repo="owner/target" number="442" kind="pr-review">\n'
+            )
             f.write("# Big PR\n\n## Diff\n")
             f.write("D" * diff_bytes)
             f.write("\n</target-content>\n")
@@ -183,11 +187,7 @@ def test_e2big_repro_giant_target_never_reaches_all_inputs():
             escaped == base_escaped,
         )
     # Contrast: the OLD inline design WOULD E2BIG on a #555-scale diff.
-    would_inline = (
-        base
-        + "\n=== Target content ===\n"
-        + ("D" * CARD_555_DIFF_BYTES)
-    )
+    would_inline = base + "\n=== Target content ===\n" + ("D" * CARD_555_DIFF_BYTES)
     check(
         "nl: inlining a #555-scale diff WOULD exceed MAX_ARG_STRLEN (the fixed bug)",
         len(json.dumps(would_inline).encode("utf-8")) > MAX_ARG_STRLEN,
@@ -231,9 +231,16 @@ def test_build_nl_prompt_no_longer_takes_or_inlines_target_content():
     )
     # A custom filename flows through, proving the name is a reference, not data.
     named = ad.build_nl_prompt(
-        body, "merge it", "pr-review", target_available=True, target_file="nl_target.txt"
+        body,
+        "merge it",
+        "pr-review",
+        target_available=True,
+        target_file="nl_target.txt",
     )
-    check("nl: the on-disk filename is a reference the prompt names", "nl_target.txt" in named)
+    check(
+        "nl: the on-disk filename is a reference the prompt names",
+        "nl_target.txt" in named,
+    )
 
 
 def test_nl_fetch_bounds_target_on_disk_with_explicit_truncation():
@@ -307,7 +314,8 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
         largs = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
             "nl: legacy step is exactly Read,Grep,Glob,Write (no shell, no Bash)",
-            largs == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model sonnet",
+            largs
+            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model sonnet",
         )
         check(
             "nl: legacy step still receives no GH_TOKEN (unchanged isolation)",
@@ -371,7 +379,9 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
     )
     check(
         "nl: note changes no label / gate / decision (it only comments)",
-        "labeler" not in dumped and "needs-decision" not in run and "gh issue close" not in run,
+        "labeler" not in dumped
+        and "needs-decision" not in run
+        and "gh issue close" not in run,
     )
 
 

@@ -620,9 +620,7 @@ def test_held_card_is_inert_to_decision_handler():
 
 def test_nl_never_offers_or_accepts_investigate():
     body = '<!-- wheelhouse-state: {"repo":"r","number":1,"kind":"pr-review"} -->'
-    prompt = ad.build_nl_prompt(
-        body, "take a closer look at this", "pr-review"
-    )
+    prompt = ad.build_nl_prompt(body, "take a closer look at this", "pr-review")
     check(
         "nl: investigate is never in the offered verb list", "investigate" not in prompt
     )
@@ -2654,9 +2652,7 @@ def test_prompt_offers_request_changes_guidance_for_pr_review_only():
     issue_body = (
         '<!-- wheelhouse-state: {"repo":"target","number":1,"kind":"issue-triage"} -->'
     )
-    issue_prompt = ad.build_nl_prompt(
-        issue_body, "needs more info", "issue-triage"
-    )
+    issue_prompt = ad.build_nl_prompt(issue_body, "needs more info", "issue-triage")
     check(
         "prompt: issue-triage does not offer request-changes",
         "request-changes" not in issue_prompt,

@@ -172,7 +172,8 @@ def test_claude_steps_split_legacy_vs_search():
             "workflow: legacy step keeps the no-shell tool mode and Sonnet alias "
             "(Read/Grep/Glob added for pass-by-reference target.txt, card #555; "
             "Write kept for decision.json, still no Bash)",
-            args == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model sonnet",
+            args
+            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model sonnet",
         )
         check(
             "workflow: legacy step has no GH_TOKEN env",
@@ -726,9 +727,7 @@ def test_nl_prompt_instructs_fully_qualified_refs():
         "prompt: instructs the model to qualify cross-repo refs with the target slug",
         "acme/repo#N" in prompt_with_slug and "never a bare #N" in prompt_with_slug,
     )
-    prompt_without_slug = ad.build_nl_prompt(
-        "card body", "merge it", "pr-review"
-    )
+    prompt_without_slug = ad.build_nl_prompt("card body", "merge it", "pr-review")
     check(
         "prompt: omits the qualification rule when no target slug is known",
         "never a bare #N" not in prompt_without_slug,
