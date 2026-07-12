@@ -14,6 +14,15 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
+# Bounded schema repair (cards #551/#547 class): when the model DELIVERS a
+# result that fails parse/normalize schema validation, exactly ONE extra
+# tokenless, no-tool, single-turn Claude step reshapes that candidate to the
+# required schema (no diff re-read, no fresh analysis). The repaired result is
+# re-validated; if it is still invalid the card records the visible
+# triage-unavailable error carrying the structural validation reason. A missing
+# result (E2BIG / auth / rate-limit / infra - no extractable result) never
+# triggers repair and keeps today's behavior. See "Bounded schema repair" in
+# AGENTS.md.
 # Trusted rendering preserves known claude-code-action harness polling/status
 # transcript lines but labels them as automated status in the visible card text.
 #
@@ -593,6 +602,96 @@ jobs:
           fi
           echo "path=$result_path" >> "$GITHUB_OUTPUT"
 
+      # Bounded schema-repair (cards #551/#547 class). ONLY triggers when a
+      # result was DELIVERED but fails parse/normalize schema validation - never
+      # for a missing result (E2BIG/auth/rate-limit/infra all leave no
+      # extractable result, so repair_needed stays false and today's fail-open
+      # path is unchanged). See "Bounded schema repair" in AGENTS.md.
+      - id: repair-prep
+        name: Detect a schema-miss and prepare the bounded repair turn
+        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          ORIG_RESULT: ${{ steps.triage-result.outputs.path }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set -euo pipefail
+          if [ -z "${ORIG_RESULT:-}" ] || [ ! -f "${ORIG_RESULT:-}" ]; then
+            echo "repair-prep: no delivered result to consider for schema repair"
+            echo "repair_needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Writes repair_needed / reason / (when needed) the repair_prompt
+          # heredoc to $GITHUB_OUTPUT. Reads only the compact result file (model
+          # output as data), never target.txt - no target token, no network.
+          "$TRUSTED_PYTHON" "$TRUSTED_SRC/scripts/render_card.py" triage-repair-prep \
+            --execution-file "$ORIG_RESULT" \
+            --kind "$KIND"
+
+      - id: claude_repair
+        name: Claude schema repair (ONE bounded turn, tokenless, no tools)
+        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.repair-prep.outputs.repair_needed == 'true' }}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          prompt: ${{ steps.repair-prep.outputs.repair_prompt }}
+          # Fail-closed tool isolation. The candidate is embedded in the prompt,
+          # so the repair turn needs NO tools and must NOT re-read the diff /
+          # re-analyze. An empty `--allowedTools` alone is not a reliable
+          # zero-tool guarantee in this action (upstream allowlist-parsing can
+          # let defaults leak, incl. Bash), so a Claude Code `permissions.deny`
+          # rule set - which takes precedence over any allow/allowlist - blocks
+          # every file/exec/network/subagent tool by name. Same tokenless
+          # side-job posture as triage itself: no FLEET_TOKEN, no READONLY_TOKEN.
+          settings: |
+            {"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}
+          claude_args: |
+            --allowedTools ""
+            --max-turns 1
+            --model sonnet
+
+      - id: repair-result
+        name: Extract the repaired result
+        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.repair-prep.outputs.repair_needed == 'true' }}
+        env:
+          EXECUTION_FILE: ${{ steps.claude_repair.outputs.execution_file }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/wheelhouse-triage-repair"
+          result_file="$out_dir/execution.json"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          result_path=""
+          if [ -n "${EXECUTION_FILE:-}" ]; then
+            if [ -L "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+              echo "::warning::auto triage schema repair produced no regular execution file"
+            elif "$TRUSTED_PYTHON" "$TRUSTED_SRC/scripts/render_card.py" \
+                 extract-result \
+                 --execution-file "$EXECUTION_FILE" \
+                 --out "$result_file"; then
+              result_path="$result_file"
+            else
+              echo "::warning::auto triage schema repair produced no extractable result"
+            fi
+          fi
+          echo "path=$result_path" >> "$GITHUB_OUTPUT"
+
       - name: Update the decision card
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
@@ -603,6 +702,9 @@ jobs:
           HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
           HEAD_MESSAGE: ${{ steps.verify_head.outputs.message }}
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
+          # Compact result of the ONE bounded schema-repair turn (empty unless a
+          # delivered result was a schema-miss and the repair step ran).
+          REPAIR_EXECUTION_FILE: ${{ steps.repair-result.outputs.path }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           # The prepare step writes target.txt in the workspace root (it has no
@@ -657,7 +759,8 @@ jobs:
                 --vision-sha "$VISION_SHA" \
                 --base-sha "$BASE_SHA" \
                 --target-file "${TARGET_FILE:-}" \
-                --execution-file "${TRIAGE_EXECUTION_FILE:-}"
+                --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
+                --repair-execution-file "${REPAIR_EXECUTION_FILE:-}"
           fi
 
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself

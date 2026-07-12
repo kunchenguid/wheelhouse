@@ -2027,9 +2027,13 @@ def test_triage_workflow_issue_path_isolation():
             and '"recommended_reason":' in run,
         )
 
+    # The two MAIN triage branches (search / no-search) are not one-per-kind; the
+    # bounded schema-repair branch (claude_repair) is a distinct, intentional
+    # third Claude step and is asserted separately.
+    main_claude = [s for s in claude_steps if s.get("id") != "claude_repair"]
     check(
-        "workflow: exactly two Claude branches total (search / no-search), not one per kind",
-        len(claude_steps) == 2,
+        "workflow: exactly two MAIN Claude branches (search / no-search), not one per kind",
+        len(main_claude) == 2,
     )
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
@@ -2133,20 +2137,22 @@ def test_triage_workflow_security_wiring():
         )
 
     claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    # Two MAIN triage branches plus the bounded schema-repair branch.
+    main_claude = [s for s in claude_steps if s.get("id") != "claude_repair"]
+    repair = step_by_id(steps, "claude_repair")
     check(
-        "workflow: search and no-search Claude branches exist", len(claude_steps) == 2
+        "workflow: search and no-search Claude branches exist", len(main_claude) == 2
     )
+    # Every Claude step (main triage AND repair) shares the same security posture.
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
-        args = str((step.get("with") or {}).get("claude_args", ""))
         check(
             "workflow: Claude action pin matches deep-review",
             step.get("uses") == CLAUDE_ACTION_PIN,
         )
-        check("workflow: Claude uses Sonnet alias", "--model sonnet" in args)
         check(
-            "workflow: Claude max-turns is lower than deep review",
-            "--max-turns 32" in args,
+            "workflow: Claude uses Sonnet alias",
+            "--model sonnet" in str((step.get("with") or {}).get("claude_args", "")),
         )
         check(
             "security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped
@@ -2162,6 +2168,30 @@ def test_triage_workflow_security_wiring():
         check(
             "workflow: Claude failures are fail-open",
             step.get("continue-on-error") is True,
+        )
+    # The MAIN triage turns are lightweight (lower max-turns than deep review).
+    for step in main_claude:
+        check(
+            "workflow: main Claude max-turns is lower than deep review",
+            "--max-turns 32" in str((step.get("with") or {}).get("claude_args", "")),
+        )
+    # The schema-repair turn is bounded to exactly ONE turn with fail-closed
+    # zero-tool isolation (deny rules take precedence over any allowlist).
+    check("workflow: schema-repair Claude branch exists", repair is not None)
+    if repair:
+        rargs = str((repair.get("with") or {}).get("claude_args", ""))
+        rsettings = str((repair.get("with") or {}).get("settings", ""))
+        check("repair: exactly one bounded turn", "--max-turns 1" in rargs)
+        check("repair: empty allowlist requested", '--allowedTools ""' in rargs)
+        check(
+            "repair: fail-closed deny of exec/file/network tools",
+            all(t in rsettings for t in ("Bash", "Read", "Write", "WebFetch"))
+            and '"deny"' in rsettings,
+        )
+        check(
+            "repair: tokenless (no FLEET_TOKEN, no READONLY_TOKEN)",
+            "FLEET_TOKEN" not in yaml.safe_dump(repair)
+            and "READONLY_TOKEN" not in yaml.safe_dump(repair),
         )
 
     search = next(s for s in claude_steps if s.get("id") == "claude_search")
@@ -2342,6 +2372,15 @@ def test_triage_workflow_security_wiring():
     claude_indexes = [
         i for i, s in enumerate(steps) if "claude-code-action" in str(s.get("uses", ""))
     ]
+    # The original triage-result handoff must run after the MAIN triage turns;
+    # the bounded schema-repair turn deliberately runs AFTER it (it consumes the
+    # handoff's delivered result to decide whether repair is needed).
+    main_claude_indexes = [
+        i
+        for i, s in enumerate(steps)
+        if "claude-code-action" in str(s.get("uses", ""))
+        and s.get("id") != "claude_repair"
+    ]
     check(
         "workflow: trusted source is prepared before Claude",
         trusted_i is not None
@@ -2353,10 +2392,10 @@ def test_triage_workflow_security_wiring():
         None not in (trusted_i, setup_i, install_i) and trusted_i < setup_i < install_i,
     )
     check(
-        "workflow: triage result handoff runs after Claude",
+        "workflow: triage result handoff runs after the main Claude turns",
         preserve_i is not None
-        and claude_indexes
-        and all(i < preserve_i for i in claude_indexes),
+        and main_claude_indexes
+        and all(i < preserve_i for i in main_claude_indexes),
     )
     check(
         "workflow: trusted card update runs after isolated handoff",
