@@ -174,7 +174,33 @@ jobs:
                 --json title,body --jq '"# " + (.title // "") + "\n\n" + (.body // "")' || true
               echo
               echo "## Diff"
-              GH_TOKEN="$FLEET_TOKEN" gh pr diff "$NUMBER" -R "$slug" || echo "(could not fetch diff)"
+              # Pass-by-reference (card #555): target.txt is written to DISK and
+              # the model Reads it; it is NEVER inlined into the Claude action
+              # prompt / ALL_INPUTS (see apply_decision.build_nl_prompt). So this
+              # cap bounds the MODEL's Read context and the on-disk file - NOT the
+              # kernel's per-string execve limit (MAX_ARG_STRLEN). The prompt is
+              # now PR-size-independent, so a large diff can no longer E2BIG the
+              # Claude step the way firstmate#442's ~1.2 MB diff did. A diff over
+              # the cap is truncated with an explicit marker (never silently),
+              # mirroring triage.yml's on-disk bound convention.
+              diff_limit_bytes=1500000
+              diff_raw="nl_diff.raw"
+              set +e
+              GH_TOKEN="$FLEET_TOKEN" gh pr diff "$NUMBER" -R "$slug" \
+                | head -c "$((diff_limit_bytes + 1))" > "$diff_raw"
+              pipe_status=("${PIPESTATUS[@]}")
+              diff_status=${pipe_status[0]}
+              head_status=${pipe_status[1]}
+              set -e
+              diff_size="$(wc -c < "$diff_raw" | tr -d '[:space:]')"
+              if [ "$diff_size" -gt "$diff_limit_bytes" ]; then
+                head -c "$diff_limit_bytes" "$diff_raw"
+                printf '\n\n[diff truncated after %s bytes]\n' "$diff_limit_bytes"
+              elif { [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; } || [ "$head_status" -ne 0 ]; then
+                echo "(could not fetch diff)"
+              else
+                cat "$diff_raw"
+              fi
             fi
             echo "</target-content>"
           } > target.txt
@@ -258,7 +284,8 @@ jobs:
       # write anywhere. See AGENTS.md's nl_decisions section for the full model.
       #
       # NOTE: keep this action pinned to the same reviewed release as deep-review.yml.
-      - name: Claude interprets intent (read-only search)
+      - id: nl-claude-search
+        name: Claude interprets intent (read-only search)
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
@@ -268,23 +295,32 @@ jobs:
           github_token: ${{ secrets.READONLY_TOKEN }}
           allowed_non_write_users: ${{ github.event.sender.login }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
+          # Read/Grep/Glob let the model open the on-disk target.txt (the diff is
+          # pass-by-reference, not inlined - card #555). Write still emits
+          # decision.json and Bash is still ONLY wheelhouse-search: the model's
+          # write/acting boundary is unchanged.
           claude_args: |
-            --allowedTools "Write,Bash(wheelhouse-search)"
+            --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
             --max-turns 32
             --model sonnet
 
       # Legacy no-search branch. This is the exact old tool posture: Write only,
       # no shell, and no GH_TOKEN environment. It runs whenever READONLY_TOKEN is
       # absent so the feature can ship before the optional secret exists.
-      - name: Claude interprets intent
+      - id: nl-claude-legacy
+        name: Claude interprets intent
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled != 'true' }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
+          # Read/Grep/Glob let the model open the on-disk target.txt (pass-by-
+          # reference, card #555). Still no shell and no GH_TOKEN: this legacy
+          # branch keeps its exact isolation, only adding the file-read tools plus
+          # the pre-existing Write for decision.json.
           claude_args: |
-            --allowedTools Write
+            --allowedTools Read,Grep,Glob,Write
             --max-turns 32
             --model sonnet
 
@@ -533,6 +569,50 @@ jobs:
           LD_LIBRARY_PATH: ""
           GH_PROMPT_DISABLED: "1"
         run: gh issue comment "$ISSUE" --body "$REPLY" || true
+
+      # --- NL failure visibility (bounded, fire-once) ------------------------
+      # If NL was entered and the prompt was built, but the intent-mapping LLM
+      # step then failed so `route` never ran (its success()-gated `if` skips it),
+      # the card would otherwise be left silently untouched under a red run - the
+      # card #555 symptom. Post ONE bounded, content-free note so the owner knows
+      # to retry, keyed by the triggering comment id so a job re-run does not pile
+      # up duplicates. It uses github.token (this repo's own card), so it never
+      # re-triggers the handler; it echoes NO prompt or comment text and changes
+      # no label, gate, or decision - purely an informational surface for a crash
+      # that had none.
+      - name: Note NL processing failure on card
+        if: ${{ always() && steps.nl-gate.outputs.proceed == 'true' && steps.nl-prompt.outcome == 'success' && steps.route.outcome == 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO_SLUG: ${{ github.repository }}
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GH_PROMPT_DISABLED: "1"
+        run: |
+          set -uo pipefail
+          marker="<!-- wheelhouse-nl-error:${TRIGGER_COMMENT_ID} -->"
+          # Fire-once: skip if this exact failure was already noted (e.g. the job
+          # was re-run). Read is best-effort; on a read error we do NOT post, to
+          # stay fail-quiet rather than risk a duplicate.
+          existing="$(gh api --paginate \
+            "/repos/${REPO_SLUG}/issues/${ISSUE}/comments?per_page=100" \
+            --jq '.[].body' 2>/dev/null)"
+          read_status=$?
+          if [ "$read_status" -ne 0 ]; then
+            echo "could not read card comments; skipping nl-error note"
+            exit 0
+          fi
+          if printf '%s' "$existing" | grep -qF "$marker"; then
+            echo "nl-error note already present; skipping"
+            exit 0
+          fi
+          body="I couldn't process that comment automatically - the assistant step didn't finish (often a transient error or an oversized target). Your card is unchanged; please try again, or drive it with a checkbox or slash-command. See the workflow run for details. ${marker}"
+          gh issue comment "$ISSUE" --body "$body" || true
 
   investigate-dispatch:
     needs: handle
