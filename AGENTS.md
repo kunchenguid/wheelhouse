@@ -820,8 +820,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   (fork-and-own, not guaranteed). The pre-observation window (rebase -> next
   observation) is irreducible in-repo; the acting path is still safe there because
   the decision-handler re-checks the pinned head SHA before any merge/
-  request-changes. What IS guaranteed: at/after the first observation of the head
-  change, the card cannot masquerade as old-head green. See
+  request-changes. What IS guaranteed: at/after the first successful
+  observation-driven refresh, the card cannot masquerade as old-head green. If
+  that corrective refresh itself fails, it is logged as `::error::` and the card
+  is left FROZEN and unactable at the stale head (never consumed; the
+  decision-handler still re-checks the pinned head SHA before any merge/
+  request-changes) and retried on the next scan - the same bound class as the
+  irreducible pre-observation window. See
   `tests/test_ci_autoapprove.py` (emission) and `tests/test_reconcile.py`
   (freeze/anti-masquerade/release/departed).
 - **Merge conflicts leave the maintainer queue.**

@@ -319,8 +319,10 @@ def main():
                     antimasq_refreshed += 1
             except Exception as e:
                 print(
-                    "::warning::failed anti-masquerade refresh for card #%s "
-                    "(%s#%s): %s"
+                    "::error::failed anti-masquerade refresh for card #%s "
+                    "(%s#%s): %s - card left FROZEN at the stale head "
+                    "(not consumed, not actable until re-checked) and retried "
+                    "on the next scan"
                     % (ex["number"], item["repo"], item["number"], str(e)[:160])
                 )
 
