@@ -497,7 +497,6 @@ def test_triage_yml_repair_wiring():
     doc = yaml.safe_load(read(".github", "workflows", "triage.yml"))
     steps = doc["jobs"]["triage"]["steps"]
     ids = [s.get("id") for s in steps]
-    names = [s.get("name") for s in steps]
 
     def idx(pred):
         for i, s in enumerate(steps):
