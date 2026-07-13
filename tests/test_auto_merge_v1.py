@@ -3204,6 +3204,17 @@ def test_scan_backstop_wiring_and_token_discipline():
         in act.get("run", ""),
     )
     check(
+        "wiring: authoritative criteria inspect the original card snapshot",
+        act
+        and "auto_merge.py act scan.json automerge-valid-claims.json cards.json"
+        in act.get("run", ""),
+    )
+    check(
+        "wiring: reconcile renders the criteria handoff from automerge.json",
+        "reconcile.py scan.json cards.json automerge.json"
+        in (by_name.get("Reconcile the queue", {}).get("run", "")),
+    )
+    check(
         "wiring: act re-reads cards with a separate default-token credential",
         act
         and "FLEET_TOKEN" in (act.get("env") or {}).get("GH_TOKEN", "")

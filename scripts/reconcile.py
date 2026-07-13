@@ -32,7 +32,11 @@ workflow sets to the default GITHUB_TOKEN (card activity must not re-trigger the
 handler).
 
 Usage:
-  reconcile.py scan.json cards.json
+  reconcile.py scan.json cards.json [automerge.json]
+
+When automerge.json is present, its read-only `criteria` snapshot is attached to
+matching PR-review items before rendering. Missing or historical files degrade
+to explicit unavailable UI rows and never affect routing or acting.
 
 cards.json is an array of open issue rows with number, body, labels, title, and
 updated_at.
@@ -129,13 +133,52 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
 
 
 def main():
-    if len(sys.argv) != 3:
-        sys.exit("usage: reconcile.py scan.json cards.json")
+    if len(sys.argv) not in (3, 4):
+        sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
+    criteria_payload = load(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
     items = scan.get("items", [])
+    criteria_index = {}
+    for entry in (
+        criteria_payload.get("criteria", [])
+        if isinstance(criteria_payload, dict)
+        else []
+    ):
+        if not isinstance(entry, dict) or not isinstance(entry.get("criteria"), list):
+            continue
+        try:
+            entry_number = int(entry.get("number") or 0)
+        except (TypeError, ValueError):
+            continue
+        key = (str(entry.get("repo") or ""), entry_number)
+        if not key[0] or not key[1] or key in criteria_index:
+            continue
+        criteria_index[key] = entry
+
+    def attach_automerge_criteria(item):
+        if item.get("kind") != "pr-review":
+            return item
+        key = (str(item.get("repo") or ""), int(item.get("number") or 0))
+        entry = criteria_index.get(key)
+        if not entry or str(entry.get("head_sha") or "") != str(
+            item.get("head_sha") or ""
+        ):
+            return item
+        enriched = dict(item)
+        enriched[render_card.AUTOMERGE_CRITERIA_FIELD] = entry["criteria"]
+        return enriched
+
+    items = [attach_automerge_criteria(item) for item in items]
+    for repo_result in repos.values():
+        if not isinstance(repo_result, dict):
+            continue
+        repo_result["ci_wait_refresh_items"] = [
+            attach_automerge_criteria(item)
+            for item in (repo_result.get("ci_wait_refresh_items") or [])
+        ]
 
     # Index existing open cards by their target (repo, number) from the state block.
     existing = {}  # (repo, number) -> existing card row

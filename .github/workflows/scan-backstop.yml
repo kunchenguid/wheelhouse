@@ -103,7 +103,7 @@ jobs:
           WHEELHOUSE_CARD_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-        run: python scripts/auto_merge.py act scan.json automerge-valid-claims.json
+        run: python scripts/auto_merge.py act scan.json automerge-valid-claims.json cards.json
 
       # Durable audit trail + resolved decision record for every auto-merge, in
       # THIS repo (default token, never FLEET_TOKEN - this repo's own
@@ -124,7 +124,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-        run: python scripts/reconcile.py scan.json cards.json
+        run: python scripts/reconcile.py scan.json cards.json automerge.json
 
       # Track per-repo consecutive scan failures in a dedicated (closed) ledger
       # issue in THIS repo, and fail the run loudly if a fleet repo has been dark
