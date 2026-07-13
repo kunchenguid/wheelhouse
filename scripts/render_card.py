@@ -1039,13 +1039,19 @@ def _ensure_recommendation_section(body, recommendation):
 
 
 def _replace_state_block(body, state):
-    marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
-        state or {},
-        separators=(",", ":"),
-    )
+    marker = "<!-- wheelhouse-state: %s -->" % _serialize_state(state)
     if _STATE_BLOCK_RE.search(body or ""):
         return _STATE_BLOCK_RE.sub(marker, body, count=1)
     return (body or "").rstrip() + "\n\n" + marker
+
+
+def _serialize_state(state):
+    return (
+        json.dumps(state or {}, separators=(",", ":"))
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
 
 
 def body_with_activity_reflected(body, item, card_updated_at=""):
@@ -1517,9 +1523,7 @@ def render(item, held=False):
         lines.append("")
     lines.append(_decision_section(kind, options, held))
     lines.append("")
-    lines.append(
-        "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
-    )
+    lines.append("<!-- wheelhouse-state: %s -->" % _serialize_state(state))
     body = "\n".join(lines)
 
     return {

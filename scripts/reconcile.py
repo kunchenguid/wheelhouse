@@ -58,6 +58,18 @@ def load(path):
         return json.load(f)
 
 
+def load_optional_object(path):
+    try:
+        value = load(path)
+    except (OSError, ValueError, TypeError) as e:
+        print(
+            "::warning::optional auto-merge criteria handoff is unavailable: %s"
+            % str(e)[:160]
+        )
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def current_card(row):
     card = render_card.get_card(row["number"])
     if not card or not render_card.issue_is_open(card):
@@ -137,7 +149,7 @@ def main():
         sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
-    criteria_payload = load(sys.argv[3]) if len(sys.argv) == 4 else {}
+    criteria_payload = load_optional_object(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
     items = scan.get("items", [])

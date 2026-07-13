@@ -411,6 +411,20 @@ def test_true_card_render_path_shows_stable_human_visible_rows():
     check("render: criteria never enter material fields", render_card.AUTOMERGE_CRITERIA_FIELD not in render_card.MATERIAL_FIELDS)
 
 
+def test_state_block_escapes_html_comment_terminators():
+    evidence = "excluded path: docs/close-->inject.md & <tag>"
+    criteria = [{"id": "g2_exclusions_clear", "status": "unmet", "evidence": evidence}]
+    rendered = render_card.render(item(automerge_criteria=criteria))
+    state_line = rendered["body"].split("<!-- wheelhouse-state: ", 1)[1]
+    state = core.parse_state_block(rendered["body"])
+    stored = {
+        row["id"]: row["evidence"]
+        for row in state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    }
+    check("security: target evidence cannot terminate the hidden state comment", "-->inject.md" not in state_line)
+    check("security: escaped state evidence round-trips without semantic changes", stored["g2_exclusions_clear"] == evidence)
+
+
 def test_displayed_met_rows_cannot_grant_eligibility():
     forged = schema.normalize_criteria(
         [

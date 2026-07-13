@@ -135,8 +135,12 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
             sys.argv = ["reconcile.py", scan_path, cards_path]
             if criteria_payload is not None:
                 criteria_path = os.path.join(d, "automerge.json")
-                with open(criteria_path, "w") as f:
-                    json.dump(criteria_payload, f)
+                if criteria_payload == "malformed":
+                    with open(criteria_path, "w") as f:
+                        f.write("{malformed")
+                elif criteria_payload != "missing":
+                    with open(criteria_path, "w") as f:
+                        json.dump(criteria_payload, f)
                 sys.argv.append(criteria_path)
             with redirect_stdout(io.StringIO()):
                 reconcile.main()
@@ -572,6 +576,16 @@ def test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria():
         )
         == criteria,
     )
+
+
+def test_optional_automerge_handoff_never_aborts_reconciliation():
+    scan = scan_payload(items=[work_item()])
+    for payload in ("missing", "malformed", []):
+        calls = run_reconcile(scan, [], criteria_payload=payload)
+        check(
+            "optional criteria handoff %r still reconciles the queue" % payload,
+            len(calls["upsert"]) == 1,
+        )
 
 
 def test_ci_wait_freeze_does_not_shield_a_different_pr():
@@ -1053,6 +1067,7 @@ def main():
     test_ci_wait_freeze_releases_when_checks_terminal()
     test_departed_target_still_self_heals_despite_freeze_machinery()
     test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria()
+    test_optional_automerge_handoff_never_aborts_reconciliation()
     test_ci_wait_freeze_does_not_shield_a_different_pr()
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()
