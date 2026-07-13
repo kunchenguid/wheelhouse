@@ -185,6 +185,19 @@ def test_all_preflight_criteria_met_and_action_semantics_unchanged():
     )
 
 
+def test_reconcile_absence_state_does_not_affect_criteria_or_eligibility():
+    baseline = evaluate(full=False)
+    with_absence = card_entry(
+        reconcile_absence={"version": 1, "threshold": 2, "count": 1}
+    )
+    actual = evaluate(card_value=with_absence, full=False)
+    check(
+        "criteria: reconcile absence is non-authoritative",
+        actual["eligible"] == baseline["eligible"] is True
+        and actual["criteria"] == baseline["criteria"],
+    )
+
+
 def test_each_guarded_criterion_has_a_fail_closed_negative():
     cases = [
         (

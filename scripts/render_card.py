@@ -174,6 +174,17 @@ CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 AUTOMERGE_CRITERIA_FIELD = "automerge_criteria"
 AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 
+# Fixed-K reconcile soft-close hysteresis. This hidden, structured record is
+# non-material and denial-only: it can delay a soft close, but never authorize
+# classification, triage, a decision, CI approval, or auto-merge. The exact
+# bounded schema also carries machine soft-close provenance for prospective
+# closed-card reuse; legacy or malformed records always read as count zero.
+RECONCILE_ABSENCE_FIELD = "reconcile_absence"
+RECONCILE_ABSENCE_VERSION = 1
+RECONCILE_ABSENCE_THRESHOLD = 2
+RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
+RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
+
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
 # (see `render_stale`) - the same missing-field-reads-as-behind backfill shape
@@ -1042,6 +1053,156 @@ def _replace_state_block(body, state):
     return (body or "").rstrip() + "\n\n" + marker
 
 
+def _unique_state_block(body):
+    """Strict state reader for reconcile close provenance.
+
+    The general card parser intentionally remains backward-compatible and
+    permissive. Close provenance needs a narrower trust boundary: exactly one
+    state marker and no duplicate JSON object keys at any depth. A malformed
+    state returns None, so it can never accelerate a soft close or qualify a
+    card for future reuse.
+    """
+    matches = list(_STATE_BLOCK_RE.finditer(body or ""))
+    if len(matches) != 1:
+        return None
+
+    def no_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate state key")
+            value[key] = item
+        return value
+
+    try:
+        state = json.loads(matches[0].group(1), object_pairs_hook=no_duplicate_keys)
+    except (TypeError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _valid_reconcile_close_timestamp(value):
+    if not isinstance(value, str) or len(value) != 20:
+        return False
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value):
+        return False
+    return _parse_iso_timestamp(value) is not None
+
+
+def _normalized_reconcile_absence(body):
+    """Return an exact trusted absence record, or None for missing/untrusted.
+
+    Only count 1 and the threshold-reaching count 2 are representable. Count 2
+    is valid only with the exact machine soft-close provenance object. This
+    keeps booleans, negatives, oversized values, wrong versions, extra keys,
+    duplicate keys, and partial provenance from becoming close permission.
+    """
+    state = _unique_state_block(body)
+    if state is None:
+        return None
+    record = state.get(RECONCILE_ABSENCE_FIELD)
+    if not isinstance(record, dict):
+        return None
+    count = record.get("count")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    base = {
+        "version": RECONCILE_ABSENCE_VERSION,
+        "threshold": RECONCILE_ABSENCE_THRESHOLD,
+        "count": count,
+    }
+    if count == 1:
+        return base if record == base else None
+    if count != RECONCILE_ABSENCE_THRESHOLD:
+        return None
+    provenance = record.get("soft_close")
+    expected = dict(base)
+    expected["soft_close"] = provenance
+    if record != expected or not isinstance(provenance, dict):
+        return None
+    if set(provenance) != {"actor", "reason", "at"}:
+        return None
+    if provenance.get("actor") != RECONCILE_SOFT_CLOSE_ACTOR:
+        return None
+    if provenance.get("reason") != RECONCILE_SOFT_CLOSE_REASON:
+        return None
+    if not _valid_reconcile_close_timestamp(provenance.get("at")):
+        return None
+    return expected
+
+
+def reconcile_absence_count(body):
+    """Trusted consecutive qualifying-absence count; untrusted means zero."""
+    record = _normalized_reconcile_absence(body)
+    return record["count"] if record else 0
+
+
+def reconcile_soft_close_provenance(body):
+    """Return validated machine soft-close provenance for future card reuse."""
+    record = _normalized_reconcile_absence(body)
+    if not record or record.get("count") != RECONCILE_ABSENCE_THRESHOLD:
+        return None
+    return dict(record["soft_close"])
+
+
+def reconcile_absence_needs_clear(body):
+    """Whether a uniquely parsed state carries any absence field, valid or not."""
+    state = _unique_state_block(body)
+    return state is not None and RECONCILE_ABSENCE_FIELD in state
+
+
+def body_with_reconcile_absence(body, count, closed_at=""):
+    """Set one exact bounded absence/provenance record in the hidden state."""
+    state = _unique_state_block(body)
+    if state is None or isinstance(count, bool) or count not in (1, 2):
+        return body
+    record = {
+        "version": RECONCILE_ABSENCE_VERSION,
+        "threshold": RECONCILE_ABSENCE_THRESHOLD,
+        "count": count,
+    }
+    if count == RECONCILE_ABSENCE_THRESHOLD:
+        if not _valid_reconcile_close_timestamp(closed_at):
+            return body
+        record["soft_close"] = {
+            "actor": RECONCILE_SOFT_CLOSE_ACTOR,
+            "reason": RECONCILE_SOFT_CLOSE_REASON,
+            "at": closed_at,
+        }
+    new_state = dict(state)
+    new_state[RECONCILE_ABSENCE_FIELD] = record
+    return _replace_state_block(body, new_state)
+
+
+def body_without_reconcile_absence(body):
+    """Clear valid or malformed absence state after conclusive worklist return."""
+    state = _unique_state_block(body)
+    if state is None or RECONCILE_ABSENCE_FIELD not in state:
+        return body
+    new_state = dict(state)
+    new_state.pop(RECONCILE_ABSENCE_FIELD, None)
+    return _replace_state_block(body, new_state)
+
+
+def _body_preserving_reconcile_absence(body, existing_body):
+    """Carry exact absence state through a CI-wait anti-masquerade refresh.
+
+    A CI-wait scan is inconclusive for worklist membership, so its required head
+    refresh must neither increment nor reset hysteresis. None means the source
+    state itself was ambiguous and the caller must skip rather than normalize an
+    untrusted duplicate/malformed state marker into close permission.
+    """
+    old_state = _unique_state_block(existing_body)
+    new_state = _unique_state_block(body)
+    if old_state is None or new_state is None:
+        return None
+    if RECONCILE_ABSENCE_FIELD not in old_state:
+        return body
+    new_state = dict(new_state)
+    new_state[RECONCILE_ABSENCE_FIELD] = old_state[RECONCILE_ABSENCE_FIELD]
+    return _replace_state_block(body, new_state)
+
+
 def _serialize_state(state):
     return (
         json.dumps(state or {}, separators=(",", ":"))
@@ -1058,6 +1219,9 @@ def body_with_activity_reflected(body, item, card_updated_at=""):
     new_state = _state_with_activity_reflected(
         state, item, card_updated_at=card_updated_at
     )
+    # A conclusive worklist item resets soft-close hysteresis. Fold the reset
+    # into this already-required activity write when possible.
+    new_state.pop(RECONCILE_ABSENCE_FIELD, None)
     if new_state == state:
         return body
     return _replace_state_block(body, new_state)
@@ -1205,6 +1369,9 @@ def body_with_triage_queued(body, item):
         base_sha=item.get("base_sha", ""),
         vision_sha=item.get("automerge_vision_sha", ""),
     )
+    # This queued write already proves the target returned to the worklist, so
+    # clear stale absence state here instead of issuing a second body edit.
+    new_state.pop(RECONCILE_ABSENCE_FIELD, None)
     new_state = _state_with_activity_reflected(
         new_state, item, allow_without_baseline=True
     )
@@ -1625,6 +1792,22 @@ def _edit_issue_body(number, body, remove_labels=None):
         os.unlink(body_path)
 
 
+def update_reconcile_absence(number, body, count, closed_at=""):
+    new_body = body_with_reconcile_absence(body, count, closed_at=closed_at)
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    return True
+
+
+def clear_reconcile_absence(number, body):
+    new_body = body_without_reconcile_absence(body)
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    return True
+
+
 def mark_triage_queued(number, item, body):
     """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
@@ -1813,7 +1996,15 @@ def _create_card(card):
         os.unlink(body_path)
 
 
-def _refresh_card(number, card, existing, item, old_state, preserve_triage=True):
+def _refresh_card(
+    number,
+    card,
+    existing,
+    item,
+    old_state,
+    preserve_triage=True,
+    preserve_reconcile_absence=False,
+):
     """Re-render an existing card's body in place and REPLACE its managed labels.
     If the target's head moved, drop a short comment so the owner sees a
     re-review is warranted rather than being silently swapped underneath."""
@@ -1828,6 +2019,17 @@ def _refresh_card(number, card, existing, item, old_state, preserve_triage=True)
             old_state,
             owner=owner,
         )
+    if preserve_reconcile_absence:
+        preserved = _body_preserving_reconcile_absence(
+            card["body"], existing.get("body", "")
+        )
+        if preserved is None:
+            print(
+                "skip card #%s for %s: reconcile absence state is ambiguous"
+                % (number, card["marker"])
+            )
+            return number
+        card["body"] = preserved
     body_path = _write_body(card["body"])
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
@@ -1863,7 +2065,9 @@ def _refresh_card(number, card, existing, item, old_state, preserve_triage=True)
     return number
 
 
-def upsert_card(item, existing=None, has_token=False):
+def upsert_card(
+    item, existing=None, has_token=False, preserve_reconcile_absence=False
+):
     """Create a new card, or refresh the existing one for this target in place.
 
     `has_token` gates whether a BRAND-NEW eligible card is created HELD (see
@@ -1871,6 +2075,8 @@ def upsert_card(item, existing=None, has_token=False):
     `CLAUDE_CODE_OAUTH_TOKEN`-presence signal used to gate whether auto triage
     is queued at all (`auto_triage_has_token()`). On refresh, a currently-held
     card stays held only if the refreshed item still passes `should_hold`.
+    `preserve_reconcile_absence` is reserved for CI-wait anti-masquerade
+    refreshes, whose scan is inconclusive and must not reset hysteresis.
 
     Refresh rules (see AGENTS.md "Card refresh"):
       * Only a pure `needs-decision` card is refreshed; a card already
@@ -1924,6 +2130,9 @@ def upsert_card(item, existing=None, has_token=False):
     old_state = parse_state_block(existing.get("body", ""))
     publish_held = held_publish_needed(item, old_state, has_token)
     if not refresh_needed(item, old_state, has_token):
+        if preserve_reconcile_absence:
+            print("skip card #%s for %s: no material change" % (number, marker))
+            return number
         if not should_auto_triage(item, old_state, existing.get("labels"), has_token):
             reflect_activity(
                 number,
@@ -1943,6 +2152,7 @@ def upsert_card(item, existing=None, has_token=False):
         item,
         old_state,
         preserve_triage=not publish_held,
+        preserve_reconcile_absence=preserve_reconcile_absence,
     )
 
 

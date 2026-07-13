@@ -163,7 +163,9 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         for c in (cards if current_cards is None else current_cards)
     }
 
-    def fake_upsert(it, existing=None, has_token=False):
+    def fake_upsert(
+        it, existing=None, has_token=False, preserve_reconcile_absence=False
+    ):
         # `has_token` is recorded (for tests that assert on it) but not used
         # to change the fake's rendering: this fake predates held cards and
         # every other test in this module relies on its always-unheld output,
@@ -2875,7 +2877,13 @@ def test_upsert_card_refresh_preserves_held_when_still_eligible():
         rc.ensure_labels = lambda labels_: None
 
         def fake_refresh(
-            number, card, existing_, item_, old_state, preserve_triage=True
+            number,
+            card,
+            existing_,
+            item_,
+            old_state,
+            preserve_triage=True,
+            preserve_reconcile_absence=False,
         ):
             captured["card"] = card
             return number

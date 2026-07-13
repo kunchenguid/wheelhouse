@@ -339,12 +339,14 @@ If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards ope
 After a base-branch push, GitHub can temporarily report a PR's mergeability as `UNKNOWN` while it recalculates it.
 Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive value before changing its worklist membership.
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
-If an open target no longer needs a maintainer decision, its pure pending card is closed too.
+If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scan and is soft-closed only after a second consecutive qualifying absence.
+The first absence is hidden card state, and a worklist return clears it while keeping the same card.
+Failed or truncated scans, unresolved mergeability, and fork-CI wait neither advance nor reset that state.
 An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a non-retryable action error stays visible.
 If that target is genuinely merged or closed, the scheduled backstop still hard-closes the `blocked` card.
-That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after a successful scan.
+That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after two consecutive complete, conclusive scans.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
-Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card.
+Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card after the two-scan soft-close threshold.
 There is one fork-CI exception: when safe automatic CI approval verifies that no run is awaiting approval and the contributor PR's mergeability conclusively settles to `CONFLICTING`, Wheelhouse keeps its `needs-ci-approval` classification and emits no card, but posts that same rebase nudge before consuming the PR from the worklist.
 An actual CI approval is unchanged and does not post a conflict nudge.
 An `UNKNOWN` mergeability value is settled before this exception can nudge, and a missing or still-indeterminate value does not nudge.

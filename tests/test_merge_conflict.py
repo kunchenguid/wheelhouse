@@ -330,14 +330,21 @@ def card(number=91, target=42):
 
 
 def run_reconcile(scan, cards, current_cards=None):
-    calls = {"upsert": [], "close": []}
+    calls = {"upsert": [], "close": [], "state": []}
     current_by_number = {
         c["number"]: c for c in (cards if current_cards is None else current_cards)
     }
 
-    def fake_upsert(item, existing=None, has_token=False):
+    def fake_upsert(
+        item, existing=None, has_token=False, preserve_reconcile_absence=False
+    ):
         calls["upsert"].append(
-            {"item": item, "existing": existing, "has_token": has_token}
+            {
+                "item": item,
+                "existing": existing,
+                "has_token": has_token,
+                "preserve_reconcile_absence": preserve_reconcile_absence,
+            }
         )
 
     def fake_close(number, message, label="resolved"):
@@ -346,13 +353,25 @@ def run_reconcile(scan, cards, current_cards=None):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
+    def fake_update_absence(number, body, count, closed_at=""):
+        new_body = reconcile.render_card.body_with_reconcile_absence(
+            body, count, closed_at=closed_at
+        )
+        calls["state"].append({"count": count, "body_after": new_body})
+        if new_body == body:
+            return False
+        current_by_number[int(number)]["body"] = new_body
+        return True
+
     old_argv = sys.argv[:]
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
+    old_update_absence = reconcile.render_card.update_reconcile_absence
     reconcile.render_card.upsert_card = fake_upsert
     reconcile.render_card.close_card = fake_close
     reconcile.render_card.get_card = fake_get_card
+    reconcile.render_card.update_reconcile_absence = fake_update_absence
     try:
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
@@ -369,6 +388,7 @@ def run_reconcile(scan, cards, current_cards=None):
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
+        reconcile.render_card.update_reconcile_absence = old_update_absence
     return calls
 
 
@@ -781,18 +801,28 @@ def test_reconcile_consumes_conflicted_card_that_left_worklist():
         },
         "items": [],
     }
-    calls = run_reconcile(scan, [card(number=91, target=42)])
+    pending = card(number=91, target=42)
+    first = run_reconcile(scan, [pending])
     check(
         "reconcile: conflicted target outside worklist has no upsert",
-        calls["upsert"] == [],
+        first["upsert"] == [],
     )
     check(
-        "reconcile: conflicted target outside worklist closes stale card",
-        len(calls["close"]) == 1 and calls["close"][0]["number"] == 91,
+        "reconcile: first conflicted-target absence stays open with count one",
+        first["close"] == []
+        and len(first["state"]) == 1
+        and first["state"][0]["count"] == 1,
+    )
+
+    pending["body"] = first["state"][0]["body_after"]
+    second = run_reconcile(scan, [pending])
+    check(
+        "reconcile: second conflicted-target absence closes stale card",
+        len(second["close"]) == 1 and second["close"][0]["number"] == 91,
     )
     check(
         "reconcile: stale card close explains no maintainer decision needed",
-        "no longer needs a maintainer decision" in calls["close"][0]["message"],
+        "no longer needs a maintainer decision" in second["close"][0]["message"],
     )
 
 
