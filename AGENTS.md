@@ -131,7 +131,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
   updates, automated-status labeling for known harness transcript lines,
   target-activity state reflection, the advisory `### Security review` section
-  on CI-approval HOLD cards (`_security_review_section`), the read-only
+  on CI-approval HOLD cards (`_security_review_section`), the non-authoritative
+  read-only
   `### Auto-merge criteria` section on PR-review cards, plus trusted
   triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
@@ -260,7 +261,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
   it is not a material field). `CARD_RENDER_VERSION` is currently `7`: the
-  6 -> 7 bump publishes the authoritative read-only `### Auto-merge criteria`
+  6 -> 7 bump publishes the non-authoritative read-only `### Auto-merge criteria`
   section on already-open PR-review cards; the 5 -> 6 bump publishes the
   advisory read-only `### Security review` section on
   already-open CI-approval HOLD cards (display-only; the pwn-request hold and

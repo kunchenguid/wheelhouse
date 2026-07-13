@@ -478,7 +478,9 @@ def test_ci_wait_freeze_releases_when_checks_terminal():
         and calls["upsert"][0]["item"]["head_sha"] == "newsha"
         and calls["upsert"][0]["item"]["tests"] == "green",
     )
-    check("ci-wait-release: card not consumed when it reclassifies", calls["close"] == [])
+    check(
+        "ci-wait-release: card not consumed when it reclassifies", calls["close"] == []
+    )
 
 
 def test_departed_target_still_self_heals_despite_freeze_machinery():
@@ -571,9 +573,7 @@ def test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria():
     check(
         "axi#96 lifecycle: authoritative criteria reach card generation",
         created
-        and created[0]["item"].get(
-            reconcile.render_card.AUTOMERGE_CRITERIA_FIELD
-        )
+        and created[0]["item"].get(reconcile.render_card.AUTOMERGE_CRITERIA_FIELD)
         == criteria,
     )
 

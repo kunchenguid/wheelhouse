@@ -183,7 +183,12 @@ def behavior_verdict_facts(verdict):
             "g6_verdict_merge",
             "g6_class_c_mode",
         ):
-            fact(key, False, "no structured behavior verdict", "no structured behavior verdict")
+            fact(
+                key,
+                False,
+                "no structured behavior verdict",
+                "no structured behavior verdict",
+            )
         return facts, ""
 
     cls = normalize_behavior_class(verdict.get("behavior_class"))
@@ -675,11 +680,7 @@ def fresh_verdict_facts(state, head_sha):
             else (
                 "behavior verdict is stale (not for the current head SHA)"
                 if not revision_ok
-                else (
-                    "card head SHA is not current"
-                    if not card_head_ok
-                    else ""
-                )
+                else ("card head SHA is not current" if not card_head_ok else "")
             )
         )
     )
@@ -702,9 +703,7 @@ def fresh_verdict_facts(state, head_sha):
     fact(
         "g6_merge_recommendation",
         recommendation_ok,
-        "explicit merge recommendation"
-        if recommendation_ok
-        else recommendation_reason,
+        "explicit merge recommendation" if recommendation_ok else recommendation_reason,
         recommendation_reason,
     )
     behavior_facts, behavior_class = behavior_verdict_facts(
@@ -850,9 +849,7 @@ def evaluate_candidate(
 
     def finish(eligible=False):
         result["eligible"] = eligible
-        result["criteria"] = criteria_schema.normalize_criteria(
-            list(criteria.values())
-        )
+        result["criteria"] = criteria_schema.normalize_criteria(list(criteria.values()))
         return result
 
     def fail(key, evidence, reason, unavailable=False):
@@ -909,7 +906,10 @@ def evaluate_candidate(
     state = (card_entry or {}).get("state") or {}
     labels = (card_entry or {}).get("labels") or set()
     if card_entry:
-        met("g1_card_identity", "trusted unique machine-created card #%s" % card_entry.get("issue"))
+        met(
+            "g1_card_identity",
+            "trusted unique machine-created card #%s" % card_entry.get("issue"),
+        )
     else:
         stopped = fail(
             "g1_card_identity",
@@ -1077,8 +1077,7 @@ def evaluate_candidate(
     elif verdict_base_sha != base_sha:
         stopped = fail(
             "g6_base_revision",
-            "verdict=%s current=%s"
-            % (verdict_base_sha[:8], base_sha[:8] or "<none>"),
+            "verdict=%s current=%s" % (verdict_base_sha[:8], base_sha[:8] or "<none>"),
             "G6 behavior verdict is not for the current base SHA",
         )
         if stopped:
@@ -1088,8 +1087,10 @@ def evaluate_candidate(
         result["base_sha"] = base_sha
 
     author = _pr_author_login(pr)
-    author_ok = bool(author) and _pr_author_is_provably_human(pr) and (
-        author.casefold() not in maintainer_logins
+    author_ok = (
+        bool(author)
+        and _pr_author_is_provably_human(pr)
+        and (author.casefold() not in maintainer_logins)
     )
     if not author:
         stopped = fail(
@@ -1101,7 +1102,9 @@ def evaluate_candidate(
         if stopped:
             return stopped
     elif not author_ok:
-        reason = "G3 author %s is a bot/maintainer, not a returning contributor" % author
+        reason = (
+            "G3 author %s is a bot/maintainer, not a returning contributor" % author
+        )
         stopped = fail("g3_author_identity", reason, reason)
         if stopped:
             return stopped
@@ -1110,7 +1113,10 @@ def evaluate_candidate(
 
     prior_merge = bool(author_ok and has_prior_merged_pr(slug, author))
     if prior_merge:
-        met("g3_prior_merge", "%s has at least one prior merged PR in %s" % (author, repo))
+        met(
+            "g3_prior_merge",
+            "%s has at least one prior merged PR in %s" % (author, repo),
+        )
         result["audit"]["contributor"] = author
         result["audit"]["contributor_proof"] = "has >=1 prior merged PR in %s" % repo
         result["gates"]["returning_contributor"] = True
@@ -1142,7 +1148,10 @@ def evaluate_candidate(
             return stopped
     exclusions = core._auto_merge_exclusions(files) if files_ok and complete else []
     if files_ok and complete and not exclusions:
-        met("g2_exclusions_clear", "no unconditional workflow/security/governance exclusions")
+        met(
+            "g2_exclusions_clear",
+            "no unconditional workflow/security/governance exclusions",
+        )
         result["gates"]["exclusions"] = "none"
     elif exclusions:
         reason = "G2 touches excluded path(s): %s" % ", ".join(exclusions[:5])
@@ -1169,14 +1178,26 @@ def evaluate_candidate(
         counts_ok = False
     if counts_ok:
         if changed_files <= MAX_CHANGED_FILES:
-            met("g5_file_limit", "%d changed files <= %d" % (changed_files, MAX_CHANGED_FILES))
+            met(
+                "g5_file_limit",
+                "%d changed files <= %d" % (changed_files, MAX_CHANGED_FILES),
+            )
         else:
-            unmet("g5_file_limit", "%d changed files > %d" % (changed_files, MAX_CHANGED_FILES))
+            unmet(
+                "g5_file_limit",
+                "%d changed files > %d" % (changed_files, MAX_CHANGED_FILES),
+            )
         changed_lines = additions + deletions
         if changed_lines <= MAX_CHANGED_LINES:
-            met("g5_line_limit", "%d changed lines <= %d" % (changed_lines, MAX_CHANGED_LINES))
+            met(
+                "g5_line_limit",
+                "%d changed lines <= %d" % (changed_lines, MAX_CHANGED_LINES),
+            )
         else:
-            unmet("g5_line_limit", "%d changed lines > %d" % (changed_lines, MAX_CHANGED_LINES))
+            unmet(
+                "g5_line_limit",
+                "%d changed lines > %d" % (changed_lines, MAX_CHANGED_LINES),
+            )
     else:
         unmet("g5_file_limit", "changed-file count unavailable", unavailable=True)
         unmet("g5_line_limit", "changed-line count unavailable", unavailable=True)
@@ -1189,7 +1210,11 @@ def evaluate_candidate(
     else:
         result["gates"]["blast_radius"] = br_reason
 
-    checks_ok = scope_ok and item.get("comp") in ("pass", "n/a") and item.get("tests") == "green"
+    checks_ok = (
+        scope_ok
+        and item.get("comp") in ("pass", "n/a")
+        and item.get("tests") == "green"
+    )
     if checks_ok:
         met(
             "g4_checks_green",
@@ -1302,10 +1327,12 @@ def collect_card_criteria(scan, cards):
             criteria = result["criteria"]
             repo_ok, repo_reason = _repo_result_ok(scan, repo)
             indeterminate = item.get("number") in set(
-                (((scan.get("repos") or {}).get(repo) or {}).get(
-                    "indeterminate_pr_numbers"
+                (
+                    ((scan.get("repos") or {}).get(repo) or {}).get(
+                        "indeterminate_pr_numbers"
+                    )
+                    or []
                 )
-                or [])
             )
             if repo_ok and not indeterminate:
                 scan_status = criteria_schema.STATUS_MET

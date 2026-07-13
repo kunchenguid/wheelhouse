@@ -197,7 +197,7 @@ AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 # Bumped 5 -> 6 to publish the advisory read-only `### Security review` section
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
-# authoritative per-criterion auto-merge preflight UI on PR-review cards.
+# non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
 CARD_RENDER_VERSION = 7
 
 ACCEPT_ALLOWED_BY_KIND = {
@@ -408,15 +408,12 @@ def automerge_criteria_stale(item, state):
     if item.get("kind") != "pr-review" or AUTOMERGE_CRITERIA_FIELD not in item:
         return False
     expected = criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD))
-    return (
-        (state or {}).get(AUTOMERGE_CRITERIA_VERSION_FIELD)
-        != criteria_schema.CRITERIA_VERSION
-        or criteria_schema.normalize_criteria(
-            (state or {}).get(AUTOMERGE_CRITERIA_FIELD),
-            missing_reason="historical criterion data is unavailable",
-        )
-        != expected
-    )
+    return (state or {}).get(
+        AUTOMERGE_CRITERIA_VERSION_FIELD
+    ) != criteria_schema.CRITERIA_VERSION or criteria_schema.normalize_criteria(
+        (state or {}).get(AUTOMERGE_CRITERIA_FIELD),
+        missing_reason="historical criterion data is unavailable",
+    ) != expected
 
 
 def refresh_needed(item, state, has_token=False):
@@ -1497,9 +1494,7 @@ def render(item, held=False):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
     if kind == "pr-review":
-        lines.extend(
-            _automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD))
-        )
+        lines.extend(_automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD)))
         lines.append("")
     # A security warning (e.g. a pull_request_target posture on a ci-approval
     # card) is surfaced as a prominent callout so the maintainer decides with
@@ -2141,7 +2136,9 @@ def _repair_schema_lines(kind):
     if kind == "issue-triage":
         action_enum = "close | decline | hold | investigate | comment"
     else:
-        action_enum = "merge | request-changes | decline | close | hold | investigate | comment"
+        action_enum = (
+            "merge | request-changes | decline | close | hold | investigate | comment"
+        )
     lines = [
         "{",
         '  "summary": "<one-sentence plain summary string>",',
@@ -2160,7 +2157,9 @@ def _repair_schema_lines(kind):
     return lines
 
 
-def build_repair_prompt(candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDATE_MAX_BYTES):
+def build_repair_prompt(
+    candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDATE_MAX_BYTES
+):
     """Build the ONE bounded schema-repair turn's prompt. It is self-contained:
     the candidate (the model's own earlier output that failed validation) is
     embedded, the required schema is stated, and the model is told to REPAIR
@@ -2170,7 +2169,10 @@ def build_repair_prompt(candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDA
     candidate = candidate_text or ""
     raw = candidate.encode("utf-8")
     if len(raw) > max_candidate_bytes:
-        candidate = raw[:max_candidate_bytes].decode("utf-8", "ignore") + "\n[candidate truncated]"
+        candidate = (
+            raw[:max_candidate_bytes].decode("utf-8", "ignore")
+            + "\n[candidate truncated]"
+        )
     lines = [
         "You previously produced a structured triage result that FAILED",
         "automated schema validation. Your ONLY task now is to REPAIR its",
@@ -2259,7 +2261,9 @@ def decide_triage_apply(result_text, repaired_text, target_file):
     if not (result_text or "").strip():
         return {"outcome": "no-result", "triage": None, "reason": "", "candidate": ""}
     # Delivered but invalid: the #551 schema-miss class.
-    reason = triage_schema_reason(result_text) or "delivered result failed schema validation"
+    reason = (
+        triage_schema_reason(result_text) or "delivered result failed schema validation"
+    )
     candidate = redacted_candidate_shape(result_text)
     if repaired_text:
         repaired = parse_triage_json(repaired_text)
