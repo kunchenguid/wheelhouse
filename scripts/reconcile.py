@@ -22,8 +22,8 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
     (`pending-triage` held cards still count as pure pending), and
   * closes any open card whose underlying PR/issue is no longer open, and closes
     pure pending cards whose open target no longer needs a maintainer decision
-    only after two consecutive conclusive scans - so the queue self-heals even
-    if a dispatch was lost without churning on a one-scan bucket transition.
+    only after two adjacent scheduled workflow runs conclusively observe it
+    absent - so any intervening inconclusive or present run breaks the streak.
     This also consumes old scan-built cards for owner/maintainer/bot-authored
     targets after the author filter removes them from the current worklist, and
     for conflicted PR-review targets after the scan moves them to needs-rebase.
@@ -140,47 +140,6 @@ def _matches_expected_write(current, before, expected_body):
     )
 
 
-def _clear_reconcile_absence(current):
-    expected = current
-    last_error = None
-    if not render_card.reconcile_reset_barrier(expected.get("body", "")):
-        barrier_body = render_card.body_with_reconcile_reset_barrier(
-            expected.get("body", "")
-        )
-        if barrier_body == expected.get("body", ""):
-            return "raced", None
-        for _attempt in range(2):
-            try:
-                render_card.set_reconcile_reset_barrier(
-                    expected["number"], expected.get("body", "")
-                )
-            except Exception as e:
-                last_error = e
-            latest = current_card(expected)
-            if _matches_expected_write(latest, expected, barrier_body):
-                expected = latest
-                break
-            if latest is None or not _matches_snapshot(latest, expected):
-                return "raced", last_error
-        else:
-            return "failed", last_error
-    for _attempt in range(2):
-        try:
-            render_card.clear_reconcile_absence(
-                expected["number"], expected.get("body", "")
-            )
-        except Exception as e:
-            last_error = e
-        latest = current_card(expected)
-        if latest is None:
-            return "raced", last_error
-        if not render_card.reconcile_absence_needs_clear(latest.get("body", "")):
-            return "cleared", None
-        if not _matches_snapshot(latest, expected):
-            return "raced", last_error
-    return "failed", last_error
-
-
 def _soft_close_timestamp():
     return (
         datetime.now(timezone.utc)
@@ -188,6 +147,19 @@ def _soft_close_timestamp():
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _reconcile_run_number():
+    if (
+        os.environ.get("GITHUB_ACTIONS") != "true"
+        or os.environ.get("GITHUB_EVENT_NAME") != "schedule"
+    ):
+        return 0
+    value = os.environ.get("GITHUB_RUN_NUMBER", "")
+    if not value.isdigit():
+        return 0
+    number = int(value)
+    return number if 1 <= number <= 9_007_199_254_740_991 else 0
 
 
 # Kept as a thin alias: reconcile.py historically owned this check, and
@@ -253,6 +225,7 @@ def main():
         sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
+    reconcile_run_number = _reconcile_run_number()
     criteria_payload = load_optional_object(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
@@ -328,7 +301,6 @@ def main():
     refreshed = 0
     activity_reflected = 0
     triage_queued = 0
-    reset_failures = []
     has_triage_token = auto_triage_has_token()
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     for item in items:
@@ -480,11 +452,15 @@ def main():
                     )
                     == key
                 ):
-                    reset_status, reset_error = _clear_reconcile_absence(current)
-                    if reset_status == "failed":
-                        reset_failures.append((ex["number"], item, reset_error))
+                    render_card.clear_reconcile_absence(
+                        current["number"], current.get("body", "")
+                    )
             except Exception as e:
-                reset_failures.append((ex["number"], item, e))
+                print(
+                    "::warning::failed to clear reconcile absence state on card "
+                    "#%s for %s#%s: %s"
+                    % (ex["number"], item["repo"], item["number"], str(e)[:160])
+                )
 
     # 1b) Anti-masquerade for the approve/wait window. A PR whose fork CI was just
     #     auto-approved this scan, or whose approved checks are still running, emits
@@ -541,9 +517,9 @@ def main():
 
     # 2) Hard-close cards whose target is definitively no longer open. For an
     #    authoritatively still-open target that is outside the maintainer
-    #    worklist, require two consecutive complete, conclusive scans before the
-    #    existing soft-close path runs. Failed/truncated/UNKNOWN/CI-wait scans
-    #    remain freezes: they neither increment nor reset this hidden state.
+    #    worklist, require two adjacent complete, conclusive workflow runs before
+    #    the existing soft-close path runs. Failed/truncated/UNKNOWN/CI-wait runs
+    #    do not mutate the record, but their run-number gap breaks adjacency.
     closed = 0
     for ex in cards_with_state:
         state = ex["state"]
@@ -599,6 +575,11 @@ def main():
                 continue
 
             count = render_card.reconcile_absence_count(current.get("body", ""))
+            absence_run_number = render_card.reconcile_absence_run_number(
+                current.get("body", "")
+            )
+            if not reconcile_run_number:
+                continue
             expected_body = current.get("body", "")
             if count == 0:
                 try:
@@ -606,6 +587,7 @@ def main():
                         current["number"],
                         current.get("body", ""),
                         1,
+                        run_number=reconcile_run_number,
                     )
                 except Exception as e:
                     print(
@@ -613,11 +595,26 @@ def main():
                         "card #%s: %s" % (current["number"], str(e)[:160])
                     )
                 continue
+            if count == 1 and absence_run_number != reconcile_run_number - 1:
+                try:
+                    render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        1,
+                        run_number=reconcile_run_number,
+                    )
+                except Exception as e:
+                    print(
+                        "::warning::failed to restart reconcile absence on card "
+                        "#%s: %s" % (current["number"], str(e)[:160])
+                    )
+                continue
             if count == 1:
                 closed_at = _soft_close_timestamp()
                 expected_body = render_card.body_with_reconcile_absence(
                     current.get("body", ""),
                     render_card.RECONCILE_ABSENCE_THRESHOLD,
+                    run_number=reconcile_run_number,
                     closed_at=closed_at,
                 )
                 if expected_body == current.get("body", ""):
@@ -627,6 +624,7 @@ def main():
                         current["number"],
                         current.get("body", ""),
                         render_card.RECONCILE_ABSENCE_THRESHOLD,
+                        run_number=reconcile_run_number,
                         closed_at=closed_at,
                     ):
                         continue
@@ -642,6 +640,23 @@ def main():
                     continue
                 current = latest
             elif count != render_card.RECONCILE_ABSENCE_THRESHOLD:
+                continue
+            elif absence_run_number not in (
+                reconcile_run_number,
+                reconcile_run_number - 1,
+            ):
+                try:
+                    render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        1,
+                        run_number=reconcile_run_number,
+                    )
+                except Exception as e:
+                    print(
+                        "::warning::failed to restart reconcile absence on card "
+                        "#%s: %s" % (current["number"], str(e)[:160])
+                    )
                 continue
 
             # Re-read and validate the exact threshold/provenance state
@@ -712,12 +727,6 @@ def main():
             closed,
         )
     )
-    if reset_failures:
-        card_number, item, error = reset_failures[0]
-        raise RuntimeError(
-            "failed to clear reconcile absence state on card #%s for %s#%s: %s"
-            % (card_number, item["repo"], item["number"], str(error or "unknown")[:160])
-        )
 
 
 if __name__ == "__main__":

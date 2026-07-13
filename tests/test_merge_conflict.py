@@ -329,7 +329,7 @@ def card(number=91, target=42):
     }
 
 
-def run_reconcile(scan, cards, current_cards=None):
+def run_reconcile(scan, cards, current_cards=None, run_number=100):
     calls = {"upsert": [], "close": [], "state": []}
     current_by_number = {
         c["number"]: c for c in (cards if current_cards is None else current_cards)
@@ -358,9 +358,9 @@ def run_reconcile(scan, cards, current_cards=None):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
-    def fake_update_absence(number, body, count, closed_at=""):
+    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, closed_at=closed_at
+            body, count, run_number=run_number, closed_at=closed_at
         )
         calls["state"].append({"count": count, "body_after": new_body})
         if new_body == body:
@@ -369,6 +369,9 @@ def run_reconcile(scan, cards, current_cards=None):
         return True
 
     old_argv = sys.argv[:]
+    old_github_actions = os.environ.get("GITHUB_ACTIONS")
+    old_event_name = os.environ.get("GITHUB_EVENT_NAME")
+    old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
@@ -378,6 +381,9 @@ def run_reconcile(scan, cards, current_cards=None):
     reconcile.render_card.get_card = fake_get_card
     reconcile.render_card.update_reconcile_absence = fake_update_absence
     try:
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["GITHUB_EVENT_NAME"] = "schedule"
+        os.environ["GITHUB_RUN_NUMBER"] = str(run_number)
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
             cards_path = os.path.join(d, "cards.json")
@@ -390,6 +396,18 @@ def run_reconcile(scan, cards, current_cards=None):
                 reconcile.main()
     finally:
         sys.argv = old_argv
+        if old_github_actions is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = old_github_actions
+        if old_event_name is None:
+            os.environ.pop("GITHUB_EVENT_NAME", None)
+        else:
+            os.environ["GITHUB_EVENT_NAME"] = old_event_name
+        if old_run_number is None:
+            os.environ.pop("GITHUB_RUN_NUMBER", None)
+        else:
+            os.environ["GITHUB_RUN_NUMBER"] = old_run_number
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
@@ -807,7 +825,7 @@ def test_reconcile_consumes_conflicted_card_that_left_worklist():
         "items": [],
     }
     pending = card(number=91, target=42)
-    first = run_reconcile(scan, [pending])
+    first = run_reconcile(scan, [pending], run_number=100)
     check(
         "reconcile: conflicted target outside worklist has no upsert",
         first["upsert"] == [],
@@ -820,7 +838,7 @@ def test_reconcile_consumes_conflicted_card_that_left_worklist():
     )
 
     pending["body"] = first["state"][0]["body_after"]
-    second = run_reconcile(scan, [pending])
+    second = run_reconcile(scan, [pending], run_number=101)
     check(
         "reconcile: second conflicted-target absence closes stale card",
         len(second["close"]) == 1 and second["close"][0]["number"] == 91,

@@ -180,7 +180,7 @@ AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 # bounded schema also carries machine soft-close provenance for prospective
 # closed-card reuse; legacy or malformed records always read as count zero.
 RECONCILE_ABSENCE_FIELD = "reconcile_absence"
-RECONCILE_ABSENCE_VERSION = 1
+RECONCILE_ABSENCE_VERSION = 2
 RECONCILE_ABSENCE_THRESHOLD = 2
 RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
 RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
@@ -1106,10 +1106,19 @@ def _normalized_reconcile_absence(body):
     count = record.get("count")
     if isinstance(count, bool) or not isinstance(count, int):
         return None
+    run_number = record.get("run_number")
+    if (
+        isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number < 1
+        or run_number > 9_007_199_254_740_991
+    ):
+        return None
     base = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
+        "run_number": run_number,
     }
     if count == 1:
         return base if record == base else None
@@ -1137,6 +1146,11 @@ def reconcile_absence_count(body):
     return record["count"] if record else 0
 
 
+def reconcile_absence_run_number(body):
+    record = _normalized_reconcile_absence(body)
+    return record["run_number"] if record else 0
+
+
 def reconcile_soft_close_provenance(body):
     """Return validated machine soft-close provenance for future card reuse."""
     record = _normalized_reconcile_absence(body)
@@ -1151,45 +1165,24 @@ def reconcile_absence_needs_clear(body):
     return state is not None and RECONCILE_ABSENCE_FIELD in state
 
 
-def reconcile_reset_barrier(body):
-    state = _unique_state_block(body)
-    if state is None:
-        return False
-    return state.get(RECONCILE_ABSENCE_FIELD) == {
-        "version": RECONCILE_ABSENCE_VERSION,
-        "threshold": RECONCILE_ABSENCE_THRESHOLD,
-        "count": 0,
-        "reset": True,
-    }
-
-
-def body_with_reconcile_reset_barrier(body):
-    state = _unique_state_block(body)
-    if state is None or RECONCILE_ABSENCE_FIELD not in state:
-        return body
-    new_state = dict(state)
-    new_state[RECONCILE_ABSENCE_FIELD] = {
-        "version": RECONCILE_ABSENCE_VERSION,
-        "threshold": RECONCILE_ABSENCE_THRESHOLD,
-        "count": 0,
-        "reset": True,
-    }
-    return _replace_state_block(body, new_state)
-
-
-def body_with_reconcile_absence(body, count, closed_at=""):
+def body_with_reconcile_absence(body, count, run_number=0, closed_at=""):
     """Set one exact bounded absence/provenance record in the hidden state."""
     state = _unique_state_block(body)
     if (
         state is None
         or isinstance(count, bool)
         or count not in (1, 2)
+        or isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number < 1
+        or run_number > 9_007_199_254_740_991
     ):
         return body
     record = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
+        "run_number": run_number,
     }
     if count == RECONCILE_ABSENCE_THRESHOLD:
         if not _valid_reconcile_close_timestamp(closed_at):
@@ -1218,9 +1211,10 @@ def _body_preserving_reconcile_absence(body, existing_body):
     """Carry exact absence state through a CI-wait anti-masquerade refresh.
 
     A CI-wait scan is inconclusive for worklist membership, so its required head
-    refresh must neither increment nor reset hysteresis. None means the source
-    state itself was ambiguous and the caller must skip rather than normalize an
-    untrusted duplicate/malformed state marker into close permission.
+    refresh preserves the exact absence record while the intervening workflow
+    run breaks adjacency. None means the source state itself was ambiguous and
+    the caller must skip rather than normalize an untrusted duplicate/malformed
+    state marker into close permission.
     """
     old_state = _unique_state_block(existing_body)
     new_state = _unique_state_block(body)
@@ -1854,16 +1848,10 @@ def _edit_issue_body(number, body, remove_labels=None):
         os.unlink(body_path)
 
 
-def update_reconcile_absence(number, body, count, closed_at=""):
-    new_body = body_with_reconcile_absence(body, count, closed_at=closed_at)
-    if new_body == body:
-        return False
-    _edit_issue_body(number, new_body)
-    return True
-
-
-def set_reconcile_reset_barrier(number, body):
-    new_body = body_with_reconcile_reset_barrier(body)
+def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
+    new_body = body_with_reconcile_absence(
+        body, count, run_number=run_number, closed_at=closed_at
+    )
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)

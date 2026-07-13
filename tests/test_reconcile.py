@@ -150,9 +150,9 @@ def run_reconcile(
         current_by_number[int(number)]["body"] = new_body
         return True
 
-    def fake_update_absence(number, body, count, closed_at=""):
+    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, closed_at=closed_at
+            body, count, run_number=run_number, closed_at=closed_at
         )
         calls["state"].append(
             {
@@ -160,6 +160,7 @@ def run_reconcile(
                 "number": number,
                 "count": count,
                 "closed_at": closed_at,
+                "run_number": run_number,
                 "body": body,
                 "body_after": new_body,
             }
@@ -184,29 +185,16 @@ def run_reconcile(
         current_by_number[int(number)]["body"] = new_body
         return True
 
-    def fake_set_reset_barrier(number, body):
-        new_body = reconcile.render_card.body_with_reconcile_reset_barrier(body)
-        calls["state"].append(
-            {
-                "operation": "barrier",
-                "number": number,
-                "body": body,
-                "body_after": new_body,
-            }
-        )
-        if new_body == body:
-            return False
-        current_by_number[int(number)]["body"] = new_body
-        return True
-
     old_argv = sys.argv[:]
+    old_github_actions = os.environ.get("GITHUB_ACTIONS")
+    old_event_name = os.environ.get("GITHUB_EVENT_NAME")
+    old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
     old_reflect = reconcile.render_card.reflect_activity
     old_update_absence = reconcile.render_card.update_reconcile_absence
     old_clear_absence = reconcile.render_card.clear_reconcile_absence
-    old_set_reset_barrier = reconcile.render_card.set_reconcile_reset_barrier
     old_maybe_queue = reconcile.maybe_queue_auto_triage
     reconcile.render_card.upsert_card = fake_upsert
     reconcile.render_card.close_card = fake_close
@@ -214,9 +202,11 @@ def run_reconcile(
     reconcile.render_card.reflect_activity = fake_reflect
     reconcile.render_card.update_reconcile_absence = fake_update_absence
     reconcile.render_card.clear_reconcile_absence = fake_clear_absence
-    reconcile.render_card.set_reconcile_reset_barrier = fake_set_reset_barrier
     reconcile.maybe_queue_auto_triage = fake_maybe_queue
     try:
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["GITHUB_EVENT_NAME"] = "schedule"
+        os.environ["GITHUB_RUN_NUMBER"] = "100"
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
             cards_path = os.path.join(d, "cards.json")
@@ -238,13 +228,24 @@ def run_reconcile(
                 reconcile.main()
     finally:
         sys.argv = old_argv
+        if old_github_actions is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = old_github_actions
+        if old_event_name is None:
+            os.environ.pop("GITHUB_EVENT_NAME", None)
+        else:
+            os.environ["GITHUB_EVENT_NAME"] = old_event_name
+        if old_run_number is None:
+            os.environ.pop("GITHUB_RUN_NUMBER", None)
+        else:
+            os.environ["GITHUB_RUN_NUMBER"] = old_run_number
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
         reconcile.render_card.reflect_activity = old_reflect
         reconcile.render_card.update_reconcile_absence = old_update_absence
         reconcile.render_card.clear_reconcile_absence = old_clear_absence
-        reconcile.render_card.set_reconcile_reset_barrier = old_set_reset_barrier
         reconcile.maybe_queue_auto_triage = old_maybe_queue
     return calls
 
@@ -335,6 +336,7 @@ class ReconcileLifecycle:
         self.body_write_attempts = 0
         self._clock = 0
         self.fail_body_write_attempts = set()
+        self.run_number = 0
 
     def _tick(self):
         self._clock += 1
@@ -402,12 +404,19 @@ class ReconcileLifecycle:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError("unexpected gh call: %r" % (args,))
 
-    def run(self, scan):
+    def run(self, scan, event_name="schedule"):
         old_argv = sys.argv[:]
         old_gh = reconcile.render_card._gh
         old_token = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN")
+        old_github_actions = os.environ.get("GITHUB_ACTIONS")
+        old_event_name = os.environ.get("GITHUB_EVENT_NAME")
+        old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
         reconcile.render_card._gh = self._gh
         os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = "false"
+        self.run_number += 1
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["GITHUB_EVENT_NAME"] = event_name
+        os.environ["GITHUB_RUN_NUMBER"] = str(self.run_number)
         try:
             with tempfile.TemporaryDirectory() as d:
                 scan_path = os.path.join(d, "scan.json")
@@ -426,12 +435,25 @@ class ReconcileLifecycle:
                 os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
             else:
                 os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = old_token
+            if old_github_actions is None:
+                os.environ.pop("GITHUB_ACTIONS", None)
+            else:
+                os.environ["GITHUB_ACTIONS"] = old_github_actions
+            if old_event_name is None:
+                os.environ.pop("GITHUB_EVENT_NAME", None)
+            else:
+                os.environ["GITHUB_EVENT_NAME"] = old_event_name
+            if old_run_number is None:
+                os.environ.pop("GITHUB_RUN_NUMBER", None)
+            else:
+                os.environ["GITHUB_RUN_NUMBER"] = old_run_number
 
 
-def _body_with_absence(body, count=1):
+def _body_with_absence(body, count=1, run_number=99):
     return reconcile.render_card.body_with_reconcile_absence(
         body,
         count,
+        run_number=run_number,
         closed_at="2026-07-13T12:00:00Z" if count == 2 else "",
     )
 
@@ -569,6 +591,46 @@ def test_open_target_that_left_worklist_records_first_absence():
             calls["state"][0]["body_after"]
         )
         == 1,
+    )
+
+
+def test_reconcile_run_number_requires_trusted_actions_identity():
+    old_actions = os.environ.get("GITHUB_ACTIONS")
+    old_event_name = os.environ.get("GITHUB_EVENT_NAME")
+    old_number = os.environ.get("GITHUB_RUN_NUMBER")
+    try:
+        os.environ.pop("GITHUB_ACTIONS", None)
+        os.environ["GITHUB_RUN_NUMBER"] = "42"
+        outside_actions = reconcile._reconcile_run_number()
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        manual = reconcile._reconcile_run_number()
+        os.environ["GITHUB_EVENT_NAME"] = "schedule"
+        invalid = []
+        for value in ("", "true", "-1", "0", "9007199254740992"):
+            os.environ["GITHUB_RUN_NUMBER"] = value
+            invalid.append(reconcile._reconcile_run_number())
+        os.environ["GITHUB_RUN_NUMBER"] = "42"
+        valid = reconcile._reconcile_run_number()
+    finally:
+        if old_actions is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = old_actions
+        if old_event_name is None:
+            os.environ.pop("GITHUB_EVENT_NAME", None)
+        else:
+            os.environ["GITHUB_EVENT_NAME"] = old_event_name
+        if old_number is None:
+            os.environ.pop("GITHUB_RUN_NUMBER", None)
+        else:
+            os.environ["GITHUB_RUN_NUMBER"] = old_number
+    check(
+        "reconcile: run identity is bounded and GitHub Actions-only",
+        outside_actions == 0
+        and manual == 0
+        and invalid == [0, 0, 0, 0, 0]
+        and valid == 42,
     )
 
 
@@ -1355,12 +1417,12 @@ def test_lifecycle_present_absent_present_reuses_and_clears():
         lifecycle.issue["number"] == 7 and lifecycle.issue["state"] == "OPEN",
     )
     check(
-        "lifecycle: present return clears absence after durable invalidation",
+        "lifecycle: present return clears absence with one required write",
         reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 0
         and not reconcile.render_card.reconcile_absence_needs_clear(
             lifecycle.issue["body"]
         )
-        and lifecycle.body_writes == first_absence_writes + 2,
+        and lifecycle.body_writes == first_absence_writes + 1,
     )
     check("lifecycle: present-absent-present never closes", lifecycle.close_calls == [])
 
@@ -1373,8 +1435,12 @@ def test_failed_present_reset_cannot_authorize_later_close():
     lifecycle.fail_body_write_attempts = {2}
     lifecycle.run(scan_payload(items=[item]))
     check(
-        "reset failure: transient clear failure is retried and verified",
-        reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 0,
+        "reset failure: stale first absence remains tied to its old run",
+        reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 1,
     )
     lifecycle.run(absent)
     check(
@@ -1382,32 +1448,10 @@ def test_failed_present_reset_cannot_authorize_later_close():
         lifecycle.issue["state"] == "OPEN"
         and lifecycle.close_calls == []
         and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
-    )
-
-
-def test_persistent_clear_failure_leaves_durable_reset_barrier():
-    lifecycle = ReconcileLifecycle(work_item())
-    lifecycle.run(scan_payload(items=[]))
-    lifecycle.fail_body_write_attempts = {3, 4}
-    failed = False
-    try:
-        lifecycle.run(scan_payload(items=[work_item()]))
-    except RuntimeError as e:
-        failed = "failed to clear reconcile absence state" in str(e)
-    check(
-        "reset failure: persistent clear failure leaves close-inert barrier",
-        failed
-        and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 0
-        and reconcile.render_card.reconcile_reset_barrier(lifecycle.issue["body"])
-        and lifecycle.close_calls == [],
-    )
-    lifecycle.fail_body_write_attempts = set()
-    lifecycle.run(scan_payload(items=[]))
-    check(
-        "reset failure: later absence starts at count one from barrier",
-        lifecycle.issue["state"] == "OPEN"
-        and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
-        and lifecycle.close_calls == [],
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 3
     )
 
 
@@ -1520,34 +1564,50 @@ def test_lifecycle_kind_transition_reuses_and_resets():
     )
 
 
-def test_freezes_preserve_existing_absence_exactly():
-    lifecycle = ReconcileLifecycle(work_item())
-    lifecycle.issue["body"] = _body_with_absence(lifecycle.issue["body"], 1)
-    original = lifecycle.issue["body"]
-    original_writes = lifecycle.body_writes
-    frozen_scans = [
-        scan_payload(items=[], ok=False),
-        scan_payload(items=[], truncated=True),
-        scan_payload(items=[], indeterminate_pr_numbers=[42]),
-        scan_payload(items=[], ci_wait_pr_numbers=[42]),
+def test_intervening_runs_break_absence_adjacency():
+    cases = [
+        ("failed", scan_payload(items=[], ok=False), "schedule"),
+        ("truncated", scan_payload(items=[], truncated=True), "schedule"),
+        (
+            "UNKNOWN",
+            scan_payload(items=[], indeterminate_pr_numbers=[42]),
+            "schedule",
+        ),
+        ("CI-wait", scan_payload(items=[], ci_wait_pr_numbers=[42]), "schedule"),
+        ("manual", scan_payload(items=[]), "workflow_dispatch"),
     ]
-    for frozen in frozen_scans:
-        lifecycle.run(frozen)
-    check(
-        "freeze lifecycle: failed/truncated/UNKNOWN/CI-wait preserve count",
-        lifecycle.issue["body"] == original
-        and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"])
-        == 1,
-    )
-    check(
-        "freeze lifecycle: no state write or close",
-        lifecycle.body_writes == original_writes and lifecycle.close_calls == [],
-    )
-    lifecycle.run(scan_payload(items=[]))
-    check(
-        "freeze lifecycle: next qualifying absence completes preserved streak",
-        lifecycle.issue["state"] == "CLOSED" and len(lifecycle.close_calls) == 1,
-    )
+    for name, intervening, event_name in cases:
+        lifecycle = ReconcileLifecycle(work_item())
+        lifecycle.run(scan_payload(items=[]))
+        original = lifecycle.issue["body"]
+        original_writes = lifecycle.body_writes
+        lifecycle.run(intervening, event_name=event_name)
+        preserved = (
+            lifecycle.issue["body"] == original
+            and lifecycle.body_writes == original_writes
+            and lifecycle.close_calls == []
+        )
+        lifecycle.run(scan_payload(items=[]))
+        restarted = (
+            lifecycle.issue["state"] == "OPEN"
+            and lifecycle.close_calls == []
+            and reconcile.render_card.reconcile_absence_count(
+                lifecycle.issue["body"]
+            )
+            == 1
+            and reconcile.render_card.reconcile_absence_run_number(
+                lifecycle.issue["body"]
+            )
+            == 3
+        )
+        lifecycle.run(scan_payload(items=[]))
+        check(
+            "freeze lifecycle: %s run preserves state but breaks adjacency" % name,
+            preserved
+            and restarted
+            and lifecycle.issue["state"] == "CLOSED"
+            and len(lifecycle.close_calls) == 1,
+        )
 
 
 def test_ci_wait_antimasquerade_refresh_preserves_absence():
@@ -1586,14 +1646,16 @@ def test_malformed_and_legacy_state_cannot_accelerate_close():
 
     malformed_records = [
         True,
-        {"version": 1, "threshold": 2, "count": True},
-        {"version": 1, "threshold": 2, "count": -1},
-        {"version": 1, "threshold": 2, "count": 999999999},
+        {"version": 2, "threshold": 2, "count": True, "run_number": 1},
+        {"version": 2, "threshold": 2, "count": -1, "run_number": 1},
+        {"version": 2, "threshold": 2, "count": 999999999, "run_number": 1},
+        {"version": 3, "threshold": 2, "count": 1, "run_number": 1},
         {"version": 2, "threshold": 2, "count": 1},
         {
-            "version": 1,
+            "version": 2,
             "threshold": 2,
             "count": 2,
+            "run_number": 1,
             "soft_close": {
                 "actor": "owner",
                 "reason": "open-target-worklist-absence",
@@ -1623,8 +1685,8 @@ def test_malformed_and_legacy_state_cannot_accelerate_close():
     state = reconcile.core.parse_state_block(duplicate.issue["body"])
     raw = json.dumps(state, separators=(",", ":"))
     raw = raw[:-1] + (
-        ',"reconcile_absence":{"version":1,"threshold":2,"count":1}'
-        ',"reconcile_absence":{"version":1,"threshold":2,"count":1}}'
+        ',"reconcile_absence":{"version":2,"threshold":2,"count":1,"run_number":1}'
+        ',"reconcile_absence":{"version":2,"threshold":2,"count":1,"run_number":1}}'
     )
     duplicate.issue["body"] = reconcile.render_card._STATE_BLOCK_RE.sub(
         "<!-- wheelhouse-state: %s -->" % raw,
@@ -1734,9 +1796,10 @@ def test_audit_protections_ignore_absence_count():
         protected = _pr_review_card()
         state = reconcile.core.parse_state_block(protected["body"])
         state[reconcile.render_card.RECONCILE_ABSENCE_FIELD] = {
-            "version": 1,
+            "version": 2,
             "threshold": 2,
             "count": 1,
+            "run_number": 99,
         }
         state[field] = {"repo": "wheelhouse", "number": 42}
         protected["body"] = reconcile.render_card._replace_state_block(
@@ -1758,6 +1821,7 @@ def main():
     test_rejected_nested_refresh_does_not_bypass_triage_snapshot_guard()
     test_refresh_uses_current_labels_before_upsert()
     test_open_target_that_left_worklist_records_first_absence()
+    test_reconcile_run_number_requires_trusted_actions_identity()
     test_indeterminate_pr_card_is_frozen()
     test_ci_wait_card_is_frozen_not_consumed()
     test_ci_wait_refresh_kills_stale_head_masquerade()
@@ -1786,11 +1850,10 @@ def main():
     test_truncated_repo_scan_does_not_self_heal_close_missing_issue()
     test_lifecycle_present_absent_present_reuses_and_clears()
     test_failed_present_reset_cannot_authorize_later_close()
-    test_persistent_clear_failure_leaves_durable_reset_barrier()
     test_lifecycle_two_absences_close_with_provenance()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()
-    test_freezes_preserve_existing_absence_exactly()
+    test_intervening_runs_break_absence_adjacency()
     test_ci_wait_antimasquerade_refresh_preserves_absence()
     test_malformed_and_legacy_state_cannot_accelerate_close()
     test_stale_snapshot_races_do_not_mutate_or_close()
