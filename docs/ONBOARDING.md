@@ -146,14 +146,14 @@ jobs:
 
 - **Injection-safe by construction.** GitHub context values are passed through `env:` and read by `jq --arg`, never interpolated into the shell - a hostile PR title cannot break out.
 - **PR-review merge conflicts.** Ingest dispatches create cards from the payload; they do not read GraphQL `mergeable` or post rebase nudges.
-  The scheduled scan later treats `CONFLICTING` PRs as `needs-rebase`, posts any contributor nudge, and consumes stale pure pending cards.
+  The scheduled scan later treats `CONFLICTING` PRs as `needs-rebase`, posts any contributor nudge, and sends stale pure pending cards through the [scheduled backstop lifecycle](../README.md#daily-use).
   After a base-branch push, GitHub can temporarily return `UNKNOWN` while it recalculates mergeability.
   The scan polls that pending value before changing membership; if it cannot settle it, it leaves any existing card unchanged rather than creating or consuming a card from an indeterminate answer.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
   Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   Only a scan-created contributor card that holds for changed workflow/action files receives the deterministic, read-only *Security review (advisory)* section; it is context for the unchanged manual hold, not a dispatch-payload feature or an approval.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
-  If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and reconcile consumes any stale CI-approval card.
+  If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and any stale CI-approval card follows the [scheduled backstop lifecycle](../README.md#daily-use).
   For a contributor fork whose safe approval returns that no-op result and whose mergeability conclusively settles to `CONFLICTING`, the scan keeps the CI-approval classification and emits no card, but posts the ordinary fire-once-per-head rebase nudge before consuming the target from the worklist.
   It never sends that nudge for an actually approved CI run, a missing or unresolved mergeability value, or a failed mergeability settlement, and this exception does not write the structured pending-contributor cleanup state.
   A failed settlement marks the repo scan unhealthy, so reconcile preserves existing cards instead of consuming them.

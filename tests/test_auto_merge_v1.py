@@ -623,6 +623,22 @@ def test_happy_path_classes_B_and_C():
         )
 
 
+def test_reconcile_absence_state_cannot_change_auto_merge_eligibility():
+    w, items, cards = default_world()
+    state = core.parse_state_block(cards[0]["body"])
+    state[render_card.RECONCILE_ABSENCE_FIELD] = {
+        "version": 1,
+        "threshold": 2,
+        "count": 1,
+    }
+    cards[0]["body"] = render_card._replace_state_block(cards[0]["body"], state)
+    payload, _ = run_act(w, items, cards)
+    check(
+        "act: reconcile absence is non-authoritative and eligibility is unchanged",
+        len(payload["merges"]) == 1 and len(w.do_merge_calls) == 1,
+    )
+
+
 def test_class_C_without_optin_holds_end_to_end():
     w, items, cards = default_world(verdict=dict(ELIGIBLE_A, behavior_class="C"))
     payload, err = run_act(w, items, cards)

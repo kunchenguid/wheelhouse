@@ -1061,7 +1061,15 @@ def test_upsert_parses_state_block_after_refetch():
         "state": "OPEN",
     }
 
-    def fake_refresh(number, card, existing_, item_, old_state, preserve_triage=True):
+    def fake_refresh(
+        number,
+        card,
+        existing_,
+        item_,
+        old_state,
+        preserve_triage=True,
+        preserve_reconcile_absence=False,
+    ):
         calls["refresh"] += 1
         calls["old_state"] = old_state
         calls["card_state"] = core.parse_state_block(card.get("body", ""))
@@ -1324,6 +1332,93 @@ def test_plan_label_update_noop_when_identical():
     check("label: identical labels -> nothing to remove", to_remove == [])
 
 
+# --------------------------------------------------------------------------- #
+# reconcile soft-close hysteresis is hidden, bounded, and non-material
+# --------------------------------------------------------------------------- #
+def test_reconcile_absence_schema_is_bounded_and_non_material():
+    it = item()
+    body = rc.render(it)["body"]
+    first = rc.body_with_reconcile_absence(body, 1, run_number=41)
+    first_state = core.parse_state_block(first)
+    check(
+        "absence: exact first-pass record round-trips",
+        rc.reconcile_absence_count(first) == 1
+        and first_state.get(rc.RECONCILE_ABSENCE_FIELD)
+        == {"version": 2, "threshold": 2, "count": 1, "run_number": 41},
+    )
+    check(
+        "absence: field is outside material semantics",
+        rc.RECONCILE_ABSENCE_FIELD not in rc.MATERIAL_FIELDS
+        and rc.material_changed(it, first_state) is False,
+    )
+    triaged = dict(first_state, triaged_sha=it["head_sha"], triage_status="succeeded")
+    triaged_without = dict(triaged)
+    triaged_without.pop(rc.RECONCILE_ABSENCE_FIELD, None)
+    check(
+        "absence: field does not affect triage freshness",
+        rc.triage_fresh(it, triaged) == rc.triage_fresh(it, triaged_without) is True,
+    )
+
+    closed = rc.body_with_reconcile_absence(
+        first, 2, run_number=42, closed_at="2026-07-13T12:00:00Z"
+    )
+    provenance = rc.reconcile_soft_close_provenance(closed)
+    check(
+        "absence: threshold record carries exact trusted provenance",
+        rc.reconcile_absence_count(closed) == 2
+        and provenance
+        == {
+            "actor": rc.RECONCILE_SOFT_CLOSE_ACTOR,
+            "reason": rc.RECONCILE_SOFT_CLOSE_REASON,
+            "at": "2026-07-13T12:00:00Z",
+        },
+    )
+    check(
+        "absence: unbounded count cannot be serialized",
+        rc.body_with_reconcile_absence(first, 3, run_number=42) == first,
+    )
+    cleared = rc.body_without_reconcile_absence(closed)
+    check(
+        "absence: clear removes record without material change",
+        not rc.reconcile_absence_needs_clear(cleared)
+        and rc.material_changed(it, core.parse_state_block(cleared)) is False,
+    )
+
+
+def test_required_present_writes_fold_absence_reset():
+    it = item(updated_at="2024-06-01T00:00:00Z")
+    old = item(updated_at="2024-01-01T00:00:00Z")
+    body = rc.body_with_reconcile_absence(
+        rc.render(old)["body"], 1, run_number=41
+    )
+    reflected = rc.body_with_activity_reflected(
+        body, it, card_updated_at="2024-01-02T00:00:00Z"
+    )
+    reflected_state = core.parse_state_block(reflected)
+    check(
+        "absence: activity write folds reset",
+        reflected != body
+        and reflected_state.get("activity_reflected_at") == it["updated_at"]
+        and rc.RECONCILE_ABSENCE_FIELD not in reflected_state,
+    )
+
+    queued_source = rc.body_with_reconcile_absence(
+        rc.render(it)["body"], 1, run_number=41
+    )
+    queued = rc.body_with_triage_queued(queued_source, it)
+    queued_state = core.parse_state_block(queued)
+    check(
+        "absence: triage queued write folds reset",
+        queued != queued_source
+        and queued_state.get("triage_status") == "queued"
+        and rc.RECONCILE_ABSENCE_FIELD not in queued_state,
+    )
+    check(
+        "absence: fresh full render never inherits lifecycle state",
+        rc.RECONCILE_ABSENCE_FIELD not in core.parse_state_block(rc.render(it)["body"]),
+    )
+
+
 def main():
     test_render_shows_author_without_mention()
     test_state_block_carries_material_fields()
@@ -1362,6 +1457,8 @@ def main():
     test_plan_label_update_replaces_stale_managed()
     test_plan_label_update_keeps_human_labels()
     test_plan_label_update_noop_when_identical()
+    test_reconcile_absence_schema_is_bounded_and_non_material()
+    test_required_present_writes_fold_absence_reset()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

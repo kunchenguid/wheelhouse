@@ -271,6 +271,27 @@ def test_consuming_actions_unchanged_by_investigate_routing():
     )
 
 
+def test_reconcile_absence_state_does_not_affect_decision_parse():
+    baseline = run_parse(_tick([], ["merge"]))
+    with_absence = _tick([], ["merge"])
+    with_absence["ISSUE_BODY"] = INV_CARD.replace(
+        '"options"',
+        '"reconcile_absence":{"version":1,"threshold":2,"count":1},"options"',
+    )
+    actual = run_parse(with_absence)
+    check(
+        "decision: reconcile absence state is ignored",
+        {
+            key: actual.get(key, "")
+            for key in ("decision", "target_repo", "target_number", "kind", "head_sha")
+        }
+        == {
+            key: baseline.get(key, "")
+            for key in ("decision", "target_repo", "target_number", "kind", "head_sha")
+        },
+    )
+
+
 def test_investigate_allow_set_and_nl_exclusion():
     check("allow: investigate in pr-review", "investigate" in ad.ALLOWED["pr-review"])
     check(
@@ -2664,6 +2685,7 @@ def main():
     test_checkbox_diff()
     test_investigate_is_non_consuming()
     test_consuming_actions_unchanged_by_investigate_routing()
+    test_reconcile_absence_state_does_not_affect_decision_parse()
     test_investigate_allow_set_and_nl_exclusion()
     test_request_changes_allow_set_and_nl_selectable()
     test_slash_only_actions_are_not_checkbox_decisions()

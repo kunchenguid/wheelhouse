@@ -68,7 +68,15 @@ still appears where it's plain English, e.g. "triage the queue".)
   purely so a display-only fix (e.g. the author `@mention` drop or automated
   status labeling) propagates to already-open cards; it is never a
   `MATERIAL_FIELDS` member and never
-  influences classification. `render_card.py` writes that marker, but
+  influences classification. `render_card.py` writes that marker.
+  Reconcile may also add one bounded, versioned, NON-material `reconcile_absence` record to a pure pending card after a conclusive scheduled run finds its still-open target outside the worklist.
+  The fixed threshold is two adjacent scheduled workflow run numbers.
+  The threshold record includes exact trusted machine soft-close provenance before close; malformed, duplicate, wrong-version, boolean, negative, oversized, or otherwise untrusted state reads as count zero and can never accelerate close or qualify future reuse.
+  Closed cards are never queried, reopened, or reused.
+  A conclusive worklist return clears the record while reusing the open card.
+  Definitive target closure remains an immediate hard close, while `ok:false`, truncated, unresolved-mergeability, CI-wait, audit-protected, and owner/handler-raced cards remain frozen.
+  Every reconcile mutation and close re-reads the live card and requires it to match the scan snapshot.
+  `render_card.py` writes state markers, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
   queue keeps working. It also tolerates old `wheelhouse-state` cards that lack
@@ -761,7 +769,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   The author filter suppresses card emission only; for fork PRs in `needs-ci-approval`, the normal safety-gated auto-approve/noop path still runs first so safe owner, maintainer, and bot CI runs do not hang awaiting approval.
   This deliberately bypasses the global or per-repo `auto_approve_ci: false` opt-out only for those author-excluded ci-approval PRs; contributor PRs still honor the opt-out and card as before.
   Unsafe, uncertain, or failed owner, maintainer, and bot CI-approval targets still do not emit cards, but they keep the scan-log warning.
-  Skipped targets still remain in `open_pr_numbers` / `open_issue_numbers` but are absent from the `items` worklist, so `reconcile.py` consumes any existing pure `needs-decision` owner, maintainer, or bot card on the next successful scan.
+  Skipped targets still remain in `open_pr_numbers` / `open_issue_numbers` but are absent from the `items` worklist, so `reconcile.py` advances the fixed two-scan soft-close lifecycle for any existing pure `needs-decision` owner, maintainer, or bot card on each qualifying scan.
 - **UNKNOWN mergeability is an EXPECTED PENDING STATE, never a classifiable
   answer (the lavish-axi#111 duplicate-card fix).** GitHub computes PR
   mergeability LAZILY: a push to the base branch invalidates every open PR's
@@ -784,8 +792,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   worklist item), and `reconcile.py` FREEZES that card - the **hard invariant is
   that an UNKNOWN reading must NEVER flip worklist membership or create/close/
   consume a card** (in stays in, out stays out). The reconcile freeze is a
-  per-PR extension of the existing `ok:false`/`truncated` unreadable-state skip,
-  NOT the (separate, out-of-scope) K-consecutive-absence soft-close hysteresis.
+  per-PR extension of the existing `ok:false`/`truncated` unreadable-state skip.
+  It does not close the card or rewrite its absence state, but its intervening
+  scheduled workflow run breaks the run-number adjacency required by the fixed-K
+  soft-close gate in `reconcile.py` (lifecycle coverage lives in
+  `tests/test_reconcile.py`).
   A settlement query error that does not recover to a conclusive answer marks
   the repo `ok:false` so its warning reaches the scan-health ledger while the
   same freeze remains in effect.
@@ -814,7 +825,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   response lacks a comment id or timestamp, the cleanup arming fails open with a
   warning and the nudge remains posted.
   If comment lookup or posting fails, the scan logs a warning and still emits no card; it never posts without first checking for the current marker.
-  The PR stays in `open_pr_numbers` but drops out of `items`, so `reconcile.py` consumes any existing pure `needs-decision` card on the next successful scan.
+  The PR stays in `open_pr_numbers` but drops out of `items`, so `reconcile.py` advances any existing pure `needs-decision` card through the fixed soft-close lifecycle documented in the state-block contract above.
 - **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
   shared `ci_safety(slug, pr, repo_posture)` verdict is the single security
   definition; `approve_ci` uses it too, so the auto path is a STRICT SUBSET of the
@@ -848,7 +859,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `ci-approval` card with no auto-approve attempt for contributor-authored PRs
   and by logging `suppressed-card` for owner, maintainer, and bot-authored PRs.
   An `approve_ci` `noop` is a verified "nothing awaiting approval" state, so the
-  scan emits no worklist item and reconcile consumes any stale card; if a real
+  scan emits no worklist item and reconcile starts the fixed soft-close lifecycle documented in the state-block contract above for any stale card; if a real
   pending run appears on a later scan, the normal approve/card/suppressed-card
   path runs again.
   **Exception for a conflicted fork with no CI:** `needs-ci-approval` is never
@@ -1188,7 +1199,7 @@ Run the unit tests:
 - `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the pre-merge workflow-touch gate (it inspects net-diff + history `.github/workflows/**`, checks both sides of a rename, returns terminal `blocked` with manual UI-merge guidance, fails closed on incomplete reads, and does not Workflows-gate action.yml), the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
-- `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, and stale-card self-healing, no network. Also covers the #551 approve/wait freeze: a `ci_wait_pr_numbers` PR-kind card is FROZEN (never consumed), its stale-head display is refreshed to the new head's pending state via `ci_wait_refresh_items` (anti-masquerade) without ever creating a card, the refresh is a no-op once the card is already current (no churn), the freeze releases the moment a terminal worklist item reappears, and a genuinely-departed target (not in the freeze set, incl. a freeze keyed to a different PR number) still self-heals.
+- `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, fixed-K adjacent-run soft-close lifecycle/provenance, hard-close and stale-snapshot race safety, and stale-card self-healing, no network. Also covers the #551 approve/wait freeze: a `ci_wait_pr_numbers` PR-kind card is FROZEN (never consumed), its stale-head display is refreshed to the new head's pending state via `ci_wait_refresh_items` (anti-masquerade) without ever creating a card, the refresh is a no-op once the card is already current (no churn), and the intervening workflow run invalidates any prior absence streak before terminal checks release the freeze.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, the contributor-fork CI-noop conflict-nudge exception (including UNKNOWN/error no-nudge and no cleanup arming), author-filter nudge skips, optional pending-contributor cleanup arming for normal `needs-rebase` nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present. Also asserts the advisory security summary is attached to a carded risky ci-approval PR (via a stubbed summarizer) but never computed on the auto-approved or suppressed-card paths. Also covers the #551 approve/wait emission: a freshly auto-approved fork PR and a `ci-running` PR are reported in `ci_wait_pr_numbers` with a non-green refresh-only pr-review item in `ci_wait_refresh_items`, while an unsafe carded PR, a verified `noop`, an author-excluded approved PR, and a terminal merge-ready PR are all deliberately NOT frozen (approval eligibility and the author-filter self-heal are unchanged).
 - `python tests/test_ci_security_summary.py` - the advisory read-only CI-approval security summary (`ci_security_summary`), no network: the HOLD stays effective and the summary CANNOT act (every gh call is a read, `approve_ci` is never invoked); risky patterns are surfaced (`pull_request_target` + PR-head checkout, write permissions, `secrets: inherit`, referenced secret NAMES, unpinned third-party actions) while SHA-pinned actions and benign first-party workflows raise no flags; secret VALUES / verbatim file lines are never echoed and contributor values are sanitized against markdown breakout; it fails closed (unreadable/incomplete file lists and unreadable/unparseable files -> a manual-review note, never raises); composite `action.yml` files are analyzed; and the render side scopes `### Security review (advisory)` to ci-approval, frames it advisory/untrusted, keeps `security_summary` out of the state block, and never triggers a material refresh.
