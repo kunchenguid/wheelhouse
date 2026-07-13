@@ -1338,13 +1338,13 @@ def test_plan_label_update_noop_when_identical():
 def test_reconcile_absence_schema_is_bounded_and_non_material():
     it = item()
     body = rc.render(it)["body"]
-    first = rc.body_with_reconcile_absence(body, 1, run_number=41)
+    first = rc.body_with_reconcile_absence(body, 1)
     first_state = core.parse_state_block(first)
     check(
         "absence: exact first-pass record round-trips",
         rc.reconcile_absence_count(first) == 1
         and first_state.get(rc.RECONCILE_ABSENCE_FIELD)
-        == {"version": 2, "threshold": 2, "count": 1, "run_number": 41},
+        == {"version": 1, "threshold": 2, "count": 1},
     )
     check(
         "absence: field is outside material semantics",
@@ -1360,7 +1360,7 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
     )
 
     closed = rc.body_with_reconcile_absence(
-        first, 2, run_number=42, closed_at="2026-07-13T12:00:00Z"
+        first, 2, closed_at="2026-07-13T12:00:00Z"
     )
     provenance = rc.reconcile_soft_close_provenance(closed)
     check(
@@ -1375,7 +1375,7 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
     )
     check(
         "absence: unbounded count cannot be serialized",
-        rc.body_with_reconcile_absence(first, 3, run_number=42) == first,
+        rc.body_with_reconcile_absence(first, 3) == first,
     )
     cleared = rc.body_without_reconcile_absence(closed)
     check(
@@ -1388,9 +1388,7 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
 def test_required_present_writes_fold_absence_reset():
     it = item(updated_at="2024-06-01T00:00:00Z")
     old = item(updated_at="2024-01-01T00:00:00Z")
-    body = rc.body_with_reconcile_absence(
-        rc.render(old)["body"], 1, run_number=41
-    )
+    body = rc.body_with_reconcile_absence(rc.render(old)["body"], 1)
     reflected = rc.body_with_activity_reflected(
         body, it, card_updated_at="2024-01-02T00:00:00Z"
     )
@@ -1402,9 +1400,7 @@ def test_required_present_writes_fold_absence_reset():
         and rc.RECONCILE_ABSENCE_FIELD not in reflected_state,
     )
 
-    queued_source = rc.body_with_reconcile_absence(
-        rc.render(it)["body"], 1, run_number=41
-    )
+    queued_source = rc.body_with_reconcile_absence(rc.render(it)["body"], 1)
     queued = rc.body_with_triage_queued(queued_source, it)
     queued_state = core.parse_state_block(queued)
     check(

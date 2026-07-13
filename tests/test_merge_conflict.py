@@ -350,6 +350,7 @@ def run_reconcile(scan, cards, current_cards=None):
                 "preserve_reconcile_absence": preserve_reconcile_absence,
             }
         )
+        return (existing or {}).get("number", 7)
 
     def fake_close(number, message, label="resolved"):
         calls["close"].append({"number": number, "message": message, "label": label})
@@ -357,9 +358,9 @@ def run_reconcile(scan, cards, current_cards=None):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
-    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
+    def fake_update_absence(number, body, count, closed_at=""):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, run_number=run_number, closed_at=closed_at
+            body, count, closed_at=closed_at
         )
         calls["state"].append({"count": count, "body_after": new_body})
         if new_body == body:

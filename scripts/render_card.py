@@ -180,7 +180,7 @@ AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 # bounded schema also carries machine soft-close provenance for prospective
 # closed-card reuse; legacy or malformed records always read as count zero.
 RECONCILE_ABSENCE_FIELD = "reconcile_absence"
-RECONCILE_ABSENCE_VERSION = 2
+RECONCILE_ABSENCE_VERSION = 1
 RECONCILE_ABSENCE_THRESHOLD = 2
 RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
 RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
@@ -1106,19 +1106,10 @@ def _normalized_reconcile_absence(body):
     count = record.get("count")
     if isinstance(count, bool) or not isinstance(count, int):
         return None
-    run_number = record.get("run_number")
-    if (
-        isinstance(run_number, bool)
-        or not isinstance(run_number, int)
-        or run_number < 1
-        or run_number > 9_007_199_254_740_991
-    ):
-        return None
     base = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
-        "run_number": run_number,
     }
     if count == 1:
         return base if record == base else None
@@ -1146,12 +1137,6 @@ def reconcile_absence_count(body):
     return record["count"] if record else 0
 
 
-def reconcile_absence_run_number(body):
-    """Trusted workflow run that recorded the current absence evidence."""
-    record = _normalized_reconcile_absence(body)
-    return record["run_number"] if record else 0
-
-
 def reconcile_soft_close_provenance(body):
     """Return validated machine soft-close provenance for future card reuse."""
     record = _normalized_reconcile_absence(body)
@@ -1166,24 +1151,19 @@ def reconcile_absence_needs_clear(body):
     return state is not None and RECONCILE_ABSENCE_FIELD in state
 
 
-def body_with_reconcile_absence(body, count, run_number=0, closed_at=""):
+def body_with_reconcile_absence(body, count, closed_at=""):
     """Set one exact bounded absence/provenance record in the hidden state."""
     state = _unique_state_block(body)
     if (
         state is None
         or isinstance(count, bool)
         or count not in (1, 2)
-        or isinstance(run_number, bool)
-        or not isinstance(run_number, int)
-        or run_number < 1
-        or run_number > 9_007_199_254_740_991
     ):
         return body
     record = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
-        "run_number": run_number,
     }
     if count == RECONCILE_ABSENCE_THRESHOLD:
         if not _valid_reconcile_close_timestamp(closed_at):
@@ -1848,10 +1828,8 @@ def _edit_issue_body(number, body, remove_labels=None):
         os.unlink(body_path)
 
 
-def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
-    new_body = body_with_reconcile_absence(
-        body, count, run_number=run_number, closed_at=closed_at
-    )
+def update_reconcile_absence(number, body, count, closed_at=""):
+    new_body = body_with_reconcile_absence(body, count, closed_at=closed_at)
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
@@ -2086,7 +2064,7 @@ def _refresh_card(
                 "skip card #%s for %s: reconcile absence state is ambiguous"
                 % (number, card["marker"])
             )
-            return number
+            return None
         card["body"] = preserved
     body_path = _write_body(card["body"])
     try:
@@ -2162,9 +2140,10 @@ def upsert_card(
         item no longer qualifies for auto triage is rendered actionable in that
         same refresh.
 
-    Always returns an int issue number (new or existing), or None if a
-    brand-new card's number could not be parsed from `gh issue create`'s
-    output. Callers needing the fresh card back MUST read it by this number
+    Returns an int issue number (new or existing), or None if a brand-new
+    card's number could not be parsed from `gh issue create`'s output. When
+    `expected_existing` is supplied, None also reports that the guarded refresh
+    was skipped. Callers needing the fresh card back MUST read it by this number
     (e.g. `get_card`/`current_card`) - a label-filtered `find_card` listing is
     not read-after-write consistent immediately after creation."""
     marker = marker_label(item)
@@ -2173,12 +2152,12 @@ def upsert_card(
         existing = get_card(known_number)
         if not existing or not issue_is_open(existing):
             print("skip card #%s for %s: card no longer open" % (known_number, marker))
-            return known_number
+            return None if expected_existing is not None else known_number
         if expected_existing is not None and not _card_matches_expected(
             existing, expected_existing
         ):
             print("skip card #%s for %s: card changed" % (known_number, marker))
-            return known_number
+            return None
     else:
         existing = find_card(marker)
 
@@ -2193,13 +2172,13 @@ def upsert_card(
             "skip card #%s for %s: decision in flight (not pure needs-decision)"
             % (number, marker)
         )
-        return number
+        return None if expected_existing is not None else number
     old_state = parse_state_block(existing.get("body", ""))
     publish_held = held_publish_needed(item, old_state, has_token)
     if not refresh_needed(item, old_state, has_token):
         if preserve_reconcile_absence:
             print("skip card #%s for %s: no material change" % (number, marker))
-            return number
+            return None if expected_existing is not None else number
         if not should_auto_triage(item, old_state, existing.get("labels"), has_token):
             reflect_activity(
                 number,
@@ -2208,7 +2187,7 @@ def upsert_card(
                 card_updated_at=card_updated_at(existing),
             )
         print("skip card #%s for %s: no material change" % (number, marker))
-        return number
+        return None if expected_existing is not None else number
     held = bool((old_state or {}).get("held")) and not publish_held
     card = render(item, held=held)
     ensure_labels(card["labels"])

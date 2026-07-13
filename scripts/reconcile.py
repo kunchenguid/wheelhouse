@@ -140,6 +140,26 @@ def _matches_expected_write(current, before, expected_body):
     )
 
 
+def _clear_reconcile_absence(current):
+    expected = current
+    last_error = None
+    for _attempt in range(2):
+        try:
+            render_card.clear_reconcile_absence(
+                expected["number"], expected.get("body", "")
+            )
+        except Exception as e:
+            last_error = e
+        latest = current_card(expected)
+        if latest is None:
+            return "raced", last_error
+        if not render_card.reconcile_absence_needs_clear(latest.get("body", "")):
+            return "cleared", None
+        if not _matches_snapshot(latest, expected):
+            return "raced", last_error
+    return "failed", last_error
+
+
 def _soft_close_timestamp():
     return (
         datetime.now(timezone.utc)
@@ -147,14 +167,6 @@ def _soft_close_timestamp():
         .isoformat()
         .replace("+00:00", "Z")
     )
-
-
-def _reconcile_run_number():
-    value = os.environ.get("GITHUB_RUN_NUMBER", "")
-    if not value.isdigit():
-        return 0
-    number = int(value)
-    return number if 1 <= number <= 9_007_199_254_740_991 else 0
 
 
 # Kept as a thin alias: reconcile.py historically owned this check, and
@@ -220,7 +232,6 @@ def main():
         sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
-    reconcile_run_number = _reconcile_run_number()
     criteria_payload = load_optional_object(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
@@ -296,6 +307,7 @@ def main():
     refreshed = 0
     activity_reflected = 0
     triage_queued = 0
+    reset_failures = []
     has_triage_token = auto_triage_has_token()
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     for item in items:
@@ -352,14 +364,15 @@ def main():
                         item, current["state"], has_triage_token
                     )
                     if still_stale:
-                        render_card.upsert_card(
+                        refresh_result = render_card.upsert_card(
                             item,
                             existing=current,
                             has_token=has_triage_token,
                             expected_existing=current,
                         )
-                        refreshed += 1
-                        maintained_this_pass = True
+                        if refresh_result is not None:
+                            refreshed += 1
+                            maintained_this_pass = True
                         current_for_triage = current_card(current)
             except Exception as e:
                 print(
@@ -446,15 +459,11 @@ def main():
                     )
                     == key
                 ):
-                    render_card.clear_reconcile_absence(
-                        current["number"], current.get("body", "")
-                    )
+                    reset_status, reset_error = _clear_reconcile_absence(current)
+                    if reset_status == "failed":
+                        reset_failures.append((ex["number"], item, reset_error))
             except Exception as e:
-                print(
-                    "::warning::failed to clear reconcile absence state on card "
-                    "#%s for %s#%s: %s"
-                    % (ex["number"], item["repo"], item["number"], str(e)[:160])
-                )
+                reset_failures.append((ex["number"], item, e))
 
     # 1b) Anti-masquerade for the approve/wait window. A PR whose fork CI was just
     #     auto-approved this scan, or whose approved checks are still running, emits
@@ -491,14 +500,15 @@ def main():
                     and current["state"].get("kind") == item.get("kind")
                     and render_card.material_changed(item, current["state"])
                 ):
-                    render_card.upsert_card(
+                    refresh_result = render_card.upsert_card(
                         item,
                         existing=current,
                         has_token=has_triage_token,
                         preserve_reconcile_absence=True,
                         expected_existing=current,
                     )
-                    antimasq_refreshed += 1
+                    if refresh_result is not None:
+                        antimasq_refreshed += 1
             except Exception as e:
                 print(
                     "::error::failed anti-masquerade refresh for card #%s "
@@ -568,11 +578,6 @@ def main():
                 continue
 
             count = render_card.reconcile_absence_count(current.get("body", ""))
-            absence_run_number = render_card.reconcile_absence_run_number(
-                current.get("body", "")
-            )
-            if not reconcile_run_number:
-                continue
             expected_body = current.get("body", "")
             if count == 0:
                 try:
@@ -580,7 +585,6 @@ def main():
                         current["number"],
                         current.get("body", ""),
                         1,
-                        run_number=reconcile_run_number,
                     )
                 except Exception as e:
                     print(
@@ -588,26 +592,11 @@ def main():
                         "card #%s: %s" % (current["number"], str(e)[:160])
                     )
                 continue
-            if count == 1 and absence_run_number != reconcile_run_number - 1:
-                try:
-                    render_card.update_reconcile_absence(
-                        current["number"],
-                        current.get("body", ""),
-                        1,
-                        run_number=reconcile_run_number,
-                    )
-                except Exception as e:
-                    print(
-                        "::warning::failed to restart reconcile absence on card "
-                        "#%s: %s" % (current["number"], str(e)[:160])
-                    )
-                continue
             if count == 1:
                 closed_at = _soft_close_timestamp()
                 expected_body = render_card.body_with_reconcile_absence(
                     current.get("body", ""),
                     render_card.RECONCILE_ABSENCE_THRESHOLD,
-                    run_number=reconcile_run_number,
                     closed_at=closed_at,
                 )
                 if expected_body == current.get("body", ""):
@@ -617,7 +606,6 @@ def main():
                         current["number"],
                         current.get("body", ""),
                         render_card.RECONCILE_ABSENCE_THRESHOLD,
-                        run_number=reconcile_run_number,
                         closed_at=closed_at,
                     ):
                         continue
@@ -633,23 +621,6 @@ def main():
                     continue
                 current = latest
             elif count != render_card.RECONCILE_ABSENCE_THRESHOLD:
-                continue
-            elif absence_run_number not in (
-                reconcile_run_number,
-                reconcile_run_number - 1,
-            ):
-                try:
-                    render_card.update_reconcile_absence(
-                        current["number"],
-                        current.get("body", ""),
-                        1,
-                        run_number=reconcile_run_number,
-                    )
-                except Exception as e:
-                    print(
-                        "::warning::failed to restart reconcile absence on card "
-                        "#%s: %s" % (current["number"], str(e)[:160])
-                    )
                 continue
 
             # Re-read and validate the exact threshold/provenance state
@@ -720,6 +691,12 @@ def main():
             closed,
         )
     )
+    if reset_failures:
+        card_number, item, error = reset_failures[0]
+        raise RuntimeError(
+            "failed to clear reconcile absence state on card #%s for %s#%s: %s"
+            % (card_number, item["repo"], item["number"], str(error or "unknown")[:160])
+        )
 
 
 if __name__ == "__main__":
