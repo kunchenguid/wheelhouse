@@ -184,6 +184,21 @@ def run_reconcile(
         current_by_number[int(number)]["body"] = new_body
         return True
 
+    def fake_set_reset_barrier(number, body):
+        new_body = reconcile.render_card.body_with_reconcile_reset_barrier(body)
+        calls["state"].append(
+            {
+                "operation": "barrier",
+                "number": number,
+                "body": body,
+                "body_after": new_body,
+            }
+        )
+        if new_body == body:
+            return False
+        current_by_number[int(number)]["body"] = new_body
+        return True
+
     old_argv = sys.argv[:]
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
@@ -191,6 +206,7 @@ def run_reconcile(
     old_reflect = reconcile.render_card.reflect_activity
     old_update_absence = reconcile.render_card.update_reconcile_absence
     old_clear_absence = reconcile.render_card.clear_reconcile_absence
+    old_set_reset_barrier = reconcile.render_card.set_reconcile_reset_barrier
     old_maybe_queue = reconcile.maybe_queue_auto_triage
     reconcile.render_card.upsert_card = fake_upsert
     reconcile.render_card.close_card = fake_close
@@ -198,6 +214,7 @@ def run_reconcile(
     reconcile.render_card.reflect_activity = fake_reflect
     reconcile.render_card.update_reconcile_absence = fake_update_absence
     reconcile.render_card.clear_reconcile_absence = fake_clear_absence
+    reconcile.render_card.set_reconcile_reset_barrier = fake_set_reset_barrier
     reconcile.maybe_queue_auto_triage = fake_maybe_queue
     try:
         with tempfile.TemporaryDirectory() as d:
@@ -227,6 +244,7 @@ def run_reconcile(
         reconcile.render_card.reflect_activity = old_reflect
         reconcile.render_card.update_reconcile_absence = old_update_absence
         reconcile.render_card.clear_reconcile_absence = old_clear_absence
+        reconcile.render_card.set_reconcile_reset_barrier = old_set_reset_barrier
         reconcile.maybe_queue_auto_triage = old_maybe_queue
     return calls
 
@@ -314,8 +332,9 @@ class ReconcileLifecycle:
         }
         self.close_calls = []
         self.body_writes = 0
+        self.body_write_attempts = 0
         self._clock = 0
-        self.fail_body_writes = 0
+        self.fail_body_write_attempts = set()
 
     def _tick(self):
         self._clock += 1
@@ -351,8 +370,8 @@ class ReconcileLifecycle:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "edit"]:
             if "--body-file" in args:
-                if self.fail_body_writes:
-                    self.fail_body_writes -= 1
+                self.body_write_attempts += 1
+                if self.body_write_attempts in self.fail_body_write_attempts:
                     raise RuntimeError("simulated body write failure")
                 path = args[args.index("--body-file") + 1]
                 with open(path) as f:
@@ -1336,12 +1355,12 @@ def test_lifecycle_present_absent_present_reuses_and_clears():
         lifecycle.issue["number"] == 7 and lifecycle.issue["state"] == "OPEN",
     )
     check(
-        "lifecycle: present return clears absence with one required write",
+        "lifecycle: present return clears absence after durable invalidation",
         reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 0
         and not reconcile.render_card.reconcile_absence_needs_clear(
             lifecycle.issue["body"]
         )
-        and lifecycle.body_writes == first_absence_writes + 1,
+        and lifecycle.body_writes == first_absence_writes + 2,
     )
     check("lifecycle: present-absent-present never closes", lifecycle.close_calls == [])
 
@@ -1351,7 +1370,7 @@ def test_failed_present_reset_cannot_authorize_later_close():
     lifecycle = ReconcileLifecycle(item)
     absent = scan_payload(items=[])
     lifecycle.run(absent)
-    lifecycle.fail_body_writes = 1
+    lifecycle.fail_body_write_attempts = {2}
     lifecycle.run(scan_payload(items=[item]))
     check(
         "reset failure: transient clear failure is retried and verified",
@@ -1366,18 +1385,27 @@ def test_failed_present_reset_cannot_authorize_later_close():
     )
 
 
-def test_persistent_present_reset_failure_fails_reconcile():
+def test_persistent_clear_failure_leaves_durable_reset_barrier():
     lifecycle = ReconcileLifecycle(work_item())
     lifecycle.run(scan_payload(items=[]))
-    lifecycle.fail_body_writes = 2
+    lifecycle.fail_body_write_attempts = {3, 4}
     failed = False
     try:
         lifecycle.run(scan_payload(items=[work_item()]))
     except RuntimeError as e:
         failed = "failed to clear reconcile absence state" in str(e)
     check(
-        "reset failure: persistent clear failure is not forgotten",
+        "reset failure: persistent clear failure leaves close-inert barrier",
         failed
+        and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 0
+        and reconcile.render_card.reconcile_reset_barrier(lifecycle.issue["body"])
+        and lifecycle.close_calls == [],
+    )
+    lifecycle.fail_body_write_attempts = set()
+    lifecycle.run(scan_payload(items=[]))
+    check(
+        "reset failure: later absence starts at count one from barrier",
+        lifecycle.issue["state"] == "OPEN"
         and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
         and lifecycle.close_calls == [],
     )
@@ -1758,7 +1786,7 @@ def main():
     test_truncated_repo_scan_does_not_self_heal_close_missing_issue()
     test_lifecycle_present_absent_present_reuses_and_clears()
     test_failed_present_reset_cannot_authorize_later_close()
-    test_persistent_present_reset_failure_fails_reconcile()
+    test_persistent_clear_failure_leaves_durable_reset_barrier()
     test_lifecycle_two_absences_close_with_provenance()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()

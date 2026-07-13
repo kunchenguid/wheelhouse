@@ -1377,6 +1377,14 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
         "absence: unbounded count cannot be serialized",
         rc.body_with_reconcile_absence(first, 3) == first,
     )
+    barrier = rc.body_with_reconcile_reset_barrier(first)
+    check(
+        "absence: reset barrier is exact, close-inert, and non-material",
+        rc.reconcile_reset_barrier(barrier)
+        and rc.reconcile_absence_count(barrier) == 0
+        and rc.reconcile_absence_needs_clear(barrier)
+        and rc.material_changed(it, core.parse_state_block(barrier)) is False,
+    )
     cleared = rc.body_without_reconcile_absence(closed)
     check(
         "absence: clear removes record without material change",

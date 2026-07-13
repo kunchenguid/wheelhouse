@@ -143,6 +143,27 @@ def _matches_expected_write(current, before, expected_body):
 def _clear_reconcile_absence(current):
     expected = current
     last_error = None
+    if not render_card.reconcile_reset_barrier(expected.get("body", "")):
+        barrier_body = render_card.body_with_reconcile_reset_barrier(
+            expected.get("body", "")
+        )
+        if barrier_body == expected.get("body", ""):
+            return "raced", None
+        for _attempt in range(2):
+            try:
+                render_card.set_reconcile_reset_barrier(
+                    expected["number"], expected.get("body", "")
+                )
+            except Exception as e:
+                last_error = e
+            latest = current_card(expected)
+            if _matches_expected_write(latest, expected, barrier_body):
+                expected = latest
+                break
+            if latest is None or not _matches_snapshot(latest, expected):
+                return "raced", last_error
+        else:
+            return "failed", last_error
     for _attempt in range(2):
         try:
             render_card.clear_reconcile_absence(

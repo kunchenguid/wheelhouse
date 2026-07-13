@@ -1151,6 +1151,32 @@ def reconcile_absence_needs_clear(body):
     return state is not None and RECONCILE_ABSENCE_FIELD in state
 
 
+def reconcile_reset_barrier(body):
+    state = _unique_state_block(body)
+    if state is None:
+        return False
+    return state.get(RECONCILE_ABSENCE_FIELD) == {
+        "version": RECONCILE_ABSENCE_VERSION,
+        "threshold": RECONCILE_ABSENCE_THRESHOLD,
+        "count": 0,
+        "reset": True,
+    }
+
+
+def body_with_reconcile_reset_barrier(body):
+    state = _unique_state_block(body)
+    if state is None or RECONCILE_ABSENCE_FIELD not in state:
+        return body
+    new_state = dict(state)
+    new_state[RECONCILE_ABSENCE_FIELD] = {
+        "version": RECONCILE_ABSENCE_VERSION,
+        "threshold": RECONCILE_ABSENCE_THRESHOLD,
+        "count": 0,
+        "reset": True,
+    }
+    return _replace_state_block(body, new_state)
+
+
 def body_with_reconcile_absence(body, count, closed_at=""):
     """Set one exact bounded absence/provenance record in the hidden state."""
     state = _unique_state_block(body)
@@ -1830,6 +1856,14 @@ def _edit_issue_body(number, body, remove_labels=None):
 
 def update_reconcile_absence(number, body, count, closed_at=""):
     new_body = body_with_reconcile_absence(body, count, closed_at=closed_at)
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    return True
+
+
+def set_reconcile_reset_barrier(number, body):
+    new_body = body_with_reconcile_reset_barrier(body)
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
