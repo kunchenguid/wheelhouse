@@ -184,7 +184,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         current_by_number[number] = refreshed
         return number
 
-    def fake_close(number, message, label="resolved"):
+    def fake_close(number, message, label="resolved", expected=None):
         calls["close"].append({"number": number, "message": message, "label": label})
 
     def fake_get_card(number):

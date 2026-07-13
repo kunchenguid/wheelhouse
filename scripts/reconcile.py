@@ -94,6 +94,8 @@ def current_card(row):
         "number": card["number"],
         "body": card.get("body", ""),
         "state": state,
+        "issue_state": card.get("state", ""),
+        "author": card.get("author"),
         "labels": card.get("labels", []),
         "updated_at": render_card.card_updated_at(card),
         "comments": _comment_count(card.get("comments")),
@@ -546,7 +548,7 @@ def main():
 
         if number in open_set:
             key = (repo, number)
-            if key in worklist_keys or not render_card.is_refreshable(ex["labels"]):
+            if key in worklist_keys:
                 continue
             current = current_card(ex)
             if not _matches_snapshot(current, ex):
@@ -572,14 +574,22 @@ def main():
             current_key = (repo, number)
             if number not in open_set or current_key in worklist_keys:
                 continue
-            if not render_card.is_refreshable(current["labels"]):
-                continue
-
             count = render_card.reconcile_absence_count(current.get("body", ""))
             absence_run_number = render_card.reconcile_absence_run_number(
                 current.get("body", "")
             )
             if not reconcile_run_number:
+                continue
+            refreshable = render_card.is_refreshable(current["labels"])
+            partial_close_retry = bool(
+                not refreshable
+                and absence_run_number == reconcile_run_number - 1
+                and render_card.reconcile_soft_close_retryable(
+                    current,
+                    {"repo": repo, "number": number, "kind": kind},
+                )
+            )
+            if not refreshable and not partial_close_retry:
                 continue
             expected_body = current.get("body", "")
             if count == 0:
@@ -698,7 +708,13 @@ def main():
                 or not render_card.reconcile_soft_close_provenance(
                     current.get("body", "")
                 )
-                or not render_card.is_refreshable(current.get("labels"))
+                or not (
+                    render_card.is_refreshable(current.get("labels"))
+                    or render_card.reconcile_soft_close_retryable(
+                        current,
+                        {"repo": repo, "number": number, "kind": kind},
+                    )
+                )
             ):
                 continue
             card_number = current["number"]
@@ -762,7 +778,7 @@ def main():
                 "(merged/closed) - consuming this card." % (repo, number)
             )
         try:
-            render_card.close_card(card_number, msg)
+            render_card.close_card(card_number, msg, expected=current)
             closed += 1
         except Exception as e:
             print(

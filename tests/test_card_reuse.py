@@ -122,6 +122,9 @@ class LifecycleGitHub:
         self.fail_prepare = ""
         self.inject_duplicate_on_reopen = False
         self.fail_post_reopen_view_once = False
+        self.fail_open_list_after_reopen = False
+        self.fail_reopen_after_mutation = False
+        self.labels_on_reopen = []
         self.just_reopened = False
         self.run_number = 0
         self.workflow_calls = []
@@ -228,6 +231,12 @@ class LifecycleGitHub:
         query = parse_qs(parsed.query)
         requested_state = (query.get("state") or [""])[0].upper()
         marker = unquote((query.get("labels") or [""])[0])
+        if (
+            self.just_reopened
+            and self.fail_open_list_after_reopen
+            and requested_state == "OPEN"
+        ):
+            raise RuntimeError("simulated persistent post-reopen list failure")
         if self.fail_list_state == requested_state:
             raise RuntimeError("simulated incomplete %s pagination" % requested_state)
         rows = [
@@ -242,6 +251,19 @@ class LifecycleGitHub:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:3] == ["api", "--paginate", "--slurp"]:
             return self._api_list(args[3])
+        if args[:3] == ["api", "--method", "PATCH"]:
+            number = int(args[3].rsplit("/", 1)[-1])
+            issue = self.issues[number]
+            names = {
+                value.removeprefix("labels[]=")
+                for value in args
+                if value.startswith("labels[]=")
+            }
+            issue["labels"] = label_objects(names)
+            self._close(issue)
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(self._rest(issue)), stderr=""
+            )
         if args and args[0] == "api":
             if self.just_reopened and self.fail_post_reopen_view_once:
                 self.just_reopened = False
@@ -326,6 +348,7 @@ class LifecycleGitHub:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "reopen"]:
             issue = self.issues[int(args[2])]
+            self.labels_on_reopen.append(set(label_names(issue)))
             issue["state"] = "OPEN"
             issue["closed_at"] = ""
             issue["closed_by"] = ""
@@ -338,6 +361,9 @@ class LifecycleGitHub:
                 duplicate["updated_at"] = self._timestamp()
                 self.issues[self.next_number] = duplicate
                 self.next_number += 1
+            if self.fail_reopen_after_mutation:
+                self.fail_reopen_after_mutation = False
+                raise RuntimeError("simulated ambiguous reopen response")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError("unexpected gh call: %r" % (args,))
 
@@ -845,6 +871,7 @@ def test_post_operation_uniqueness_rolls_back_local_reopen():
         "post verification: the locally reopened card is rolled back closed",
         github.issues[7]["state"] == "CLOSED"
         and "needs-decision" not in label_names(github.issues[7])
+        and "needs-decision" not in label_names(github.issues[8])
         and open_numbers == [8],
     )
 
@@ -852,7 +879,7 @@ def test_post_operation_uniqueness_rolls_back_local_reopen():
 def test_post_reopen_read_failure_rolls_back_local_reopen():
     github = LifecycleGitHub(item())
     github.soft_close()
-    github.fail_post_reopen_view_once = True
+    github.fail_open_list_after_reopen = True
     failed = False
     try:
         github.event_upsert(item(head="7" * 40))
@@ -868,6 +895,30 @@ def test_post_reopen_read_failure_rolls_back_local_reopen():
         and "resolved" in label_names(github.issues[7])
         and "needs-decision" not in label_names(github.issues[7])
         and github.create_calls == 0,
+    )
+    check(
+        "post-reopen read failure: staging never exposes decision labels",
+        github.labels_on_reopen
+        and "resolved" in github.labels_on_reopen[-1]
+        and "needs-decision" not in github.labels_on_reopen[-1],
+    )
+
+
+def test_ambiguous_reopen_response_forces_inert_card_closed():
+    github = LifecycleGitHub(item())
+    github.soft_close()
+    github.fail_reopen_after_mutation = True
+    failed = False
+    try:
+        github.event_upsert(item(head="8" * 40))
+    except rc.CardLifecycleError:
+        failed = True
+    check(
+        "ambiguous reopen: local issue is closed and inert",
+        failed
+        and github.issues[7]["state"] == "CLOSED"
+        and "resolved" in label_names(github.issues[7])
+        and "needs-decision" not in label_names(github.issues[7]),
     )
 
 
@@ -965,6 +1016,7 @@ def main():
     test_serialization_and_sequential_race_converge_to_one_card()
     test_post_operation_uniqueness_rolls_back_local_reopen()
     test_post_reopen_read_failure_rolls_back_local_reopen()
+    test_ambiguous_reopen_response_forces_inert_card_closed()
     test_auto_merge_duplicate_and_authorization_gates_unchanged()
     test_full_lifecycle_wait_then_new_head()
     if _failures:

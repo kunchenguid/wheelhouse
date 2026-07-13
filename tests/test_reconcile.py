@@ -126,7 +126,7 @@ def run_reconcile(
         calls["triage_rows"].append(row)
         return False
 
-    def fake_close(number, message, label="resolved"):
+    def fake_close(number, message, label="resolved", expected=None):
         calls["close"].append({"number": number, "message": message, "label": label})
 
     def fake_get_card(number):
@@ -337,6 +337,7 @@ class ReconcileLifecycle:
         self._clock = 0
         self.fail_body_write_attempts = set()
         self.fail_close_attempts = set()
+        self.partial_close_attempts = set()
         self.close_attempts = 0
         self.run_number = 0
 
@@ -359,6 +360,55 @@ class ReconcileLifecycle:
         ]
 
     def _gh(self, args, check=True):
+        if args[:3] == ["api", "--method", "PATCH"]:
+            names = {
+                value.removeprefix("labels[]=")
+                for value in args
+                if value.startswith("labels[]=")
+            }
+            self.issue["labels"] = labels(*sorted(names))
+            provenance = reconcile.render_card.reconcile_soft_close_provenance(
+                self.issue["body"]
+            )
+            closed_at = (provenance or {}).get("at", "2026-07-13T12:00:00Z")
+            self.issue["state"] = "CLOSED"
+            self.issue["updatedAt"] = closed_at
+            self.issue["closedAt"] = closed_at
+            self.issue["closedBy"] = {"login": "app/github-actions"}
+            self.close_calls.append(
+                {
+                    "number": self.issue["number"],
+                    "body": self.issue["body"],
+                    "labels": copy.deepcopy(self.issue["labels"]),
+                }
+            )
+            response = {
+                "number": self.issue["number"],
+                "body": self.issue["body"],
+                "labels": copy.deepcopy(self.issue["labels"]),
+                "title": self.issue["title"],
+                "state": "closed",
+                "updated_at": closed_at,
+                "user": {"login": "github-actions[bot]"},
+                "closed_at": closed_at,
+                "closed_by": {"login": "github-actions[bot]"},
+                "comments": len(self.issue["comments"]),
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr="")
+        if args and args[0] == "api":
+            response = {
+                "number": self.issue["number"],
+                "body": self.issue["body"],
+                "labels": copy.deepcopy(self.issue["labels"]),
+                "title": self.issue["title"],
+                "state": self.issue["state"].lower(),
+                "updated_at": self.issue["updatedAt"],
+                "user": {"login": "github-actions[bot]"},
+                "closed_at": self.issue.get("closedAt"),
+                "closed_by": self.issue.get("closedBy"),
+                "comments": len(self.issue["comments"]),
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr="")
         if args[:2] == ["issue", "view"]:
             return SimpleNamespace(
                 returncode=0,
@@ -393,17 +443,6 @@ class ReconcileLifecycle:
             self.issue["labels"] = labels(*sorted(names))
             self._tick()
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if args[:2] == ["issue", "close"]:
-            self.close_calls.append(
-                {
-                    "number": int(args[2]),
-                    "body": self.issue["body"],
-                    "labels": copy.deepcopy(self.issue["labels"]),
-                }
-            )
-            self.issue["state"] = "CLOSED"
-            self._tick()
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError("unexpected gh call: %r" % (args,))
 
     def run(self, scan, event_name="schedule"):
@@ -419,6 +458,15 @@ class ReconcileLifecycle:
         def guarded_close(*args, **kwargs):
             self.close_attempts += 1
             if self.close_attempts in self.fail_close_attempts:
+                if self.close_attempts in self.partial_close_attempts:
+                    names = {
+                        label["name"] if isinstance(label, dict) else label
+                        for label in self.issue["labels"]
+                    }
+                    names.add("resolved")
+                    names.discard("needs-decision")
+                    self.issue["labels"] = labels(*sorted(names))
+                    self._tick()
                 raise RuntimeError("simulated close failure")
             return old_close(*args, **kwargs)
 
@@ -1508,17 +1556,27 @@ def test_lifecycle_failed_close_refreshes_provenance_before_retry():
     absent = scan_payload(items=[])
     lifecycle.run(absent)
     lifecycle.fail_close_attempts = {1}
+    lifecycle.partial_close_attempts = {1}
     lifecycle.run(absent)
     failed_provenance = reconcile.render_card.reconcile_soft_close_provenance(
         lifecycle.issue["body"]
     )
+    partial_state = lifecycle.issue["state"]
+    partial_labels = {
+        label["name"] if isinstance(label, dict) else label
+        for label in lifecycle.issue["labels"]
+    }
     lifecycle.run(absent)
     retried_provenance = reconcile.render_card.reconcile_soft_close_provenance(
         lifecycle.issue["body"]
     )
     check(
         "close retry: failed close leaves a trusted threshold record open",
-        failed_provenance is not None and lifecycle.close_attempts == 2,
+        failed_provenance is not None
+        and partial_state == "OPEN"
+        and "resolved" in partial_labels
+        and "needs-decision" not in partial_labels
+        and lifecycle.close_attempts == 2,
     )
     check(
         "close retry: next scheduled run refreshes provenance before closing",
