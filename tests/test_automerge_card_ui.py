@@ -423,6 +423,13 @@ def test_state_block_escapes_html_comment_terminators():
     }
     check("security: target evidence cannot terminate the hidden state comment", "-->inject.md" not in state_line)
     check("security: escaped state evidence round-trips without semantic changes", stored["g2_exclusions_clear"] == evidence)
+    updated = render_card.body_with_activity_reflected(
+        rendered["body"],
+        item(updated_at="2026-07-14T16:27:26Z"),
+    )
+    updated_state = core.parse_state_block(updated)
+    check("security: escaped state survives later state-block replacement", updated_state["activity_reflected_at"] == "2026-07-14T16:27:26Z")
+    check("security: replacement preserves escaped evidence", {row["id"]: row["evidence"] for row in updated_state[render_card.AUTOMERGE_CRITERIA_FIELD]}["g2_exclusions_clear"] == evidence)
 
 
 def test_displayed_met_rows_cannot_grant_eligibility():

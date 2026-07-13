@@ -1041,7 +1041,7 @@ def _ensure_recommendation_section(body, recommendation):
 def _replace_state_block(body, state):
     marker = "<!-- wheelhouse-state: %s -->" % _serialize_state(state)
     if _STATE_BLOCK_RE.search(body or ""):
-        return _STATE_BLOCK_RE.sub(marker, body, count=1)
+        return _STATE_BLOCK_RE.sub(lambda _match: marker, body, count=1)
     return (body or "").rstrip() + "\n\n" + marker
 
 
