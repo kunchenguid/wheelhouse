@@ -124,7 +124,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > If multiple verified pending runs share a stable workflow identity, Wheelhouse approves only the newest run; runs without a stable workflow identity stay distinct.
 > After a safe run is approved, Wheelhouse waits for its checks to finish before classifying the PR or creating a card.
 > During that wait, an existing pure PR-review card is kept open and the hourly scan refreshes it to the observed head's non-green pending state; no transient-head triage is queued.
-> If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and the backstop consumes any stale CI-approval card.
+> If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use).
 > For a contributor fork whose safe no-op PR is conclusively `CONFLICTING`, it also posts the existing one-per-head rebase nudge before consuming the card; it never does so for an approved run or unresolved mergeability.
 > If the mergeability settlement required for that exception errors, the repo scan is unhealthy and reconcile preserves an existing card instead.
 > The scan log records every CI-approval candidate it handles: approved runs and verified no-pending runs emit one `::notice::`, contributor PRs that need a decision emit one `::warning::wheelhouse auto-approve carded <repo>#<pr>: ...` line, and excluded owner, maintainer, or bot PRs that cannot be approved emit one `::warning::wheelhouse auto-approve suppressed-card <repo>#<pr>: ...` line.
@@ -360,7 +360,7 @@ Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop p
 Same-repo PRs with no CI signal are routed to normal PR review, not CI approval.
 The approval step still binds each awaiting workflow run to the target PR by PR association, or by exact head SHA plus branch for fork runs where GitHub returns an empty association list.
 Verified duplicate pending runs that share a stable workflow identity are collapsed to the newest run before approval, so Wheelhouse does not start two copies of the same workflow and let the older one cancel.
-If the approval step verifies that no matching run is awaiting approval, the scan normally emits no worklist item and the backstop consumes any stale CI-approval card; for a contributor fork that conclusively conflicts, it also posts the rebase nudge described above, and a later pending run re-enters the normal approve, card, or suppressed-card path.
+If the approval step verifies that no matching run is awaiting approval, the scan normally emits no worklist item and any stale CI-approval card enters the soft-close lifecycle described above; for a contributor fork that conclusively conflicts, it also posts the rebase nudge described above, and a later pending run re-enters the normal approve, card, or suppressed-card path.
 A mergeability-settlement error for that narrow nudge exception marks the repo scan unhealthy instead, so reconcile preserves existing cards.
 Each CI-approval candidate the auto path handles also writes exactly one scan-log line, so approved runs, no-pending runs, approval failures, and fail-closed safety reasons are visible in `scan-backstop`.
 
@@ -427,7 +427,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Auto-approve is a strict **subset** of the manual gate: a run emits no card only when there are **no** CI-execution file changes (above), the PR targets the repo default branch, the target repo's default branch runs **no** `pull_request_target` workflow, all safety reads succeed, and the approval call either approves the matching run or verifies that none is awaiting approval.
   After that safety verdict passes, the approval call approves only `action_required` runs for the PR head: when GitHub populates `workflow_run.pull_requests`, it must contain exactly that PR; when fork-originated runs leave that list empty, the run detail must match the PR's head SHA and branch.
   Verified runs are deduped by stable `workflowDatabaseId` when GitHub exposes it, keeping the highest run ID for that workflow; same-named distinct workflows and runs without that identity are not collapsed.
-  If no matching run is awaiting approval, Wheelhouse normally emits no worklist item and lets reconcile consume any stale CI-approval card; a later pending run re-enters the normal approve, card, or suppressed-card path.
+  If no matching run is awaiting approval, Wheelhouse normally emits no worklist item and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use); a later pending run re-enters the normal approve, card, or suppressed-card path.
   For a contributor fork whose no-op PR is conclusively `CONFLICTING`, that no-card path also posts the existing fire-once-per-head rebase nudge before it drops the PR from the worklist.
   It does not change the CI-approval bucket, affect an `approved` path with real workflows, or write the structured pending-contributor cleanup state.
   An explicit `UNKNOWN` mergeability is settled before this nudge can be sent, while a missing value or an unresolved value produces no nudge.
@@ -514,7 +514,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Search the latest `scan-backstop` log for `pending-contributor cleanup skipped`, `pending-contributor cleanup reminded`, or `pending-contributor cleanup closed`.
 - **An Approve-CI card disappeared before I acted.**
   Search the latest `scan-backstop` logs for `approve_ci noop`.
-  That means Wheelhouse verified no matching workflow run was still awaiting approval, emitted no worklist item, and let reconcile consume the stale card.
+  That means Wheelhouse verified no matching workflow run was still awaiting approval, emitted no worklist item, and let the stale card follow the [scheduled backstop lifecycle](#daily-use).
   If that safe contributor-fork PR is also conclusively merge-conflicted, Wheelhouse posts one rebase nudge for its current head before consuming the card; an `UNKNOWN` or missing mergeability value does not nudge.
 - **Cron lag.**
   The scheduled keep-current path runs hourly, but GitHub cron is best-effort and can be delayed.
@@ -572,7 +572,7 @@ scripts/
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
-tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, and self-healing
+tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, fixed-K soft-close hysteresis, race guards, and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging

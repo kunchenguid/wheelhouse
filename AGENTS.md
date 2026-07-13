@@ -68,7 +68,15 @@ still appears where it's plain English, e.g. "triage the queue".)
   purely so a display-only fix (e.g. the author `@mention` drop or automated
   status labeling) propagates to already-open cards; it is never a
   `MATERIAL_FIELDS` member and never
-  influences classification. `render_card.py` writes that marker, but
+  influences classification. `render_card.py` writes that marker.
+  Reconcile may also add one bounded, versioned, NON-material `reconcile_absence` record to a pure pending card after a conclusive scheduled run finds its still-open target outside the worklist.
+  The fixed threshold is two adjacent scheduled workflow run numbers.
+  The threshold record includes exact trusted machine soft-close provenance before close; malformed, duplicate, wrong-version, boolean, negative, oversized, or otherwise untrusted state reads as count zero and can never accelerate close or qualify future reuse.
+  Closed cards are never queried, reopened, or reused.
+  A conclusive worklist return clears the record while reusing the open card.
+  Definitive target closure remains an immediate hard close, while `ok:false`, truncated, unresolved-mergeability, CI-wait, audit-protected, and owner/handler-raced cards remain frozen.
+  Every reconcile mutation and close re-reads the live card and requires it to match the scan snapshot.
+  `render_card.py` writes state markers, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
   queue keeps working. It also tolerates old `wheelhouse-state` cards that lack
@@ -817,7 +825,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   response lacks a comment id or timestamp, the cleanup arming fails open with a
   warning and the nudge remains posted.
   If comment lookup or posting fails, the scan logs a warning and still emits no card; it never posts without first checking for the current marker.
-  The PR stays in `open_pr_numbers` but drops out of `items`, so `reconcile.py` consumes any existing pure `needs-decision` card on the next successful scan.
+  The PR stays in `open_pr_numbers` but drops out of `items`, so `reconcile.py` advances any existing pure `needs-decision` card through the fixed soft-close lifecycle documented in the state-block contract above.
 - **Scan-time fork-CI auto-approve (kill the routine "approve CI" click).** One
   shared `ci_safety(slug, pr, repo_posture)` verdict is the single security
   definition; `approve_ci` uses it too, so the auto path is a STRICT SUBSET of the
@@ -851,7 +859,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `ci-approval` card with no auto-approve attempt for contributor-authored PRs
   and by logging `suppressed-card` for owner, maintainer, and bot-authored PRs.
   An `approve_ci` `noop` is a verified "nothing awaiting approval" state, so the
-  scan emits no worklist item and reconcile consumes any stale card; if a real
+  scan emits no worklist item and reconcile starts the fixed soft-close lifecycle documented in the state-block contract above for any stale card; if a real
   pending run appears on a later scan, the normal approve/card/suppressed-card
   path runs again.
   **Exception for a conflicted fork with no CI:** `needs-ci-approval` is never
