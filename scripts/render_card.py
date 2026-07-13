@@ -2207,13 +2207,23 @@ def reuse_closed_card(item, candidate, has_token=False):
         )
     # This live read is the immediate precondition for the reopen mutation.
     _gh(["issue", "reopen", str(current["number"])])
-    opened = _get_lifecycle_issue(current["number"])
-    if not _prepared_lifecycle_matches(
-        opened, card["body"], expected_labels, "OPEN"
-    ):
-        if opened.get("state") == "OPEN":
+    try:
+        opened = _get_lifecycle_issue(current["number"])
+        if not _prepared_lifecycle_matches(
+            opened, card["body"], expected_labels, "OPEN"
+        ):
+            raise CardLifecycleError(
+                "card #%s did not reopen safely" % current["number"]
+            )
+    except Exception:
+        try:
             _rollback_open_lifecycle_card(current["number"], card["body"])
-        raise CardLifecycleError("card #%s did not reopen safely" % current["number"])
+        except Exception as rollback_error:
+            raise CardLifecycleError(
+                "card #%s post-reopen verification failed and rollback failed: %s"
+                % (current["number"], rollback_error)
+            ) from rollback_error
+        raise
     try:
         verify_unique_open_card(
             item, current["number"], card["body"], expected_labels

@@ -642,10 +642,7 @@ def main():
                 current = latest
             elif count != render_card.RECONCILE_ABSENCE_THRESHOLD:
                 continue
-            elif absence_run_number not in (
-                reconcile_run_number,
-                reconcile_run_number - 1,
-            ):
+            elif absence_run_number < reconcile_run_number - 1:
                 try:
                     render_card.update_reconcile_absence(
                         current["number"],
@@ -658,6 +655,38 @@ def main():
                         "::warning::failed to restart reconcile absence on card "
                         "#%s: %s" % (current["number"], str(e)[:160])
                     )
+                continue
+            elif absence_run_number == reconcile_run_number - 1:
+                closed_at = _soft_close_timestamp()
+                expected_body = render_card.body_with_reconcile_absence(
+                    current.get("body", ""),
+                    render_card.RECONCILE_ABSENCE_THRESHOLD,
+                    run_number=reconcile_run_number,
+                    closed_at=closed_at,
+                )
+                if expected_body == current.get("body", ""):
+                    continue
+                try:
+                    if not render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        render_card.RECONCILE_ABSENCE_THRESHOLD,
+                        run_number=reconcile_run_number,
+                        closed_at=closed_at,
+                    ):
+                        continue
+                except Exception as e:
+                    print(
+                        "::warning::failed to refresh reconcile soft-close "
+                        "provenance on card #%s: %s"
+                        % (current["number"], str(e)[:160])
+                    )
+                    continue
+                latest = current_card(current)
+                if not _matches_expected_write(latest, current, expected_body):
+                    continue
+                current = latest
+            elif absence_run_number != reconcile_run_number:
                 continue
 
             # Re-read and validate the exact threshold/provenance state

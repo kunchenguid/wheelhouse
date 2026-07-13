@@ -336,6 +336,8 @@ class ReconcileLifecycle:
         self.body_write_attempts = 0
         self._clock = 0
         self.fail_body_write_attempts = set()
+        self.fail_close_attempts = set()
+        self.close_attempts = 0
         self.run_number = 0
 
     def _tick(self):
@@ -407,11 +409,20 @@ class ReconcileLifecycle:
     def run(self, scan, event_name="schedule"):
         old_argv = sys.argv[:]
         old_gh = reconcile.render_card._gh
+        old_close = reconcile.render_card.close_card
         old_token = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN")
         old_github_actions = os.environ.get("GITHUB_ACTIONS")
         old_event_name = os.environ.get("GITHUB_EVENT_NAME")
         old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
         reconcile.render_card._gh = self._gh
+
+        def guarded_close(*args, **kwargs):
+            self.close_attempts += 1
+            if self.close_attempts in self.fail_close_attempts:
+                raise RuntimeError("simulated close failure")
+            return old_close(*args, **kwargs)
+
+        reconcile.render_card.close_card = guarded_close
         os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = "false"
         self.run_number += 1
         os.environ["GITHUB_ACTIONS"] = "true"
@@ -431,6 +442,7 @@ class ReconcileLifecycle:
         finally:
             sys.argv = old_argv
             reconcile.render_card._gh = old_gh
+            reconcile.render_card.close_card = old_close
             if old_token is None:
                 os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
             else:
@@ -1491,6 +1503,38 @@ def test_lifecycle_two_absences_close_with_provenance():
     )
 
 
+def test_lifecycle_failed_close_refreshes_provenance_before_retry():
+    lifecycle = ReconcileLifecycle(work_item())
+    absent = scan_payload(items=[])
+    lifecycle.run(absent)
+    lifecycle.fail_close_attempts = {1}
+    lifecycle.run(absent)
+    failed_provenance = reconcile.render_card.reconcile_soft_close_provenance(
+        lifecycle.issue["body"]
+    )
+    lifecycle.run(absent)
+    retried_provenance = reconcile.render_card.reconcile_soft_close_provenance(
+        lifecycle.issue["body"]
+    )
+    check(
+        "close retry: failed close leaves a trusted threshold record open",
+        failed_provenance is not None and lifecycle.close_attempts == 2,
+    )
+    check(
+        "close retry: next scheduled run refreshes provenance before closing",
+        lifecycle.issue["state"] == "CLOSED"
+        and lifecycle.body_writes == 3
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.close_calls[0]["body"]
+        )
+        == 3
+        and retried_provenance
+        == reconcile.render_card.reconcile_soft_close_provenance(
+            lifecycle.close_calls[0]["body"]
+        ),
+    )
+
+
 def test_lifecycle_pr_and_issue_cards_share_threshold():
     cases = [
         (
@@ -1851,6 +1895,7 @@ def main():
     test_lifecycle_present_absent_present_reuses_and_clears()
     test_failed_present_reset_cannot_authorize_later_close()
     test_lifecycle_two_absences_close_with_provenance()
+    test_lifecycle_failed_close_refreshes_provenance_before_retry()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()
     test_intervening_runs_break_absence_adjacency()

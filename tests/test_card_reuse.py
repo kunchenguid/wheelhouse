@@ -121,6 +121,8 @@ class LifecycleGitHub:
         self.fail_list_state = ""
         self.fail_prepare = ""
         self.inject_duplicate_on_reopen = False
+        self.fail_post_reopen_view_once = False
+        self.just_reopened = False
         self.run_number = 0
         self.workflow_calls = []
         self.add_card(initial_item or item(), number=7)
@@ -241,6 +243,10 @@ class LifecycleGitHub:
         if args[:3] == ["api", "--paginate", "--slurp"]:
             return self._api_list(args[3])
         if args and args[0] == "api":
+            if self.just_reopened and self.fail_post_reopen_view_once:
+                self.just_reopened = False
+                self.fail_post_reopen_view_once = False
+                raise RuntimeError("simulated post-reopen read failure")
             number = int(args[1].rsplit("/", 1)[-1])
             issue = self.issues.get(number)
             if not issue:
@@ -324,6 +330,7 @@ class LifecycleGitHub:
             issue["closed_at"] = ""
             issue["closed_by"] = ""
             self._touch(issue)
+            self.just_reopened = True
             if self.inject_duplicate_on_reopen:
                 self.inject_duplicate_on_reopen = False
                 duplicate = copy.deepcopy(issue)
@@ -842,6 +849,28 @@ def test_post_operation_uniqueness_rolls_back_local_reopen():
     )
 
 
+def test_post_reopen_read_failure_rolls_back_local_reopen():
+    github = LifecycleGitHub(item())
+    github.soft_close()
+    github.fail_post_reopen_view_once = True
+    failed = False
+    try:
+        github.event_upsert(item(head="7" * 40))
+    except rc.CardLifecycleError:
+        failed = True
+    check(
+        "post-reopen read failure: verification fails closed",
+        failed,
+    )
+    check(
+        "post-reopen read failure: the locally reopened card is rolled back",
+        github.issues[7]["state"] == "CLOSED"
+        and "resolved" in label_names(github.issues[7])
+        and "needs-decision" not in label_names(github.issues[7])
+        and github.create_calls == 0,
+    )
+
+
 def test_auto_merge_duplicate_and_authorization_gates_unchanged():
     github = LifecycleGitHub(item())
     first = github.cards_snapshot()[0]
@@ -935,6 +964,7 @@ def main():
     test_partial_prepare_failures_stay_closed_non_actionable()
     test_serialization_and_sequential_race_converge_to_one_card()
     test_post_operation_uniqueness_rolls_back_local_reopen()
+    test_post_reopen_read_failure_rolls_back_local_reopen()
     test_auto_merge_duplicate_and_authorization_gates_unchanged()
     test_full_lifecycle_wait_then_new_head()
     if _failures:
