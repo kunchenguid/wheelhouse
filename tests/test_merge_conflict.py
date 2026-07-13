@@ -336,7 +336,11 @@ def run_reconcile(scan, cards, current_cards=None):
     }
 
     def fake_upsert(
-        item, existing=None, has_token=False, preserve_reconcile_absence=False
+        item,
+        existing=None,
+        has_token=False,
+        preserve_reconcile_absence=False,
+        expected_existing=None,
     ):
         calls["upsert"].append(
             {
@@ -353,9 +357,9 @@ def run_reconcile(scan, cards, current_cards=None):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
-    def fake_update_absence(number, body, count, closed_at=""):
+    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, closed_at=closed_at
+            body, count, run_number=run_number, closed_at=closed_at
         )
         calls["state"].append({"count": count, "body_after": new_body})
         if new_body == body:

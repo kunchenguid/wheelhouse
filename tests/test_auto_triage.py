@@ -164,7 +164,11 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
     }
 
     def fake_upsert(
-        it, existing=None, has_token=False, preserve_reconcile_absence=False
+        it,
+        existing=None,
+        has_token=False,
+        preserve_reconcile_absence=False,
+        expected_existing=None,
     ):
         # `has_token` is recorded (for tests that assert on it) but not used
         # to change the fake's rendering: this fake predates held cards and

@@ -180,7 +180,7 @@ AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 # bounded schema also carries machine soft-close provenance for prospective
 # closed-card reuse; legacy or malformed records always read as count zero.
 RECONCILE_ABSENCE_FIELD = "reconcile_absence"
-RECONCILE_ABSENCE_VERSION = 1
+RECONCILE_ABSENCE_VERSION = 2
 RECONCILE_ABSENCE_THRESHOLD = 2
 RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
 RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
@@ -1106,10 +1106,19 @@ def _normalized_reconcile_absence(body):
     count = record.get("count")
     if isinstance(count, bool) or not isinstance(count, int):
         return None
+    run_number = record.get("run_number")
+    if (
+        isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number < 1
+        or run_number > 9_007_199_254_740_991
+    ):
+        return None
     base = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
+        "run_number": run_number,
     }
     if count == 1:
         return base if record == base else None
@@ -1137,6 +1146,12 @@ def reconcile_absence_count(body):
     return record["count"] if record else 0
 
 
+def reconcile_absence_run_number(body):
+    """Trusted workflow run that recorded the current absence evidence."""
+    record = _normalized_reconcile_absence(body)
+    return record["run_number"] if record else 0
+
+
 def reconcile_soft_close_provenance(body):
     """Return validated machine soft-close provenance for future card reuse."""
     record = _normalized_reconcile_absence(body)
@@ -1151,15 +1166,24 @@ def reconcile_absence_needs_clear(body):
     return state is not None and RECONCILE_ABSENCE_FIELD in state
 
 
-def body_with_reconcile_absence(body, count, closed_at=""):
+def body_with_reconcile_absence(body, count, run_number=0, closed_at=""):
     """Set one exact bounded absence/provenance record in the hidden state."""
     state = _unique_state_block(body)
-    if state is None or isinstance(count, bool) or count not in (1, 2):
+    if (
+        state is None
+        or isinstance(count, bool)
+        or count not in (1, 2)
+        or isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number < 1
+        or run_number > 9_007_199_254_740_991
+    ):
         return body
     record = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
+        "run_number": run_number,
     }
     if count == RECONCILE_ABSENCE_THRESHOLD:
         if not _valid_reconcile_close_timestamp(closed_at):
@@ -1775,6 +1799,38 @@ def card_updated_at(issue):
     return (issue or {}).get("updated_at") or (issue or {}).get("updatedAt") or ""
 
 
+def _card_comment_count(issue):
+    comments = (issue or {}).get("comments")
+    if isinstance(comments, list):
+        return len(comments)
+    if isinstance(comments, bool):
+        return 0
+    try:
+        return max(0, int(comments or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _card_matches_expected(current, expected):
+    current_labels = {
+        label if isinstance(label, str) else label.get("name", "")
+        for label in ((current or {}).get("labels") or [])
+    }
+    expected_labels = {
+        label if isinstance(label, str) else label.get("name", "")
+        for label in ((expected or {}).get("labels") or [])
+    }
+    return bool(
+        current
+        and expected
+        and int(current.get("number") or 0) == int(expected.get("number") or 0)
+        and current.get("body", "") == expected.get("body", "")
+        and current_labels == expected_labels
+        and card_updated_at(current) == card_updated_at(expected)
+        and _card_comment_count(current) == _card_comment_count(expected)
+    )
+
+
 def _write_body(body):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(body)
@@ -1792,8 +1848,10 @@ def _edit_issue_body(number, body, remove_labels=None):
         os.unlink(body_path)
 
 
-def update_reconcile_absence(number, body, count, closed_at=""):
-    new_body = body_with_reconcile_absence(body, count, closed_at=closed_at)
+def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
+    new_body = body_with_reconcile_absence(
+        body, count, run_number=run_number, closed_at=closed_at
+    )
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
@@ -2066,7 +2124,11 @@ def _refresh_card(
 
 
 def upsert_card(
-    item, existing=None, has_token=False, preserve_reconcile_absence=False
+    item,
+    existing=None,
+    has_token=False,
+    preserve_reconcile_absence=False,
+    expected_existing=None,
 ):
     """Create a new card, or refresh the existing one for this target in place.
 
@@ -2111,6 +2173,11 @@ def upsert_card(
         existing = get_card(known_number)
         if not existing or not issue_is_open(existing):
             print("skip card #%s for %s: card no longer open" % (known_number, marker))
+            return known_number
+        if expected_existing is not None and not _card_matches_expected(
+            existing, expected_existing
+        ):
+            print("skip card #%s for %s: card changed" % (known_number, marker))
             return known_number
     else:
         existing = find_card(marker)

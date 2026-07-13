@@ -149,6 +149,14 @@ def _soft_close_timestamp():
     )
 
 
+def _reconcile_run_number():
+    value = os.environ.get("GITHUB_RUN_NUMBER", "")
+    if not value.isdigit():
+        return 0
+    number = int(value)
+    return number if 1 <= number <= 9_007_199_254_740_991 else 0
+
+
 # Kept as a thin alias: reconcile.py historically owned this check, and
 # render_card.py now needs the same signal (to decide whether a brand-new
 # card is created HELD), so it is the shared single source of truth.
@@ -212,6 +220,7 @@ def main():
         sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
+    reconcile_run_number = _reconcile_run_number()
     criteria_payload = load_optional_object(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
@@ -344,7 +353,10 @@ def main():
                     )
                     if still_stale:
                         render_card.upsert_card(
-                            item, existing=current, has_token=has_triage_token
+                            item,
+                            existing=current,
+                            has_token=has_triage_token,
+                            expected_existing=current,
                         )
                         refreshed += 1
                         maintained_this_pass = True
@@ -484,6 +496,7 @@ def main():
                         existing=current,
                         has_token=has_triage_token,
                         preserve_reconcile_absence=True,
+                        expected_existing=current,
                     )
                     antimasq_refreshed += 1
             except Exception as e:
@@ -555,11 +568,19 @@ def main():
                 continue
 
             count = render_card.reconcile_absence_count(current.get("body", ""))
+            absence_run_number = render_card.reconcile_absence_run_number(
+                current.get("body", "")
+            )
+            if not reconcile_run_number:
+                continue
             expected_body = current.get("body", "")
             if count == 0:
                 try:
                     render_card.update_reconcile_absence(
-                        current["number"], current.get("body", ""), 1
+                        current["number"],
+                        current.get("body", ""),
+                        1,
+                        run_number=reconcile_run_number,
                     )
                 except Exception as e:
                     print(
@@ -567,11 +588,26 @@ def main():
                         "card #%s: %s" % (current["number"], str(e)[:160])
                     )
                 continue
+            if count == 1 and absence_run_number != reconcile_run_number - 1:
+                try:
+                    render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        1,
+                        run_number=reconcile_run_number,
+                    )
+                except Exception as e:
+                    print(
+                        "::warning::failed to restart reconcile absence on card "
+                        "#%s: %s" % (current["number"], str(e)[:160])
+                    )
+                continue
             if count == 1:
                 closed_at = _soft_close_timestamp()
                 expected_body = render_card.body_with_reconcile_absence(
                     current.get("body", ""),
                     render_card.RECONCILE_ABSENCE_THRESHOLD,
+                    run_number=reconcile_run_number,
                     closed_at=closed_at,
                 )
                 if expected_body == current.get("body", ""):
@@ -581,6 +617,7 @@ def main():
                         current["number"],
                         current.get("body", ""),
                         render_card.RECONCILE_ABSENCE_THRESHOLD,
+                        run_number=reconcile_run_number,
                         closed_at=closed_at,
                     ):
                         continue
@@ -596,6 +633,23 @@ def main():
                     continue
                 current = latest
             elif count != render_card.RECONCILE_ABSENCE_THRESHOLD:
+                continue
+            elif absence_run_number not in (
+                reconcile_run_number,
+                reconcile_run_number - 1,
+            ):
+                try:
+                    render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        1,
+                        run_number=reconcile_run_number,
+                    )
+                except Exception as e:
+                    print(
+                        "::warning::failed to restart reconcile absence on card "
+                        "#%s: %s" % (current["number"], str(e)[:160])
+                    )
                 continue
 
             # Re-read and validate the exact threshold/provenance state
@@ -613,8 +667,8 @@ def main():
             card_number = current["number"]
             msg = (
                 "Self-healed by the scheduled backstop: %s#%s no longer needs "
-                "a maintainer decision in two consecutive conclusive scans - "
-                "consuming this card." % (repo, number)
+                "a maintainer decision in the current scan - consuming this "
+                "card." % (repo, number)
             )
         else:
             # Definitive target closure bypasses hysteresis, including blocked

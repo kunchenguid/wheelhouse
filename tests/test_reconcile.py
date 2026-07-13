@@ -89,7 +89,11 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
     }
 
     def fake_upsert(
-        item, existing=None, has_token=False, preserve_reconcile_absence=False
+        item,
+        existing=None,
+        has_token=False,
+        preserve_reconcile_absence=False,
+        expected_existing=None,
     ):
         calls["upsert"].append(
             {
@@ -97,6 +101,7 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
                 "existing": existing,
                 "has_token": has_token,
                 "preserve_reconcile_absence": preserve_reconcile_absence,
+                "expected_existing": expected_existing,
             }
         )
 
@@ -124,9 +129,9 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
         current_by_number[int(number)]["body"] = new_body
         return True
 
-    def fake_update_absence(number, body, count, closed_at=""):
+    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, closed_at=closed_at
+            body, count, run_number=run_number, closed_at=closed_at
         )
         calls["state"].append(
             {
@@ -134,6 +139,7 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
                 "number": number,
                 "count": count,
                 "closed_at": closed_at,
+                "run_number": run_number,
                 "body": body,
                 "body_after": new_body,
             }
@@ -159,6 +165,7 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
         return True
 
     old_argv = sys.argv[:]
+    old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
@@ -172,6 +179,7 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
     reconcile.render_card.update_reconcile_absence = fake_update_absence
     reconcile.render_card.clear_reconcile_absence = fake_clear_absence
     try:
+        os.environ["GITHUB_RUN_NUMBER"] = "100"
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
             cards_path = os.path.join(d, "cards.json")
@@ -193,6 +201,10 @@ def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
                 reconcile.main()
     finally:
         sys.argv = old_argv
+        if old_run_number is None:
+            os.environ.pop("GITHUB_RUN_NUMBER", None)
+        else:
+            os.environ["GITHUB_RUN_NUMBER"] = old_run_number
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
@@ -286,6 +298,8 @@ class ReconcileLifecycle:
         self.close_calls = []
         self.body_writes = 0
         self._clock = 0
+        self.run_number = 0
+        self.fail_next_body_write = False
 
     def _tick(self):
         self._clock += 1
@@ -321,6 +335,9 @@ class ReconcileLifecycle:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "edit"]:
             if "--body-file" in args:
+                if self.fail_next_body_write:
+                    self.fail_next_body_write = False
+                    raise RuntimeError("simulated body write failure")
                 path = args[args.index("--body-file") + 1]
                 with open(path) as f:
                     self.issue["body"] = f.read()
@@ -354,8 +371,11 @@ class ReconcileLifecycle:
         old_argv = sys.argv[:]
         old_gh = reconcile.render_card._gh
         old_token = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN")
+        old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
         reconcile.render_card._gh = self._gh
         os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = "false"
+        self.run_number += 1
+        os.environ["GITHUB_RUN_NUMBER"] = str(self.run_number)
         try:
             with tempfile.TemporaryDirectory() as d:
                 scan_path = os.path.join(d, "scan.json")
@@ -374,12 +394,17 @@ class ReconcileLifecycle:
                 os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
             else:
                 os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = old_token
+            if old_run_number is None:
+                os.environ.pop("GITHUB_RUN_NUMBER", None)
+            else:
+                os.environ["GITHUB_RUN_NUMBER"] = old_run_number
 
 
-def _body_with_absence(body, count=1):
+def _body_with_absence(body, count=1, run_number=99):
     return reconcile.render_card.body_with_reconcile_absence(
         body,
         count,
+        run_number=run_number,
         closed_at="2026-07-13T12:00:00Z" if count == 2 else "",
     )
 
@@ -411,7 +436,37 @@ def test_refresh_uses_known_card_when_target_label_missing():
             label.get("name") != "target:wheelhouse-42" for label in existing["labels"]
         ),
     )
+    check(
+        "reconcile: refresh carries the validated snapshot into final guard",
+        calls["upsert"][0].get("expected_existing") == existing,
+    )
     check("reconcile: no close for refreshed worklist item", calls["close"] == [])
+
+
+def test_upsert_rejects_change_after_reconcile_validation():
+    expected = _pr_review_card()
+    raced = copy.deepcopy(expected)
+    raced["body"] += "\nowner selected a decision"
+    raced["state"] = "OPEN"
+    raced["updatedAt"] = raced.pop("updated_at")
+    old_get_card = reconcile.render_card.get_card
+    old_gh = reconcile.render_card._gh
+    gh_calls = []
+    reconcile.render_card.get_card = lambda _number: raced
+    reconcile.render_card._gh = lambda args, check=True: gh_calls.append(args)
+    try:
+        reconcile.render_card.upsert_card(
+            work_item(priority="high"),
+            existing=expected,
+            expected_existing=expected,
+        )
+    finally:
+        reconcile.render_card.get_card = old_get_card
+        reconcile.render_card._gh = old_gh
+    check(
+        "race: nested refresh read rejects owner change before mutation",
+        gh_calls == [],
+    )
 
 
 def test_refresh_uses_current_labels_before_upsert():
@@ -1267,6 +1322,34 @@ def test_lifecycle_present_absent_present_reuses_and_clears():
     check("lifecycle: present-absent-present never closes", lifecycle.close_calls == [])
 
 
+def test_failed_present_reset_cannot_authorize_later_close():
+    item = work_item()
+    lifecycle = ReconcileLifecycle(item)
+    absent = scan_payload(items=[])
+    lifecycle.run(absent)
+    lifecycle.fail_next_body_write = True
+    lifecycle.run(scan_payload(items=[item]))
+    check(
+        "reset failure: stale first absence remains after failed clear",
+        reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 1,
+    )
+    lifecycle.run(absent)
+    check(
+        "reset failure: nonconsecutive absence restarts instead of closing",
+        lifecycle.issue["state"] == "OPEN"
+        and lifecycle.close_calls == []
+        and reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 3,
+    )
+
+
 def test_lifecycle_two_absences_close_with_provenance():
     item = work_item()
     lifecycle = ReconcileLifecycle(item)
@@ -1284,6 +1367,12 @@ def test_lifecycle_two_absences_close_with_provenance():
     check(
         "lifecycle: pass two closes exactly once",
         lifecycle.issue["state"] == "CLOSED" and len(lifecycle.close_calls) == 1,
+    )
+    check(
+        "lifecycle: soft-close owner copy remains unchanged",
+        lifecycle.issue["comments"][-1]["body"]
+        == "Self-healed by the scheduled backstop: wheelhouse#42 no longer needs "
+        "a maintainer decision in the current scan - consuming this card.",
     )
     check(
         "lifecycle: trusted provenance is in the body before close",
@@ -1431,14 +1520,16 @@ def test_malformed_and_legacy_state_cannot_accelerate_close():
 
     malformed_records = [
         True,
-        {"version": 1, "threshold": 2, "count": True},
-        {"version": 1, "threshold": 2, "count": -1},
-        {"version": 1, "threshold": 2, "count": 999999999},
+        {"version": 2, "threshold": 2, "count": True, "run_number": 99},
+        {"version": 2, "threshold": 2, "count": -1, "run_number": 99},
+        {"version": 2, "threshold": 2, "count": 999999999, "run_number": 99},
+        {"version": 3, "threshold": 2, "count": 1, "run_number": 99},
         {"version": 2, "threshold": 2, "count": 1},
         {
-            "version": 1,
+            "version": 2,
             "threshold": 2,
             "count": 2,
+            "run_number": 99,
             "soft_close": {
                 "actor": "owner",
                 "reason": "open-target-worklist-absence",
@@ -1468,8 +1559,8 @@ def test_malformed_and_legacy_state_cannot_accelerate_close():
     state = reconcile.core.parse_state_block(duplicate.issue["body"])
     raw = json.dumps(state, separators=(",", ":"))
     raw = raw[:-1] + (
-        ',"reconcile_absence":{"version":1,"threshold":2,"count":1}'
-        ',"reconcile_absence":{"version":1,"threshold":2,"count":1}}'
+        ',"reconcile_absence":{"version":2,"threshold":2,"count":1,"run_number":99}'
+        ',"reconcile_absence":{"version":2,"threshold":2,"count":1,"run_number":99}}'
     )
     duplicate.issue["body"] = reconcile.render_card._STATE_BLOCK_RE.sub(
         "<!-- wheelhouse-state: %s -->" % raw,
@@ -1579,9 +1670,10 @@ def test_audit_protections_ignore_absence_count():
         protected = _pr_review_card()
         state = reconcile.core.parse_state_block(protected["body"])
         state[reconcile.render_card.RECONCILE_ABSENCE_FIELD] = {
-            "version": 1,
+            "version": 2,
             "threshold": 2,
             "count": 1,
+            "run_number": 99,
         }
         state[field] = {"repo": "wheelhouse", "number": 42}
         protected["body"] = reconcile.render_card._replace_state_block(
@@ -1599,6 +1691,7 @@ def test_audit_protections_ignore_absence_count():
 
 def main():
     test_refresh_uses_known_card_when_target_label_missing()
+    test_upsert_rejects_change_after_reconcile_validation()
     test_refresh_uses_current_labels_before_upsert()
     test_open_target_that_left_worklist_records_first_absence()
     test_indeterminate_pr_card_is_frozen()
@@ -1628,6 +1721,7 @@ def main():
     test_open_target_without_needs_decision_is_left_alone()
     test_truncated_repo_scan_does_not_self_heal_close_missing_issue()
     test_lifecycle_present_absent_present_reuses_and_clears()
+    test_failed_present_reset_cannot_authorize_later_close()
     test_lifecycle_two_absences_close_with_provenance()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()
