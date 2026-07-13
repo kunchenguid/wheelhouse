@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
+import automerge_criteria as criteria_schema  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment, decline, and
 # request-changes are intentionally not checkboxes because issue-form checkboxes
@@ -170,6 +171,8 @@ CI_SECURITY_SUMMARY_HEAD_FIELD = "ci_security_summary_head_sha"
 CI_SECURITY_SUMMARY_DIFF_FIELD = "ci_security_summary_diff_revision"
 CI_SECURITY_SUMMARY_VERSION_FIELD = "ci_security_summary_version"
 CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
+AUTOMERGE_CRITERIA_FIELD = "automerge_criteria"
+AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -193,8 +196,9 @@ CI_SECURITY_SUMMARY_PRESENT_FIELD = "ci_security_summary_present"
 # claude-code-action harness polling/status lines in card-visible agent output.
 # Bumped 5 -> 6 to publish the advisory read-only `### Security review` section
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
-# hold and manual approve are unchanged).
-CARD_RENDER_VERSION = 6
+# hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
+# non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
+CARD_RENDER_VERSION = 7
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -394,12 +398,31 @@ def security_summary_stale(item, state):
     )
 
 
+def automerge_criteria_stale(item, state):
+    """Whether fresh evaluator evidence needs a display-only card refresh.
+
+    Criterion rows are explicitly NON-MATERIAL and never authorize a merge.
+    When the scan supplies a current structured result, however, the visible UI
+    should follow it without waiting for another material target change.
+    """
+    if item.get("kind") != "pr-review" or AUTOMERGE_CRITERIA_FIELD not in item:
+        return False
+    expected = criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD))
+    return (state or {}).get(
+        AUTOMERGE_CRITERIA_VERSION_FIELD
+    ) != criteria_schema.CRITERIA_VERSION or criteria_schema.normalize_criteria(
+        (state or {}).get(AUTOMERGE_CRITERIA_FIELD),
+        missing_reason="historical criterion data is unavailable",
+    ) != expected
+
+
 def refresh_needed(item, state, has_token=False):
     return (
         material_changed(item, state)
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
         or security_summary_stale(item, state)
+        or automerge_criteria_stale(item, state)
     )
 
 
@@ -1013,13 +1036,19 @@ def _ensure_recommendation_section(body, recommendation):
 
 
 def _replace_state_block(body, state):
-    marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
-        state or {},
-        separators=(",", ":"),
-    )
+    marker = "<!-- wheelhouse-state: %s -->" % _serialize_state(state)
     if _STATE_BLOCK_RE.search(body or ""):
-        return _STATE_BLOCK_RE.sub(marker, body, count=1)
+        return _STATE_BLOCK_RE.sub(lambda _match: marker, body, count=1)
     return (body or "").rstrip() + "\n\n" + marker
+
+
+def _serialize_state(state):
+    return (
+        json.dumps(state or {}, separators=(",", ":"))
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
 
 
 def body_with_activity_reflected(body, item, card_updated_at=""):
@@ -1311,6 +1340,52 @@ def _publish_decision_section(body, kind, options):
     return new_body if count else body
 
 
+def _automerge_criteria_evidence(value):
+    text = _clean_triage_text(value, limit=260, default="evidence unavailable")
+    # Criterion evidence can contain target-controlled paths or actor names.
+    # Keep it inert in this owner-facing Markdown section.
+    return (
+        text.replace("`", "'")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _automerge_criteria_section(rows):
+    normalized = criteria_schema.normalize_criteria(
+        rows,
+        missing_reason="not evaluated on this card generation path",
+    )
+    icons = {
+        criteria_schema.STATUS_MET: "✅ **MET**",
+        criteria_schema.STATUS_UNMET: "❌ **UNMET**",
+        criteria_schema.STATUS_UNAVAILABLE: "⚪ **UNAVAILABLE**",
+    }
+    lines = [
+        "### Auto-merge criteria",
+        "",
+        "> [!NOTE]",
+        "> Read-only preflight from the authoritative auto-merge evaluator. "
+        "A displayed **MET** result never authorizes a merge: Wheelhouse "
+        "re-evaluates every gate and performs G7 immediately before acting.",
+        "",
+    ]
+    for row in normalized:
+        lines.append(
+            "- %s `%s` - %s"
+            % (
+                icons[row["status"]],
+                row["label"],
+                _automerge_criteria_evidence(row.get("evidence")),
+            )
+        )
+    return lines
+
+
 def _security_review_section(summary):
     """The advisory security-review block for a CI-approval HOLD card.
 
@@ -1379,6 +1454,11 @@ def render(item, held=False):
         state[CI_SECURITY_SUMMARY_PRESENT_FIELD] = bool(
             item.get(CI_SECURITY_SUMMARY_PRESENT_FIELD)
         )
+    if kind == "pr-review" and AUTOMERGE_CRITERIA_FIELD in item:
+        state[AUTOMERGE_CRITERIA_VERSION_FIELD] = criteria_schema.CRITERIA_VERSION
+        state[AUTOMERGE_CRITERIA_FIELD] = criteria_schema.normalize_criteria(
+            item.get(AUTOMERGE_CRITERIA_FIELD)
+        )
     if held:
         state["held"] = True
     if triage:
@@ -1413,6 +1493,9 @@ def render(item, held=False):
     if item.get("summary"):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
+    if kind == "pr-review":
+        lines.extend(_automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD)))
+        lines.append("")
     # A security warning (e.g. a pull_request_target posture on a ci-approval
     # card) is surfaced as a prominent callout so the maintainer decides with
     # eyes open. Display-only - not part of the material refresh signature.
@@ -1435,9 +1518,7 @@ def render(item, held=False):
         lines.append("")
     lines.append(_decision_section(kind, options, held))
     lines.append("")
-    lines.append(
-        "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
-    )
+    lines.append("<!-- wheelhouse-state: %s -->" % _serialize_state(state))
     body = "\n".join(lines)
 
     return {
@@ -2055,7 +2136,9 @@ def _repair_schema_lines(kind):
     if kind == "issue-triage":
         action_enum = "close | decline | hold | investigate | comment"
     else:
-        action_enum = "merge | request-changes | decline | close | hold | investigate | comment"
+        action_enum = (
+            "merge | request-changes | decline | close | hold | investigate | comment"
+        )
     lines = [
         "{",
         '  "summary": "<one-sentence plain summary string>",',
@@ -2074,7 +2157,9 @@ def _repair_schema_lines(kind):
     return lines
 
 
-def build_repair_prompt(candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDATE_MAX_BYTES):
+def build_repair_prompt(
+    candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDATE_MAX_BYTES
+):
     """Build the ONE bounded schema-repair turn's prompt. It is self-contained:
     the candidate (the model's own earlier output that failed validation) is
     embedded, the required schema is stated, and the model is told to REPAIR
@@ -2084,7 +2169,10 @@ def build_repair_prompt(candidate_text, kind, max_candidate_bytes=REPAIR_CANDIDA
     candidate = candidate_text or ""
     raw = candidate.encode("utf-8")
     if len(raw) > max_candidate_bytes:
-        candidate = raw[:max_candidate_bytes].decode("utf-8", "ignore") + "\n[candidate truncated]"
+        candidate = (
+            raw[:max_candidate_bytes].decode("utf-8", "ignore")
+            + "\n[candidate truncated]"
+        )
     lines = [
         "You previously produced a structured triage result that FAILED",
         "automated schema validation. Your ONLY task now is to REPAIR its",
@@ -2173,7 +2261,9 @@ def decide_triage_apply(result_text, repaired_text, target_file):
     if not (result_text or "").strip():
         return {"outcome": "no-result", "triage": None, "reason": "", "candidate": ""}
     # Delivered but invalid: the #551 schema-miss class.
-    reason = triage_schema_reason(result_text) or "delivered result failed schema validation"
+    reason = (
+        triage_schema_reason(result_text) or "delivered result failed schema validation"
+    )
     candidate = redacted_candidate_shape(result_text)
     if repaired_text:
         repaired = parse_triage_json(repaired_text)

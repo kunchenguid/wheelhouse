@@ -80,7 +80,7 @@ def work_item(**overrides):
     return item
 
 
-def run_reconcile(scan, cards, current_cards=None):
+def run_reconcile(scan, cards, current_cards=None, criteria_payload=None):
     calls = {"upsert": [], "close": [], "reflect": []}
     current_by_number = {
         c["number"]: c for c in (cards if current_cards is None else current_cards)
@@ -133,6 +133,15 @@ def run_reconcile(scan, cards, current_cards=None):
             with open(cards_path, "w") as f:
                 json.dump(cards, f)
             sys.argv = ["reconcile.py", scan_path, cards_path]
+            if criteria_payload is not None:
+                criteria_path = os.path.join(d, "automerge.json")
+                if criteria_payload == "malformed":
+                    with open(criteria_path, "w") as f:
+                        f.write("{malformed")
+                elif criteria_payload != "missing":
+                    with open(criteria_path, "w") as f:
+                        json.dump(criteria_payload, f)
+                sys.argv.append(criteria_path)
             with redirect_stdout(io.StringIO()):
                 reconcile.main()
     finally:
@@ -469,7 +478,9 @@ def test_ci_wait_freeze_releases_when_checks_terminal():
         and calls["upsert"][0]["item"]["head_sha"] == "newsha"
         and calls["upsert"][0]["item"]["tests"] == "green",
     )
-    check("ci-wait-release: card not consumed when it reclassifies", calls["close"] == [])
+    check(
+        "ci-wait-release: card not consumed when it reclassifies", calls["close"] == []
+    )
 
 
 def test_departed_target_still_self_heals_despite_freeze_machinery():
@@ -483,6 +494,98 @@ def test_departed_target_still_self_heals_despite_freeze_machinery():
         "ci-wait: genuinely-departed target is still consumed",
         len(calls["close"]) == 1 and calls["close"][0]["number"] == 7,
     )
+
+
+def test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria():
+    # Live #96 lifecycle regression: the safe fork-CI approval scan intentionally
+    # emits no worklist card while checks run, but the first terminal green scan
+    # must surface the PR and thread authoritative criterion rows into the normal
+    # card generation path. It must never silently disappear after terminal CI.
+    waiting_refresh = ci_wait_refresh_item(number=96, head_sha="head96")
+    waiting_refresh["repo"] = "axi"
+    waiting = {
+        "repos": {
+            "axi": {
+                "ok": True,
+                "open_pr_numbers": [96],
+                "open_issue_numbers": [],
+                "indeterminate_pr_numbers": [],
+                "ci_wait_pr_numbers": [96],
+                "ci_wait_refresh_items": [waiting_refresh],
+                "truncated": False,
+            }
+        },
+        "items": [],
+    }
+    waiting_calls = run_reconcile(waiting, [])
+    check(
+        "axi#96 lifecycle: approve/wait scan intentionally creates no transient card",
+        waiting_calls["upsert"] == [],
+    )
+
+    terminal_item = work_item(
+        repo="axi",
+        number=96,
+        head_sha="head96",
+        title="docs: add jj-axi to community catalog",
+        author="aivv73",
+        url="https://github.com/kunchenguid/axi/pull/96",
+    )
+    criteria = [
+        {
+            "id": "g3_prior_merge",
+            "status": "unmet",
+            "evidence": "aivv73 has no prior merged PR in axi",
+        }
+    ]
+    terminal = {
+        "repos": {
+            "axi": {
+                "ok": True,
+                "open_pr_numbers": [96],
+                "open_issue_numbers": [],
+                "indeterminate_pr_numbers": [],
+                "ci_wait_pr_numbers": [],
+                "ci_wait_refresh_items": [],
+                "truncated": False,
+            }
+        },
+        "items": [terminal_item],
+    }
+    payload = {
+        "criteria": [
+            {
+                "repo": "axi",
+                "number": 96,
+                "head_sha": "head96",
+                "criteria": criteria,
+            }
+        ]
+    }
+    terminal_calls = run_reconcile(terminal, [], criteria_payload=payload)
+    created = terminal_calls["upsert"]
+    check(
+        "axi#96 lifecycle: terminal green scan creates the normal decision card",
+        len(created) == 1
+        and created[0]["item"]["number"] == 96
+        and created[0]["item"]["tests"] == "green",
+    )
+    check(
+        "axi#96 lifecycle: authoritative criteria reach card generation",
+        created
+        and created[0]["item"].get(reconcile.render_card.AUTOMERGE_CRITERIA_FIELD)
+        == criteria,
+    )
+
+
+def test_optional_automerge_handoff_never_aborts_reconciliation():
+    scan = scan_payload(items=[work_item()])
+    for payload in ("missing", "malformed", []):
+        calls = run_reconcile(scan, [], criteria_payload=payload)
+        check(
+            "optional criteria handoff %r still reconciles the queue" % payload,
+            len(calls["upsert"]) == 1,
+        )
 
 
 def test_ci_wait_freeze_does_not_shield_a_different_pr():
@@ -963,6 +1066,8 @@ def main():
     test_ci_wait_refresh_is_noop_when_card_already_current()
     test_ci_wait_freeze_releases_when_checks_terminal()
     test_departed_target_still_self_heals_despite_freeze_machinery()
+    test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria()
+    test_optional_automerge_handoff_never_aborts_reconciliation()
     test_ci_wait_freeze_does_not_shield_a_different_pr()
     test_ci_approval_card_with_no_pending_run_is_consumed()
     test_ci_approval_worklist_item_creates_fresh_card()

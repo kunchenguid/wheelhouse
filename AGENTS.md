@@ -131,7 +131,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   conditional `Accept recommendation` checkbox rendering, `triaged_sha` cache
   updates, automated-status labeling for known harness transcript lines,
   target-activity state reflection, the advisory `### Security review` section
-  on CI-approval HOLD cards (`_security_review_section`), plus trusted
+  on CI-approval HOLD cards (`_security_review_section`), the non-authoritative
+  read-only
+  `### Auto-merge criteria` section on PR-review cards, plus trusted
   triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; pre-merge workflow-touch gate in `do_merge` that blocks
@@ -145,6 +147,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   free-text comment to a structured result), `nl_readonly_search.py` (installs
   the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed LLM
   context),
+  `automerge_criteria.py` (stable criterion IDs/labels and fail-closed
+  normalization shared by evaluator and renderer), `auto_merge.py`
+  (authoritative G0-G6 criterion evaluation plus claim/validate/G7 act/audit),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
   create/**refresh**/activity-reflect/close and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
   `nl_readonly_search`; `reconcile`/`render_card` import `wheelhouse_core` (and
@@ -255,8 +260,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `6`: the
-  5 -> 6 bump publishes the advisory read-only `### Security review` section on
+  it is not a material field). `CARD_RENDER_VERSION` is currently `7`: the
+  6 -> 7 bump publishes the non-authoritative read-only `### Auto-merge criteria`
+  section on already-open PR-review cards; the 5 -> 6 bump publishes the
+  advisory read-only `### Security review` section on
   already-open CI-approval HOLD cards (display-only; the pwn-request hold and
   manual approve are unchanged); the
   4 -> 5 bump labels known claude-code-action harness polling/status transcript
@@ -940,9 +947,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   on its DEFAULT branch (the alignment rubric doubles as the opt-in signal). THIS
   repository's committed `wheelhouse.config.yml` sets the GLOBAL
   `auto_merge: true`, so forks of this repository inherit the fleet-wide switch
-  on and a committed default-branch `VISION.md` is the practical per-repo opt-in;
-  no fleet repo has one yet, so the fleet is inert until the captain commits a
-  `VISION.md`. The absent-key code fallback stays false - only this repository's
+  on and a committed default-branch `VISION.md` is the practical per-repo opt-in.
+  The absent-key code fallback stays false - only this repository's
   committed config value flipped; a per-repo `auto_merge: false` opts one repo
   back out. A
   merge-ready `pr-review` candidate is merged only when EVERY gate passes:
@@ -963,6 +969,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   recommending merge (class C also requires an explicit strictly-opt-in + default-off flag).
   G7 is an immediate live re-check of head SHA, base SHA, default-branch VISION.md SHA, mergeable, clean state, and configured compliance/test contexts right before `do_merge`.
   Any missing/stale/malformed/uncertain/unreadable input HOLDS for human review (fail-closed), and an ok:false / truncated / `indeterminate_pr_numbers` repo is frozen exactly like reconcile.
+  `evaluate_candidate` returns one ordered structured criterion result using the stable schema in `automerge_criteria.py`; action decisions consume those same facts, while `collect_card_criteria` runs a read-only full evaluation for rendering.
+  `scan-backstop` passes that head-bound result through `automerge.json` to `reconcile.py`, and `render_card.py` shows every row as `MET`, `UNMET`, or `UNAVAILABLE` with concise evidence.
+  Criterion state is non-material and never read as authorization; action mode always re-evaluates fail-fast with an exclusive card claim, and G7 plus the unchanged `do_merge` workflow-touch gate still run immediately before merge.
+  Missing historical criterion data renders every row explicitly unavailable, while a changed fresh result triggers only a display refresh through `automerge_criteria_stale`.
+  See `tests/test_automerge_card_ui.py` for the full positive/negative matrix, axi#96 lifecycle shape, old-card compatibility, and the guarantee that forged displayed `MET` rows cannot grant eligibility.
   A target repository without GitHub's "require branches to be up to date" branch protection has an irreducible sub-second window between those final GETs and GitHub's merge PUT: GitHub's merge API accepts no base-SHA precondition.
   That residual risk is bounded by the final CLEAN state, green configured checks, blast-radius caps, and unconditional exclusions.
   Enabling "require branches to be up to date" branch protection, or using a merge queue, closes it server-side because GitHub's `mergeStateStatus` becomes `BEHIND` while auto-merge requires a CLEAN merge state.
@@ -1194,7 +1205,8 @@ Run the unit tests:
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
 - `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and the UNKNOWN-mergeability policy (`_settle_mergeable` poll-first-conclusive/fail-open, `_resolve_pr_bucket` polling an explicit `UNKNOWN` and returning `needs-rebase` on settled CONFLICTING / `merge-ready` on settled MERGEABLE / `MERGEABILITY_PENDING` when it never settles, no poll for a known-MERGEABLE PR, plus `build_repo` integration: UNKNOWN->CONFLICTING nudges with no card, UNKNOWN->MERGEABLE emits a merge-ready card, unsettled UNKNOWN emits no item and lands in `indeterminate_pr_numbers` with no nudge, and the #111 acceptance that a statically-conflicting PR never enters the worklist across readable-CONFLICTING and post-base-push-UNKNOWN scans). The reconcile freeze of an `indeterminate_pr_numbers` card (no close, no refresh) and the unchanged non-indeterminate soft-close live in `tests/test_reconcile.py`.
 - `python tests/test_config_schema.py` - structural load test that `wheelhouse_core.load_config()` accepts the checked-in `wheelhouse.config.yml`: every `repos:` entry is well-formed (name is trimmed and matches its key; `compliance_check` is null or a trimmed non-empty string; `test_check_patterns` is a list of trimmed non-empty strings; `merge_method` is unset or squash|merge|rebase) and repo names are case-insensitively unique. Deliberately pins no repo names or fleet size, so it keeps guarding the file as the fleet grows/shrinks, no network.
-- `python tests/test_auto_merge_v1.py` - scan-time auto-merge (V1), no network and no target-repo writes: the config + exclusion helpers (`_auto_merge_enabled` default-off/overrides, `_auto_merge_exclusions` covering every category incl. VISION.md self-authorization); the pure `verdict_eligible` gate (A/B/C eligibility, class-C opt-in/default-off, malformed/stale/absent verdicts, fail-closed defaults) plus `normalize_automerge_verdict` parsing/coercion; the blast-radius caps at the exact 20-file and 1000-line boundaries; every deterministic gate G0-G6 walked through PASS and HOLD via representative live-card fixtures in `act_on_scan`; the G7 live head + merge-state re-check immediately before acting (and the scan-vs-live head mismatch); the `wheelhouse:no-auto-merge` escape hatch and global/per-repo kill switches; the ok:false/truncated/indeterminate freeze; base-branch-ONLY VISION.md reads (contents API, no `?ref`); the durable ledger (parse/append/render/cap) + audit comment + `record` CLI resolving the card and appending the ledger (best-effort/no-op paths); the `do_merge` race/error outcomes; and the DELIBERATE ABSENCE of an open-PR file-overlap gate and any per-contributor/per-scan rate cap; the claim-time author-duality normalization (real `get_card`-shaped `{"login": "app/github-actions"}` fixtures normalize and are trusted, `github-actions[bot]` stays trusted, and a human login / a different `app/*` slug / bare `github-actions` / lookalikes all stay fail-closed rejected); plus offline YAML wiring checks (FLEET act step, github.token record step, act->reconcile->record order, and the triage.yml base-VISION verdict prompt).
+- `python tests/test_auto_merge_v1.py` - scan-time auto-merge (V1), no network and no target-repo writes: the config + exclusion helpers (`_auto_merge_enabled` default-off/overrides, `_auto_merge_exclusions` covering every category incl. VISION.md self-authorization); the pure `verdict_eligible` gate (A/B/C eligibility, class-C opt-in/default-off, malformed/stale/absent verdicts, fail-closed defaults) plus `normalize_automerge_verdict` parsing/coercion; the blast-radius caps at the exact 20-file and 1000-line boundaries; every deterministic gate G0-G6 walked through PASS and HOLD via representative live-card fixtures in `act_on_scan`; the G7 live head + merge-state re-check immediately before acting (and the scan-vs-live head mismatch); the `wheelhouse:no-auto-merge` escape hatch and global/per-repo kill switches; the ok:false/truncated/indeterminate freeze; base-branch-ONLY VISION.md reads (contents API, no `?ref`); the durable ledger (parse/append/render/cap) + audit comment + `record` CLI resolving the card and appending the ledger (best-effort/no-op paths); the `do_merge` race/error outcomes; and the DELIBERATE ABSENCE of an open-PR file-overlap gate and any per-contributor/per-scan rate cap; the claim-time author-duality normalization (real `get_card`-shaped `{"login": "app/github-actions"}` fixtures normalize and are trusted, `github-actions[bot]` stays trusted, and a human login / a different `app/*` slug / bare `github-actions` / lookalikes all stay fail-closed rejected); plus offline YAML wiring checks (FLEET act step, github.token record step, act->reconcile->record order, the criteria handoff, and the triage.yml base-VISION verdict prompt).
+- `python tests/test_automerge_card_ui.py` - authoritative auto-merge criterion UI, no network: every stable row's positive and fail-closed negative state, owner/bot/history distinctions, workflow/security exclusions, dirty/unknown mergeability and checks, verdict freshness and A/B/C details, blast limits, held/claimed card state, the real axi#96 shape through evaluator and renderer, old-card fallback, criterion-only refresh, and proof that persisted display rows cannot grant eligibility.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
 Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.

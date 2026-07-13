@@ -995,7 +995,12 @@ def test_claim_author_duality_normalizes_only_github_actions():
         "claim: _canonical_card_author maps exactly the duality string",
         am._canonical_card_author("app/github-actions") == am.CARD_AUTOMATION_AUTHOR,
     )
-    for login in ("contributor", "app/other-bot", "github-actions", "App/GitHub-Actions"):
+    for login in (
+        "contributor",
+        "app/other-bot",
+        "github-actions",
+        "App/GitHub-Actions",
+    ):
         check(
             "claim: _canonical_card_author leaves %r unchanged" % login,
             am._canonical_card_author(login) == login,
@@ -2503,6 +2508,7 @@ def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
     # verdict on is empty when no VISION.md exists, so triage never asks for one.
     saved = core.gh_rest
     try:
+
         def _absent(path):
             raise RuntimeError("404 no VISION.md")
 
@@ -2526,7 +2532,9 @@ def test_global_true_self_authorization_still_excluded():
     # excluded, and the rubric is read from the BASE default branch, never the head.
     check(
         "self-authorization: a PR ADDING VISION.md is a vision: exclusion",
-        any(h.startswith("vision:") for h in core._auto_merge_exclusions(["VISION.md"])),
+        any(
+            h.startswith("vision:") for h in core._auto_merge_exclusions(["VISION.md"])
+        ),
     )
     check(
         "self-authorization: VISION.md CHANGED among other files still excludes",
@@ -3202,6 +3210,17 @@ def test_scan_backstop_wiring_and_token_discipline():
         act
         and "auto_merge.py act scan.json automerge-valid-claims.json"
         in act.get("run", ""),
+    )
+    check(
+        "wiring: authoritative criteria inspect the original card snapshot",
+        act
+        and "auto_merge.py act scan.json automerge-valid-claims.json cards.json"
+        in act.get("run", ""),
+    )
+    check(
+        "wiring: reconcile renders the criteria handoff from automerge.json",
+        "reconcile.py scan.json cards.json automerge.json"
+        in (by_name.get("Reconcile the queue", {}).get("run", "")),
     )
     check(
         "wiring: act re-reads cards with a separate default-token credential",
