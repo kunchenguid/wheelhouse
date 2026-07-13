@@ -1,8 +1,8 @@
 name: ingest
 
 # Fast path: a source repo (or a manual test) hands us an item that needs the
-# maintainer's decision, and we create, refresh, or activity-reflect a
-# decision-card issue for it.
+# maintainer's decision, and we create, safely reuse, refresh, or
+# activity-reflect a decision-card issue for it.
 # For eligible PR-review or issue-triage cards, this also queues the advisory
 # auto-triage workflow after writing the per-revision cache marker.
 # A brand-new eligible card is created HELD (`pending-triage`, no decision
@@ -60,10 +60,12 @@ permissions:
   issues: write
   actions: write
 
-# Serialize per target so a dispatch and a manual run can't double-create or
-# double-refresh a card.
+# Share the global card-lifecycle queue with scan-backstop and the decision
+# handler. A closed-card reopen or new-card create must not race another path
+# into two open cards for one target.
 concurrency:
-  group: wheelhouse-ingest-${{ github.event.client_payload.repo || github.event.inputs.repo }}-${{ github.event.client_payload.number || github.event.inputs.number }}
+  group: wheelhouse-backstop
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -99,7 +101,7 @@ jobs:
         run: python scripts/build_item.py item.json
 
       - id: upsert
-        name: Create or refresh the decision card
+        name: Create, reuse, or refresh the decision card
         env:
           # Cards live in THIS repo: the default token is correct, and using it
           # keeps card activity from re-triggering the decision handler.

@@ -94,7 +94,7 @@ MAX_VISION_BYTES = 40000
 #   C = new feature strictly opt-in and disabled by default
 # Any change to existing/default behavior that is not one of these is ineligible.
 ELIGIBLE_BEHAVIOR_CLASSES = ("A", "B", "C")
-CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
+CARD_AUTOMATION_AUTHOR = render_card.CARD_AUTOMATION_AUTHOR
 # GitHub reports the SAME automation actor under two spellings depending on the
 # API surface: the REST issues endpoint (`.user.login`, used to build cards.json)
 # returns "github-actions[bot]", while `gh issue view --json author` (the GraphQL
@@ -105,7 +105,7 @@ CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
 # and trusted is still recognized when re-read live. Every other login is left
 # byte-for-byte unchanged (no prefix stripping, no case folding, no allowlist),
 # so fail-closed rejection of any non-automation author is fully preserved.
-GET_CARD_AUTOMATION_AUTHOR = "app/github-actions"
+GET_CARD_AUTOMATION_AUTHOR = render_card.GET_CARD_AUTOMATION_AUTHOR
 AUTO_MERGE_CLAIM_LABEL = "wheelhouse:auto-merge-claim"
 AUDIT_WRITE_MAX_ATTEMPTS = 3
 AUDIT_WRITE_BACKOFF_SECONDS = 0.25
