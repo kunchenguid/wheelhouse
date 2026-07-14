@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,28 +29,16 @@ IMMUTABLE_MODEL = "claude-sonnet-4-6"
 PROTOCOL = "claude-agent-sdk-json-v1"
 
 
-def _bounded_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-            text = item["text"].strip()
-            if text:
-                parts.append(text)
-    return "\n".join(parts).strip()
-
-
 def _transcript(path: str) -> list[dict[str, Any]]:
     candidate = Path(path)
     if not path or candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 8 * 1024 * 1024:
         return []
     value = load_json_regular(candidate, max_bytes=8 * 1024 * 1024)
     if not isinstance(value, list):
-        return []
-    return [row for row in value if isinstance(row, dict)]
+        raise ContractError("Claude action transcript was not an event array")
+    if any(not isinstance(row, dict) for row in value):
+        raise ContractError("Claude action transcript contained an invalid event")
+    return value
 
 
 def _spend_started(path: str) -> bool:
@@ -61,33 +50,35 @@ def _spend_started(path: str) -> bool:
 
 
 def _observed_model(rows: list[dict[str, Any]]) -> str:
-    models = {
-        row.get("model")
+    models = [
+        row["model"]
         for row in rows
         if row.get("type") == "system"
         and row.get("subtype") == "init"
         and isinstance(row.get("model"), str)
         and row.get("model")
-    }
-    return next(iter(models)) if len(models) == 1 else ""
+    ]
+    return models[0] if len(models) == 1 else ""
 
 
-def _result_text(rows: list[dict[str, Any]]) -> str:
-    for row in reversed(rows):
-        if row.get("type") == "result" and not row.get("is_error") and isinstance(row.get("result"), str) and row["result"].strip():
-            return row["result"].strip()
-    for row in reversed(rows):
-        if row.get("type") == "assistant" and isinstance(row.get("message"), dict):
-            text = _bounded_text(row["message"].get("content"))
-            if text:
-                return text
-    return ""
+def _terminal_result(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    results = [row for row in rows if row.get("type") == "result"]
+    if len(results) != 1 or not rows or rows[-1] is not results[0]:
+        return None
+    return results[0]
 
 
-def _delivered(action: str, rows: list[dict[str, Any]], delivered_file: str) -> Any:
+def _result_text(terminal: dict[str, Any] | None) -> str:
+    if terminal is None or terminal.get("is_error") is not False:
+        return ""
+    text = terminal.get("result")
+    return text.strip() if isinstance(text, str) else ""
+
+
+def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> Any:
     if delivered_file:
         return load_json_regular(delivered_file, max_bytes=131072)
-    text = _result_text(rows)
+    text = _result_text(terminal)
     if not text:
         raise ContractError("Claude action delivered no final result")
     if action.startswith("deep-review"):
@@ -102,7 +93,7 @@ def _delivered(action: str, rows: list[dict[str, Any]], delivered_file: str) -> 
     return value
 
 
-def _usage(rows: list[dict[str, Any]], duration_ms: int) -> dict[str, Any]:
+def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
     turns = 0
     token_usage: dict[str, Any] = {}
     tool_calls = 0
@@ -111,15 +102,13 @@ def _usage(rows: list[dict[str, Any]], duration_ms: int) -> dict[str, Any]:
             content = row["message"].get("content")
             if isinstance(content, list):
                 tool_calls += sum(1 for item in content if isinstance(item, dict) and item.get("type") == "tool_use")
-    for row in reversed(rows):
-        value = row.get("num_turns")
-        if row.get("type") == "result" and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    if terminal is not None:
+        value = terminal.get("num_turns")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             turns = value
-        usage = row.get("usage")
-        if row.get("type") == "result" and isinstance(usage, dict):
+        usage = terminal.get("usage")
+        if isinstance(usage, dict):
             token_usage = usage
-        if turns or token_usage:
-            break
 
     def token(name: str) -> int | None:
         value = token_usage.get(name)
@@ -139,9 +128,26 @@ def _usage(rows: list[dict[str, Any]], duration_ms: int) -> dict[str, Any]:
     }
 
 
+def _attempt_timing(execution_file: str, terminal: dict[str, Any] | None) -> tuple[str, int]:
+    duration = terminal.get("duration_ms") if terminal is not None else None
+    if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
+        duration = 0
+    completed = time.time()
+    try:
+        observed = Path(execution_file).stat().st_mtime
+        if 0 < observed <= completed:
+            completed = observed
+    except OSError:
+        pass
+    started = datetime.fromtimestamp(completed - duration / 1000, tz=timezone.utc)
+    return started.isoformat(timespec="milliseconds").replace("+00:00", "Z"), duration
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file: str, result_path: str, events_path: str) -> dict[str, Any]:
-    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    started = time.monotonic()
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     bundle = Path(bundle_dir).resolve()
@@ -156,22 +162,26 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         rows = []
         transcript_error = True
     actual_model = _observed_model(rows)
+    terminal = _terminal_result(rows)
     spend_started = _spend_started(execution_file)
     error = None
     delivered = None
     final = None
-    action_failed = any(row.get("type") == "result" and row.get("is_error") is True for row in rows)
     if transcript_error:
         error = _error("harness.protocol", "Claude action execution data failed bounded protocol validation.", spend_started=spend_started)
     elif not rows:
         error = _error("output.missing", "Claude action delivered no execution data.", spend_started=False)
+    elif terminal is None:
+        error = _error("harness.protocol", "Claude action execution did not contain exactly one terminal result event.", spend_started=spend_started)
     elif actual_model != candidate["model"]:
         error = _error("model.mismatch", "Observed Claude model did not match the immutable requested model.", spend_started=spend_started)
-    elif action_failed:
+    elif terminal.get("is_error") is not False or terminal.get("subtype") != "success":
         error = _error("harness.crash", "Claude action reported an unsuccessful execution.", spend_started=spend_started)
+    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or terminal["duration_ms"] < 0:
+        error = _error("harness.protocol", "Claude action terminal result omitted valid attempt timing.", spend_started=spend_started)
     else:
         try:
-            value = _delivered(task["metadata"]["action"], rows, delivered_file)
+            value = _delivered(task["metadata"]["action"], terminal, delivered_file)
             encoded = canonical_json_bytes(value)
             if len(encoded) > task["spec"]["limits"]["maxFinalBytes"]:
                 raise ContractError("Claude action result exceeded its byte bound")
@@ -193,13 +203,13 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                     ],
                 }
         except (ContractError, json.JSONDecodeError, OSError, RecursionError, UnicodeError, ValueError):
-            raw = _result_text(rows)
+            raw = _result_text(terminal)
             if raw:
                 encoded = canonical_json_bytes(raw)
                 if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
                     delivered = {"value": raw, "valueSha256": canonical_sha256(raw), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
-    duration = int((time.monotonic() - started) * 1000)
+    started_at, duration = _attempt_timing(execution_file, terminal)
     status = "succeeded" if final is not None else "failed"
     selection = {
         "candidateIndex": 0,
@@ -242,10 +252,10 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
             "sandboxPolicySha256": canonical_sha256(task["spec"]["isolation"]),
         },
-        "usage": _usage(rows, duration),
+        "usage": _usage(rows, terminal, duration),
         "artifacts": [],
         "startedAt": started_at,
-        "completedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "completedAt": _now(),
     }
     if delivered is not None:
         result["delivered"] = delivered

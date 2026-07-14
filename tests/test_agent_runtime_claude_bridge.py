@@ -48,13 +48,13 @@ def make_bundle(root: Path, action: str = "deep-review.local"):
     return task, bundle
 
 
-def transcript(path: Path, model: str, text: str):
+def transcript(path: Path, model: str, text: str, duration_ms: int = 2500):
     path.write_text(
         json.dumps(
             [
                 {"type": "system", "subtype": "init", "model": model},
                 {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
-                {"type": "result", "subtype": "success", "is_error": False, "result": text, "duration_ms": 12, "num_turns": 2},
+                {"type": "result", "subtype": "success", "is_error": False, "result": text, "duration_ms": duration_ms, "num_turns": 2},
             ]
         ),
         encoding="utf-8",
@@ -81,7 +81,20 @@ def main():
         check("bridge: immutable Claude task validates", task["spec"]["selection"]["candidates"][0]["allowModelAlias"] is False)
         check("bridge: observed model accepted", result["status"] == "succeeded" and result["selection"]["actualModel"] == IMMUTABLE_MODEL)
         check("bridge: usage remains unavailable when action omits tokens", result["usage"]["inputTokens"] is None and result["usage"]["providerRequests"] is None)
+        check("bridge: timing comes from the terminal action event", result["usage"]["durationMs"] == 2500 and result["startedAt"] < result["completedAt"])
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
+
+        _, partial_bundle = make_bundle(root / "partial")
+        partial_execution = root / "partial.json"
+        partial_execution.write_text(json.dumps([{"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL}, {"type": "assistant", "message": {"content": [{"type": "text", "text": "HOLD"}]}}]), encoding="utf-8")
+        partial, _ = run_bridge(partial_bundle, partial_execution, "partial")
+        check("bridge: partial assistant output fails closed", partial["status"] == "failed" and partial["error"]["code"] == "harness.protocol" and "delivered" not in partial and "final" not in partial)
+
+        _, duplicate_bundle = make_bundle(root / "duplicate")
+        duplicate_execution = root / "duplicate.json"
+        duplicate_execution.write_text(json.dumps([{"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL}, {"type": "result", "subtype": "success", "is_error": False, "result": "HOLD", "duration_ms": 10}, {"type": "result", "subtype": "success", "is_error": False, "result": "HOLD", "duration_ms": 10}]), encoding="utf-8")
+        duplicate, _ = run_bridge(duplicate_bundle, duplicate_execution, "duplicate")
+        check("bridge: duplicate terminal results fail closed", duplicate["status"] == "failed" and duplicate["error"]["code"] == "harness.protocol" and "final" not in duplicate)
 
         _, mismatch_bundle = make_bundle(root / "mismatch")
         mismatch_execution = root / "mismatch.json"
