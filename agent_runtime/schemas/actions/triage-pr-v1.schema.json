@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wheelhouse/triage-pr/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "product_implications", "recommended_action", "recommended_reason", "evidence"],
+  "properties": {
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "product_implications": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "recommended_action": {"type": "string", "enum": ["merge", "request-changes", "decline", "close", "hold", "investigate", "comment"]},
+    "recommended_reason": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "evidence": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "automerge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["behavior_class", "aligns_with_vision", "changes_existing_or_default_behavior", "optin_default_off", "recommend_merge"],
+      "properties": {
+        "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
+        "aligns_with_vision": {"type": "boolean"},
+        "changes_existing_or_default_behavior": {"type": "boolean"},
+        "optin_default_off": {"type": "boolean"},
+        "recommend_merge": {"type": "boolean"}
+      }
+    }
+  }
+}

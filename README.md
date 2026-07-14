@@ -39,8 +39,12 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ```
 
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
-Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
-All three LLM features can also use an optional `READONLY_TOKEN` for scoped read-only search across the target repo and configured fleet repos.
+Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
+All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through a typed, scoped read-only search broker.
+The current production selection is the exact pinned direct Claude Action bridge.
+Codex CLI app-server is fully implemented as the selected future primary but is deliberately inactive because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
+No Codex secret should be added, and fallback is disabled.
+See [Agent runtime operations](docs/AGENT_RUNTIME.md) for selection, authentication, rollback, provenance, failure recovery, and activation prerequisites.
 When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
 For auto triage and deep review, trusted rendering also preserves known claude-code-action harness polling/status transcript lines but prefixes them with `[automated status]` so they are visible as metadata instead of review substance.
 When auto triage will run for a newly created PR-review or issue-triage card, Wheelhouse holds the card under `pending-triage` and publishes the decision boxes only after that first attempt records a result or an unavailable note.
@@ -189,9 +193,12 @@ Only you can mint it (it's tied to your account).
 
 That is the only secret the deterministic machine needs.
 
-### 4. (Optional) Add the Claude token for the LLM features
+### 4. (Optional) Add the current Claude rollback token for the agent-assisted features
 
 Skip this for the deterministic machine.
+The direct Claude Action is the explicit current production and rollback selection while Codex activation remains blocked by the documented authentication gate.
+Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
+See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider selection.
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
 Auto triage and deep review keep their action prompts independent of target size by writing fetched target content to runner files for Claude to read; PR diffs are bounded to 1,500,000 bytes on disk instead of being embedded in the action input.
 

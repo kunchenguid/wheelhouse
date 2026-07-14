@@ -13,18 +13,23 @@ name: deep-review
 # tick event. Issue-only manual runs and label runs parse the current card body
 # with this repo's token.
 # In each case this workflow checks out the TARGET repo's code read-only, runs
-# Claude over it, captures Claude's final response from the action output, and
-# posts that merit / triage verdict as a card comment.
+# the selected agent path, captures its normalized final response, and posts
+# that merit / triage verdict as a card comment.
+# Codex AgentTask v1 is the selected future primary integration but remains
+# fail-closed and inactive pending the approved private subscription-auth gate.
+# The direct Claude Action is an explicit temporary production/rollback bridge,
+# never an automatic fallback after a Codex failure.
 # Known claude-code-action harness polling/status transcript lines are preserved
 # but labeled before posting, so they are visible as metadata rather than review
 # substance.
 #
-# There is NO enable flag. The only thing it needs is the CLAUDE_CODE_OAUTH_TOKEN
-# secret (a Claude *subscription* token from `claude setup-token`, NOT an
-# Anthropic API key). When that secret is ABSENT the workflow does not silently
-# no-op - it posts a one-line "needs token" note on the card so the owner knows
-# why nothing happened. The deterministic core (ingest + decision-handler +
-# scan-backstop) never depends on this workflow.
+# There is NO feature enable flag.
+# The selected auth profile must be available.
+# In the current explicit legacy mode that is CLAUDE_CODE_OAUTH_TOKEN, a Claude
+# subscription token from `claude setup-token`, not an Anthropic API key.
+# An unavailable selected profile posts a one-line note instead of silently
+# no-oping.
+# The deterministic core never depends on this workflow.
 #
 # Security model (do not weaken):
 #   * FLEET_TOKEN is used ONLY for the read-only checkout of the target's code
@@ -148,14 +153,16 @@ jobs:
       # The ONLY gate: the model credential must be present. No config flag.
       - id: gate
         env:
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
+          INPUT_REPO: ${{ github.event.inputs.repo }}
         run: |
-          if [ "$HAS_TOKEN" = "true" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
+            action="deep-review.search"
           else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "deep-review triggered but CLAUDE_CODE_OAUTH_TOKEN is absent - posting a note."
+            action="deep-review.local"
           fi
+          python scripts/agent_runtime.py auth-status --action "$action" --repo "$INPUT_REPO"
 
       # Token absent: self-explain on the card instead of silently no-opping.
       - name: Explain missing token
@@ -164,8 +171,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.target.outputs.issue }}
         run: |
-          gh issue comment "$ISSUE" --body \
-            "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." || true
+          if [ "${{ steps.gate.outputs.mode }}" = "legacy" ]; then
+            body="Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run."
+          else
+            body="Deep-review needs the selected agent-runtime auth profile configured to run (${{ steps.gate.outputs.reason }})."
+          fi
+          gh issue comment "$ISSUE" --body "$body" || true
 
       # Resolve the target coordinates and the ref to check out. Complete
       # workflow_dispatch runs use immutable inputs from decision-handler's
@@ -414,7 +425,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
@@ -428,7 +439,7 @@ jobs:
       # shell command allowed is the scoped wheelhouse-search wrapper.
       - id: claude_search
         name: Claude deep review (code-grounded, read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
@@ -453,7 +464,7 @@ jobs:
       # feature can ship before the optional secret exists.
       - id: claude
         name: Claude deep review (code-grounded, read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -470,6 +481,77 @@ jobs:
             --max-turns 64
             --model sonnet
 
+      - name: Prepare the pinned Codex sandboxed adapter worker
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          CODEX_PREFIX: ${{ runner.temp }}/wheelhouse-codex
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          integrity="$(npm view @openai/codex@0.144.0 dist.integrity)"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --integrity "$integrity"
+          npm install --no-audit --no-fund --prefix "$CODEX_PREFIX" @openai/codex@0.144.0
+          echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
+          "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
+          python scripts/agent_runtime.py verify-pins
+
+      - id: agent-runtime-task
+        name: Build the immutable deep-review AgentTask
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          SEARCH: ${{ steps.readonly.outputs.enabled }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-agent-deep-review
+        run: |
+          set -euo pipefail
+          if [ "$SEARCH" = "true" ]; then
+            action="deep-review.search"
+          else
+            action="deep-review.local"
+          fi
+          repository_commit="$(git -C target-src rev-parse HEAD)"
+          revision="${HEAD_SHA:-$repository_commit}"
+          python scripts/agent_runtime.py build-task \
+            --action "$action" \
+            --prompt prompt.txt \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind "$KIND" \
+            --revision "$revision" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --target-file target.txt \
+            --repository-dir target-src \
+            --repository-commit "$repository_commit"
+
+      - id: agent-runtime
+        name: Run deep review through the Codex app-server contract
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.agent-runtime-task.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
+          BUNDLE: ${{ steps.agent-runtime-task.outputs.bundle }}
+          TASK: ${{ steps.agent-runtime-task.outputs.task }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py run \
+            --task "$TASK" \
+            --bundle "$BUNDLE" \
+            --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
+
+      - name: Record deep-review runtime provenance
+        if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
+        run: python scripts/agent_runtime.py summary --result '${{ steps.agent-runtime.outputs.result }}'
+
       # Post the verdict on the card with THIS repo's token (never FLEET_TOKEN).
       # The workflow does the posting, not Claude. The action exposes the Claude
       # SDK event log as `execution_file`; the final `result` event is the clean
@@ -485,7 +567,7 @@ jobs:
           ISSUE: ${{ steps.target.outputs.issue }}
           HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
           HEAD_VERDICT: ${{ steps.verify_head.outputs.verdict }}
-          EXECUTION_FILE: ${{ steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
+          EXECUTION_FILE: ${{ steps.agent-runtime.outputs.result || steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
           TARGET_REPO: ${{ steps.resolve.outputs.repo }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -549,6 +631,13 @@ jobs:
           def extract_verdict(path):
               if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
                   return ""
+              try:
+                  from agent_runtime.consumer import result_text
+                  normalized = result_text(path, require_success=True)
+                  if normalized:
+                      return normalized
+              except (ImportError, OSError, ValueError):
+                  pass
               try:
                   with open(path, encoding="utf-8") as f:
                       events = json.load(f)

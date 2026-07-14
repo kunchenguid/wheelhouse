@@ -6,7 +6,7 @@ name: decision-handler
 # Three ways to drive a card:
 #   * tick a checkbox            (issues.edited  - read via issue-ops/parser)
 #   * reply with a slash-command (issue_comment.created)
-#   * reply in plain English     (issue_comment.created - mapped by Claude, opt-in)
+#   * reply in plain English     (issue_comment.created - mapped by the selected agent path, opt-in)
 # The `Investigate` checkbox is the deliberate exception: it dispatches
 # deep-review.yml, clears the box, and leaves the card open.
 # Owner-gated, serialized per issue. Whatever the entry point, any target action
@@ -120,33 +120,56 @@ jobs:
       # --- Natural-language path (opt-in) ------------------------------------
       # An owner/maintainer comment that is NOT a slash-command and not on a held
       # `pending-triage` card. Gated on nl_decisions in config AND the
-      # CLAUDE_CODE_OAUTH_TOKEN secret; inert otherwise. Claude only MAPS
+      # selected runtime auth profile; inert otherwise. The model only MAPS
       # intent or answers a question - the deterministic steps below do any
       # acting, so every guard still applies.
       - id: nl-gate
         if: ${{ steps.gate.outputs.authorized == 'true' && github.event_name == 'issue_comment' && steps.decide.outputs.decision == '' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          set -euo pipefail
           nl="$(python scripts/wheelhouse_core.py nl-decisions-enabled)"
           eligible="$(python scripts/apply_decision.py nl-eligible)"
+          repo="$(python scripts/wheelhouse_core.py state repo)"
+          auth_output="$(mktemp)"
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
+            runtime_action="nl-decision.search"
+          else
+            runtime_action="nl-decision.local"
+          fi
+          GITHUB_OUTPUT="$auth_output" python scripts/agent_runtime.py auth-status \
+            --action "$runtime_action" --repo "$repo"
+          cat "$auth_output" >> "$GITHUB_OUTPUT"
+          auth_ready="$(grep '^enabled=' "$auth_output" | tail -1 | cut -d= -f2)"
+          mode="$(grep '^mode=' "$auth_output" | tail -1 | cut -d= -f2)"
           proceed=false
-          if [ "$nl" = "true" ] && [ "$HAS_TOKEN" = "true" ] && [ "$eligible" = "true" ]; then
+          if [ "$nl" = "true" ] && [ "$auth_ready" = "true" ] && [ "$eligible" = "true" ]; then
             proceed=true
+          fi
+          revision="$(python scripts/wheelhouse_core.py state head_sha)"
+          if [ -z "$revision" ]; then
+            revision="$(python scripts/wheelhouse_core.py state updated_at)"
+          fi
+          if [ -z "$revision" ]; then
+            revision="comment-${{ github.event.comment.id }}"
           fi
           # `proceed` plus the target coordinates from the card's hidden state
           # block (used by the fetch + execute steps below).
           {
             echo "proceed=$proceed"
-            echo "repo=$(python scripts/wheelhouse_core.py state repo)"
+            echo "runtime_mode=$mode"
+            echo "repo=$repo"
             echo "number=$(python scripts/wheelhouse_core.py state number)"
             echo "kind=$(python scripts/wheelhouse_core.py state kind)"
+            echo "revision=$revision"
           } >> "$GITHUB_OUTPUT"
           if [ "$proceed" != "true" ]; then
-            echo "nl path inert (nl_decisions=$nl, token_present=$HAS_TOKEN, eligible=$eligible)"
+            echo "nl path inert (nl_decisions=$nl, auth_ready=$auth_ready, eligible=$eligible)"
           fi
 
       # Read-only fetch of the target with FLEET_TOKEN so Claude can answer
@@ -254,7 +277,7 @@ jobs:
         run: python scripts/apply_decision.py nl-prompt
 
       - id: nl-search-tool
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'legacy' && steps.nl-readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
@@ -286,7 +309,7 @@ jobs:
       # NOTE: keep this action pinned to the same reviewed release as deep-review.yml.
       - id: nl-claude-search
         name: Claude interprets intent (read-only search)
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'legacy' && steps.nl-readonly.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
@@ -309,7 +332,7 @@ jobs:
       # absent so the feature can ship before the optional secret exists.
       - id: nl-claude-legacy
         name: Claude interprets intent
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled != 'true' }}
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'legacy' && steps.nl-readonly.outputs.enabled != 'true' }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -324,10 +347,80 @@ jobs:
             --max-turns 32
             --model sonnet
 
+      - name: Prepare the pinned Codex sandboxed adapter worker
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
+        env:
+          CODEX_PREFIX: ${{ runner.temp }}/wheelhouse-codex
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          integrity="$(npm view @openai/codex@0.144.0 dist.integrity)"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --integrity "$integrity"
+          npm install --no-audit --no-fund --prefix "$CODEX_PREFIX" @openai/codex@0.144.0
+          echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
+          "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
+          python scripts/agent_runtime.py verify-pins
+
+      - id: nl-agent-runtime-task
+        name: Build the immutable natural-language decision AgentTask
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
+        env:
+          NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.nl-gate.outputs.repo }}
+          NUMBER: ${{ steps.nl-gate.outputs.number }}
+          KIND: ${{ steps.nl-gate.outputs.kind }}
+          REVISION: ${{ steps.nl-gate.outputs.revision }}
+          SEARCH: ${{ steps.nl-readonly.outputs.enabled }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-agent-nl-decision
+        run: |
+          set -euo pipefail
+          printf '%s' "$NL_PROMPT" > prompt.txt
+          if [ "$SEARCH" = "true" ]; then
+            action="nl-decision.search"
+          else
+            action="nl-decision.local"
+          fi
+          python scripts/agent_runtime.py build-task \
+            --action "$action" \
+            --prompt prompt.txt \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind "$KIND" \
+            --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --target-file target.txt
+
+      - id: nl-agent-runtime
+        name: Map natural-language intent through the Codex app-server contract
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' && steps.nl-agent-runtime-task.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
+          BUNDLE: ${{ steps.nl-agent-runtime-task.outputs.bundle }}
+          TASK: ${{ steps.nl-agent-runtime-task.outputs.task }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py run \
+            --task "$TASK" \
+            --bundle "$BUNDLE" \
+            --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
+
+      - name: Record natural-language runtime provenance
+        if: ${{ always() && steps.nl-agent-runtime.outputs.result != '' }}
+        run: python scripts/agent_runtime.py summary --result '${{ steps.nl-agent-runtime.outputs.result }}'
+
       - id: nl-result
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          RUNTIME_RESULT: ${{ steps.nl-agent-runtime.outputs.result }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -338,9 +431,12 @@ jobs:
           out_file="${out_dir}/decision.json"
           mkdir -p "$out_dir"
           : > "$out_file"
-          if [ -e decision.json ]; then
+          if [ -n "${RUNTIME_RESULT:-}" ]; then
+            python scripts/agent_runtime.py export-final \
+              --result "$RUNTIME_RESULT" --out "$out_file"
+          elif [ -e decision.json ]; then
             if [ -L decision.json ] || [ ! -f decision.json ]; then
-              echo "::error::Invalid decision.json produced by Claude"
+              echo "::error::Invalid decision.json produced by the temporary Claude rollback"
               exit 1
             fi
             size=$(wc -c < decision.json)
