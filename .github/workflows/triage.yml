@@ -586,10 +586,15 @@ jobs:
             *) echo "::error::unsupported Codex runner architecture"; exit 1 ;;
           esac
           platform_package="@openai/codex@0.144.0-${platform}"
-          integrity="$(npm view @openai/codex@0.144.0 dist.integrity)"
-          platform_integrity="$(npm view "$platform_package" dist.integrity)"
-          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --integrity "$integrity" --platform "$platform" --platform-package "$platform_package" --platform-integrity "$platform_integrity"
-          npm install --no-audit --no-fund --prefix "$CODEX_PREFIX" @openai/codex@0.144.0
+          tarball_dir="${RUNNER_TEMP}/wheelhouse-codex-tarballs"
+          mkdir -p "$tarball_dir"
+          tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" @openai/codex@0.144.0)"
+          platform_tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" "$platform_package")"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --platform "$platform" --platform-package "$platform_package" --tarball "$tarball" --platform-tarball "$platform_tarball"
+          npm install --offline --ignore-scripts --omit=optional --no-audit --no-fund --prefix "$CODEX_PREFIX" "$tarball"
+          platform_dir="$CODEX_PREFIX/node_modules/@openai/codex-${platform}"
+          mkdir -p "$platform_dir"
+          tar -xzf "$platform_tarball" --strip-components=1 -C "$platform_dir"
           echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
           "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
           python scripts/agent_runtime.py verify-pins
@@ -784,10 +789,15 @@ jobs:
             *) echo "::error::unsupported Codex runner architecture"; exit 1 ;;
           esac
           platform_package="@openai/codex@0.144.0-${platform}"
-          integrity="$(npm view @openai/codex@0.144.0 dist.integrity)"
-          platform_integrity="$(npm view "$platform_package" dist.integrity)"
-          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --integrity "$integrity" --platform "$platform" --platform-package "$platform_package" --platform-integrity "$platform_integrity"
-          npm install --no-audit --no-fund --prefix "$CODEX_PREFIX" @openai/codex@0.144.0
+          tarball_dir="${RUNNER_TEMP}/wheelhouse-codex-tarballs"
+          mkdir -p "$tarball_dir"
+          tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" @openai/codex@0.144.0)"
+          platform_tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" "$platform_package")"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --platform "$platform" --platform-package "$platform_package" --tarball "$tarball" --platform-tarball "$platform_tarball"
+          npm install --offline --ignore-scripts --omit=optional --no-audit --no-fund --prefix "$CODEX_PREFIX" "$tarball"
+          platform_dir="$CODEX_PREFIX/node_modules/@openai/codex-${platform}"
+          mkdir -p "$platform_dir"
+          tar -xzf "$platform_tarball" --strip-components=1 -C "$platform_dir"
           echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
           "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
           python scripts/agent_runtime.py verify-pins

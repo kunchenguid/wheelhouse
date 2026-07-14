@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_runtime.contract import canonical_json_bytes
 from agent_runtime.redaction import REDACTED, contains_secret, redact_text
 from agent_runtime.sandbox import build_command
-from agent_runtime.tools import CanonicalTools, ToolError
+from agent_runtime.tools import CanonicalTools, ToolError, _bounded_text_result
 from agent_runtime.worker import _auth_secret_values
 
 FAILURES = []
@@ -67,6 +67,17 @@ def main():
         bounded_glob = tiny_tools.call("fs.glob", {"root": "target-src", "pattern": "*.txt", "maxResults": 2000})
         check("tools: grep enforces canonical maxResultBytes", bounded_grep["truncated"] is True and len(canonical_json_bytes(bounded_grep)) <= 220)
         check("tools: glob enforces canonical maxResultBytes", bounded_glob["truncated"] is True and len(canonical_json_bytes(bounded_glob)) <= 180)
+
+        maximum_read = root / "maximum.txt"
+        maximum_read.write_text("z" * 65536, encoding="utf-8")
+        bounded_read = tools.call("fs.read", {"path": "maximum.txt", "limit": 65536})
+        check("tools: maximum read truncates within canonical envelope", bounded_read["truncated"] is True and bounded_read["bytes"] < 65536 and len(canonical_json_bytes(bounded_read)) <= 65536)
+        bounded_search = _bounded_text_result("q" * 65536, 256, lambda value, clipped: {"text": value, "truncated": clipped})
+        check("tools: maximum search truncates within canonical envelope", bounded_search["truncated"] is True and len(canonical_json_bytes(bounded_search)) <= 256)
+
+        call_count = tools.calls
+        rejected(lambda: tools.call("fs.read", {"path": "target.txt", "unexpected": True}))
+        check("tools: rejected attempts count toward tool budget", tools.calls == call_count + 1)
 
         # Inspect the production command without executing bubblewrap on macOS.
         bundle = Path(directory) / "bundle"
@@ -146,6 +157,7 @@ def main():
     check("worker: diagnostics compare exact credential values in memory", "self.secret_values" in worker and 'clean.replace(secret, "[REDACTED_SECRET]")' in worker)
     check("worker: final result is scanned against exact credential values", "any(secret in final_text for secret in secret_values)" in worker)
     check("worker: provider retries disabled for exact request accounting", "request_max_retries = 0" in worker and "stream_max_retries = 0" in worker)
+    check("worker: rejected tool continuations reserve provider budget", 'continue_after_tool(message["id"], error=' in worker)
 
     if FAILURES:
         raise SystemExit("%d agent runtime security checks failed" % len(FAILURES))

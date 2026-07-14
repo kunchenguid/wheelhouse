@@ -8,7 +8,9 @@
     "sourceCommit": "767822446c7a594caa19609ca435281a9ec67e0d",
     "npmPackage": "@openai/codex@0.144.0",
     "npmPackageIntegrity": "sha512-QFh6f+v5QUx/Vg0HjIl9HB94p7aDLBDkZjc4IXX5RXUcXHPVCZNb6Hl2R49Og/fqW7orgZkeDcgWfRANUa1WoQ==",
+    "linuxX64BinaryPackage": "@openai/codex@0.144.0-linux-x64",
     "linuxX64BinaryPackageIntegrity": "sha512-GmKtQeX+cO9lN7mQD1FEVcXYEMLMgMByHwZdvlluH0bj/+c2ind3hwbRtE3eECFDekNhEiB80Ez0FfbkyFQqoA==",
+    "linuxArm64BinaryPackage": "@openai/codex@0.144.0-linux-arm64",
     "linuxArm64BinaryPackageIntegrity": "sha512-k++xhZrn9P3laO00Q92APG6mdOFDD66nUBo+8ExCa1NXi2pjLEMLC4+UNJTUUtUT1PEflOZ5pDKxPXgzaiFFFg==",
     "protocol": "app-server-v2-experimental",
     "protocolSchemas": {

@@ -354,6 +354,34 @@ def _validate_worker(task: dict[str, Any], bundle: Path, worker: dict[str, Any])
     return final, delivered, None
 
 
+def _merge_worker_checkpoint(worker: Any, checkpoint: dict[str, Any], protocol_code: str = "harness.protocol", protocol_message: str = "Sandboxed adapter worker result was missing or malformed.", adapter_code: str | None = None) -> dict[str, Any]:
+    if isinstance(worker, dict):
+        merged = dict(worker)
+    else:
+        merged = {
+            "status": "failed",
+            "error": {"code": protocol_code, "message": protocol_message, "adapterCode": adapter_code},
+        }
+    merged["spendStarted"] = bool(merged.get("spendStarted")) or bool(checkpoint.get("spendStarted"))
+    for name in ("actualModel", "actualProvider", "actualEffort"):
+        value = merged.get(name)
+        checkpoint_value = checkpoint.get(name)
+        if not isinstance(value, str) or not value or len(value) > 256:
+            merged[name] = checkpoint_value if isinstance(checkpoint_value, str) and len(checkpoint_value) <= 256 else ""
+    worker_usage = merged.get("usage") if isinstance(merged.get("usage"), dict) else {}
+    checkpoint_usage = checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}
+    usage = dict(worker_usage)
+    for name in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "providerRequests", "toolCalls", "turns"):
+        values = [value for value in (worker_usage.get(name), checkpoint_usage.get(name)) if isinstance(value, int) and not isinstance(value, bool) and value >= 0]
+        usage[name] = max(values) if values else None
+    if not isinstance(usage.get("quota"), dict) and isinstance(checkpoint_usage.get("quota"), dict):
+        usage["quota"] = checkpoint_usage["quota"]
+    if not isinstance(usage.get("cost"), dict) and isinstance(checkpoint_usage.get("cost"), dict):
+        usage["cost"] = checkpoint_usage["cost"]
+    merged["usage"] = usage
+    return merged
+
+
 def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
@@ -463,14 +491,15 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) ->
             except ContractError:
                 checkpoint = {}
             if killed_code:
-                worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted", True)), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": killed_code, "message": "Sandboxed adapter worker exceeded its deadline.", "adapterCode": None}}
+                worker_value: Any = {"status": "failed", "spendStarted": True, "error": {"code": killed_code, "message": "Sandboxed adapter worker exceeded its deadline.", "adapterCode": None}}
             elif process.returncode != 0 and not worker_path.exists():
-                worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted")), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": "harness.crash", "message": "Sandboxed adapter worker exited without an atomic result.", "adapterCode": str(process.returncode)}}
+                worker_value = {"status": "failed", "error": {"code": "harness.crash", "message": "Sandboxed adapter worker exited without an atomic result.", "adapterCode": str(process.returncode)}}
             else:
                 try:
-                    worker = load_json_regular(worker_path, max_bytes=2 * 1024 * 1024)
+                    worker_value = load_json_regular(worker_path, max_bytes=2 * 1024 * 1024)
                 except ContractError:
-                    worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted")), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": "harness.protocol", "message": "Sandboxed adapter worker result was missing or malformed.", "adapterCode": None}}
+                    worker_value = None
+            worker = _merge_worker_checkpoint(worker_value, checkpoint)
             _read_worker_events(output_dir / "adapter-events.ndjson", events)
             try:
                 final, delivered, validation_error = _validate_worker(task, bundle, worker)

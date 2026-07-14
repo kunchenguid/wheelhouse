@@ -66,7 +66,11 @@ def main():
     check("runtime: every invocation has trusted immutable task construction", len(build_steps) == 4)
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + build_steps))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
-    check("runtime: all verify pinned npm and platform package integrity before install", text.count("agent_runtime.py verify-package") >= 3 and text.count("platform_integrity") >= 3 and text.count("--platform-package") >= 3)
+    package_steps = [step for _, step in all_steps if "agent_runtime.py verify-package" in str(step.get("run", ""))]
+    check("runtime: every Codex setup verifies wrapper and platform tarball bytes", len(package_steps) == 4 and all("--tarball" in step["run"] and "--platform-tarball" in step["run"] and step["run"].count("npm pack --silent") == 2 for step in package_steps))
+    check("runtime: installation does not trust separately fetched registry metadata", all("npm view" not in step["run"] for step in package_steps))
+    check("runtime: every Codex setup installs only verified local artifacts", all("npm install --offline" in step["run"] and '"$tarball"' in step["run"] and 'tar -xzf "$platform_tarball"' in step["run"] for step in package_steps))
+    check("runtime: verification precedes install and executable extraction", all(step["run"].index("agent_runtime.py verify-package") < step["run"].index("npm install --offline") < step["run"].index('tar -xzf "$platform_tarball"') < step["run"].index("--version | grep") for step in package_steps))
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
     check("runtime: external bubblewrap sandbox installed", text.count("bubblewrap") >= 3)
 

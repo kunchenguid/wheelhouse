@@ -59,7 +59,13 @@ class RuntimeBudget:
         self.turns = 0
         self.provider_requests = 0
 
-    def begin_provider_request(self) -> None:
+    def begin_provider_request(self, observed_usage: dict[str, Any] | None = None) -> None:
+        if observed_usage is not None:
+            normalized = _token_counts(observed_usage)
+            if normalized["inputTokens"] is not None and normalized["inputTokens"] >= self.max_input_tokens:
+                raise WorkerFailure("context.exceeded", "Agent exhausted the task input-token limit before continuation.", spend_started=self.provider_requests > 0)
+            if normalized["outputTokens"] is not None and normalized["outputTokens"] >= self.max_output_tokens:
+                raise WorkerFailure("context.exceeded", "Agent exhausted the task output-token limit before continuation.", spend_started=self.provider_requests > 0)
         if self.turns + 1 > self.max_turns:
             raise WorkerFailure("context.exceeded", "Agent exceeded the task turn limit.", spend_started=self.provider_requests > 0)
         if self.provider_requests + 1 > self.max_provider_requests:
@@ -398,6 +404,25 @@ def _item_text(item: dict[str, Any]) -> str:
     return ""
 
 
+def _bounded_output_schema(schema: dict[str, Any], max_output_tokens: int) -> dict[str, Any]:
+    bounded = json.loads(json.dumps(schema))
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            value_type = value.get("type")
+            if value_type == "string" or isinstance(value_type, list) and "string" in value_type:
+                current = value.get("maxLength")
+                value["maxLength"] = min(current, max_output_tokens) if isinstance(current, int) else max_output_tokens
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(bounded)
+    return bounded
+
+
 def _checkpoint(
     output: Path,
     *,
@@ -544,6 +569,8 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
                 "experimentalRawEvents": False,
                 "config": {
                     "model_reasoning_effort": candidate["effort"],
+                    "model_context_window": plan["limits"]["maxInputTokens"],
+                    "model_auto_compact_token_limit": plan["limits"]["maxInputTokens"],
                     "web_search": "disabled",
                     "include_apps_instructions": False,
                     "include_collaboration_mode_instructions": False,
@@ -571,7 +598,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         schema_path = Path("/run/wheelhouse/output-schema.json")
         if not schema_path.exists():
             schema_path = Path(os.environ["WHEELHOUSE_BUNDLE_ROOT"]) / plan["output"]["schemaArtifact"]
-        output_schema = load_json_regular(schema_path, max_bytes=65536)
+        output_schema = _bounded_output_schema(load_json_regular(schema_path, max_bytes=65536), plan["limits"]["maxOutputTokens"])
         events.emit("model.request.started", {"model": actual_model, "provider": actual_provider, "effort": candidate["effort"]})
         budget.begin_provider_request()
         spend_started = True
@@ -606,6 +633,19 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         interrupted = False
         cancel_sent = False
         terminal_status = ""
+
+        def continue_after_tool(request_id: Any, *, result: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> None:
+            budget.begin_provider_request(usage)
+            _checkpoint(
+                output,
+                spend_started=True,
+                actual_model=actual_model,
+                actual_provider=actual_provider,
+                actual_effort=actual_effort or candidate["effort"],
+                usage=_normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
+            )
+            client.respond(request_id, result=result, error=error)
+
         while True:
             if cancel_path.exists() and not cancel_sent:
                 client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
@@ -618,37 +658,31 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
             params = message.get("params") or {}
             if "id" in message and method:
                 if method != "item/tool/call":
-                    client.respond(message["id"], error={"code": -32601, "message": "tool request denied"})
+                    client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
                     raise WorkerFailure("tool.denied", "Codex requested an unregistered host operation.", spend_started=True)
                 name = str(params.get("tool") or "")
                 arguments = params.get("arguments")
                 call_id = str(params.get("callId") or "")
                 events.emit("tool.started", {"callId": call_id, "tool": name, "argumentsSha256": canonical_sha256(arguments)})
                 if tools.calls >= plan["limits"]["maxToolCalls"]:
-                    client.respond(message["id"], error={"code": -32000, "message": "tool call limit reached"})
+                    client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
                     raise WorkerFailure("tool.denied", "Agent exceeded the task tool-call limit.", spend_started=True)
                 before = time.monotonic()
                 try:
                     value = tools.call(name, arguments)
                     try:
-                        budget.begin_provider_request()
+                        continue_after_tool(message["id"], result=_tool_response(value))
                     except WorkerFailure:
-                        client.respond(message["id"], error={"code": -32000, "message": "runtime budget reached"})
                         client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
                         raise
-                    _checkpoint(
-                        output,
-                        spend_started=True,
-                        actual_model=actual_model,
-                        actual_provider=actual_provider,
-                        actual_effort=actual_effort or candidate["effort"],
-                        usage=_normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
-                    )
-                    client.respond(message["id"], result=_tool_response(value))
                     encoded = canonical_json_bytes(value)
                     events.emit("tool.completed", {"callId": call_id, "tool": name, "status": "success", "resultSha256": hashlib.sha256(encoded).hexdigest(), "resultBytes": len(encoded), "truncated": bool(value.get("truncated")), "durationMs": int((time.monotonic() - before) * 1000)})
                 except ToolError:
-                    client.respond(message["id"], error={"code": -32000, "message": "canonical tool request rejected"})
+                    try:
+                        continue_after_tool(message["id"], error={"code": -32000, "message": "canonical tool request rejected"})
+                    except WorkerFailure:
+                        client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
+                        raise
                     events.emit("tool.completed", {"callId": call_id, "tool": name, "status": "failed", "resultSha256": canonical_sha256({"failed": True}), "resultBytes": 0, "truncated": False, "durationMs": int((time.monotonic() - before) * 1000)})
                 continue
             if method == "model/rerouted":
@@ -870,6 +904,26 @@ def _run_fake(plan: dict[str, Any], output: Path, events: InternalEvents, cancel
         os._exit(17)
     if script.get("malformedResult"):
         (output / "worker-result.json").write_text("{bad", encoding="utf-8")
+        return {"skipWrite": True}
+    if script.get("nonObjectResult"):
+        _checkpoint(
+            output,
+            spend_started=True,
+            actual_model=str(script.get("actualModel") or plan["candidate"]["model"]),
+            actual_provider=str(script.get("actualProvider") or plan["candidate"]["provider"]),
+            actual_effort=str(script.get("actualEffort") or plan["candidate"]["effort"]),
+            usage={
+                "inputTokens": 12,
+                "outputTokens": 6,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "providerRequests": 2,
+                "toolCalls": tools.calls,
+                "turns": 2,
+                "cost": {"amount": 0, "currency": "USD", "quality": "estimated"},
+            },
+        )
+        (output / "worker-result.json").write_text("[]", encoding="utf-8")
         return {"skipWrite": True}
     if script.get("error"):
         error = script["error"]

@@ -244,7 +244,7 @@ def load_json_regular(path: os.PathLike[str] | str, max_bytes: int = 16 * 1024 *
     try:
         with candidate.open(encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, ValueError) as error:
         raise ContractError("contract file is not valid UTF-8 JSON") from error
 
 

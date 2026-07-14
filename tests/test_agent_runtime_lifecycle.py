@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.contract import atomic_write_json, load_json_regular, validate_contract
 from agent_runtime.supervisor import _anchor_ok, run
-from agent_runtime.worker import RuntimeBudget, WorkerFailure
+from agent_runtime.worker import RuntimeBudget, WorkerFailure, _bounded_output_schema
 from agent_runtime_testlib import default_final, environment, make_task
 
 FAILURES = []
@@ -82,6 +82,11 @@ def main():
         result, _, _, _ = execute(base / "malformed-worker", {"malformedResult": True})
         check("output: malformed atomic worker result classified", result["error"]["code"] == "harness.protocol")
 
+        result, _, _, _ = execute(base / "non-object-worker", {"nonObjectResult": True})
+        check("output: non-object worker result fails closed", result["status"] == "failed" and result["error"]["code"] == "harness.protocol" and "final" not in result)
+        check("output: non-object result preserves checkpoint spend", result["error"]["spendStarted"] is True and result["usage"]["providerRequests"] == 2)
+        check("output: non-object result preserves checkpoint provenance", result["selection"]["actualModel"] == "fake-model" and result["usage"]["inputTokens"] == 12)
+
         fast = {"softDeadlineMs": 1000, "hardDeadlineMs": 1800, "cancelGraceMs": 200}
         result, _, events, _ = execute(base / "cancel", {"sleepMs": 5000}, fast)
         check("cancel: soft deadline requests adapter-native cancel", result["status"] == "cancelled" and result["error"]["code"] == "lifecycle.cancelled")
@@ -128,6 +133,20 @@ def main():
             output_limited = True
         check("limits: observed input-token budget enforced", input_limited)
         check("limits: observed output-token budget enforced", output_limited)
+
+        continuation_budget = RuntimeBudget({"maxTurns": 3, "maxProviderRequests": 3, "maxInputTokens": 20, "maxOutputTokens": 10})
+        continuation_budget.begin_provider_request()
+        try:
+            continuation_budget.begin_provider_request({"total": {"inputTokens": 20, "outputTokens": 9}})
+            continuation_limited = False
+        except WorkerFailure:
+            continuation_limited = True
+        check("limits: continuation stops at observed token ceiling", continuation_limited and continuation_budget.provider_requests == 1 and continuation_budget.turns == 1)
+
+        schema = {"type": "object", "properties": {"summary": {"type": "string"}, "nested": {"anyOf": [{"type": "string", "maxLength": 50}, {"type": "null"}]}}}
+        bounded_schema = _bounded_output_schema(schema, 10)
+        check("limits: native output schema carries conservative string ceilings", bounded_schema["properties"]["summary"]["maxLength"] == 10 and bounded_schema["properties"]["nested"]["anyOf"][0]["maxLength"] == 10)
+        check("limits: output schema source remains immutable", "maxLength" not in schema["properties"]["summary"])
 
     if FAILURES:
         raise SystemExit("%d agent runtime lifecycle checks failed" % len(FAILURES))

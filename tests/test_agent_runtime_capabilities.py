@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import copy
+import base64
+import hashlib
+import io
 import json
 import os
-import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -20,6 +23,7 @@ from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.supervisor import _error, _preflight_code
 from agent_runtime.contract import canonical_sha256
 from agent_runtime_testlib import make_task
+from scripts.agent_runtime import _verify_package_tarball
 
 FAILURES = []
 
@@ -113,12 +117,27 @@ def main():
     check("pins: initialization request and response schemas included", {"InitializeParams.json", "InitializeResponse.json"}.issubset(lock["codex"]["protocolSchemas"]))
     check("pins: quota response schema included", "GetAccountRateLimitsResponse.json" in lock["codex"]["protocolSchemas"])
     check("pins: thread and turn response schemas included", {"ThreadStartResponse.json", "TurnStartResponse.json"}.issubset(lock["codex"]["protocolSchemas"]))
-    cli = str(Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime.py")
-    package_args = [sys.executable, cli, "verify-package", "--package", lock["codex"]["npmPackage"], "--integrity", lock["codex"]["npmPackageIntegrity"], "--platform", "linux-x64", "--platform-package", "@openai/codex@0.144.0-linux-x64", "--platform-integrity", lock["codex"]["linuxX64BinaryPackageIntegrity"]]
-    valid_package = subprocess.run(package_args, capture_output=True, text=True, check=False)
-    check("pins: exact npm and executable platform package integrity accepted", valid_package.returncode == 0)
-    invalid_package = subprocess.run(package_args[:-1] + ["sha512-wrong"], capture_output=True, text=True, check=False)
-    check("pins: executable platform package integrity mismatch rejected", invalid_package.returncode != 0)
+    check("pins: executable package identities committed", lock["codex"]["linuxX64BinaryPackage"] == "@openai/codex@0.144.0-linux-x64" and lock["codex"]["linuxArm64BinaryPackage"] == "@openai/codex@0.144.0-linux-arm64")
+    with tempfile.TemporaryDirectory() as directory:
+        package = Path(directory) / "package.tgz"
+        with tarfile.open(package, "w:gz") as archive:
+            payload = b'{"name":"fixture"}'
+            member = tarfile.TarInfo("package/package.json")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(package.read_bytes()).digest()).decode("ascii")
+        check("pins: exact verified tarball bytes accepted", _verify_package_tarball(str(package), integrity))
+        package.write_bytes(package.read_bytes() + b"tampered")
+        check("pins: changed tarball bytes rejected", not _verify_package_tarball(str(package), integrity))
+
+        unsafe = Path(directory) / "unsafe.tgz"
+        with tarfile.open(unsafe, "w:gz") as archive:
+            payload = b"escape"
+            member = tarfile.TarInfo("package/../escape")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        unsafe_integrity = "sha512-" + base64.b64encode(hashlib.sha512(unsafe.read_bytes()).digest()).decode("ascii")
+        check("pins: unsafe verified archive rejected", not _verify_package_tarball(str(unsafe), unsafe_integrity))
 
     worker = Path("agent_runtime/worker.py").read_text(encoding="utf-8")
     check("auth: forced ChatGPT login configured", 'forced_login_method = "chatgpt"' in worker)

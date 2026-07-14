@@ -137,11 +137,23 @@ def _safe_path(root: Path, relative: str, regular: bool | None = None) -> Path:
     return resolved
 
 
-def _bounded(text: str, limit: int) -> tuple[str, bool]:
+def _bounded_text_result(text: str, maximum: int, build: Any, already_truncated: bool = False) -> dict[str, Any]:
     encoded = text.encode("utf-8")
-    if len(encoded) <= limit:
-        return text, False
-    return encoded[:limit].decode("utf-8", "ignore"), True
+    low = 0
+    high = len(encoded)
+    best: dict[str, Any] | None = None
+    while low <= high:
+        middle = (low + high) // 2
+        candidate_text = encoded[:middle].decode("utf-8", "ignore")
+        candidate = build(candidate_text, already_truncated or middle < len(encoded))
+        if len(canonical_json_bytes(candidate)) <= maximum:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    if best is None:
+        raise ToolError("tool result byte bound cannot hold its canonical envelope")
+    return best
 
 
 class CanonicalTools:
@@ -158,6 +170,7 @@ class CanonicalTools:
         self.calls = 0
 
     def call(self, name: str, arguments: Any) -> dict[str, Any]:
+        self.calls += 1
         if name not in self.allowed or name not in TOOL_SCHEMAS:
             raise ToolError("tool is not available in this task")
         if not isinstance(arguments, dict):
@@ -166,7 +179,6 @@ class CanonicalTools:
             validate_schema(arguments, TOOL_SCHEMAS[name])
         except ContractError as error:
             raise ToolError("tool arguments failed the canonical schema") from error
-        self.calls += 1
         if name == "fs.read":
             result = self._read(arguments)
         elif name == "fs.grep":
@@ -197,7 +209,7 @@ class CanonicalTools:
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
         path = _safe_path(self.root, str(args.get("path") or ""), regular=True)
         offset = args.get("offset", 0)
-        limit = min(int(args.get("limit", 65536)), self.max_results.get("fs.read", 65536))
+        limit = int(args.get("limit", 65536))
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ToolError("offset must be a non-negative integer")
         with path.open("rb") as handle:
@@ -205,8 +217,28 @@ class CanonicalTools:
             raw = handle.read(limit + 1)
         truncated = len(raw) > limit
         raw = raw[:limit]
-        text = raw.decode("utf-8", "replace")
-        return {"path": str(path.relative_to(self.root)), "offset": offset, "text": text, "bytes": len(raw), "truncated": truncated}
+        relative = str(path.relative_to(self.root))
+        maximum = self.max_results.get("fs.read", 65536)
+        low = 0
+        high = len(raw)
+        best: dict[str, Any] | None = None
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = {
+                "path": relative,
+                "offset": offset,
+                "text": raw[:middle].decode("utf-8", "replace"),
+                "bytes": middle,
+                "truncated": truncated or middle < len(raw),
+            }
+            if len(canonical_json_bytes(candidate)) <= maximum:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best is None:
+            raise ToolError("tool result byte bound cannot hold its canonical envelope")
+        return best
 
     def _iter_regular(self, relative: str) -> list[Path]:
         target = _safe_path(self.root, relative, regular=None)
@@ -307,5 +339,9 @@ class CanonicalTools:
             raise ToolError("read-only GitHub search broker returned invalid data") from error
         if not isinstance(response, dict) or not response.get("ok"):
             raise ToolError("read-only GitHub search request was rejected")
-        text, truncated = _bounded(str(response.get("text") or ""), self.max_results.get("github.search.readonly", 65536))
-        return {"text": text, "truncated": bool(response.get("truncated")) or truncated}
+        return _bounded_text_result(
+            str(response.get("text") or ""),
+            self.max_results.get("github.search.readonly", 65536),
+            lambda value, clipped: {"text": value, "truncated": clipped},
+            already_truncated=bool(response.get("truncated")),
+        )

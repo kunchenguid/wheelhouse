@@ -96,7 +96,7 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
-Each workflow compares both the wrapper package and selected Linux executable package registry integrity with the committed pins before installation.
+Each workflow downloads the exact wrapper and selected Linux executable tarballs, verifies their bytes and safe archive shape against the committed SHA-512 integrity pins, and installs only those verified local artifacts.
 
 The app-server is driven over stdio JSONL.
 Human terminal output is never scraped.
@@ -122,8 +122,9 @@ Codex uses its native `turn/start.outputSchema` mechanism.
 The fake adapter and future adapters use the same action schemas and trusted validation.
 
 Path tools reject absolute paths, traversal, symlinks, devices, sockets, and escaping canonical paths.
-Results and call counts are bounded.
+Results and call counts are bounded, including rejected tool attempts.
 Filesystem result bounds apply to the complete canonical serialized response, including paths and envelope fields.
+Read and search payloads truncate deterministically to fit that complete envelope.
 Search keeps the existing repository allowlist and operation semantics but no longer needs model-facing Write or Bash on Codex.
 
 Final-result delivery is independent of transcript retention.
@@ -137,7 +138,8 @@ No model output directly authorizes or performs a GitHub action.
 ## Deadlines, cancellation, and retry
 
 Each action has a soft deadline, a cancellation grace interval, and a hard deadline.
-The worker counts every logical provider request and turn before it can proceed, disables provider and stream retries, and interrupts when observed input or output tokens exceed the task budget.
+The worker counts every logical provider request and turn before it can proceed, including continuations after rejected tool calls, disables provider and stream retries, and interrupts before continuation at an observed token ceiling or after any observed overrun.
+Codex receives the task input ceiling through its pinned app-server context configuration and additional native output-schema string ceilings before the first provider request.
 Durable worker checkpoints preserve observed spend, usage, and model provenance if the worker crashes or is killed after spend begins.
 At the soft deadline the supervisor writes a cancellation request.
 The Codex adapter sends `turn/interrupt` and waits for an interrupted terminal event.
