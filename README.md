@@ -41,7 +41,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
 Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through a typed, scoped read-only search broker.
-The current production selection is the exact pinned direct Claude Action implementation.
+The current production selection is the exact pinned direct Claude Action implementation, executed in a separate read-only model workflow from a bounded content-addressed task handoff.
 Claude is the named production primary across every action selection.
 Codex CLI app-server remains disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
 OpenCode with Z.AI Coding Plan is a deferred disabled candidate only, with no adapter or credential request authorized in this phase.
@@ -199,6 +199,7 @@ That is the only secret the deterministic machine needs.
 
 Skip this for the deterministic machine.
 The direct Claude Action is the explicit production selection behind the shared action boundary.
+Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate model workflow has read-only permissions and returns only a bounded transcript for contract normalization.
 Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
 Do not add credentials for disabled or deferred provider candidates.
 See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider selection.

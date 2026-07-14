@@ -1123,11 +1123,13 @@ OpenCode with Z.AI Coding Plan is a deferred disabled candidate only; no adapter
 Fallback remains disabled.
 
 The seven current direct Claude Action invocations are the explicit production adapter path behind the unified selection boundary.
+They run only in the separately permissioned `claude-model.yml` workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
 Every direct step is conditional on the resolved Claude mode, and no provider failure can trigger a different adapter.
 Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
 Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
 Trusted preflight builds an immutable `AgentTask`, and the post-action bridge requires the execution transcript's observed `system/init.model` to match before it emits an atomic `AgentResult`.
-Every direct step enables the pinned action's bubblewrap subprocess isolation, so the Claude model process receives no GitHub token with acting authority even though later trusted steps retain the default token for card writes.
+The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, verifies the complete handoff into a fresh workspace, and enables the pinned action's subprocess isolation.
+Trusted parent jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary, supervise the hard deadline, and normalize only a task-bound transcript plus observed enforcement record.
 
 The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.
 

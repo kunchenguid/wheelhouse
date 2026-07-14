@@ -155,8 +155,8 @@
           "type": "object", "additionalProperties": false,
           "required": ["worker", "rootFilesystem", "writableRoots", "modelNetwork", "toolNetwork", "inheritEnvironment", "dropCapabilities", "noNewPrivileges", "denyHostHome"],
           "properties": {
-            "worker": {"const": "sandboxed-adapter-worker"},
-            "rootFilesystem": {"const": "read-only"},
+            "worker": {"type": "string", "enum": ["sandboxed-adapter-worker", "separate-read-only-github-job"]},
+            "rootFilesystem": {"type": "string", "enum": ["read-only", "ephemeral-workspace"]},
             "writableRoots": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
             "modelNetwork": {
               "type": "object", "additionalProperties": false,
@@ -215,7 +215,7 @@
           "required": ["normalizedEventsDays", "rawTranscript", "finalResult", "redactionPolicy"],
           "properties": {
             "normalizedEventsDays": {"type": "integer", "minimum": 0, "maximum": 30},
-            "rawTranscript": {"const": "discard"},
+            "rawTranscript": {"type": "string", "enum": ["discard", "transient-cross-job"]},
             "finalResult": {"const": "consumer-owned"},
             "redactionPolicy": {"const": "wheelhouse-agent/v1"}
           }

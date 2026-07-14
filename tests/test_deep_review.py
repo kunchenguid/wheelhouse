@@ -77,7 +77,13 @@ def step_index(steps, predicate):
 
 
 def claude_steps(steps):
-    return [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    model = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
+    return [s for s in model if s.get("id") in ("deep_search", "deep_local")]
+
+
+def deep_model_step(step_id):
+    model = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
+    return step_by_id(model, step_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,8 +173,8 @@ def test_readonly_search_wiring():
     gate = step_by_id(steps, "readonly")
     prompt = step_by_id(steps, "prepare")
     install = step_by_id(steps, "search-tool")
-    search = step_by_id(steps, "claude_search")
-    legacy = step_by_id(steps, "claude")
+    search = deep_model_step("deep_search")
+    legacy = deep_model_step("deep_local")
 
     check("workflow: readonly search gate step exists", gate is not None)
     if gate:
@@ -233,8 +239,7 @@ def test_readonly_search_wiring():
         )
         check(
             "workflow: search wrapper installs from the trusted checkout",
-            str(install.get("run", "")).strip()
-            == "python scripts/nl_readonly_search.py install",
+            "python scripts/nl_readonly_search.py scope" in str(install.get("run", "")),
         )
         check(
             "workflow: search wrapper runs only when readonly search is enabled",
@@ -244,7 +249,7 @@ def test_readonly_search_wiring():
     readonly_i = step_index(steps, lambda s: s.get("id") == "readonly")
     prompt_i = step_index(steps, lambda s: s.get("id") == "prepare")
     install_i = step_index(steps, lambda s: s.get("id") == "search-tool")
-    search_i = step_index(steps, lambda s: s.get("id") == "claude_search")
+    search_i = step_index(steps, lambda s: s.get("id") == "claude-model")
     check(
         "workflow: readonly gate runs before prompt construction",
         None not in (readonly_i, prompt_i) and readonly_i < prompt_i,
@@ -336,8 +341,8 @@ def test_code_grounded_checkout_and_tool_isolation():
         )
 
     llm_steps = claude_steps(steps)
-    legacy = step_by_id(steps, "claude")
-    search = step_by_id(steps, "claude_search")
+    legacy = deep_model_step("deep_local")
+    search = deep_model_step("deep_search")
     check("workflow: two mutually exclusive Claude steps exist", len(llm_steps) == 2)
     check("workflow: legacy no-search Claude step exists", legacy is not None)
     check("workflow: read-only search Claude step exists", search is not None)
@@ -394,7 +399,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         )
         check(
             "security: legacy Claude runs only when readonly search is disabled",
-            "steps.readonly.outputs.enabled != 'true'" in str(legacy.get("if", "")),
+            "endsWith(steps.hydrate.outputs.action, '.local')" in str(legacy.get("if", "")),
         )
 
     if search:
@@ -416,7 +421,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         )
         check(
             "security: search Claude runs only when readonly search is enabled",
-            "steps.readonly.outputs.enabled == 'true'" in str(search.get("if", "")),
+            "endsWith(steps.hydrate.outputs.action, '.search')" in str(search.get("if", "")),
         )
         check(
             "security: search Claude has Write for request-file search",
@@ -440,7 +445,7 @@ def test_code_grounded_checkout_and_tool_isolation():
             check("security: search Claude forbids %s" % forbidden, forbidden not in args)
 
     # The verdict is posted by the workflow (default token), not by Claude.
-    dr = read(".github", "workflows", "deep-review.yml")
+    dr = read(".github", "workflows", "claude-model.yml")
     check(
         "workflow: Claude action pin keeps the v1.0.161 breadcrumb",
         f"uses: {CLAUDE_ACTION_PIN} # v1.0.161" in dr,
@@ -499,7 +504,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         check(
             "workflow: post step consumes normalized Claude AgentResult",
             "EXECUTION_FILE" in env
-            and "steps.claude-bridge.outputs.result" in env
+            and "steps.claude-model.outputs.result" in env
             and "steps.claude_search.outputs.execution_file" not in env
             and "steps.claude.outputs.execution_file" not in env,
         )
@@ -553,11 +558,7 @@ def test_code_grounded_checkout_and_tool_isolation():
             qualify_idx != -1 and post_idx != -1 and qualify_idx < post_idx,
         )
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
-    claude_indexes = [
-        i
-        for i, step in enumerate(steps)
-        if "claude-code-action" in str(step.get("uses", ""))
-    ]
+    claude_indexes = [step_index(steps, lambda step: step.get("id") == "claude-model")]
     post_i = step_index(
         steps,
         lambda s: "post the verdict" in str(s.get("name", "")).lower(),
@@ -766,8 +767,8 @@ def test_handler_investigate_wiring():
         top_perms.get("actions") != "write",
     )
     check(
-        "handler: handle job does NOT grant actions: write",
-        (handle.get("permissions") or {}).get("actions") != "write",
+        "handler: trusted handle job can dispatch the isolated model workflow",
+        (handle.get("permissions") or {}).get("actions") == "write",
     )
     action_jobs = [
         name
@@ -775,8 +776,8 @@ def test_handler_investigate_wiring():
         if (job.get("permissions") or {}).get("actions") == "write"
     ]
     check(
-        "handler: only the investigate job has actions: write",
-        action_jobs == ["investigate-dispatch"],
+        "handler: only trusted dispatching jobs have actions: write",
+        action_jobs == ["handle", "investigate-dispatch"],
     )
     check("handler: investigate dispatch job exists", dispatch is not None)
 

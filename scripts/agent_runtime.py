@@ -109,7 +109,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_bridge_claude(args: argparse.Namespace) -> int:
-    result = bridge(args.task, args.bundle, args.execution_file, args.delivered_file, args.result, args.events)
+    result = bridge(args.task, args.bundle, args.execution_file, args.delivered_file, args.enforcement_file, args.handoff_sha256, args.result, args.events)
     output("result", str(Path(args.result).resolve()))
     output("events", str(Path(args.events).resolve()))
     output("status", result["status"])
@@ -261,6 +261,8 @@ def parser() -> argparse.ArgumentParser:
     claude.add_argument("--bundle", required=True)
     claude.add_argument("--execution-file", default="")
     claude.add_argument("--delivered-file", default="")
+    claude.add_argument("--enforcement-file", required=True)
+    claude.add_argument("--handoff-sha256", required=True)
     claude.add_argument("--result", required=True)
     claude.add_argument("--events", required=True)
     claude.set_defaults(func=cmd_bridge_claude)

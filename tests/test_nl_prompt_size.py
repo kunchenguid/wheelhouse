@@ -73,6 +73,11 @@ def handle_steps():
     return load_workflow()["jobs"]["handle"]["steps"]
 
 
+def nl_model_step(step_id):
+    model = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
+    return step_by_id(model, step_id)
+
+
 def step_by_id(steps, sid):
     return next((s for s in steps if s.get("id") == sid), None)
 
@@ -279,8 +284,8 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
     wheelhouse-search, and the legacy step keeps Write (for decision.json) with no
     shell and no GH_TOKEN."""
     steps = handle_steps()
-    search = step_by_name(steps, "Claude interprets intent (read-only search)")
-    legacy = step_by_name(steps, "Claude interprets intent")
+    search = nl_model_step("nl_search")
+    legacy = nl_model_step("nl_local")
     check("nl: read-only search Claude step exists", search is not None)
     check("nl: legacy no-token Claude step exists", legacy is not None)
 
@@ -291,7 +296,7 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
         prompt = str((step.get("with") or {}).get("prompt", ""))
         check(
             "nl: %s step uses the by-reference nl-prompt output" % label,
-            prompt == "${{ steps.nl-prompt.outputs.prompt }}",
+            prompt == "${{ steps.hydrate.outputs.prompt }}",
         )
         check(
             "nl: %s step allows Read/Grep/Glob to open target.txt" % label,

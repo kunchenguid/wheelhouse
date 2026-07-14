@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge
 from agent_runtime.config import resolve_selection
-from agent_runtime.contract import validate_contract
+from agent_runtime.contract import canonical_sha256, file_sha256, validate_contract
 from agent_runtime.task_builder import build_task
 
 FAILURES = []
@@ -64,7 +64,11 @@ def transcript(path: Path, model: str, text: str, duration_ms: int = 2500):
 def run_bridge(bundle: Path, execution: Path, suffix: str):
     result = bundle / ("result-%s.json" % suffix)
     events = bundle / ("events-%s.ndjson" % suffix)
-    value = bridge(str(bundle / "task.json"), str(bundle), str(execution), "", str(result), str(events))
+    task = json.loads((bundle / "task.json").read_text(encoding="utf-8"))
+    enforcement = bundle / ("enforcement-%s.json" % suffix)
+    handoff_sha256 = "a" * 64
+    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "spendStarted": True, "action": task["metadata"]["action"], "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution), "subprocessIsolation": "dependencies-verified", "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"], "conclusion": "success"}}), encoding="utf-8")
+    value = bridge(str(bundle / "task.json"), str(bundle), str(execution), "", str(enforcement), handoff_sha256, str(result), str(events))
     validate_contract(value, "AgentResult")
     return value, events
 
@@ -113,6 +117,18 @@ def main():
         malformed_execution.write_text("{malformed", encoding="utf-8")
         malformed, _ = run_bridge(malformed_bundle, malformed_execution, "malformed")
         check("bridge: malformed spent execution emits stable failure", malformed["status"] == "failed" and malformed["error"]["code"] == "harness.protocol" and malformed["error"]["spendStarted"] is True)
+
+        _, empty_bundle = make_bundle(root / "empty")
+        empty_execution = root / "empty.json"
+        empty_execution.write_text("[]", encoding="utf-8")
+        empty, empty_events = run_bridge(empty_bundle, empty_execution, "empty")
+        check("bridge: empty transcript preserves spend agreement", empty["error"]["spendStarted"] is True and '"spendStarted":true' in empty_events.read_text(encoding="utf-8"))
+
+        _, overflow_bundle = make_bundle(root / "overflow")
+        overflow_execution = root / "overflow.json"
+        transcript(overflow_execution, IMMUTABLE_MODEL, "HOLD", 10**100)
+        overflow, _ = run_bridge(overflow_bundle, overflow_execution, "overflow")
+        check("bridge: oversized duration emits stable protocol failure", overflow["status"] == "failed" and overflow["error"]["code"] == "harness.protocol")
 
     if FAILURES:
         raise SystemExit("%d Claude bridge checks failed" % len(FAILURES))

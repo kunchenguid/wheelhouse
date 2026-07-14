@@ -272,23 +272,24 @@ def test_both_token_and_no_token_paths_use_the_same_by_reference_prompt():
     no-search Claude steps consume the SAME by-reference prompt, and the legacy
     step needs no token because it only Reads the on-disk files."""
     for rel in (".github/workflows/triage.yml", ".github/workflows/deep-review.yml"):
-        doc = yaml.safe_load(_read(rel))
+        doc = yaml.safe_load(_read(".github/workflows/claude-model.yml"))
         steps = [
             s
             for job in (doc.get("jobs") or {}).values()
             for s in (job.get("steps") or [])
         ]
-        search = next((s for s in steps if s.get("id") == "claude_search"), None)
-        legacy = next((s for s in steps if s.get("id") == "claude"), None)
+        prefix = "triage" if rel.endswith("triage.yml") else "deep"
+        search = next((s for s in steps if s.get("id") == prefix + "_search"), None)
+        legacy = next((s for s in steps if s.get("id") == prefix + "_local"), None)
         check("%s: search Claude step exists" % rel, search is not None)
         check("%s: legacy (no-token) Claude step exists" % rel, legacy is not None)
         if search and legacy:
             sp = (search.get("with") or {}).get("prompt", "")
             lp = (legacy.get("with") or {}).get("prompt", "")
             check(
-                "%s: both Claude steps use steps.prepare.outputs.prompt" % rel,
-                "steps.prepare.outputs.prompt" in sp
-                and "steps.prepare.outputs.prompt" in lp,
+                "%s: both Claude steps use the hydrated immutable prompt" % rel,
+                sp == "${{ steps.hydrate.outputs.prompt }}"
+                and lp == "${{ steps.hydrate.outputs.prompt }}",
             )
             largs = str((legacy.get("with") or {}).get("claude_args", ""))
             check(

@@ -74,6 +74,7 @@ on:
         required: false
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
@@ -427,16 +428,7 @@ jobs:
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
-          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
-        run: python scripts/nl_readonly_search.py install
-
-      - name: Enforce Claude subprocess token isolation
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap socat
-          command -v bwrap >/dev/null
+        run: echo "repos=$(python scripts/nl_readonly_search.py scope)" >> "$GITHUB_OUTPUT"
 
       - id: claude-task
         name: Build the immutable Claude deep-review AgentTask
@@ -462,71 +454,15 @@ jobs:
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit"
 
-      # Run Claude over the on-disk code. In the read-only search branch, the
-      # action's github_token input and shell GH_TOKEN are READONLY_TOKEN because
-      # claude-code-action exposes that input to the subprocess as GitHub CLI
-      # credentials. GH_TOKEN is READONLY_TOKEN, never FLEET_TOKEN, and the only
-      # shell command allowed is the scoped wheelhouse-search wrapper.
-      - id: claude_search
-        name: Claude deep review (code-grounded, read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.READONLY_TOKEN }}
-          # The Investigate checkbox is maintainer-gated in decision-handler.yml,
-          # then dispatches this workflow with github.token. That makes the
-          # Claude action see github-actions[bot] as the actor and reject the run
-          # before it emits execution_file unless this exact bot is allowed.
-          # Keep this narrow: never use `*`, and never add external bot actors.
-          allowed_bots: github-actions[bot]
-          allowed_non_write_users: ${{ github.actor }}
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
-            --max-turns 64
-            --model claude-sonnet-4-6
-
-      # Legacy no-search branch. This is the exact old tool posture:
-      # Read/Grep/Glob only, no shell, no GH_TOKEN environment, and the default
-      # action github_token. It runs whenever READONLY_TOKEN is absent so the
-      # feature can ship before the optional secret exists.
-      - id: claude
-        name: Claude deep review (code-grounded, read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
-        env:
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          # The Investigate checkbox is maintainer-gated in decision-handler.yml,
-          # then dispatches this workflow with github.token. That makes the
-          # Claude action see github-actions[bot] as the actor and reject the run
-          # before it emits execution_file unless this exact bot is allowed.
-          # Keep this narrow: never use `*`, and never add external bot actors.
-          allowed_bots: github-actions[bot]
-          allowed_non_write_users: ${{ github.actor }}
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools Read,Grep,Glob
-            --max-turns 64
-            --model claude-sonnet-4-6
-
-      - id: claude-bridge
-        name: Normalize Claude deep review through AgentResult
+      - id: claude-model
+        name: Run Claude deep review in the read-only model workflow
         if: ${{ always() && steps.claude-task.outcome == 'success' }}
-        env:
-          TASK: ${{ steps.claude-task.outputs.task }}
-          BUNDLE: ${{ steps.claude-task.outputs.bundle }}
-          EXECUTION_FILE: ${{ steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
-        run: |
-          python scripts/agent_runtime.py bridge-claude \
-            --task "$TASK" --bundle "$BUNDLE" --execution-file "${EXECUTION_FILE:-}" \
-            --result "$BUNDLE/result.json" --events "$BUNDLE/events.ndjson"
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.claude-task.outputs.task }}
+          bundle: ${{ steps.claude-task.outputs.bundle }}
+          invocation-id: deep-review
+          allowed-repos: ${{ steps.search-tool.outputs.repos || '[]' }}
 
       - name: Prepare the pinned Codex sandboxed adapter worker
         if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.verify_head.outputs.head_ok != 'false' }}
@@ -611,13 +547,7 @@ jobs:
         if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
         run: python scripts/agent_runtime.py summary --result '${{ steps.agent-runtime.outputs.result }}'
 
-      # Post the verdict on the card with THIS repo's token (never FLEET_TOKEN).
-      # The workflow does the posting, not Claude. The action exposes the Claude
-      # SDK event log as `execution_file`; the final `result` event is the clean
-      # closing assistant message, with the last assistant text as a fallback.
-      # Trusted code labels known automated harness status lines and qualifies
-      # target refs before posting.
-      # If no usable verdict exists, self-explain and fail the run.
+      # Post the normalized verdict on the card with THIS repo's token.
       - name: Post the verdict on the card
         if: ${{ always() && steps.gate.outputs.enabled == 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
@@ -626,7 +556,7 @@ jobs:
           ISSUE: ${{ steps.target.outputs.issue }}
           HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
           HEAD_VERDICT: ${{ steps.verify_head.outputs.verdict }}
-          EXECUTION_FILE: ${{ steps.claude-bridge.outputs.result || steps.agent-runtime.outputs.result }}
+          EXECUTION_FILE: ${{ steps.claude-model.outputs.result || steps.agent-runtime.outputs.result }}
           TARGET_REPO: ${{ steps.resolve.outputs.repo }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}

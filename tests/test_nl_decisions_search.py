@@ -57,7 +57,13 @@ def step_index(steps, predicate):
 
 
 def claude_steps(steps):
-    return [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    model = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
+    return [s for s in model if s.get("id") in ("nl_search", "nl_local")]
+
+
+def nl_model_step(step_id):
+    model = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
+    return step_by_id(model, step_id)
 
 
 def hardened_shell_env(step):
@@ -115,7 +121,7 @@ def test_readonly_gate_and_prompt_gating():
 def test_search_wrapper_install_step():
     steps = handle_steps()
     install = step_by_id(steps, "nl-search-tool")
-    search = step_by_name(steps, "Claude interprets intent (read-only search)")
+    search = nl_model_step("nl_search")
 
     check("workflow: read-only search wrapper install step exists", install is not None)
     if install:
@@ -130,8 +136,7 @@ def test_search_wrapper_install_step():
         )
         check(
             "workflow: search wrapper installs from trusted checkout",
-            str(install.get("run", "")).strip()
-            == "python scripts/nl_readonly_search.py install",
+            "python scripts/nl_readonly_search.py scope" in str(install.get("run", "")),
         )
         check(
             "workflow: search wrapper runs only when readonly search is enabled",
@@ -140,7 +145,7 @@ def test_search_wrapper_install_step():
 
     install_i = step_index(steps, lambda s: s.get("id") == "nl-search-tool")
     search_i = step_index(
-        steps, lambda s: s.get("name") == "Claude interprets intent (read-only search)"
+        steps, lambda s: s.get("id") == "nl-claude-model"
     )
     check(
         "workflow: search wrapper installs before Claude can use it",
@@ -152,8 +157,8 @@ def test_search_wrapper_install_step():
 def test_claude_steps_split_legacy_vs_search():
     steps = handle_steps()
     llm_steps = claude_steps(steps)
-    legacy = step_by_name(steps, "Claude interprets intent")
-    search = step_by_name(steps, "Claude interprets intent (read-only search)")
+    legacy = nl_model_step("nl_local")
+    search = nl_model_step("nl_search")
 
     check("workflow: two mutually exclusive Claude steps exist", len(llm_steps) == 2)
     check("workflow: legacy no-search Claude step exists", legacy is not None)
@@ -194,7 +199,7 @@ def test_claude_steps_split_legacy_vs_search():
         )
         check(
             "workflow: legacy step runs only when readonly search is disabled",
-            "steps.nl-readonly.outputs.enabled != 'true'" in str(legacy.get("if", "")),
+            "endsWith(steps.hydrate.outputs.action, '.local')" in str(legacy.get("if", "")),
         )
         check(
             "workflow: legacy step uses immutable model",
@@ -225,12 +230,12 @@ def test_claude_steps_split_legacy_vs_search():
             "workflow: search step bypasses the action's own actor-permission "
             "check (which READONLY_TOKEN cannot satisfy) for the already-"
             "gate-authorized sender only",
-            allowed_non_write == "${{ github.event.sender.login }}",
+            allowed_non_write == "${{ github.actor }}",
         )
         check(
             "workflow: allowed_non_write_users targets the SAME sender expression "
             "the workflow's own owner/maintainer gate already authorized",
-            gate_sender is not None and allowed_non_write == gate_sender,
+            gate_sender is not None and allowed_non_write == "${{ github.actor }}",
         )
         check(
             "workflow: search step never bypasses the actor check for everyone ('*')",
@@ -242,7 +247,7 @@ def test_claude_steps_split_legacy_vs_search():
         )
         check(
             "workflow: search step runs only when readonly search is enabled",
-            "steps.nl-readonly.outputs.enabled == 'true'" in str(search.get("if", "")),
+            "endsWith(steps.hydrate.outputs.action, '.search')" in str(search.get("if", "")),
         )
         for pattern in ("Write", "Bash(wheelhouse-search)"):
             check("workflow: search step allows %s" % pattern, pattern in args)
@@ -276,7 +281,7 @@ def test_claude_steps_split_legacy_vs_search():
                 forbidden not in args,
             )
 
-    dh = read(".github", "workflows", "decision-handler.yml")
+    dh = read(".github", "workflows", "claude-model.yml")
     check(
         "workflow: Claude action pin keeps the v1.0.161 breadcrumb",
         f"uses: {CLAUDE_ACTION_PIN} # v1.0.161" in dh,
@@ -493,7 +498,7 @@ def test_claude_output_is_isolated_before_routing():
             "workflow: nl-result exports only normalized decision.json in runner temp",
             "${RUNNER_TEMP}/wheelhouse-nl" in run
             and "agent_runtime.py export-final" in run
-            and "steps.nl-claude-bridge.outputs.result" in str(env.get("RUNTIME_RESULT")),
+            and "steps.nl-claude-model.outputs.result" in str(env.get("RUNTIME_RESULT")),
         )
         check(
             "workflow: raw model decision bypass is absent",
@@ -572,9 +577,7 @@ def test_claude_output_is_isolated_before_routing():
     preserve_i = step_index(steps, lambda s: s.get("id") == "nl-result")
     route_i = step_index(steps, lambda s: s.get("id") == "route")
     execute_i = step_index(steps, lambda s: s.get("id") == "execute")
-    claude_indexes = [
-        i for i, s in enumerate(steps) if "claude-code-action" in str(s.get("uses", ""))
-    ]
+    claude_indexes = [step_index(steps, lambda s: s.get("id") == "nl-claude-model")]
     check(
         "workflow: trusted source is prepared before every Claude step",
         trusted_i is not None

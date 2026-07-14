@@ -1,0 +1,242 @@
+name: claude-model
+run-name: wheelhouse-claude-${{ inputs.parent_run_id }}-${{ inputs.parent_run_attempt }}-${{ inputs.invocation_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      parent_run_id: {required: true}
+      parent_run_attempt: {required: true}
+      input_artifact: {required: true}
+      handoff_sha256: {required: true}
+      output_artifact: {required: true}
+      invocation_id: {required: true}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Download immutable prepared handoff
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.input_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-handoff
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.parent_run_id }}
+
+      - id: hydrate
+        name: Verify and hydrate the content-addressed workspace
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["HANDOFF"])
+          manifest = json.loads((root / "manifest.json").read_text())
+          canonical = json.dumps(manifest["files"], sort_keys=True, separators=(",", ":")).encode()
+          if manifest.get("manifestSha256") != os.environ["HANDOFF_SHA256"] or hashlib.sha256(canonical).hexdigest() != os.environ["HANDOFF_SHA256"]:
+              raise SystemExit("handoff manifest identity mismatch")
+          expected = {row["path"]: row for row in manifest["files"]}
+          if len(expected) != len(manifest["files"]) or len(expected) > 32000 or sum(row["bytes"] for row in expected.values()) > 220000000:
+              raise SystemExit("handoff manifest bound exceeded")
+          observed = {}
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink(): raise SystemExit("handoff symlink rejected")
+              if path.is_file() and path.name != "manifest.json":
+                  rel = path.relative_to(root).as_posix()
+                  size = path.stat().st_size
+                  if rel not in expected or size != expected[rel]["bytes"]: raise SystemExit("handoff file bound mismatch")
+                  digest = hashlib.sha256()
+                  with path.open("rb") as handle:
+                      for chunk in iter(lambda: handle.read(1048576), b""): digest.update(chunk)
+                  observed[rel] = {"path": rel, "bytes": size, "sha256": digest.hexdigest()}
+          if observed != expected:
+              raise SystemExit("handoff manifest mismatch")
+          PY
+          PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.claude_handoff hydrate \
+            --handoff "$HANDOFF" --workspace "$GITHUB_WORKSPACE"
+
+      - name: Enforce model subprocess isolation dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          command -v bwrap >/dev/null
+          command -v socat >/dev/null
+
+      - name: Install bounded read-only search broker
+        if: ${{ endsWith(steps.hydrate.outputs.action, '.search') }}
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          ALLOWED_REPOS: ${{ steps.hydrate.outputs.allowedRepos }}
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/wheelhouse-tools"
+          mkdir -p "$tool_dir"
+          cp "$HANDOFF/runtime/nl_readonly_search.py" "$tool_dir/wheelhouse-search"
+          chmod 500 "$tool_dir" "$tool_dir/wheelhouse-search"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+          echo "WHEELHOUSE_SEARCH_ALLOWED_REPOS=$ALLOWED_REPOS" >> "$GITHUB_ENV"
+
+      - id: triage_search
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
+        continue-on-error: true
+        env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.READONLY_TOKEN }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6"
+
+      - id: triage_local
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
+        continue-on-error: true
+        env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob\n--max-turns 32\n--model claude-sonnet-4-6"
+
+      - id: triage_repair
+        if: ${{ steps.hydrate.outputs.action == 'triage.schema-repair' }}
+        continue-on-error: true
+        env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          settings: '{"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}'
+          claude_args: "--allowedTools \"\"\n--max-turns 1\n--model claude-sonnet-4-6"
+
+      - id: deep_search
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.search') }}
+        env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.READONLY_TOKEN }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 64\n--model claude-sonnet-4-6"
+
+      - id: deep_local
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.local') }}
+        env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob\n--max-turns 64\n--model claude-sonnet-4-6"
+
+      - id: nl_search
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && endsWith(steps.hydrate.outputs.action, '.search') }}
+        env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.READONLY_TOKEN }}
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6"
+
+      - id: nl_local
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && endsWith(steps.hydrate.outputs.action, '.local') }}
+        env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6"
+
+      - id: capture
+        if: ${{ always() }}
+        env:
+          ACTION: ${{ steps.hydrate.outputs.action }}
+          TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
+          HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file }}
+          OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          if [[ "$ACTION" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
+            cp decision.json "$OUTPUT/decision.json"
+          fi
+          python - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          output = Path(os.environ["OUTPUT"])
+          execution = output / "execution.json"
+          source_name = os.environ.get("EXECUTION_FILE", "")
+          source = Path(source_name) if source_name else None
+          spent = bool(source and source.is_file() and not source.is_symlink())
+          if spent and source.stat().st_size <= 8388608:
+              try:
+                  rows = json.loads(source.read_text(encoding="utf-8"))
+                  if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows): raise ValueError
+                  bounded = []
+                  for row in rows:
+                      if row.get("type") == "system" and row.get("subtype") == "init":
+                          bounded.append({"type": "system", "subtype": "init", "model": row.get("model")})
+                      elif row.get("type") == "assistant" and isinstance(row.get("message"), dict):
+                          content = row["message"].get("content")
+                          if isinstance(content, list): bounded.append({"type": "assistant", "message": {"content": [{"type": "tool_use"} for item in content if isinstance(item, dict) and item.get("type") == "tool_use"]}})
+                      elif row.get("type") == "result":
+                          kept = {key: row.get(key) for key in ("type", "subtype", "is_error", "result", "duration_ms", "num_turns")}
+                          usage = row.get("usage")
+                          if isinstance(usage, dict): kept["usage"] = {key: usage.get(key) for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+                          bounded.append(kept)
+                  execution.write_text(json.dumps(bounded, sort_keys=True, separators=(",", ":")) + "\n")
+              except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                  execution.write_text('[{"subtype":"invalid","type":"capture"}]\n')
+          proof = {
+              "version": 1,
+              "boundary": "separate-read-only-github-job",
+              "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"},
+              "writeCapableGithubTokenAvailable": False,
+              "fleetTokenAvailable": False,
+              "spendStarted": spent,
+              "action": os.environ["ACTION"],
+              "taskSha256": os.environ["TASK_SHA"],
+              "handoffManifestSha256": os.environ["HANDOFF_SHA256"],
+              "transcriptSha256": hashlib.sha256(execution.read_bytes()).hexdigest() if execution.is_file() else None,
+              "subprocessIsolation": "dependencies-verified" if shutil.which("bwrap") and shutil.which("socat") else "unverified",
+          }
+          (output / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+
+      - name: Upload bounded model transcript
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-model-output
+          if-no-files-found: error
+          retention-days: 1

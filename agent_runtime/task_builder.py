@@ -123,16 +123,17 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
     raise ArtifactError("unsupported action output schema")
 
 
-def _capabilities(action: str, schema_digest: str) -> dict[str, Any]:
+def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, Any]:
+    claude = adapter == "claude-action-compat"
     required = [
         {"name": "input.text", "constraints": {}},
-        {"name": "process.exec", "constraints": {"mode": "none"}},
+        {"name": "process.exec", "constraints": {"mode": "scoped-readonly-broker" if claude and action.endswith(".search") else "none"}},
         {"name": "tool.network", "constraints": {"mode": "broker-only" if action.endswith(".search") else "none"}},
-        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["native-schema", "typed-terminating-tool"]}},
-        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000}},
+        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["trusted-post-action-bridge"] if claude else ["native-schema", "typed-terminating-tool"]}},
+        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000, "mechanism": "parent-workflow-cancel" if claude else "adapter-interrupt"}},
         {"name": "provenance.actual-model", "constraints": {}},
         {"name": "provenance.actual-provider", "constraints": {}},
-        {"name": "isolation.external", "constraints": {"worker": "sandboxed-adapter-worker"}},
+        {"name": "isolation.external", "constraints": {"worker": "separate-read-only-github-job" if claude else "sandboxed-adapter-worker"}},
     ]
     if action != "triage.schema-repair":
         required.extend(
@@ -314,12 +315,12 @@ def build_task(
                 "segments": _trust_segments(action, prompt_digest, prompt_bytes, inputs),
             },
             "inputs": inputs,
-            "capabilities": _capabilities(action, schema_digest),
+            "capabilities": _capabilities(action, schema_digest, adapter),
             "tools": _tools(action),
             "isolation": {
-                "worker": "sandboxed-adapter-worker",
-                "rootFilesystem": "read-only",
-                "writableRoots": ["/run/wheelhouse/output", "/tmp"],
+                "worker": "separate-read-only-github-job" if adapter == "claude-action-compat" else "sandboxed-adapter-worker",
+                "rootFilesystem": "ephemeral-workspace" if adapter == "claude-action-compat" else "read-only",
+                "writableRoots": ["/github/workspace", "/tmp"] if adapter == "claude-action-compat" else ["/run/wheelhouse/output", "/tmp"],
                 "modelNetwork": {"mode": "provider-only", "allowedHosts": list(profile["provider_hosts"])},
                 "toolNetwork": {"mode": "broker-only" if action.endswith(".search") else "none"},
                 "inheritEnvironment": False,
@@ -348,7 +349,7 @@ def build_task(
             },
             "retry": {"sameCandidateMaxAttempts": 1, "retryable": [], "repairTask": "triage.schema-repair/v1" if action.startswith("triage.") and action != "triage.schema-repair" else None},
             "session": {"mode": "ephemeral", "resume": "forbidden"},
-            "retention": {"normalizedEventsDays": 3, "rawTranscript": "discard", "finalResult": "consumer-owned", "redactionPolicy": "wheelhouse-agent/v1"},
+            "retention": {"normalizedEventsDays": 3, "rawTranscript": "transient-cross-job" if adapter == "claude-action-compat" else "discard", "finalResult": "consumer-owned", "redactionPolicy": "wheelhouse-agent/v1"},
         },
     }
     validate_contract(task, "AgentTask")

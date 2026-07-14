@@ -128,9 +128,9 @@ def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration
     }
 
 
-def _attempt_timing(execution_file: str, terminal: dict[str, Any] | None) -> tuple[str, int]:
+def _attempt_timing(execution_file: str, terminal: dict[str, Any] | None, max_duration_ms: int) -> tuple[str, int]:
     duration = terminal.get("duration_ms") if terminal is not None else None
-    if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
+    if not isinstance(duration, int) or isinstance(duration, bool) or not 0 <= duration <= max_duration_ms:
         duration = 0
     completed = time.time()
     try:
@@ -147,7 +147,45 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file: str, result_path: str, events_path: str) -> dict[str, Any]:
+def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_sha256: str) -> dict[str, Any] | None:
+    try:
+        proof = load_json_regular(path, max_bytes=65536)
+    except (ContractError, OSError, RecursionError, ValueError):
+        return None
+    controller = proof.get("controller") if isinstance(proof, dict) else None
+    transcript = Path(execution_file)
+    try:
+        transcript_sha = file_sha256(transcript) if execution_file and transcript.is_file() and not transcript.is_symlink() else None
+    except OSError:
+        return None
+    expected_permissions = {"actions": "read", "contents": "read", "issues": "none"}
+    if (
+        not isinstance(handoff_sha256, str)
+        or len(handoff_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in handoff_sha256)
+        or proof.get("version") != 1
+        or proof.get("boundary") != "separate-read-only-github-job"
+        or proof.get("jobPermissions") != expected_permissions
+        or proof.get("writeCapableGithubTokenAvailable") is not False
+        or proof.get("fleetTokenAvailable") is not False
+        or not isinstance(proof.get("spendStarted"), bool)
+        or proof.get("subprocessIsolation") != "dependencies-verified"
+        or proof.get("taskSha256") != canonical_sha256(task)
+        or proof.get("handoffManifestSha256") != handoff_sha256
+        or proof.get("action") != task["metadata"]["action"]
+        or proof.get("transcriptSha256") != transcript_sha
+        or not isinstance(controller, dict)
+        or controller.get("hardDeadlineMs") != task["spec"]["limits"]["hardDeadlineMs"]
+        or controller.get("conclusion") != "success"
+        or not isinstance(controller.get("parentRunId"), str)
+        or not isinstance(controller.get("parentRunAttempt"), str)
+        or not isinstance(controller.get("modelRunId"), str)
+    ):
+        return None
+    return proof
+
+
+def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file: str, enforcement_file: str, handoff_sha256: str, result_path: str, events_path: str) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     bundle = Path(bundle_dir).resolve()
@@ -163,21 +201,24 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         transcript_error = True
     actual_model = _observed_model(rows)
     terminal = _terminal_result(rows)
-    spend_started = _spend_started(execution_file)
+    enforcement = _enforcement(enforcement_file, task, execution_file, handoff_sha256)
+    spend_started = _spend_started(execution_file) or bool(enforcement and enforcement["spendStarted"])
     error = None
     delivered = None
     final = None
     if transcript_error:
         error = _error("harness.protocol", "Claude action execution data failed bounded protocol validation.", spend_started=spend_started)
+    elif enforcement is None:
+        error = _error("sandbox.violation", "Claude action job enforcement proof was missing or invalid.", spend_started=spend_started)
     elif not rows:
-        error = _error("output.missing", "Claude action delivered no execution data.", spend_started=False)
+        error = _error("output.missing", "Claude action delivered no execution data.", spend_started=spend_started)
     elif terminal is None:
         error = _error("harness.protocol", "Claude action execution did not contain exactly one terminal result event.", spend_started=spend_started)
     elif actual_model != candidate["model"]:
         error = _error("model.mismatch", "Observed Claude model did not match the immutable requested model.", spend_started=spend_started)
     elif terminal.get("is_error") is not False or terminal.get("subtype") != "success":
         error = _error("harness.crash", "Claude action reported an unsuccessful execution.", spend_started=spend_started)
-    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or terminal["duration_ms"] < 0:
+    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or not 0 <= terminal["duration_ms"] <= task["spec"]["limits"]["hardDeadlineMs"]:
         error = _error("harness.protocol", "Claude action terminal result omitted valid attempt timing.", spend_started=spend_started)
     else:
         try:
@@ -209,7 +250,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                 if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
                     delivered = {"value": raw, "valueSha256": canonical_sha256(raw), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
-    started_at, duration = _attempt_timing(execution_file, terminal)
+    started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["hardDeadlineMs"])
     status = "succeeded" if final is not None else "failed"
     selection = {
         "candidateIndex": 0,
@@ -250,7 +291,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
             "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
             "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
-            "sandboxPolicySha256": canonical_sha256(task["spec"]["isolation"]),
+            "sandboxPolicySha256": canonical_sha256(enforcement or {"status": "unverified"}),
         },
         "usage": _usage(rows, terminal, duration),
         "artifacts": [],

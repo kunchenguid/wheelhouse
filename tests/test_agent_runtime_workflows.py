@@ -13,6 +13,7 @@ WORKFLOWS = {
     "triage": Path(".github/workflows/triage.yml"),
     "deep": Path(".github/workflows/deep-review.yml"),
     "decision": Path(".github/workflows/decision-handler.yml"),
+    "model": Path(".github/workflows/claude-model.yml"),
 }
 PIN = "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
 
@@ -36,27 +37,28 @@ def main():
     claude = [(name, step) for name, step in all_steps if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
     check("production: exactly seven inventoried direct Claude steps remain", len(claude) == 7)
     check("production: every direct step keeps exact action pin", all(step["uses"] == PIN for _, step in claude))
-    check("production: every direct step requires resolved Claude selection", all("mode == 'claude'" in str(step.get("if", "")) or "runtime_mode == 'claude'" in str(step.get("if", "")) for _, step in claude))
+    check("production: every direct step is selected by immutable task action", all("steps.hydrate.outputs.action" in str(step.get("if", "")) for _, step in claude))
     check("production: direct Claude is never a failure fallback", all("failure()" not in str(step.get("if", "")) and "agent-runtime.outcome" not in str(step.get("if", "")) for _, step in claude))
     check("production: every direct step pins immutable model", all("--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")) for _, step in claude))
     check("production: every model subprocess enables credential scrub", all((step.get("env") or {}).get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1" for _, step in claude))
     check("production: every direct step activates external subprocess isolation", all((step.get("with") or {}).get("allowed_non_write_users") for _, step in claude))
     check("production: subprocess isolation never uses a wildcard actor", all((step.get("with") or {}).get("allowed_non_write_users") != "*" for _, step in claude))
-    acting_token_steps = [step for _, step in claude if (step.get("with") or {}).get("github_token") == "${{ github.token }}"]
-    check("production: acting tokens remain outside isolated model subprocesses", bool(acting_token_steps) and all((step.get("env") or {}).get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1" and (step.get("with") or {}).get("allowed_non_write_users") for step in acting_token_steps))
+    model_permissions = docs["model"].get("permissions", {})
+    check("production: model workflow has read-only permissions", model_permissions == {"actions": "read", "contents": "read"})
+    check("production: model workflow contains no acting or fleet credential", "FLEET_TOKEN" not in WORKFLOWS["model"].read_text() and "issues: write" not in WORKFLOWS["model"].read_text())
+    check("production: model default token is downscoped before direct actions", all(name == "model" for name, _ in claude) and model_permissions.get("contents") == "read")
+    check("production: original write-capable jobs contain no direct model action", all(name == "model" for name, _ in claude))
+    model_steps = steps(docs["model"])
+    isolation = next((index for index, step in enumerate(model_steps) if step.get("name") == "Enforce model subprocess isolation dependencies"), -1)
+    direct = [index for index, step in enumerate(model_steps) if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
+    check("production: isolation dependencies precede every direct action", isolation >= 0 and all(isolation < index for index in direct))
+    check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
+    capture = next(step for step in model_steps if step.get("id") == "capture")
+    check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
 
-    for name, doc in docs.items():
-        workflow_steps = steps(doc)
-        isolation = next((index for index, step in enumerate(workflow_steps) if step.get("name") == "Enforce Claude subprocess token isolation"), -1)
-        direct = [index for index, step in enumerate(workflow_steps) if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
-        task_steps = [index for index, step in enumerate(workflow_steps) if "claude" in str(step.get("id", "")) and "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
-        bridge = [index for index, step in enumerate(workflow_steps) if "scripts/agent_runtime.py bridge-claude" in str(step.get("run", ""))]
-        check("production: %s enforces isolation before every direct action" % name, isolation >= 0 and all(isolation < index for index in direct))
-        isolation_step = workflow_steps[isolation] if isolation >= 0 else {}
-        check("production: %s isolation requires bubblewrap and socat" % name, "bubblewrap socat" in str(isolation_step.get("run", "")) and not isolation_step.get("continue-on-error"))
-        check("production: %s wraps every direct action family in task and result contracts" % name, bool(task_steps) and bool(bridge) and min(task_steps) < min(direct) and max(bridge) > max(direct))
-
-    text = "\n".join(path.read_text() for path in WORKFLOWS.values())
+    component = Path(".github/actions/claude-model-call/action.yml").read_text()
+    handoff = Path("agent_runtime/claude_handoff.py").read_text()
+    text = "\n".join(path.read_text() for path in WORKFLOWS.values()) + "\n" + component
     for action in (
         "triage.issue.local",
         "triage.issue.search",
@@ -82,10 +84,15 @@ def main():
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
     claude_build_steps = [step for step in build_steps if "claude" in str(step.get("id", ""))]
     codex_build_steps = [step for step in build_steps if step not in claude_build_steps]
-    bridge_steps = [step for _, step in all_steps if "scripts/agent_runtime.py bridge-claude" in str(step.get("run", ""))]
+    model_calls = [step for _, step in all_steps if step.get("uses") == "./.github/actions/claude-model-call"]
     check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 4 and len(codex_build_steps) == 4)
-    check("runtime: every Claude family emits normalized AgentResult", len(bridge_steps) == 4 and all("--task" in step["run"] and "--execution-file" in step["run"] for step in bridge_steps))
-    check("runtime: no consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if "bridge-claude" not in str(step.get("run", ""))))
+    check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 4)
+    check("runtime: trusted bridge requires observed enforcement proof", "--enforcement-file" in component and "bridge-claude" in component)
+    check("runtime: handoff has byte and file bounds plus complete digest verification", "MAX_HANDOFF_BYTES" in handoff and "MAX_HANDOFF_FILES" in handoff and "_verify_bundle" in handoff and "manifest verification failed" in handoff)
+    check("runtime: model job receives a trusted manifest identity", "handoff_sha256" in WORKFLOWS["model"].read_text() and "steps.pack.outputs.manifestSha256" in component)
+    check("runtime: trusted parent controls dispatch deadline and cancellation", "hardDeadlineMs" in Path("scripts/claude_model_dispatch.py").read_text() and "gh\", \"run\", \"cancel" in Path("scripts/claude_model_dispatch.py").read_text())
+    check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
+    check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
     check("runtime: no configured action can reach a Codex workflow path", all(row["target"] == "claude" for row in yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]["actions"].values()))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
@@ -95,7 +102,7 @@ def main():
     check("runtime: every Codex setup installs only verified local artifacts", all("npm install --offline" in step["run"] and '"$tarball"' in step["run"] and 'tar -xzf "$platform_tarball"' in step["run"] for step in package_steps))
     check("runtime: verification precedes install and executable extraction", all(step["run"].index("agent_runtime.py verify-package") < step["run"].index("npm install --offline") < step["run"].index('tar -xzf "$platform_tarball"') < step["run"].index("--version | grep") for step in package_steps))
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
-    check("runtime: external bubblewrap sandbox installed", text.count("bubblewrap") >= 3)
+    check("runtime: external bubblewrap sandbox installed in model workflow", "bubblewrap socat" in WORKFLOWS["model"].read_text())
 
     check("search: wrapper follows resolved Claude production branches", all("claude" in str(step.get("if", "")) for _, step in all_steps if step.get("id") in ("search-tool", "nl-search-tool")))
     check("search: Codex receives no model GH_TOKEN", all("GH_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))
@@ -106,10 +113,10 @@ def main():
 
     triage = docs["triage"]
     triage_steps = {step.get("id"): step for step in steps(triage) if step.get("id")}
-    check("triage consumer: Claude AgentResult required", "steps.claude-bridge.outputs.result" in str((triage_steps["triage-result"].get("env") or {}).get("EXECUTION_FILE")))
-    check("repair consumer: normalized repair result required", "steps.claude-repair-bridge.outputs.result" in str((triage_steps["repair-result"].get("env") or {}).get("RUNTIME_RESULT")))
+    check("triage consumer: Claude AgentResult required", "steps.claude-model.outputs.result" in str((triage_steps["triage-result"].get("env") or {}).get("EXECUTION_FILE")))
+    check("repair consumer: normalized repair result required", "steps.claude-repair-model.outputs.result" in str((triage_steps["repair-result"].get("env") or {}).get("RUNTIME_RESULT")))
     deep_post = next(step for step in steps(docs["deep"]) if step.get("name") == "Post the verdict on the card")
-    check("deep consumer: Claude AgentResult required", "steps.claude-bridge.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
+    check("deep consumer: Claude AgentResult required", "steps.claude-model.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
     deep_steps = steps(docs["deep"])
     deep_ids = [step.get("id") for step in deep_steps]
     deep_gate = next(step for step in deep_steps if step.get("id") == "gate")

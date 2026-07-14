@@ -31,6 +31,10 @@ concurrency:
 
 jobs:
   handle:
+    permissions:
+      actions: write
+      contents: read
+      issues: write
     runs-on: ubuntu-latest
     outputs:
       authorized: ${{ steps.gate.outputs.authorized }}
@@ -281,16 +285,7 @@ jobs:
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
-          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
-        run: python scripts/nl_readonly_search.py install
-
-      - name: Enforce Claude subprocess token isolation
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap socat
-          command -v bwrap >/dev/null
+        run: echo "repos=$(python scripts/nl_readonly_search.py scope)" >> "$GITHUB_OUTPUT"
 
       - id: nl-claude-task
         name: Build the immutable Claude natural-language AgentTask
@@ -316,85 +311,16 @@ jobs:
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt
 
-      # Claude maps intent -> writes decision.json. If READONLY_TOKEN exists,
-      # this branch may also run the scoped wheelhouse-search wrapper for answer
-      # context. The action's github_token input is READONLY_TOKEN here because
-      # claude-code-action also exposes that input to the Claude subprocess as
-      # GitHub CLI credentials. GH_TOKEN is READONLY_TOKEN, never FLEET_TOKEN,
-      # and any resulting output is treated by the prompt as UNTRUSTED DATA.
-      # Auth is the Claude subscription token, NOT an API key.
-      #
-      # allowed_non_write_users bypasses claude-code-action's OWN triggering-actor
-      # write-permission check (which otherwise calls GET .../collaborators/{actor}/
-      # permission using the github_token input - a call READONLY_TOKEN, being a
-      # fine-grained public-read PAT, cannot make, so it 403s and kills the run
-      # before Claude ever sees the prompt). That built-in check is redundant here:
-      # this step only runs once `steps.gate.outputs.authorized == 'true'`, i.e.
-      # `wheelhouse_core.py authorized` has already proven github.event.sender.login
-      # is the repo owner or the configured maintainer - the workflow's own gate IS
-      # the trust boundary. Scoping the bypass to that exact, already-authorized
-      # sender (never '*') keeps this narrow: it does not let any other actor skip
-      # the check, and it does not change what token the model can act with -
-      # github_token/GH_TOKEN stay READONLY_TOKEN, so the model remains unable to
-      # write anywhere. See AGENTS.md's nl_decisions section for the full model.
-      #
-      # NOTE: keep this action pinned to the same reviewed release as deep-review.yml.
-      - id: nl-claude-search
-        name: Claude interprets intent (read-only search)
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.READONLY_TOKEN }}
-          allowed_non_write_users: ${{ github.event.sender.login }}
-          prompt: ${{ steps.nl-prompt.outputs.prompt }}
-          # Read/Grep/Glob let the model open the on-disk target.txt (the diff is
-          # pass-by-reference, not inlined - card #555). Write still emits
-          # decision.json and Bash is still ONLY wheelhouse-search: the model's
-          # write/acting boundary is unchanged.
-          claude_args: |
-            --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
-            --max-turns 32
-            --model claude-sonnet-4-6
-
-      # No-search branch. This is the exact production tool posture: Write only,
-      # no shell, and no GH_TOKEN environment. It runs whenever READONLY_TOKEN is
-      # absent so the feature can ship before the optional secret exists.
-      - id: nl-claude
-        name: Claude interprets intent
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled != 'true' }}
-        env:
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_non_write_users: ${{ github.event.sender.login }}
-          prompt: ${{ steps.nl-prompt.outputs.prompt }}
-          # Read/Grep/Glob let the model open the on-disk target.txt (pass-by-
-          # reference, card #555). Still no shell and no GH_TOKEN: this
-          # branch keeps its exact isolation, only adding the file-read tools plus
-          # the pre-existing Write for decision.json.
-          claude_args: |
-            --allowedTools Read,Grep,Glob,Write
-            --max-turns 32
-            --model claude-sonnet-4-6
-
-      - id: nl-claude-bridge
-        name: Normalize Claude natural-language result through AgentResult
+      - id: nl-claude-model
+        name: Run Claude intent mapping in the read-only model workflow
         if: ${{ always() && steps.nl-claude-task.outcome == 'success' }}
-        env:
-          TASK: ${{ steps.nl-claude-task.outputs.task }}
-          BUNDLE: ${{ steps.nl-claude-task.outputs.bundle }}
-          EXECUTION_FILE: ${{ steps.nl-claude-search.outputs.execution_file || steps.nl-claude.outputs.execution_file }}
-        run: |
-          python scripts/agent_runtime.py bridge-claude \
-            --task "$TASK" --bundle "$BUNDLE" --execution-file "${EXECUTION_FILE:-}" \
-            --delivered-file decision.json --result "$BUNDLE/result.json" \
-            --events "$BUNDLE/events.ndjson"
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.nl-claude-task.outputs.task }}
+          bundle: ${{ steps.nl-claude-task.outputs.bundle }}
+          invocation-id: nl-decision
+          allowed-repos: ${{ steps.nl-search-tool.outputs.repos || '[]' }}
+          delivered-file: "true"
 
       - name: Prepare the pinned Codex sandboxed adapter worker
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
@@ -481,7 +407,7 @@ jobs:
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
-          RUNTIME_RESULT: ${{ steps.nl-claude-bridge.outputs.result || steps.nl-agent-runtime.outputs.result }}
+          RUNTIME_RESULT: ${{ steps.nl-claude-model.outputs.result || steps.nl-agent-runtime.outputs.result }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""

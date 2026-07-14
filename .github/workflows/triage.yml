@@ -69,6 +69,7 @@ on:
         required: false
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
@@ -536,16 +537,7 @@ jobs:
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
-          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
-        run: python scripts/nl_readonly_search.py install
-
-      - name: Enforce Claude subprocess token isolation
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap socat
-          command -v bwrap >/dev/null
+        run: echo "repos=$(python scripts/nl_readonly_search.py scope)" >> "$GITHUB_OUTPUT"
 
       - id: claude-task
         name: Build the immutable Claude triage AgentTask
@@ -575,55 +567,16 @@ jobs:
             --repository-dir target-src --repository-commit "$repository_commit" \
             "${vision_args[@]}"
 
-      - id: claude_search
-        name: Claude auto triage (read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.READONLY_TOKEN }}
-          allowed_bots: github-actions[bot]
-          allowed_non_write_users: ${{ github.actor }}
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
-            --max-turns 32
-            --model claude-sonnet-4-6
-
-      - id: claude
-        name: Claude auto triage (read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
-        continue-on-error: true
-        env:
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_bots: github-actions[bot]
-          allowed_non_write_users: ${{ github.actor }}
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools Read,Grep,Glob
-            --max-turns 32
-            --model claude-sonnet-4-6
-
-      - id: claude-bridge
-        name: Normalize Claude triage through AgentResult
+      - id: claude-model
+        name: Run Claude triage in the read-only model workflow
         if: ${{ always() && steps.claude-task.outcome == 'success' }}
         continue-on-error: true
-        env:
-          TASK: ${{ steps.claude-task.outputs.task }}
-          BUNDLE: ${{ steps.claude-task.outputs.bundle }}
-          EXECUTION_FILE: ${{ steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
-        run: |
-          python scripts/agent_runtime.py bridge-claude \
-            --task "$TASK" --bundle "$BUNDLE" --execution-file "${EXECUTION_FILE:-}" \
-            --result "$BUNDLE/result.json" --events "$BUNDLE/events.ndjson"
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.claude-task.outputs.task }}
+          bundle: ${{ steps.claude-task.outputs.bundle }}
+          invocation-id: triage
+          allowed-repos: ${{ steps.search-tool.outputs.repos || '[]' }}
 
       - name: Prepare the pinned Codex sandboxed adapter worker
         if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
@@ -721,7 +674,7 @@ jobs:
       - id: triage-result
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
         env:
-          EXECUTION_FILE: ${{ steps.claude-bridge.outputs.result || steps.agent-runtime.outputs.result }}
+          EXECUTION_FILE: ${{ steps.claude-model.outputs.result || steps.agent-runtime.outputs.result }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -826,46 +779,15 @@ jobs:
             --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
             --repair-kind "$repair_kind"
 
-      - id: claude_repair
-        name: Claude schema repair (ONE bounded turn, tokenless, no tools)
-        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
-        continue-on-error: true
-        env:
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_bots: github-actions[bot]
-          allowed_non_write_users: ${{ github.actor }}
-          prompt: ${{ steps.repair-prep.outputs.repair_prompt }}
-          # Fail-closed tool isolation. The candidate is embedded in the prompt,
-          # so the repair turn needs NO tools and must NOT re-read the diff /
-          # re-analyze. An empty `--allowedTools` alone is not a reliable
-          # zero-tool guarantee in this action (upstream allowlist-parsing can
-          # let defaults leak, incl. Bash), so a Claude Code `permissions.deny`
-          # rule set - which takes precedence over any allow/allowlist - blocks
-          # every file/exec/network/subagent tool by name. Same tokenless
-          # side-job posture as triage itself: no FLEET_TOKEN, no READONLY_TOKEN.
-          settings: |
-            {"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}
-          claude_args: |
-            --allowedTools ""
-            --max-turns 1
-            --model claude-sonnet-4-6
-
-      - id: claude-repair-bridge
-        name: Normalize Claude schema repair through AgentResult
+      - id: claude-repair-model
+        name: Run Claude schema repair in the read-only model workflow
         if: ${{ always() && steps.claude-repair-task.outcome == 'success' }}
         continue-on-error: true
-        env:
-          TASK: ${{ steps.claude-repair-task.outputs.task }}
-          BUNDLE: ${{ steps.claude-repair-task.outputs.bundle }}
-          EXECUTION_FILE: ${{ steps.claude_repair.outputs.execution_file }}
-        run: |
-          python scripts/agent_runtime.py bridge-claude \
-            --task "$TASK" --bundle "$BUNDLE" --execution-file "${EXECUTION_FILE:-}" \
-            --result "$BUNDLE/result.json" --events "$BUNDLE/events.ndjson"
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.claude-repair-task.outputs.task }}
+          bundle: ${{ steps.claude-repair-task.outputs.bundle }}
+          invocation-id: triage-repair
 
       - name: Prepare the pinned Codex worker for schema repair
         if: ${{ always() && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'codex' && steps.gate.outputs.mode != 'codex' }}
@@ -947,7 +869,7 @@ jobs:
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.repair-prep.outputs.repair_needed == 'true' }}
         env:
           EXECUTION_FILE: ""
-          RUNTIME_RESULT: ${{ steps.claude-repair-bridge.outputs.result || steps.agent-runtime-repair.outputs.result }}
+          RUNTIME_RESULT: ${{ steps.claude-repair-model.outputs.result || steps.agent-runtime-repair.outputs.result }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
