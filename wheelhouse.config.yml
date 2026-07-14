@@ -193,25 +193,57 @@ repos:
 maintainer: ""
 
 # Provider-agnostic agent runtime.
-# Claude is the production primary for every agent-assisted action.
-# The seven direct Claude Action steps remain the exact pinned production
-# implementation behind the shared selection boundary.
-# Codex remains disabled adapter evidence because this public deployment has no
-# supported secure noninteractive ChatGPT Pro authentication path.
-# GLM through Z.AI OpenCode is an unapproved investigation candidate only.
-# Fallback is always disabled.
+# Codex CLI 0.144.0 app-server is the selected future primary for all agentic
+# tasks, but production activation is deliberately OFF.
+# The authentication audit found no supported secure noninteractive way to use
+# the current ChatGPT Pro account from this public GitHub Actions repository.
+# Do not add an API key, access token, or auth.json blob to this repository.
+# The seven direct Claude Action steps remain the explicit production/rollback
+# bridge while Codex is inactive.
+# Fallback is always disabled, so a Codex failure can never invoke Claude.
 agent_runtime:
   contract: wheelhouse.agent-runtime/v1alpha1
   runtime_version: 1.0.0
-  primary_profile: claude-action-current-pinned
-  target: claude
+  primary_profile: codex-subscription-pinned
+  temporary_rollback_profile: claude-action-current-pinned
+  rollout: legacy
+  production_activation: false
   fallback: none
-  disabled_adapters:
-    codex-app-server: unsupported-public-chatgpt-pro-auth
-  investigations:
-    glm-opencode: unapproved
+
+  # Every field below must be approved before a reviewed config change may set
+  # production_activation true and any action rollout to codex.
+  # Secret presence never changes selection.
+  codex_auth_gate:
+    audit_status: unavailable-pro-public
+    captain_alternative: none
+    security_review: pending
+    private_credential_boundary: false
+    nonproduction_proof: not-run
+    credential_owner: ""
+    rotation_date: ""
+    revocation_owner: ""
+    pr_automerge_semantic_parity: pending
 
   profiles:
+    codex-subscription-pinned:
+      adapter: codex-app-server
+      harness: codex-cli
+      provider: openai
+      auth_profile: codex-subscription
+      # This is the preferred future Business/Enterprise mechanism.
+      # managed-auth-json remains fail-closed until secure mutable refresh
+      # persistence is separately implemented and approved.
+      auth_mechanism: codex-access-token
+      expected_workspace_id: ""
+      model: gpt-5.6-sol
+      effort: high
+      cost_class: subscription
+      data_boundary: chatgpt-workspace
+      allow_model_alias: false
+      provider_hosts:
+        - chatgpt.com
+        - auth.openai.com
+        - api.openai.com
     claude-action-current-pinned:
       adapter: claude-action-compat
       harness: claude-code
@@ -228,15 +260,15 @@ agent_runtime:
         - api.anthropic.com
 
   actions:
-    triage.issue.local: {target: claude, profile: claude-action-current-pinned}
-    triage.issue.search: {target: claude, profile: claude-action-current-pinned}
-    triage.pr.local: {target: claude, profile: claude-action-current-pinned}
-    triage.pr.search: {target: claude, profile: claude-action-current-pinned}
-    triage.schema-repair: {target: claude, profile: claude-action-current-pinned}
-    deep-review.local: {target: claude, profile: claude-action-current-pinned}
-    deep-review.search: {target: claude, profile: claude-action-current-pinned}
-    nl-decision.local: {target: claude, profile: claude-action-current-pinned}
-    nl-decision.search: {target: claude, profile: claude-action-current-pinned}
+    triage.issue.local: {rollout: legacy, profile: codex-subscription-pinned}
+    triage.issue.search: {rollout: legacy, profile: codex-subscription-pinned}
+    triage.pr.local: {rollout: legacy, profile: codex-subscription-pinned}
+    triage.pr.search: {rollout: legacy, profile: codex-subscription-pinned}
+    triage.schema-repair: {rollout: legacy, profile: codex-subscription-pinned}
+    deep-review.local: {rollout: legacy, profile: codex-subscription-pinned}
+    deep-review.search: {rollout: legacy, profile: codex-subscription-pinned}
+    nl-decision.local: {rollout: legacy, profile: codex-subscription-pinned}
+    nl-decision.search: {rollout: legacy, profile: codex-subscription-pinned}
 
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
