@@ -1594,6 +1594,28 @@ def _validated_workflow_hold_handoff(record):
     }
 
 
+def _workflow_hold_snapshot_matches(expected, current):
+    expected_updated_at = str(render_card.card_updated_at(expected) or "")
+    current_updated_at = str(render_card.card_updated_at(current) or "")
+    if not expected_updated_at or not current_updated_at:
+        return (False, "card updatedAt is unavailable")
+    if current_updated_at != expected_updated_at:
+        return (False, "card updatedAt changed")
+    if (current or {}).get("body") != (expected or {}).get("body"):
+        return (False, "card body changed")
+    if _card_label_names(current) != _card_label_names(expected):
+        return (False, "card labels changed")
+    expected_comments = (expected or {}).get("comments")
+    current_comments = (current or {}).get("comments")
+    if not isinstance(expected_comments, list) or not isinstance(
+        current_comments, list
+    ):
+        return (False, "card comment contents are unavailable")
+    if current_comments != expected_comments:
+        return (False, "card comments changed")
+    return (True, "")
+
+
 def persist_workflow_hold(record, card_token=""):
     """Persist and verify the denial state, visible section, and managed label.
 
@@ -1634,9 +1656,20 @@ def persist_workflow_hold(record, card_token=""):
         new_body = render_card.body_with_automerge_workflow_hold(
             card.get("body") or "", handoff["hold"]
         )
-        if new_body != card.get("body"):
+        body_change = new_body != card.get("body")
+        label_change = render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in labels
+        if body_change or label_change:
+            current = render_card.get_card(handoff["card_issue"])
+            matches, reason = _workflow_hold_snapshot_matches(card, current)
+            if not matches:
+                raise RuntimeError(
+                    "manual-merge hold card changed before persistence: %s" % reason
+                )
+            if not render_card.issue_is_open(current):
+                raise RuntimeError("manual-merge hold card closed before persistence")
+        if body_change:
             render_card._edit_issue_body(handoff["card_issue"], new_body)
-        if render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in labels:
+        if label_change:
             render_card.ensure_labels([render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL])
             render_card._gh(
                 [

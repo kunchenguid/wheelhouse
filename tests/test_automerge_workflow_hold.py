@@ -111,6 +111,7 @@ class LifecycleWorld:
             "comments": 0,
         }
         self.card_write_tokens = []
+        self.card_read_tokens = []
         self.history_read_tokens = []
         self.merge_tokens = []
         self.closed_cards = []
@@ -165,6 +166,7 @@ class LifecycleWorld:
     def get_card(self, number):
         if int(number) != self.card["number"]:
             return None
+        self.card_read_tokens.append(os.environ.get("GH_TOKEN"))
         result = copy.deepcopy(self.card)
         result["author"] = {"login": render_card.GET_CARD_AUTOMATION_AUTHOR}
         return result
@@ -617,6 +619,105 @@ def test_malformed_stale_and_persistence_failure_fail_closed():
         failed.restore()
 
 
+def test_hold_persistence_rejects_card_snapshot_races():
+    race_cases = {
+        "body": lambda world: world.card.update(
+            {"body": world.card["body"] + "\nOwner edit preserved.\n"}
+        ),
+        "labels": lambda world: world.card["labels"].append({"name": "owner-note"}),
+        "comments": lambda world: world.card["comments"].append(
+            {
+                "id": 999,
+                "body": "Owner context preserved.",
+                "author": {"login": "owner"},
+            }
+        ),
+        "updatedAt": lambda world: world.touch(),
+    }
+    for race_name, mutate in race_cases.items():
+        world = LifecycleWorld().install()
+        try:
+            result = {
+                "repo": "fmt",
+                "number": "5",
+                "slug": "owner/fmt",
+                "head_sha": HEAD_ONE,
+                "card_issue": 101,
+            }
+            gate = {
+                "status": apply_decision.WORKFLOW_GATE_BLOCKED,
+                "reason": apply_decision.WORKFLOW_GATE_HISTORY_ONLY_REASON,
+                "net_diff_complete": True,
+                "commit_sha": HISTORY_COMMIT,
+                "paths": [".github/workflows/ci.yml"],
+            }
+            hold = am.workflow_hold_from_gate(result, gate)
+            intent = {
+                "repo": "fmt",
+                "number": "5",
+                "head_sha": HEAD_ONE,
+                "card_issue": 101,
+                am.AUDIT_FINAL_GATE_PENDING_FIELD: True,
+            }
+            state = core.parse_state_block(world.card["body"])
+            state[am.AUDIT_INTENT_FIELD] = intent
+            world.card["body"] = render_card._replace_state_block(
+                world.card["body"], state
+            )
+            world.card["labels"].extend(
+                [{"name": "processing"}, {"name": am.AUTO_MERGE_CLAIM_LABEL}]
+            )
+            original_get_card = render_card.get_card
+            reads = 0
+
+            def racing_get_card(number):
+                nonlocal reads
+                reads += 1
+                if reads == 2:
+                    mutate(world)
+                return original_get_card(number)
+
+            render_card.get_card = racing_get_card
+            failed_closed = False
+            reads_before = len(world.card_read_tokens)
+            try:
+                am.persist_workflow_hold(
+                    am._workflow_hold_handoff(result, hold), card_token="card-token"
+                )
+            except RuntimeError as error:
+                failed_closed = "changed before persistence" in str(error)
+            finally:
+                render_card.get_card = original_get_card
+            raced_state = core.parse_state_block(world.card["body"])
+            raced_labels = {label["name"] for label in world.card["labels"]}
+            check(
+                "%s race: persistence fails closed" % race_name,
+                failed_closed,
+            )
+            check(
+                "%s race: hold never changes the card" % race_name,
+                render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD not in raced_state
+                and render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in raced_labels
+                and world.metrics["hold_body_writes"] == 0
+                and world.metrics["hold_label_writes"] == 0,
+            )
+            check(
+                "%s race: audit and claim remain recoverable" % race_name,
+                raced_state.get(am.AUDIT_INTENT_FIELD) == intent
+                and {"needs-decision", "processing", am.AUTO_MERGE_CLAIM_LABEL}.issubset(
+                    raced_labels
+                ),
+            )
+            check(
+                "%s race: reads and attempted writes use only the card token"
+                % race_name,
+                world.card_read_tokens[reads_before:] == ["card-token", "card-token"]
+                and not world.card_write_tokens,
+            )
+        finally:
+            world.restore()
+
+
 def test_refresh_reuse_hard_close_and_token_boundaries():
     world = LifecycleWorld().install()
     try:
@@ -686,6 +787,7 @@ def main():
     test_changed_history_head_establishes_one_new_hold()
     test_net_diff_and_unproven_history_never_create_specialized_hold()
     test_malformed_stale_and_persistence_failure_fail_closed()
+    test_hold_persistence_rejects_card_snapshot_races()
     test_refresh_reuse_hard_close_and_token_boundaries()
     test_structured_authoritative_gate_contract()
     if _failures:
