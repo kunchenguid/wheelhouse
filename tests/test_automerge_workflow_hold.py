@@ -176,6 +176,45 @@ class LifecycleWorld:
 
     def gh(self, args, check=True, input_text=None):
         token = os.environ.get("GH_TOKEN")
+        if args[:3] == ["api", "--method", "PATCH"]:
+            fields = [
+                args[index + 1]
+                for index, value in enumerate(args)
+                if value == "--raw-field"
+            ]
+            body = next(value[5:] for value in fields if value.startswith("body="))
+            labels = [
+                value[len("labels[]=") :]
+                for value in fields
+                if value.startswith("labels[]=")
+            ]
+            before = core.parse_state_block(self.card["body"]) or {}
+            after = core.parse_state_block(body) or {}
+            adding_hold = (
+                render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD not in before
+                and render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD in after
+            )
+            if adding_hold and self.fail_hold_body_writes:
+                raise RuntimeError("simulated manual-hold persistence failure")
+            self.card["body"] = body
+            self.card["labels"] = [{"name": label} for label in sorted(labels)]
+            if adding_hold:
+                self.metrics["hold_body_writes"] += 1
+                if render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL in labels:
+                    self.metrics["hold_label_writes"] += 1
+                    self.metrics["hold_atomic_writes"] += 1
+            self.card_write_tokens.append(token)
+            self.touch()
+            response = {
+                "number": self.card["number"],
+                "body": self.card["body"],
+                "labels": copy.deepcopy(self.card["labels"]),
+                "state": "open",
+                "updated_at": self.card["updatedAt"],
+            }
+            if adding_hold and self.after_hold_card_edit:
+                self.after_hold_card_edit(self)
+            return subprocess.CompletedProcess(args, 0, json.dumps(response), "")
         if args[:2] == ["issue", "edit"]:
             before = core.parse_state_block(self.card["body"]) or {}
             body = self.card["body"]
@@ -763,6 +802,13 @@ def test_hold_persistence_rejects_split_write_window_races():
         "post-edit handler transition": (
             "after",
             lambda world: world.card["labels"].append({"name": "decision:merge"}),
+        ),
+        "post-edit timestamp-only owner edit": (
+            "after",
+            lambda world: (
+                world.card.update({"title": "Owner changed title"}),
+                world.touch(),
+            ),
         ),
     }
     for race_name, (window, mutate) in race_cases.items():

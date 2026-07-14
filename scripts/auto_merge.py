@@ -1616,6 +1616,37 @@ def _workflow_hold_snapshot_matches(expected, current):
     return (True, "")
 
 
+def _update_workflow_hold_card(number, body, labels):
+    repository = str(os.environ.get("GITHUB_REPOSITORY") or "").strip()
+    if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
+        raise RuntimeError("card repository identity is unavailable")
+    args = [
+        "api",
+        "--method",
+        "PATCH",
+        "repos/%s/issues/%s" % (repository, number),
+        "--raw-field",
+        "body=%s" % body,
+    ]
+    for label in sorted(labels):
+        args.extend(["--raw-field", "labels[]=%s" % label])
+    result = render_card._gh(args)
+    try:
+        updated = json.loads(result.stdout or "{}")
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("manual-merge hold update response is unreadable") from error
+    updated_at = str(render_card.card_updated_at(updated) or "")
+    if (
+        int(updated.get("number") or 0) != int(number)
+        or not render_card.issue_is_open(updated)
+        or updated.get("body") != body
+        or _card_label_names(updated) != set(labels)
+        or not updated_at
+    ):
+        raise RuntimeError("manual-merge hold update response is untrusted")
+    return updated_at
+
+
 def persist_workflow_hold(record, card_token=""):
     """Persist and verify the denial state, visible section, and managed label.
 
@@ -1659,6 +1690,9 @@ def persist_workflow_hold(record, card_token=""):
         body_change = new_body != card.get("body")
         label_change = render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in labels
         mutation_snapshot = card
+        expected_labels = set(labels)
+        expected_labels.add(render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL)
+        expected_updated_at = str(render_card.card_updated_at(card) or "")
         if body_change or label_change:
             if label_change:
                 render_card.ensure_labels([render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL])
@@ -1671,24 +1705,18 @@ def persist_workflow_hold(record, card_token=""):
             if not render_card.issue_is_open(current):
                 raise RuntimeError("manual-merge hold card closed before persistence")
             mutation_snapshot = current
-            render_card._edit_issue_body_and_labels(
-                handoff["card_issue"],
-                new_body,
-                add_labels=[render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL]
-                if label_change
-                else None,
+            expected_updated_at = _update_workflow_hold_card(
+                handoff["card_issue"], new_body, expected_labels
             )
         confirmed = render_card.get_card(handoff["card_issue"])
         confirmed_entry = _card_index([confirmed]).get(
             (handoff["repo"], handoff["number"])
         )
-        expected_labels = set(labels)
-        expected_labels.add(render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL)
         owner_action, _ = _card_has_pending_owner_action(confirmed)
         if (
             not confirmed_entry
             or not render_card.issue_is_open(confirmed)
-            or not render_card.card_updated_at(confirmed)
+            or render_card.card_updated_at(confirmed) != expected_updated_at
             or confirmed.get("body") != new_body
             or _card_label_names(confirmed) != expected_labels
             or confirmed.get("comments") != mutation_snapshot.get("comments")
