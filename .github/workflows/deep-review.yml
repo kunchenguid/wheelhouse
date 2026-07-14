@@ -150,40 +150,11 @@ jobs:
       - id: target
         run: echo "issue=${{ github.event.issue.number || github.event.inputs.issue }}" >> "$GITHUB_OUTPUT"
 
-      # The ONLY gate: the model credential must be present. No config flag.
-      - id: gate
-        env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
-          INPUT_REPO: ${{ github.event.inputs.repo }}
-        run: |
-          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
-            action="deep-review.search"
-          else
-            action="deep-review.local"
-          fi
-          python scripts/agent_runtime.py auth-status --action "$action" --repo "$INPUT_REPO"
-
-      # Token absent: self-explain on the card instead of silently no-opping.
-      - name: Explain missing token
-        if: steps.gate.outputs.enabled != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE: ${{ steps.target.outputs.issue }}
-        run: |
-          if [ "${{ steps.gate.outputs.mode }}" = "legacy" ]; then
-            body="Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run."
-          else
-            body="Deep-review needs the selected agent-runtime auth profile configured to run (${{ steps.gate.outputs.reason }})."
-          fi
-          gh issue comment "$ISSUE" --body "$body" || true
-
       # Resolve the target coordinates and the ref to check out. Complete
       # workflow_dispatch runs use immutable inputs from decision-handler's
       # Investigate event; issue-only manual dispatches and label events parse
       # the current card body.
       - id: resolve
-        if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
@@ -246,6 +217,34 @@ jobs:
               echo "ref=refs/pull/${number}/head" # the PR head (works for forks too)
             fi
           } >> "$GITHUB_OUTPUT"
+
+      # The ONLY gate: the model credential must be present. No config flag.
+      - id: gate
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
+          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+        run: |
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
+            action="deep-review.search"
+          else
+            action="deep-review.local"
+          fi
+          python scripts/agent_runtime.py auth-status --action "$action" --repo "$TARGET_REPO"
+
+      # Token absent: self-explain on the card instead of silently no-opping.
+      - name: Explain missing token
+        if: steps.gate.outputs.enabled != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.target.outputs.issue }}
+        run: |
+          if [ "${{ steps.gate.outputs.mode }}" = "legacy" ]; then
+            body="Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run."
+          else
+            body="Deep-review needs the selected agent-runtime auth profile configured to run (${{ steps.gate.outputs.reason }})."
+          fi
+          gh issue comment "$ISSUE" --body "$body" || true
 
       # Check out the TARGET's code so the review is genuinely code-grounded.
       # FLEET_TOKEN is used ONLY here, and `persist-credentials: false` keeps it

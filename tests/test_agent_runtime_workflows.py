@@ -83,6 +83,11 @@ def main():
     check("repair consumer: normalized repair result preferred", "RUNTIME_RESULT" in (triage_steps["repair-result"].get("env") or {}))
     deep_post = next(step for step in steps(docs["deep"]) if step.get("name") == "Post the verdict on the card")
     check("deep consumer: normalized result preferred", "steps.agent-runtime.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
+    deep_steps = steps(docs["deep"])
+    deep_ids = [step.get("id") for step in deep_steps]
+    deep_gate = next(step for step in deep_steps if step.get("id") == "gate")
+    check("deep selection: target resolves before repository-aware gate", deep_ids.index("resolve") < deep_ids.index("gate"))
+    check("deep selection: gate uses validated resolved repository", (deep_gate.get("env") or {}).get("TARGET_REPO") == "${{ steps.resolve.outputs.repo }}" and '--repo "$TARGET_REPO"' in deep_gate["run"])
     nl_result = next(step for step in steps(docs["decision"]) if step.get("id") == "nl-result")
     check("NL consumer: runtime final exported before deterministic route", "agent_runtime.py export-final" in nl_result["run"])
     execute = next(step for step in steps(docs["decision"]) if step.get("id") == "execute")
