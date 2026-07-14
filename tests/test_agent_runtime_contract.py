@@ -130,6 +130,8 @@ def main():
         task_schema = load_schema("AgentTask")
         check("schema: draft 2020-12 pinned", task_schema["$schema"].endswith("2020-12/schema"))
         check("schema: exact API version pinned", task_schema["properties"]["apiVersion"]["const"] == "wheelhouse.agent-runtime/v1alpha1")
+        result_selection = load_schema("AgentResult")["properties"]["selection"]
+        check("schema: observed provider provenance required", "actualProvider" in result_selection["required"])
 
         event_path = root / "events.ndjson"
         with EventWriter(str(event_path), task["metadata"]["executionId"], 65536) as writer:

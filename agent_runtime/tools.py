@@ -41,7 +41,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["pattern", "root"],
         "properties": {
             "pattern": {"type": "string", "minLength": 1, "maxLength": 500},
-            "root": {"type": "string", "maxLength": 4096},
+            "root": {"type": "string", "minLength": 1, "maxLength": 4096},
             "maxResults": {"type": "integer", "minimum": 1, "maximum": 2000},
         },
     },

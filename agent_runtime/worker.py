@@ -426,6 +426,7 @@ def _bounded_output_schema(schema: dict[str, Any], max_output_tokens: int) -> di
 def _checkpoint(
     output: Path,
     *,
+    plan: dict[str, Any],
     spend_started: bool,
     actual_model: str,
     actual_provider: str,
@@ -435,6 +436,9 @@ def _checkpoint(
     atomic_write_json(
         output / "worker-state.json",
         {
+            "executionId": plan["executionId"],
+            "requestSha256": plan["taskSha256"],
+            "attemptId": plan["attemptId"],
             "spendStarted": spend_started,
             "actualModel": actual_model,
             "actualProvider": actual_provider,
@@ -604,6 +608,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         spend_started = True
         _checkpoint(
             output,
+            plan=plan,
             spend_started=True,
             actual_model=actual_model,
             actual_provider=actual_provider,
@@ -638,6 +643,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
             budget.begin_provider_request(usage)
             _checkpoint(
                 output,
+                plan=plan,
                 spend_started=True,
                 actual_model=actual_model,
                 actual_provider=actual_provider,
@@ -710,6 +716,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
                     events.emit("usage.updated", {"usageSha256": canonical_sha256(token_usage)})
                     _checkpoint(
                         output,
+                        plan=plan,
                         spend_started=True,
                         actual_model=actual_model,
                         actual_provider=actual_provider,
@@ -797,6 +804,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         )
         _checkpoint(
             output,
+            plan=plan,
             spend_started=error.spend_started,
             actual_model=error.actual_model,
             actual_provider=error.actual_provider,
@@ -822,6 +830,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         )
         _checkpoint(
             output,
+            plan=plan,
             spend_started=failure.spend_started,
             actual_model=failure.actual_model,
             actual_provider=failure.actual_provider,
@@ -911,6 +920,7 @@ def _run_fake(plan: dict[str, Any], output: Path, events: InternalEvents, cancel
     if script.get("nonObjectResult"):
         _checkpoint(
             output,
+            plan=plan,
             spend_started=True,
             actual_model=str(script.get("actualModel") or plan["candidate"]["model"]),
             actual_provider=str(script.get("actualProvider") or plan["candidate"]["provider"]),

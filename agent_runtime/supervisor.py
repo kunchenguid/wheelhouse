@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import secrets
 import shutil
 import signal
 import stat
@@ -170,6 +171,7 @@ def _selection(task: dict[str, Any], probe: Any, worker: dict[str, Any] | None =
         "protocol": descriptor["protocol"],
         "protocolSchemaSha256": descriptor["protocolSchemaSha256"],
         "provider": candidate["provider"],
+        "actualProvider": str(worker.get("actualProvider") or ""),
         "authProfile": candidate["authProfile"],
         "authMechanism": candidate["authMechanism"],
         "expectedWorkspaceIdSha256": canonical_sha256(candidate["expectedWorkspaceId"]) if candidate.get("expectedWorkspaceId") else None,
@@ -391,14 +393,19 @@ def _merge_worker_checkpoint(worker: Any, checkpoint: dict[str, Any], protocol_c
     return merged
 
 
-def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> dict[str, Any]:
+def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, recovery: dict[str, Any]) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     bundle = Path(bundle_dir).resolve()
+    output_dir = bundle / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(mode=0o700)
     _verify_artifacts(task, bundle)
     started_at = _now()
     started = time.monotonic()
     execution_id = task["metadata"]["executionId"]
+    request_sha256 = canonical_sha256(task)
     candidate = task["spec"]["selection"]["candidates"][0]
     adapter_class = ADAPTERS.get(candidate["adapter"])
     if adapter_class is None:
@@ -408,10 +415,8 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) ->
     probe = adapter.probe(task)
     negotiated = negotiate(task, probe.descriptor.value, host)
     plan = adapter.compile(task, negotiated.proof, probe)
-    output_dir = bundle / "output"
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(mode=0o700)
+    attempt_id = secrets.token_hex(16)
+    plan["attemptId"] = attempt_id
     plan_path = bundle / "adapter-plan.json"
     atomic_write_json(plan_path, plan)
     if host.get("testOnly"):
@@ -450,8 +455,19 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) ->
             worker_command=worker_command,
             proof=host,
         )
+        recovery.update(
+            {
+                "executionId": execution_id,
+                "requestSha256": request_sha256,
+                "attemptId": attempt_id,
+                "startedAt": started_at,
+                "startedMonotonicMs": int(started * 1000),
+                "selection": _selection(task, probe),
+                "proof": _proof(task, probe.descriptor.value, negotiated.proof, host),
+            }
+        )
         with EventWriter(events_path, execution_id, task["spec"]["limits"]["maxEventBytes"]) as events:
-            events.emit("execution.accepted", {"requestSha256": canonical_sha256(task)})
+            events.emit("execution.accepted", {"requestSha256": request_sha256})
             events.emit("selection.resolved", {"candidateIndex": 0, "adapter": candidate["adapter"], "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
             events.emit("capabilities.probed", {"descriptorSha256": canonical_sha256(probe.descriptor.value)})
             events.emit("capabilities.negotiated", {"proofSha256": canonical_sha256(negotiated.proof), "exactTools": negotiated.proof["exactTools"]})
@@ -527,7 +543,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) ->
                 "apiVersion": API_VERSION,
                 "kind": "AgentResult",
                 "executionId": execution_id,
-                "requestSha256": canonical_sha256(task),
+                "requestSha256": request_sha256,
                 "status": status,
                 "selection": _selection(task, probe, worker),
                 "proof": _proof(task, probe.descriptor.value, negotiated.proof, host),
@@ -580,15 +596,27 @@ def _preflight_code(error: Exception) -> tuple[str, str]:
     return "internal.error", "validating"
 
 
-def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_path: str, error: Exception) -> dict[str, Any]:
+def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_path: str, error: Exception, recovery: dict[str, Any]) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     candidate = task["spec"]["selection"]["candidates"][0]
+    execution_id = task["metadata"]["executionId"]
+    request_sha256 = canonical_sha256(task)
     code, phase = _preflight_code(error)
     checkpoint: dict[str, Any] = {}
     try:
         checkpoint_value = load_json_regular(Path(bundle_dir) / "output" / "worker-state.json", max_bytes=65536)
-        if isinstance(checkpoint_value, dict) and checkpoint_value.get("spendStarted") is True:
+        if (
+            isinstance(checkpoint_value, dict)
+            and checkpoint_value.get("spendStarted") is True
+            and checkpoint_value.get("executionId") == execution_id
+            and checkpoint_value.get("requestSha256") == request_sha256
+            and checkpoint_value.get("attemptId") == recovery.get("attemptId")
+            and recovery.get("executionId") == execution_id
+            and recovery.get("requestSha256") == request_sha256
+            and isinstance(recovery.get("selection"), dict)
+            and isinstance(recovery.get("proof"), dict)
+        ):
             checkpoint = checkpoint_value
     except Exception:
         pass
@@ -596,7 +624,7 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
     if spend_started:
         code = "internal.error"
         phase = "running"
-    started = _now()
+    started = recovery.get("startedAt") if spend_started and isinstance(recovery.get("startedAt"), str) else _now()
     adapter_id = candidate["adapter"]
     if adapter_id == "codex-app-server":
         lock_path = Path(__file__).resolve().parent / "runtime.lock.json"
@@ -622,6 +650,7 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         "protocol": protocol,
         "protocolSchemaSha256": protocol_digest,
         "provider": candidate["provider"],
+        "actualProvider": str(checkpoint.get("actualProvider") or "")[:256],
         "authProfile": candidate["authProfile"],
         "authMechanism": candidate["authMechanism"],
         "expectedWorkspaceIdSha256": canonical_sha256(candidate["expectedWorkspaceId"]) if candidate.get("expectedWorkspaceId") else None,
@@ -634,6 +663,11 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         "fallbackUsed": False,
         "fallbackReason": None,
     }
+    if spend_started:
+        selection = dict(recovery["selection"])
+        selection["actualModel"] = str(checkpoint.get("actualModel") or "")[:256]
+        selection["actualProvider"] = str(checkpoint.get("actualProvider") or "")[:256]
+        selection["actualEffort"] = str(checkpoint.get("actualEffort") or "")[:256]
     rejected_error = _error(
         code,
         "Agent runtime failed after model spend." if spend_started else str(error) or "Agent runtime preflight failed.",
@@ -643,11 +677,11 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
     result = {
         "apiVersion": API_VERSION,
         "kind": "AgentResult",
-        "executionId": task["metadata"]["executionId"],
-        "requestSha256": canonical_sha256(task),
+        "executionId": execution_id,
+        "requestSha256": request_sha256,
         "status": "failed" if spend_started else "rejected",
         "selection": selection,
-        "proof": {
+        "proof": recovery["proof"] if spend_started else {
             "contractMajor": 1,
             "capabilitySnapshotSha256": canonical_sha256({"status": "unavailable", "code": code}),
             "negotiationSha256": canonical_sha256({"status": "failed-after-spend" if spend_started else "rejected-before-spend", "code": code}),
@@ -658,7 +692,7 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
             "sandboxPolicySha256": canonical_sha256({"status": "not-started"}),
         },
         "error": rejected_error,
-        "usage": _usage(checkpoint, 0) if spend_started else {
+        "usage": _usage(checkpoint, max(0, int(time.monotonic() * 1000) - int(recovery.get("startedMonotonicMs") or 0))) if spend_started else {
             "inputTokens": None,
             "outputTokens": None,
             "cacheReadTokens": None,
@@ -674,8 +708,8 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         "startedAt": started,
         "completedAt": _now(),
     }
-    with EventWriter(events_path, task["metadata"]["executionId"], task["spec"]["limits"]["maxEventBytes"]) as events:
-        events.emit("execution.accepted", {"requestSha256": canonical_sha256(task)})
+    with EventWriter(events_path, execution_id, task["spec"]["limits"]["maxEventBytes"]) as events:
+        events.emit("execution.accepted", {"requestSha256": request_sha256})
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": adapter_id, "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
         events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": spend_started})
         events.emit("execution.completed", {"status": result["status"], "resultSha256": canonical_sha256(result)})
@@ -687,10 +721,11 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
 
 
 def run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> dict[str, Any]:
+    recovery: dict[str, Any] = {}
     try:
-        return _run(task_path, bundle_dir, result_path, events_path)
+        return _run(task_path, bundle_dir, result_path, events_path, recovery)
     except Exception as error:
         try:
-            return _write_rejected(task_path, bundle_dir, result_path, events_path, error)
+            return _write_rejected(task_path, bundle_dir, result_path, events_path, error, recovery)
         except Exception:
             raise error

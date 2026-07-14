@@ -10,7 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.contract import atomic_write_json, load_json_regular, validate_contract
+from agent_runtime.contract import atomic_write_json, canonical_sha256, load_json_regular, validate_contract
 from agent_runtime.supervisor import _anchor_ok, run
 from agent_runtime.worker import RuntimeBudget, WorkerFailure, _bounded_output_schema
 from agent_runtime_testlib import default_final, environment, make_task
@@ -46,6 +46,7 @@ def main():
         check("lifecycle: final independent from transcript retention", result["final"]["value"] and result["artifacts"][0]["role"] == "normalized-events")
         check("lifecycle: raw transcript discarded", not list(bundle.rglob("*transcript*")))
         check("lifecycle: normalized terminal emitted once", events.read_text().count('"type":"execution.completed"') == 1)
+        check("provenance: observed provider retained", result["selection"]["actualProvider"] == "fake-provider")
 
         task = load_json_regular(bundle / "task.json")
         with mock.patch.object(Path, "read_text", side_effect=OSError("fixture read failure")):
@@ -107,7 +108,32 @@ def main():
             result, _, _, _ = execute(base / "event-ingestion-exception", {"nonObjectResult": True})
         check("events: escaping ingestion failure remains post-spend", result["status"] == "failed" and result["error"]["spendStarted"] is True)
         check("events: escaping ingestion failure preserves checkpoint usage", result["usage"]["providerRequests"] == 2 and result["usage"]["inputTokens"] == 12)
-        check("events: escaping ingestion failure preserves checkpoint provenance", result["selection"]["actualModel"] == "fake-model" and result["selection"]["actualEffort"] == "high")
+        check("events: escaping ingestion failure preserves checkpoint provenance", result["selection"]["actualModel"] == "fake-model" and result["selection"]["actualProvider"] == "fake-provider" and result["selection"]["actualEffort"] == "high")
+        check("events: escaping ingestion failure preserves negotiated proof", result["proof"]["sandboxPolicySha256"] != canonical_sha256({"status": "not-started"}))
+        check("events: escaping ingestion failure preserves attempt timing", result["usage"]["durationMs"] > 0 and result["startedAt"] < result["completedAt"])
+
+        stale_root = base / "stale-checkpoint"
+        stale_task, stale_bundle, stale_script = make_task(stale_root, "triage.issue.local", script={})
+        stale_task["spec"]["selection"]["candidates"][0]["adapter"] = "unavailable"
+        atomic_write_json(stale_bundle / "task.json", stale_task)
+        stale_output = stale_bundle / "output"
+        stale_output.mkdir()
+        atomic_write_json(
+            stale_output / "worker-state.json",
+            {
+                "executionId": stale_task["metadata"]["executionId"],
+                "requestSha256": canonical_sha256(stale_task),
+                "attemptId": "stale-attempt",
+                "spendStarted": True,
+                "actualModel": "stale-model",
+                "actualProvider": "stale-provider",
+                "actualEffort": "stale-effort",
+                "usage": {"providerRequests": 9},
+            },
+        )
+        with environment(WHEELHOUSE_AGENT_TEST_SANDBOX="1", WHEELHOUSE_FAKE_ADAPTER_SCRIPT=str(stale_script)):
+            stale_result = run(str(stale_bundle / "task.json"), str(stale_bundle), str(stale_bundle / "result.json"), str(stale_bundle / "events.ndjson"))
+        check("recovery: stale checkpoint cannot reclassify preflight failure", stale_result["status"] == "rejected" and stale_result["error"]["spendStarted"] is False and stale_result["usage"]["providerRequests"] == 0)
 
         fast = {"softDeadlineMs": 1000, "hardDeadlineMs": 1800, "cancelGraceMs": 200}
         result, _, events, _ = execute(base / "cancel", {"sleepMs": 5000}, fast)

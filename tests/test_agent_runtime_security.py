@@ -60,6 +60,7 @@ def main():
         glob = tools.call("fs.glob", {"root": "target-src", "pattern": "*.py"})
         check("tools: glob excludes symlinks", glob["paths"] == ["target-src/safe.py"])
         check("tools: glob requires an explicit mounted root", rejected(lambda: tools.call("fs.glob", {"pattern": "*.py"})))
+        check("tools: glob rejects an empty mounted root", rejected(lambda: tools.call("fs.glob", {"root": "", "pattern": "*.py"})))
 
         for index in range(12):
             (source / ("long-%02d-%s.txt" % (index, "x" * 80))).write_text("match %s\n" % ("y" * 300), encoding="utf-8")
