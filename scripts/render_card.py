@@ -1960,27 +1960,6 @@ def _trusted_open_target_card(issue, item):
     return True
 
 
-def reconcile_soft_close_retryable(issue, item):
-    try:
-        _trusted_target_state(issue, item)
-    except CardLifecycleError:
-        return False
-    issue_state = (issue or {}).get("issue_state", (issue or {}).get("state"))
-    if not isinstance(issue_state, str) or issue_state.upper() != "OPEN":
-        return False
-    author = (((issue or {}).get("author") or {}).get("login") or "")
-    if not _trusted_automation_login(author):
-        return False
-    names = _lifecycle_label_names(issue)
-    if "resolved" not in names or "needs-decision" in names:
-        return False
-    if names.intersection(
-        {"processing", "blocked", HOLD_LABEL, "wheelhouse:auto-merge-claim"}
-    ):
-        return False
-    return bool(reconcile_soft_close_provenance(issue.get("body", "")))
-
-
 def reusable_closed_card(issue, item):
     """Return (eligible, reason) for one exact closed target-label candidate.
 

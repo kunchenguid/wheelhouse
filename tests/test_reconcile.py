@@ -337,7 +337,6 @@ class ReconcileLifecycle:
         self._clock = 0
         self.fail_body_write_attempts = set()
         self.fail_close_attempts = set()
-        self.partial_close_attempts = set()
         self.close_attempts = 0
         self.run_number = 0
 
@@ -361,6 +360,8 @@ class ReconcileLifecycle:
 
     def _gh(self, args, check=True):
         if args[:3] == ["api", "--method", "PATCH"]:
+            if self.close_attempts in self.fail_close_attempts:
+                raise RuntimeError("simulated close failure")
             names = {
                 value.removeprefix("labels[]=")
                 for value in args
@@ -457,17 +458,6 @@ class ReconcileLifecycle:
 
         def guarded_close(*args, **kwargs):
             self.close_attempts += 1
-            if self.close_attempts in self.fail_close_attempts:
-                if self.close_attempts in self.partial_close_attempts:
-                    names = {
-                        label["name"] if isinstance(label, dict) else label
-                        for label in self.issue["labels"]
-                    }
-                    names.add("resolved")
-                    names.discard("needs-decision")
-                    self.issue["labels"] = labels(*sorted(names))
-                    self._tick()
-                raise RuntimeError("simulated close failure")
             return old_close(*args, **kwargs)
 
         reconcile.render_card.close_card = guarded_close
@@ -1556,7 +1546,6 @@ def test_lifecycle_failed_close_refreshes_provenance_before_retry():
     absent = scan_payload(items=[])
     lifecycle.run(absent)
     lifecycle.fail_close_attempts = {1}
-    lifecycle.partial_close_attempts = {1}
     lifecycle.run(absent)
     failed_provenance = reconcile.render_card.reconcile_soft_close_provenance(
         lifecycle.issue["body"]
@@ -1570,12 +1559,25 @@ def test_lifecycle_failed_close_refreshes_provenance_before_retry():
     retried_provenance = reconcile.render_card.reconcile_soft_close_provenance(
         lifecycle.issue["body"]
     )
+    candidate = {
+        "number": lifecycle.issue["number"],
+        "body": lifecycle.issue["body"],
+        "labels": lifecycle.issue["labels"],
+        "state": lifecycle.issue["state"],
+        "updatedAt": lifecycle.issue["updatedAt"],
+        "author": lifecycle.issue["author"],
+        "closedAt": lifecycle.issue.get("closedAt", ""),
+        "closedBy": lifecycle.issue.get("closedBy"),
+    }
+    reusable, _reason = reconcile.render_card.reusable_closed_card(
+        candidate, work_item()
+    )
     check(
         "close retry: failed close leaves a trusted threshold record open",
         failed_provenance is not None
         and partial_state == "OPEN"
-        and "resolved" in partial_labels
-        and "needs-decision" not in partial_labels
+        and "needs-decision" in partial_labels
+        and "resolved" not in partial_labels
         and lifecycle.close_attempts == 2,
     )
     check(
@@ -1589,7 +1591,35 @@ def test_lifecycle_failed_close_refreshes_provenance_before_retry():
         and retried_provenance
         == reconcile.render_card.reconcile_soft_close_provenance(
             lifecycle.close_calls[0]["body"]
-        ),
+        )
+        and reusable,
+    )
+
+
+def test_owner_resolution_cannot_be_retried_as_reconcile_close():
+    lifecycle = ReconcileLifecycle(work_item())
+    absent = scan_payload(items=[])
+    lifecycle.run(absent)
+    lifecycle.fail_close_attempts = {1}
+    lifecycle.run(absent)
+    names = {
+        label["name"] if isinstance(label, dict) else label
+        for label in lifecycle.issue["labels"]
+    }
+    names.add("resolved")
+    names.discard("needs-decision")
+    lifecycle.issue["labels"] = labels(*sorted(names))
+    lifecycle._tick()
+    lifecycle.run(absent)
+    check(
+        "owner resolution: threshold provenance is never refreshed or closed",
+        lifecycle.issue["state"] == "OPEN"
+        and lifecycle.close_attempts == 1
+        and lifecycle.body_writes == 2
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 2,
     )
 
 
@@ -1954,6 +1984,7 @@ def main():
     test_failed_present_reset_cannot_authorize_later_close()
     test_lifecycle_two_absences_close_with_provenance()
     test_lifecycle_failed_close_refreshes_provenance_before_retry()
+    test_owner_resolution_cannot_be_retried_as_reconcile_close()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()
     test_intervening_runs_break_absence_adjacency()
