@@ -103,6 +103,12 @@ def main():
         check("events: OSError cannot erase checkpoint-backed failure", result["status"] == "failed" and result["error"]["spendStarted"] is True and result["usage"]["providerRequests"] == 2)
         check("events: unreadable diagnostics emit content-free warning", "adapter-events-unavailable" in events.read_text(encoding="utf-8"))
 
+        with mock.patch("agent_runtime.supervisor._read_worker_events", side_effect=RecursionError("fixture event nesting")):
+            result, _, _, _ = execute(base / "event-ingestion-exception", {"nonObjectResult": True})
+        check("events: escaping ingestion failure remains post-spend", result["status"] == "failed" and result["error"]["spendStarted"] is True)
+        check("events: escaping ingestion failure preserves checkpoint usage", result["usage"]["providerRequests"] == 2 and result["usage"]["inputTokens"] == 12)
+        check("events: escaping ingestion failure preserves checkpoint provenance", result["selection"]["actualModel"] == "fake-model" and result["selection"]["actualEffort"] == "high")
+
         fast = {"softDeadlineMs": 1000, "hardDeadlineMs": 1800, "cancelGraceMs": 200}
         result, _, events, _ = execute(base / "cancel", {"sleepMs": 5000}, fast)
         check("cancel: soft deadline requests adapter-native cancel", result["status"] == "cancelled" and result["error"]["code"] == "lifecycle.cancelled")

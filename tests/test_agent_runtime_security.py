@@ -59,6 +59,7 @@ def main():
         check("tools: grep returns bounded typed matches", grep["matches"][0]["path"] == "target-src/safe.py")
         glob = tools.call("fs.glob", {"root": "target-src", "pattern": "*.py"})
         check("tools: glob excludes symlinks", glob["paths"] == ["target-src/safe.py"])
+        check("tools: glob requires an explicit mounted root", rejected(lambda: tools.call("fs.glob", {"pattern": "*.py"})))
 
         for index in range(12):
             (source / ("long-%02d-%s.txt" % (index, "x" * 80))).write_text("match %s\n" % ("y" * 300), encoding="utf-8")

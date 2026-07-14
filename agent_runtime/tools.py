@@ -38,7 +38,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "fs.glob": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["pattern"],
+        "required": ["pattern", "root"],
         "properties": {
             "pattern": {"type": "string", "minLength": 1, "maxLength": 500},
             "root": {"type": "string", "maxLength": 4096},
@@ -291,7 +291,7 @@ class CanonicalTools:
         pattern = str(args.get("pattern") or "")
         if not pattern or os.path.isabs(pattern) or ".." in Path(pattern).parts:
             raise ToolError("glob pattern must remain inside the input root")
-        root_relative = str(args.get("root") or "inputs")
+        root_relative = str(args["root"])
         root = _safe_path(self.root, root_relative, regular=False)
         maximum = min(int(args.get("maxResults", 1000)), 2000)
         paths: list[str] = []

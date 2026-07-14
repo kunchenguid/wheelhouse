@@ -580,11 +580,22 @@ def _preflight_code(error: Exception) -> tuple[str, str]:
     return "internal.error", "validating"
 
 
-def _write_rejected(task_path: str, result_path: str, events_path: str, error: Exception) -> dict[str, Any]:
+def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_path: str, error: Exception) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     candidate = task["spec"]["selection"]["candidates"][0]
     code, phase = _preflight_code(error)
+    checkpoint: dict[str, Any] = {}
+    try:
+        checkpoint_value = load_json_regular(Path(bundle_dir) / "output" / "worker-state.json", max_bytes=65536)
+        if isinstance(checkpoint_value, dict) and checkpoint_value.get("spendStarted") is True:
+            checkpoint = checkpoint_value
+    except Exception:
+        pass
+    spend_started = bool(checkpoint)
+    if spend_started:
+        code = "internal.error"
+        phase = "running"
     started = _now()
     adapter_id = candidate["adapter"]
     if adapter_id == "codex-app-server":
@@ -615,26 +626,31 @@ def _write_rejected(task_path: str, result_path: str, events_path: str, error: E
         "authMechanism": candidate["authMechanism"],
         "expectedWorkspaceIdSha256": canonical_sha256(candidate["expectedWorkspaceId"]) if candidate.get("expectedWorkspaceId") else None,
         "requestedModel": candidate["model"],
-        "actualModel": "",
+        "actualModel": str(checkpoint.get("actualModel") or "")[:256],
         "requestedEffort": candidate["effort"],
-        "actualEffort": "",
+        "actualEffort": str(checkpoint.get("actualEffort") or "")[:256],
         "costClass": candidate["costClass"],
         "dataBoundary": candidate["dataBoundary"],
         "fallbackUsed": False,
         "fallbackReason": None,
     }
-    rejected_error = _error(code, str(error) or "Agent runtime preflight failed.", phase=phase, spend_started=False)
+    rejected_error = _error(
+        code,
+        "Agent runtime failed after model spend." if spend_started else str(error) or "Agent runtime preflight failed.",
+        phase=phase,
+        spend_started=spend_started,
+    )
     result = {
         "apiVersion": API_VERSION,
         "kind": "AgentResult",
         "executionId": task["metadata"]["executionId"],
         "requestSha256": canonical_sha256(task),
-        "status": "rejected",
+        "status": "failed" if spend_started else "rejected",
         "selection": selection,
         "proof": {
             "contractMajor": 1,
             "capabilitySnapshotSha256": canonical_sha256({"status": "unavailable", "code": code}),
-            "negotiationSha256": canonical_sha256({"status": "rejected-before-spend", "code": code}),
+            "negotiationSha256": canonical_sha256({"status": "failed-after-spend" if spend_started else "rejected-before-spend", "code": code}),
             "policySha256": canonical_sha256({"isolation": task["spec"]["isolation"], "limits": task["spec"]["limits"], "retention": task["spec"]["retention"], "retry": task["spec"]["retry"]}),
             "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
             "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
@@ -642,7 +658,7 @@ def _write_rejected(task_path: str, result_path: str, events_path: str, error: E
             "sandboxPolicySha256": canonical_sha256({"status": "not-started"}),
         },
         "error": rejected_error,
-        "usage": {
+        "usage": _usage(checkpoint, 0) if spend_started else {
             "inputTokens": None,
             "outputTokens": None,
             "cacheReadTokens": None,
@@ -661,8 +677,8 @@ def _write_rejected(task_path: str, result_path: str, events_path: str, error: E
     with EventWriter(events_path, task["metadata"]["executionId"], task["spec"]["limits"]["maxEventBytes"]) as events:
         events.emit("execution.accepted", {"requestSha256": canonical_sha256(task)})
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": adapter_id, "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
-        events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": False})
-        events.emit("execution.completed", {"status": "rejected", "resultSha256": canonical_sha256(result)})
+        events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": spend_started})
+        events.emit("execution.completed", {"status": result["status"], "resultSha256": canonical_sha256(result)})
     event_file = Path(events_path)
     result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
     validate_contract(result, "AgentResult")
@@ -675,6 +691,6 @@ def run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> 
         return _run(task_path, bundle_dir, result_path, events_path)
     except Exception as error:
         try:
-            return _write_rejected(task_path, result_path, events_path, error)
+            return _write_rejected(task_path, bundle_dir, result_path, events_path, error)
         except Exception:
             raise error
