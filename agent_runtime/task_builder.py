@@ -144,7 +144,9 @@ def claude_declared_outputs(action: str) -> list[str]:
 def claude_limit_enforcement() -> dict[str, str]:
     return {
         "softDeadlineMs": "unavailable",
-        "hardDeadlineMs": "externally-enforced",
+        "hardDeadlineMs": "unavailable",
+        "dispatchDeadlineMs": "externally-enforced",
+        "childExecutionTimeoutMs": "externally-enforced",
         "cancelGraceMs": "unavailable",
         "maxTurns": "unavailable",
         "maxToolCalls": "unavailable",
@@ -260,6 +262,8 @@ def _limit_enforcement(adapter: str) -> dict[str, str]:
     return {
         "softDeadlineMs": "externally-enforced",
         "hardDeadlineMs": "externally-enforced",
+        "dispatchDeadlineMs": "unavailable",
+        "childExecutionTimeoutMs": "unavailable",
         "cancelGraceMs": "externally-enforced",
         "maxTurns": "adapter-enforced",
         "maxToolCalls": "adapter-enforced",
@@ -424,7 +428,9 @@ def build_task(
             },
             "limits": {
                 "softDeadlineMs": None if adapter == "claude-action-compat" else soft,
-                "hardDeadlineMs": hard,
+                "hardDeadlineMs": None if adapter == "claude-action-compat" else hard,
+                "dispatchDeadlineMs": 60_000 if adapter == "claude-action-compat" else None,
+                "childExecutionTimeoutMs": ((hard + 59_999) // 60_000) * 60_000 if adapter == "claude-action-compat" else None,
                 "cancelGraceMs": None if adapter == "claude-action-compat" else 10000,
                 "maxTurns": None if adapter == "claude-action-compat" else turns,
                 "maxToolCalls": None if adapter == "claude-action-compat" else tool_calls,

@@ -57,10 +57,12 @@
         "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "limitEnforcement": {
           "type": "object", "additionalProperties": false,
-          "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+          "required": ["softDeadlineMs", "hardDeadlineMs", "dispatchDeadlineMs", "childExecutionTimeoutMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
           "properties": {
             "softDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
             "hardDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "dispatchDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "childExecutionTimeoutMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
             "cancelGraceMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
             "maxTurns": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
             "maxToolCalls": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},

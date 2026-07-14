@@ -168,7 +168,8 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
         "prompt": prompt.read_text(encoding="utf-8"),
         "taskSha256": canonical_sha256(task),
         "allowedRepos": metadata["allowedRepos"],
-        "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"],
+        "dispatchDeadlineMs": task["spec"]["limits"]["dispatchDeadlineMs"],
+        "childExecutionTimeoutMs": task["spec"]["limits"]["childExecutionTimeoutMs"],
     }
 
 

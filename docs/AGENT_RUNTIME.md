@@ -27,9 +27,10 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 It revalidates every hydrated input digest, file type, and permission after the action and accepts success only when the immutable input observation is unchanged and every new workspace path is a declared output.
-The trusted parent supervises the hard deadline, cancels overruns, binds the returned artifact to the task and model run, and atomically emits `AgentResult` plus content-free events.
+The trusted parent bounds dispatch and correlation, validates the correlated child revision separately, supervises known child runs, and atomically emits `AgentResult` plus content-free events.
 Every task limit carries provider-neutral enforcement evidence as `externally-enforced`, `adapter-enforced`, or `unavailable`, and an unavailable value is explicitly `null`.
-Only the Claude hard deadline and trusted artifact, transcript, event, and final-output bounds are claimed.
+Claude records the exact end-to-end hard deadline as unavailable because GitHub can delay workflow discovery.
+Its separate dispatch deadline and child-job execution timeout are externally enforced, and its trusted artifact, transcript, event, and final-output bounds remain explicit.
 The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before action invocation, so cancellation or an action crash cannot downgrade a possibly spent attempt.
 The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
@@ -147,8 +148,9 @@ No model output directly authorizes or performs a GitHub action.
 
 ## Deadlines, cancellation, and retry
 
-Each action has a soft deadline, a cancellation grace interval, and a hard deadline.
-For Claude, the trusted parent controller enforces the hard deadline across the separate workflow and cancels an overrun before accepting any result.
+Sandboxed worker actions have a soft deadline, a cancellation grace interval, and a hard deadline.
+For Claude, the trusted parent has a bounded dispatch and correlation window, while the separately permissioned child job has its own task-bound GitHub Actions timeout.
+The end-to-end Claude hard deadline is unavailable because a queued child may become discoverable only after its parent window closes, but that delayed child still cannot execute beyond its own job timeout.
 The worker counts every logical provider request and turn before it can proceed, including continuations after rejected tool calls, disables provider and stream retries, and interrupts before continuation at an observed token ceiling or after any observed overrun.
 Codex receives the task input ceiling through its pinned app-server context configuration and additional native output-schema string ceilings before the first provider request.
 Durable worker checkpoints preserve observed spend, usage, and model provenance if the worker crashes or is killed after spend begins.

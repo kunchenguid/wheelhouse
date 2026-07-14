@@ -235,7 +235,7 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
         for name, quality in enforcement.items():
             if (limits[name] is None) != (quality == "unavailable"):
                 raise ContractError("limit values must match their enforcement availability")
-        if limits["softDeadlineMs"] is not None and limits["cancelGraceMs"] is not None and limits["hardDeadlineMs"] <= limits["softDeadlineMs"] + limits["cancelGraceMs"]:
+        if limits["hardDeadlineMs"] is not None and limits["softDeadlineMs"] is not None and limits["cancelGraceMs"] is not None and limits["hardDeadlineMs"] <= limits["softDeadlineMs"] + limits["cancelGraceMs"]:
             raise ContractError("hard deadline must exceed soft deadline plus cancellation grace")
     if actual_kind == "AgentResult":
         if document["proof"]["limitEnforcementSha256"] != canonical_sha256(document["proof"]["limitEnforcement"]):

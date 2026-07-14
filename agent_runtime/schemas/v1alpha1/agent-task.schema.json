@@ -176,10 +176,12 @@
         },
         "limits": {
           "type": "object", "additionalProperties": false,
-          "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens", "enforcement"],
+          "required": ["softDeadlineMs", "hardDeadlineMs", "dispatchDeadlineMs", "childExecutionTimeoutMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens", "enforcement"],
           "properties": {
             "softDeadlineMs": {"type": ["integer", "null"], "minimum": 1000, "maximum": 3600000},
-            "hardDeadlineMs": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+            "hardDeadlineMs": {"type": ["integer", "null"], "minimum": 1000, "maximum": 3600000},
+            "dispatchDeadlineMs": {"type": ["integer", "null"], "minimum": 1000, "maximum": 300000},
+            "childExecutionTimeoutMs": {"type": ["integer", "null"], "minimum": 60000, "maximum": 3600000},
             "cancelGraceMs": {"type": ["integer", "null"], "minimum": 100, "maximum": 60000},
             "maxTurns": {"type": ["integer", "null"], "minimum": 1, "maximum": 128},
             "maxToolCalls": {"type": ["integer", "null"], "minimum": 0, "maximum": 512},
@@ -190,10 +192,12 @@
             "maxOutputTokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 131072},
             "enforcement": {
               "type": "object", "additionalProperties": false,
-              "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+              "required": ["softDeadlineMs", "hardDeadlineMs", "dispatchDeadlineMs", "childExecutionTimeoutMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
               "properties": {
                 "softDeadlineMs": {"$ref": "#/$defs/limitEnforcement"},
                 "hardDeadlineMs": {"$ref": "#/$defs/limitEnforcement"},
+                "dispatchDeadlineMs": {"$ref": "#/$defs/limitEnforcement"},
+                "childExecutionTimeoutMs": {"$ref": "#/$defs/limitEnforcement"},
                 "cancelGraceMs": {"$ref": "#/$defs/limitEnforcement"},
                 "maxTurns": {"$ref": "#/$defs/limitEnforcement"},
                 "maxToolCalls": {"$ref": "#/$defs/limitEnforcement"},

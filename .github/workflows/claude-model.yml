@@ -12,6 +12,7 @@ on:
       invocation_id: {required: true}
       expected_commit_sha: {required: true}
       correlation_id: {required: true}
+      child_timeout_minutes: {required: true}
 
 permissions:
   actions: read
@@ -20,7 +21,7 @@ permissions:
 jobs:
   model:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}
     steps:
       - name: Bind the dispatched workflow revision
         env:
@@ -105,6 +106,7 @@ jobs:
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
           ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
           RUNNER_WORKSPACE: ${{ runner.workspace }}
+          CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
         run: |
           set -euo pipefail
           mkdir -p "$ATTEMPT"
@@ -113,6 +115,9 @@ jobs:
           from pathlib import Path
           from agent_runtime.claude_handoff import declared_output_paths, workspace_input_observation
           task = json.loads((Path(os.environ["HANDOFF"]) / "bundle" / "task.json").read_text(encoding="utf-8"))
+          child_timeout_ms = int(os.environ["CHILD_TIMEOUT_MINUTES"]) * 60000
+          if child_timeout_ms != task["spec"]["limits"]["childExecutionTimeoutMs"]:
+              raise SystemExit("child job timeout does not match AgentTask")
           declared_tools = next(row["constraints"]["exact"] for row in task["spec"]["capabilities"]["required"] if row["name"] == "tools.declared")
           input_observation = workspace_input_observation(task, os.environ["GITHUB_WORKSPACE"])
           local_repository = Path(".git").is_dir() and not subprocess.run(["git", "remote"], check=True, text=True, capture_output=True).stdout.strip()
@@ -142,6 +147,7 @@ jobs:
               "taskSha256": os.environ["TASK_SHA"],
               "handoffManifestSha256": os.environ["HANDOFF_SHA256"],
               "transcriptSha256": None,
+              "childExecutionTimeoutMs": child_timeout_ms,
           }
           (Path(os.environ["ATTEMPT"]) / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
           PY

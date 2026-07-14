@@ -22,22 +22,20 @@ def check(name, condition):
 
 def main():
     with mock.patch.object(dispatch, "matching_run", return_value=None), mock.patch.object(dispatch.time, "sleep"), mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 0, 31]):
-        check("dispatch: missing correlation lookup is bounded", dispatch.discover_run("owner/repo", "marker", "a" * 40, 30) is None)
+        check("dispatch: missing correlation lookup is bounded", dispatch.discover_run("owner/repo", "marker", "main", "2026-01-01T00:00:00Z", 30) is None)
 
-    calls = []
-    dispatch.STATE.clear()
-    dispatch.STATE.update({"dispatched": True, "repo": "owner/repo", "title": "marker", "expected_sha": "a" * 40})
-    with mock.patch.object(dispatch, "discover_run", return_value={"id": 7}), mock.patch.object(dispatch, "cancel_and_wait", side_effect=lambda run_id: calls.append(("cancel", run_id))), mock.patch.object(dispatch, "recover_attempt", side_effect=lambda run_id, conclusion, reason: calls.append(("recover", run_id, conclusion, reason))), mock.patch.object(dispatch.signal, "signal"):
+    with mock.patch.object(dispatch.signal, "signal"):
         try:
             dispatch.terminate_parent(15, None)
-        except SystemExit as error:
-            check("dispatch: SIGTERM cancels and checkpoints correlated child", error.code == 143 and calls == [("cancel", "7"), ("recover", "7", "cancelled", "parent-sigterm")])
+        except dispatch.ParentCancelled:
+            check("dispatch: SIGTERM enters shared bounded cleanup", True)
         else:
-            check("dispatch: SIGTERM cancels and checkpoints correlated child", False)
+            check("dispatch: SIGTERM enters shared bounded cleanup", False)
 
     source = Path("scripts/claude_model_dispatch.py").read_text(encoding="utf-8")
-    check("dispatch: hard deadline is the sole enforced Claude runtime limit", '"enforcedLimits": {"hardDeadlineMs": STATE["hard_ms"]}' in source)
-    check("dispatch: command and final discovery operations are bounded", "COMMAND_TIMEOUT_SECONDS" in source and "DISCOVERY_GRACE_SECONDS" in source and "while not run_id" not in source)
+    check("dispatch: end-to-end hard deadline is not claimed", '"hardDeadlineMs": None' in source)
+    check("dispatch: correlation and child timeout limits are separate", '"dispatchDeadlineMs"' in source and '"childExecutionTimeoutMs"' in source)
+    check("dispatch: command and final discovery operations are bounded", "COMMAND_TIMEOUT_SECONDS" in source and "dispatch_deadline" in source and "while not run_id" not in source)
 
     if FAILURES:
         raise SystemExit("%d Claude dispatch checks failed" % len(FAILURES))

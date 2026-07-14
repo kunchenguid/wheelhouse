@@ -210,15 +210,20 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or proof.get("action") != task["metadata"]["action"]
         or proof.get("transcriptSha256") != transcript_sha
         or not isinstance(controller, dict)
-        or controller.get("hardDeadlineMs") != task["spec"]["limits"]["hardDeadlineMs"]
+        or controller.get("hardDeadlineMs") is not None
+        or controller.get("dispatchDeadlineMs") != task["spec"]["limits"]["dispatchDeadlineMs"]
+        or controller.get("childExecutionTimeoutMs") != task["spec"]["limits"]["childExecutionTimeoutMs"]
+        or proof.get("childExecutionTimeoutMs") != task["spec"]["limits"]["childExecutionTimeoutMs"]
         or conclusion not in ("success", "failure", "timed_out", "cancelled")
-        or termination_reason not in ("completed", "hard-deadline", "parent-sigterm", "controller-failure")
+        or termination_reason not in ("completed", "child-timeout", "parent-sigterm", "controller-failure", "revision-mismatch")
         or (termination_reason == "completed" and controller.get("conclusion") not in ("success", "failure"))
-        or (termination_reason == "hard-deadline" and controller.get("conclusion") != "timed_out")
+        or (termination_reason == "child-timeout" and controller.get("conclusion") != "timed_out")
         or (termination_reason == "parent-sigterm" and controller.get("conclusion") != "cancelled")
         or (termination_reason == "controller-failure" and controller.get("conclusion") != "failure")
+        or (termination_reason == "revision-mismatch" and controller.get("conclusion") != "failure")
         or controller.get("enforcedLimits") != externally_enforced_limits
         or controller.get("expectedCommitSha") != task["metadata"]["wheelhouseRevision"]
+        or controller.get("observedCommitSha") != task["metadata"]["wheelhouseRevision"]
         or not isinstance(controller.get("dispatchRef"), str)
         or not controller.get("dispatchRef")
         or not isinstance(controller.get("correlationId"), str)
@@ -257,8 +262,8 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         error = _error("harness.protocol", "Claude action execution data failed bounded protocol validation.", spend_started=spend_started)
     elif enforcement is None:
         error = _error("sandbox.violation", "Claude action job enforcement proof was missing or invalid.", spend_started=spend_started)
-    elif enforcement["controller"]["terminationReason"] == "hard-deadline":
-        error = _error("lifecycle.timeout", "Claude action exceeded the externally enforced hard deadline.", spend_started=spend_started)
+    elif enforcement["controller"]["terminationReason"] == "child-timeout":
+        error = _error("lifecycle.timeout", "Claude action exceeded the externally enforced child execution timeout.", spend_started=spend_started)
     elif enforcement["controller"]["terminationReason"] == "parent-sigterm":
         error = _error("lifecycle.cancelled", "Claude action was cancelled with its trusted parent.", spend_started=spend_started)
     elif not rows:
@@ -269,7 +274,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         error = _error("model.mismatch", "Observed Claude model did not match the immutable requested model.", spend_started=spend_started)
     elif terminal.get("is_error") is not False or terminal.get("subtype") != "success":
         error = _error("harness.crash", "Claude action reported an unsuccessful execution.", spend_started=spend_started)
-    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or not 0 <= terminal["duration_ms"] <= task["spec"]["limits"]["hardDeadlineMs"]:
+    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or not 0 <= terminal["duration_ms"] <= task["spec"]["limits"]["childExecutionTimeoutMs"]:
         error = _error("harness.protocol", "Claude action terminal result omitted valid attempt timing.", spend_started=spend_started)
     else:
         try:
@@ -301,7 +306,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                 if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
                     delivered = {"value": raw, "valueSha256": canonical_sha256(raw), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
-    started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["hardDeadlineMs"])
+    started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["childExecutionTimeoutMs"])
     status = "succeeded" if final is not None else ("cancelled" if error and error["code"] == "lifecycle.cancelled" else "failed")
     selection = {
         "candidateIndex": 0,

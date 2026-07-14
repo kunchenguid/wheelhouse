@@ -43,7 +43,7 @@ Three agent-assisted features layer on top: **auto triage** adds lightweight Sum
 All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through a typed, scoped read-only search broker.
 The current production selection is the exact pinned direct Claude Action implementation, executed in a separate read-only model workflow from a bounded content-addressed task handoff.
 Its runtime proof records the observed read-only job, verified artifact, exact action tools, local no-remote repository, controller cancellation, and bounded transcript boundary without claiming the stronger disabled Codex worker sandbox.
-Unenforceable Claude provider budgets are explicit unavailable values, and a durable conservative spend checkpoint precedes each direct invocation.
+Unenforceable Claude provider budgets and the exact end-to-end hard deadline are explicit unavailable values, while bounded dispatch and child-job timeouts plus a durable conservative spend checkpoint constrain each direct invocation.
 Claude is the named production primary across every action selection.
 Codex CLI app-server remains disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
 OpenCode with Z.AI Coding Plan is a deferred disabled candidate only, with no adapter or credential request authorized in this phase.
