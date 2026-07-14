@@ -33,7 +33,8 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 - **State lives in GitHub, not on disk.** Open issue = pending decision; closed =
   consumed. Labels are state (`needs-decision`, `pending-triage`, `processing`,
-  `resolved`, `blocked`, `repo:*`, `kind:*`, `priority:*`). A hidden
+  `resolved`, `blocked`, `wheelhouse:manual-merge-required`, `repo:*`, `kind:*`,
+  `priority:*`). A hidden
   `<!-- wheelhouse-state: {...} -->` block in each card body carries
   `{repo, number, kind, head_sha, options}` plus the material fields
   `{comp, tests, priority}` (the latter three added so a refresh can cheaply and
@@ -62,6 +63,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   because it is derived from non-material triage state, not from source-provided
   checkbox options. A held card also carries non-material `held: true` until its
   first auto-triage attempt publishes the normal decision controls. The state
+  block may also carry a bounded, versioned, head-scoped NON-material
+  `automerge_workflow_hold` record after the authoritative final auto-merge gate
+  proves a history-only workflow touch against a complete clean net diff.
+  Its matching managed `wheelhouse:manual-merge-required` label and visible
+  section deny repeated claims without making the refreshable card generically
+  `blocked`; malformed same-head state fails closed, while authoritative
+  new-head or incompatible-kind rendering clears it.
+  The state
   block also carries `render_version`, another
   non-material field alongside `triaged_sha`: it is a one-time re-render
   trigger stamped by `render()` (see "Card refresh" in Sharp edges) that exists
@@ -147,7 +156,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   target-activity state reflection, the advisory `### Security review` section
   on CI-approval HOLD cards (`_security_review_section`), the non-authoritative
   read-only
-  `### Auto-merge criteria` section on PR-review cards, plus trusted
+  `### Auto-merge criteria` section and trusted history-only workflow hold on
+  PR-review cards, plus trusted
   triage-result card edits that publish held cards),
   `apply_decision.py` (deterministic `parse` then
   `execute`; pre-merge workflow-touch gate in `do_merge` that blocks
@@ -163,7 +173,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   context),
   `automerge_criteria.py` (stable criterion IDs/labels and fail-closed
   normalization shared by evaluator and renderer), `auto_merge.py`
-  (authoritative G0-G6 criterion evaluation plus claim/validate/G7 act/audit),
+  (authoritative G0-G6 criterion evaluation plus claim/validate/G7 act/audit and
+  default-token persistence/recovery of final-gate workflow holds),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
   create/**refresh**/activity-reflect/close/reuse and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
   `nl_readonly_search`; `reconcile`/`render_card` import `wheelhouse_core` (and
