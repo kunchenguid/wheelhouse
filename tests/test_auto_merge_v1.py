@@ -192,6 +192,7 @@ class World:
         self.card_token_reads = []
         self.merge_tokens = []
         self.do_merge_returns = {}  # (repo, number) -> (message, terminal)
+        self.workflow_gate_results = {}  # (repo, number) -> structured final gate
         self.merge_commits = {}  # (repo, number) -> merge endpoint sha
         self.final_prs = {}
         self.before_final_guard = None
@@ -239,6 +240,7 @@ class World:
         number,
         head,
         return_merge_commit=False,
+        return_workflow_gate=False,
         expected_base_sha=None,
         require_clean_merge_state=False,
         auto_merge_guard=None,
@@ -256,16 +258,21 @@ class World:
             guard_ok, guard_reason = auto_merge_guard(final_pr)
             self.do_merge_final_guards.append((guard_ok, guard_reason))
             if guard_ok is not True:
-                result = ("HOLD: %s" % guard_reason, "blocked")
+                result = ["HOLD: %s" % guard_reason, "blocked"]
                 if return_merge_commit:
-                    return (*result, "")
-                return result
+                    result.append("")
+                if return_workflow_gate:
+                    result.append(None)
+                return tuple(result)
         result = self.do_merge_returns.get(
             (repo, str(number)), ("Merged %s#%s (squash)." % (repo, number), "resolved")
         )
+        values = list(result)
         if return_merge_commit:
-            return (*result, self.merge_commits.get((repo, str(number)), "c" * 40))
-        return result
+            values.append(self.merge_commits.get((repo, str(number)), "c" * 40))
+        if return_workflow_gate:
+            values.append(self.workflow_gate_results.get((repo, str(number))))
+        return tuple(values)
 
 
 def run_act(world, items, cards, has_token=True, has_card_token=True):

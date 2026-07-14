@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
 
@@ -160,7 +161,22 @@ NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 # actionable in the same refresh. `update_card_triage` publishes held cards when
 # an auto-triage attempt completes.
 HOLD_LABEL = "pending-triage"
-SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL})
+
+# A final, authoritative auto-merge workflow-history gate can prove that a
+# workflow file existed in commit history even though the complete current net
+# diff is clean. That current head requires a manual GitHub UI merge. The
+# dedicated state and label stay refreshable so an authoritative new-head
+# refresh can clear them; they are never generic `blocked` state.
+AUTOMERGE_WORKFLOW_HOLD_FIELD = "automerge_workflow_hold"
+AUTOMERGE_WORKFLOW_HOLD_VERSION = 1
+AUTOMERGE_WORKFLOW_HOLD_REASON = "history-only-workflow-touch"
+AUTOMERGE_WORKFLOW_HOLD_LABEL = "wheelhouse:manual-merge-required"
+AUTOMERGE_WORKFLOW_HOLD_NET_EVIDENCE = "complete-net-diff-without-workflow-touch"
+AUTOMERGE_WORKFLOW_HOLD_MAX_PATHS = 5
+AUTOMERGE_WORKFLOW_HOLD_MAX_PATH_LENGTH = 240
+AUTOMERGE_WORKFLOW_HOLD_START = "<!-- wheelhouse-automerge-workflow-hold:start -->"
+AUTOMERGE_WORKFLOW_HOLD_END = "<!-- wheelhouse-automerge-workflow-hold:end -->"
+SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL, AUTOMERGE_WORKFLOW_HOLD_LABEL})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
@@ -262,6 +278,11 @@ _RECOMMENDATION_SECTION_RE = re.compile(
     r"\n?### Recommended action\n.*?(?=\n<!--\s*wheelhouse-decision:start\s*-->)",
     re.S,
 )
+_AUTOMERGE_WORKFLOW_HOLD_SECTION_RE = re.compile(
+    r"\n?<!--\s*wheelhouse-automerge-workflow-hold:start\s*-->.*?"
+    r"<!--\s*wheelhouse-automerge-workflow-hold:end\s*-->\n?",
+    re.S,
+)
 
 # Sentinel for a material field absent from an old card's state block. It can
 # never equal a real value, so a card written before these fields were carried
@@ -270,11 +291,145 @@ _RECOMMENDATION_SECTION_RE = re.compile(
 _UNKNOWN = "\x00unknown"
 
 
+def normalize_automerge_workflow_hold(value):
+    """Return one exact bounded manual-merge hold record, else None.
+
+    This record is denial-only. Strict keys, revisions, path bounds, and source
+    evidence keep malformed card state from becoming trusted UI or action data.
+    """
+    if not isinstance(value, dict):
+        return None
+    expected_keys = {
+        "version",
+        "head_sha",
+        "reason",
+        "commit_sha",
+        "paths",
+        "path_count",
+        "source_pr_url",
+        "net_diff_evidence",
+    }
+    if set(value) != expected_keys:
+        return None
+    version = value.get("version")
+    path_count = value.get("path_count")
+    if (
+        isinstance(version, bool)
+        or version != AUTOMERGE_WORKFLOW_HOLD_VERSION
+        or isinstance(path_count, bool)
+        or not isinstance(path_count, int)
+        or path_count < 1
+        or path_count > 10000
+    ):
+        return None
+    head_sha = value.get("head_sha")
+    commit_sha = value.get("commit_sha")
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", head_sha):
+        return None
+    if not isinstance(commit_sha, str) or not re.fullmatch(
+        r"[0-9A-Fa-f]{7,64}", commit_sha
+    ):
+        return None
+    if value.get("reason") != AUTOMERGE_WORKFLOW_HOLD_REASON:
+        return None
+    if value.get("net_diff_evidence") != AUTOMERGE_WORKFLOW_HOLD_NET_EVIDENCE:
+        return None
+    paths = value.get("paths")
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or len(paths) > AUTOMERGE_WORKFLOW_HOLD_MAX_PATHS
+        or path_count < len(paths)
+    ):
+        return None
+    normalized_paths = []
+    for path in paths:
+        if (
+            not isinstance(path, str)
+            or not path
+            or path != path.strip()
+            or len(path) > AUTOMERGE_WORKFLOW_HOLD_MAX_PATH_LENGTH
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or not core._workflow_merge_gated_files([path])
+            or path in normalized_paths
+        ):
+            return None
+        normalized_paths.append(path)
+    source_url = value.get("source_pr_url")
+    if (
+        not isinstance(source_url, str)
+        or len(source_url) > 300
+        or not re.fullmatch(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+",
+            source_url,
+        )
+    ):
+        return None
+    return {
+        "version": AUTOMERGE_WORKFLOW_HOLD_VERSION,
+        "head_sha": head_sha,
+        "reason": AUTOMERGE_WORKFLOW_HOLD_REASON,
+        "commit_sha": commit_sha,
+        "paths": normalized_paths,
+        "path_count": path_count,
+        "source_pr_url": source_url,
+        "net_diff_evidence": AUTOMERGE_WORKFLOW_HOLD_NET_EVIDENCE,
+    }
+
+
+def automerge_workflow_hold_status(state, head_sha):
+    """Return (status, trusted_record) for absent/matching/stale/malformed.
+
+    Any malformed current-head field is fail-closed. A record carrying a
+    different well-formed head is stale and can be removed only by the normal
+    authoritative refresh path; it is never merge authorization.
+    """
+    state = state if isinstance(state, dict) else {}
+    if AUTOMERGE_WORKFLOW_HOLD_FIELD not in state:
+        return ("absent", None)
+    raw = state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD)
+    raw_head = raw.get("head_sha") if isinstance(raw, dict) else None
+    current_head = str(head_sha or "")
+    if (
+        isinstance(raw_head, str)
+        and re.fullmatch(r"[0-9A-Fa-f]{7,64}", raw_head)
+        and current_head
+        and raw_head != current_head
+    ):
+        return ("stale", None)
+    record = normalize_automerge_workflow_hold(raw)
+    if record is None:
+        return ("malformed", None)
+    if not current_head or record["head_sha"] != current_head:
+        return ("stale", None)
+    return ("matching", record)
+
+
+def workflow_hold_maintenance_needed(item, state, labels=None):
+    """Whether a full refresh must preserve, clear, add, or remove hold UI."""
+    status, _ = automerge_workflow_hold_status(
+        state, (item or {}).get("head_sha", "")
+    )
+    names = _label_names(labels)
+    labeled = AUTOMERGE_WORKFLOW_HOLD_LABEL in names
+    if status == "matching":
+        return not labeled
+    if status == "stale":
+        return True
+    if status == "absent":
+        return labeled
+    # A malformed same-head record stays untouched and claim-ineligible until
+    # an authoritative head move gives the refresh path permission to clear it.
+    return str((state or {}).get("head_sha") or "") != str(
+        (item or {}).get("head_sha") or ""
+    )
+
+
 def marker_label(item):
     return "target:%s-%s" % (item["repo"], item["number"])
 
 
-def card_labels(item, held=False):
+def card_labels(item, held=False, workflow_hold=False):
     labels = [
         "needs-decision",
         "repo:%s" % item["repo"],
@@ -284,6 +439,8 @@ def card_labels(item, held=False):
     ]
     if held:
         labels.append(HOLD_LABEL)
+    if workflow_hold:
+        labels.append(AUTOMERGE_WORKFLOW_HOLD_LABEL)
     return labels
 
 
@@ -440,13 +597,14 @@ def automerge_criteria_stale(item, state):
     ) != expected
 
 
-def refresh_needed(item, state, has_token=False):
+def refresh_needed(item, state, has_token=False, labels=None):
     return (
         material_changed(item, state)
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
         or security_summary_stale(item, state)
         or automerge_criteria_stale(item, state)
+        or workflow_hold_maintenance_needed(item, state, labels)
     )
 
 
@@ -1559,6 +1717,107 @@ def _automerge_criteria_evidence(value):
     )
 
 
+def automerge_workflow_hold_evidence(record):
+    record = normalize_automerge_workflow_hold(record)
+    if record is None:
+        return "manual-merge hold evidence is malformed"
+    paths = ", ".join("`%s`" % core._safe_inline(path) for path in record["paths"])
+    if record["path_count"] > len(record["paths"]):
+        paths += " (+%d more)" % (record["path_count"] - len(record["paths"]))
+    return (
+        "head %s; complete net diff had no workflow touch; history commit %s "
+        "touched %s; source %s"
+        % (
+            record["head_sha"][:8],
+            record["commit_sha"][:8],
+            paths,
+            record["source_pr_url"],
+        )
+    )
+
+
+def _automerge_workflow_hold_section(record):
+    record = normalize_automerge_workflow_hold(record)
+    if record is None:
+        return []
+    paths = ["- `%s`" % core._safe_inline(path) for path in record["paths"]]
+    if record["path_count"] > len(record["paths"]):
+        paths.append(
+            "- _%d additional workflow path(s) omitted from this bounded record._"
+            % (record["path_count"] - len(record["paths"]))
+        )
+    return [
+        AUTOMERGE_WORKFLOW_HOLD_START,
+        "### Manual merge required",
+        "",
+        "> [!WARNING]",
+        "> Wheelhouse will not auto-merge this head. The complete current net "
+        "diff is clean, but the authoritative final gate proved that workflow "
+        "files were touched in commit history. Review and merge this PR manually "
+        "in the GitHub UI.",
+        "",
+        "- `G7 - immediate live recheck and manual merge gate`: ❌ **UNMET**",
+        "- Source PR: %s" % record["source_pr_url"],
+        "- Head: `%s`" % record["head_sha"],
+        "- History evidence: commit `%s`" % record["commit_sha"],
+        "- Net-diff evidence: complete and contains no workflow-file touch",
+        "- Workflow path evidence:",
+        *paths,
+        AUTOMERGE_WORKFLOW_HOLD_END,
+    ]
+
+
+def body_with_automerge_workflow_hold(body, record):
+    """Persist one trusted hold plus its bounded owner-visible section."""
+    normalized = normalize_automerge_workflow_hold(record)
+    state = _unique_state_block(body)
+    if (
+        normalized is None
+        or state is None
+        or str(state.get("head_sha") or "") != normalized["head_sha"]
+    ):
+        return body
+    if AUTOMERGE_WORKFLOW_HOLD_FIELD in state:
+        existing = normalize_automerge_workflow_hold(
+            state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD)
+        )
+        if existing != normalized:
+            return body
+    section = "\n".join(_automerge_workflow_hold_section(normalized))
+    without = _AUTOMERGE_WORKFLOW_HOLD_SECTION_RE.sub("\n", body or "").strip()
+    marker = "\n### Auto-merge criteria\n"
+    index = without.find(marker)
+    if index < 0:
+        marker = "\n%s" % DECISION_START
+        index = without.find(marker)
+    if index >= 0:
+        updated = without[:index].rstrip() + "\n\n" + section + "\n" + without[index:]
+    else:
+        updated = without.rstrip() + "\n\n" + section
+    new_state = dict(state)
+    new_state[AUTOMERGE_WORKFLOW_HOLD_FIELD] = normalized
+    return _replace_state_block(updated, new_state)
+
+
+def automerge_workflow_hold_presentation_complete(body, labels, record):
+    normalized = normalize_automerge_workflow_hold(record)
+    if normalized is None:
+        return False
+    state = _unique_state_block(body)
+    expected_section = "\n".join(_automerge_workflow_hold_section(normalized))
+    sections = list(_AUTOMERGE_WORKFLOW_HOLD_SECTION_RE.finditer(body or ""))
+    return bool(
+        state
+        and normalize_automerge_workflow_hold(
+            state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD)
+        )
+        == normalized
+        and AUTOMERGE_WORKFLOW_HOLD_LABEL in _label_names(labels)
+        and len(sections) == 1
+        and sections[0].group(0).strip() == expected_section
+    )
+
+
 def _automerge_criteria_section(rows):
     normalized = criteria_schema.normalize_criteria(
         rows,
@@ -1612,12 +1871,15 @@ def _security_review_section(summary):
     ]
 
 
-def render(item, held=False):
+def render(item, held=False, workflow_hold=None):
     """item -> {title, body, labels, marker}. Tolerates missing optional fields.
 
     `held=True` renders the placeholder "Held cards" form (see the module-
     level comment above `HOLD_LABEL`): the state block carries `held: true`
-    and the "Your decision" section has no checkboxes."""
+    and the "Your decision" section has no checkboxes. A trusted matching-head
+    `workflow_hold` renders the dedicated, refreshable manual-merge section and
+    label; callers must never pass unvalidated card state here.
+    """
     kind = item.get("kind", "pr-review")
     repo = item["repo"]
     number = int(item["number"])
@@ -1629,6 +1891,12 @@ def render(item, held=False):
         if kind in AUTO_TRIAGE_FLAG_BY_KIND
         else None
     )
+    workflow_hold = normalize_automerge_workflow_hold(workflow_hold)
+    if workflow_hold and (
+        kind != "pr-review"
+        or workflow_hold["head_sha"] != str(item.get("head_sha") or "")
+    ):
+        workflow_hold = None
 
     # The stored material set lets a refresh cheaply and deterministically decide
     # "did this materially change?". `updated_at` is non-material (never added to
@@ -1665,6 +1933,8 @@ def render(item, held=False):
         )
     if held:
         state["held"] = True
+    if workflow_hold:
+        state[AUTOMERGE_WORKFLOW_HOLD_FIELD] = workflow_hold
     if triage:
         state["triaged_sha"] = item.get("triaged_sha") or triage_revision(item)
         state["triage_status"] = "succeeded"
@@ -1697,6 +1967,9 @@ def render(item, held=False):
     if item.get("summary"):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
+    if workflow_hold:
+        lines.extend(_automerge_workflow_hold_section(workflow_hold))
+        lines.append("")
     if kind == "pr-review":
         lines.extend(_automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD)))
         lines.append("")
@@ -1728,7 +2001,7 @@ def render(item, held=False):
     return {
         "title": issue_title,
         "body": body,
-        "labels": card_labels(item, held),
+        "labels": card_labels(item, held, workflow_hold=bool(workflow_hold)),
         "marker": marker_label(item),
     }
 
@@ -1751,6 +2024,8 @@ def ensure_labels(labels):
             color = "1d76db"
         elif label == HOLD_LABEL:
             color = "bfdadc"
+        elif label == AUTOMERGE_WORKFLOW_HOLD_LABEL:
+            color = "b60205"
         elif label.startswith("priority:high"):
             color = "d93f0b"
         elif label.startswith("priority:"):
@@ -2080,7 +2355,17 @@ def _reused_card_render(item, candidate, has_token):
         and state_revision(old_state, old_state.get("kind")) == triage_revision(item)
     )
     held = should_hold(item, has_token) and not same_revision
-    card = render(item, held=held)
+    workflow_hold = None
+    if same_revision and AUTOMERGE_WORKFLOW_HOLD_FIELD in old_state:
+        hold_status, workflow_hold = automerge_workflow_hold_status(
+            old_state, item.get("head_sha", "")
+        )
+        if hold_status != "matching":
+            raise CardLifecycleError(
+                "closed card #%s has untrusted same-revision manual-merge hold state"
+                % candidate.get("number")
+            )
+    card = render(item, held=held, workflow_hold=workflow_hold)
     if same_revision:
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         card["body"] = _preserve_same_revision_triage(
@@ -2786,7 +3071,24 @@ def upsert_card(
         return None if expected_existing is not None else number
     old_state = parse_state_block(existing.get("body", ""))
     publish_held = held_publish_needed(item, old_state, has_token)
-    if not refresh_needed(item, old_state, has_token):
+    hold_status, workflow_hold = automerge_workflow_hold_status(
+        old_state, item.get("head_sha", "")
+    )
+    if (
+        hold_status == "malformed"
+        and (old_state or {}).get("kind") == "pr-review"
+        and item.get("kind", "pr-review") == "pr-review"
+        and str((old_state or {}).get("head_sha") or "")
+        == str(item.get("head_sha") or "")
+    ):
+        print(
+            "::error::skip card #%s for %s: matching-head manual-merge hold "
+            "state is malformed" % (number, marker)
+        )
+        return None if expected_existing is not None else number
+    if not refresh_needed(
+        item, old_state, has_token, labels=existing.get("labels")
+    ):
         if preserve_reconcile_absence:
             print("skip card #%s for %s: no material change" % (number, marker))
             return None if expected_existing is not None else number
@@ -2800,7 +3102,11 @@ def upsert_card(
         print("skip card #%s for %s: no material change" % (number, marker))
         return None if expected_existing is not None else number
     held = bool((old_state or {}).get("held")) and not publish_held
-    card = render(item, held=held)
+    card = render(
+        item,
+        held=held,
+        workflow_hold=workflow_hold if hold_status == "matching" else None,
+    )
     ensure_labels(card["labels"])
     return _refresh_card(
         number,

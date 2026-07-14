@@ -53,14 +53,18 @@ Four CLI phases run as separate workflow steps so each uses the right token:
       rows for card rendering. Writes a machine-readable results file (path from
       $WHEELHOUSE_AUTOMERGE_RESULTS, default automerge.json) and one
       ::notice::/::warning:: audit line per candidate. Uses the separate default
-      card token only to persist an audit intent before merging.
+      card token only to persist an audit intent before merging and a bounded
+      current-head manual-merge hold when the final gate proves a history-only
+      workflow touch.
 
   auto_merge.py record <results.json> [validated-claims.json]
       Under GITHUB_TOKEN. Append each auto-merge to the durable ledger issue in
       THIS repo and resolve each merged PR's decision card with an audit record
       of why it qualified. Audit writes retry transient failures and report
-      unrecoverable errors after the merge. When the result handoff is missing,
-      the optional validated-claims file releases claims under the default token.
+      unrecoverable errors after the merge. It also verifies or retries a proven
+      workflow hold before clearing its audit intent and claim. When the result
+      handoff is missing, the optional validated-claims file releases only claims
+      that have no protected final-gate recovery intent.
 
 Owner is derived from $GITHUB_REPOSITORY_OWNER. Cross-repo reads and the merge
 itself use the ambient GH_TOKEN (FLEET_TOKEN in the act step); the ledger and
@@ -118,6 +122,7 @@ LEDGER_LABEL = "wheelhouse:auto-merge-log"
 LEDGER_TITLE = "Wheelhouse auto-merge log (automated)"
 AUDIT_PENDING_FIELD = "automerge_audit_pending"
 AUDIT_INTENT_FIELD = "automerge_audit_intent"
+AUDIT_FINAL_GATE_PENDING_FIELD = "final_gate_pending"
 # Keep the stored history bounded so the ledger body cannot grow without limit.
 LEDGER_ENTRY_CAP = 200
 LEDGER_MAX_BODY_BYTES = 60000
@@ -915,6 +920,9 @@ def evaluate_candidate(
     # claim is acquired; action mode still requires that claim byte-for-byte.
     state = (card_entry or {}).get("state") or {}
     labels = (card_entry or {}).get("labels") or set()
+    workflow_hold_status, workflow_hold = render_card.automerge_workflow_hold_status(
+        state, head_sha
+    )
     if card_entry:
         met(
             "g1_card_identity",
@@ -1295,6 +1303,21 @@ def evaluate_candidate(
         result["audit"]["behavior_class"] = behavior_class
         result["audit"]["behavior_verdict"] = verdict
 
+    if workflow_hold_status == "matching":
+        evidence = render_card.automerge_workflow_hold_evidence(workflow_hold)
+        unmet("g7_immediate_recheck", evidence)
+        if not result["hold_reason"]:
+            result["hold_reason"] = "G7 manual merge required for current head"
+        return finish(False)
+    if workflow_hold_status in ("malformed", "stale"):
+        evidence = (
+            "manual-merge hold state is %s; claim denied until an authoritative "
+            "card refresh" % workflow_hold_status
+        )
+        unmet("g7_immediate_recheck", evidence)
+        if not result["hold_reason"]:
+            result["hold_reason"] = "G7 manual-merge hold state is %s" % workflow_hold_status
+        return finish(False)
     unmet(
         "g7_immediate_recheck",
         "runs only immediately before merge: card claim, VISION, head/base, "
@@ -1483,6 +1506,170 @@ def _with_card_token(card_token, operation):
             os.environ["GH_TOKEN"] = original_token
 
 
+def workflow_hold_from_gate(result, workflow_gate):
+    """Build one bounded trusted hold from a proven history-only gate result."""
+    if (
+        not isinstance(result, dict)
+        or not isinstance(workflow_gate, dict)
+        or workflow_gate.get("status") != apply_decision.WORKFLOW_GATE_BLOCKED
+        or workflow_gate.get("reason")
+        != apply_decision.WORKFLOW_GATE_HISTORY_ONLY_REASON
+        or workflow_gate.get("net_diff_complete") is not True
+    ):
+        return None
+    head_sha = str(result.get("head_sha") or "")
+    commit_sha = str(workflow_gate.get("commit_sha") or "")
+    if not _GIT_OBJECT_ID_RE.fullmatch(head_sha) or not _GIT_OBJECT_ID_RE.fullmatch(
+        commit_sha
+    ):
+        return None
+    raw_paths = workflow_gate.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        return None
+    paths = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str):
+            return None
+        path = raw_path.strip()
+        if (
+            path != raw_path
+            or not path
+            or len(path) > render_card.AUTOMERGE_WORKFLOW_HOLD_MAX_PATH_LENGTH
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or not core._workflow_merge_gated_files([path])
+        ):
+            return None
+        if path not in paths:
+            paths.append(path)
+    if not paths or len(paths) > 10000:
+        return None
+    record = {
+        "version": render_card.AUTOMERGE_WORKFLOW_HOLD_VERSION,
+        "head_sha": head_sha,
+        "reason": render_card.AUTOMERGE_WORKFLOW_HOLD_REASON,
+        "commit_sha": commit_sha,
+        "paths": paths[: render_card.AUTOMERGE_WORKFLOW_HOLD_MAX_PATHS],
+        "path_count": len(paths),
+        "source_pr_url": "https://github.com/%s/pull/%s"
+        % (result.get("slug"), result.get("number")),
+        "net_diff_evidence": render_card.AUTOMERGE_WORKFLOW_HOLD_NET_EVIDENCE,
+    }
+    return render_card.normalize_automerge_workflow_hold(record)
+
+
+def _workflow_hold_handoff(result, hold):
+    return {
+        "card_issue": result.get("card_issue"),
+        "repo": result.get("repo"),
+        "number": result.get("number"),
+        "head_sha": result.get("head_sha"),
+        "hold": hold,
+    }
+
+
+def _validated_workflow_hold_handoff(record):
+    if not isinstance(record, dict):
+        return None
+    hold = render_card.normalize_automerge_workflow_hold(record.get("hold"))
+    card_issue = record.get("card_issue")
+    repo = str(record.get("repo") or "")
+    number = str(record.get("number") or "")
+    head_sha = str(record.get("head_sha") or "")
+    if (
+        isinstance(card_issue, bool)
+        or not isinstance(card_issue, int)
+        or card_issue < 1
+        or not repo
+        or not number
+        or hold is None
+        or head_sha != hold["head_sha"]
+    ):
+        return None
+    return {
+        "card_issue": card_issue,
+        "repo": repo,
+        "number": number,
+        "head_sha": head_sha,
+        "hold": hold,
+    }
+
+
+def persist_workflow_hold(record, card_token=""):
+    """Persist and verify the denial state, visible section, and managed label.
+
+    This operation writes only to the decision-card repository. It is
+    idempotent for an already-complete same-head hold and requires the exclusive
+    claim plus pre-merge audit intent to remain live until persistence succeeds.
+    """
+    handoff = _validated_workflow_hold_handoff(record)
+    if handoff is None:
+        raise RuntimeError("manual-merge hold handoff is malformed")
+
+    def persist():
+        card = render_card.get_card(handoff["card_issue"])
+        if not card or not render_card.issue_is_open(card):
+            raise RuntimeError("manual-merge hold card is not open")
+        entry = _card_index([card]).get((handoff["repo"], handoff["number"]))
+        if not entry:
+            raise RuntimeError("manual-merge hold card identity is untrusted")
+        state = entry.get("state") or {}
+        labels = entry.get("labels") or set()
+        if str(state.get("head_sha") or "") != handoff["head_sha"]:
+            raise RuntimeError("manual-merge hold card head changed")
+        if not _card_is_claimed(labels):
+            raise RuntimeError("manual-merge hold card claim is not current")
+        if not _audit_intent_record(state, handoff["card_issue"]):
+            raise RuntimeError("manual-merge hold audit intent is unavailable")
+        if _card_has_pending_decision(labels) or _selected_card_option(card.get("body")):
+            raise RuntimeError("owner decision appeared before hold persistence")
+        owner_action, owner_reason = _card_has_pending_owner_action(card)
+        if owner_action:
+            raise RuntimeError(owner_reason)
+        if render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD in state:
+            status, existing = render_card.automerge_workflow_hold_status(
+                state, handoff["head_sha"]
+            )
+            if status != "matching" or existing != handoff["hold"]:
+                raise RuntimeError("card has different or malformed manual-merge hold")
+        new_body = render_card.body_with_automerge_workflow_hold(
+            card.get("body") or "", handoff["hold"]
+        )
+        if new_body != card.get("body"):
+            render_card._edit_issue_body(handoff["card_issue"], new_body)
+        if render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in labels:
+            render_card.ensure_labels([render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL])
+            render_card._gh(
+                [
+                    "issue",
+                    "edit",
+                    str(handoff["card_issue"]),
+                    "--add-label",
+                    render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL,
+                ]
+            )
+        confirmed = render_card.get_card(handoff["card_issue"])
+        confirmed_entry = _card_index([confirmed]).get(
+            (handoff["repo"], handoff["number"])
+        )
+        if (
+            not confirmed_entry
+            or not render_card.issue_is_open(confirmed)
+            or not _card_is_claimed(confirmed_entry.get("labels") or set())
+            or not _audit_intent_record(
+                confirmed_entry.get("state"), handoff["card_issue"]
+            )
+            or not render_card.automerge_workflow_hold_presentation_complete(
+                confirmed.get("body") or "",
+                confirmed.get("labels") or [],
+                handoff["hold"],
+            )
+        ):
+            raise RuntimeError("could not confirm persisted manual-merge hold")
+        return handoff
+
+    return _with_card_token(card_token, persist) if card_token else persist()
+
+
 def stage_audit_intent(expected_card, record, card_token):
     card_issue = record.get("card_issue")
     if not card_issue:
@@ -1594,6 +1781,26 @@ def _current_claim_matches(expected, current, repo, number):
     return (True, "")
 
 
+def _workflow_hold_denies_claim(state, head_sha, repo, number):
+    status, record = render_card.automerge_workflow_hold_status(state, head_sha)
+    if status == "absent":
+        return False
+    if status == "matching":
+        print(
+            "::notice::wheelhouse auto-merge manual hold skips %s#%s head %s"
+            % (repo, number, str(head_sha or "")[:8]),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "::warning::wheelhouse auto-merge claim denied for %s#%s: "
+            "manual-merge hold state is %s and requires authoritative refresh"
+            % (repo, number, status),
+            file=sys.stderr,
+        )
+    return True
+
+
 def claim_cards(scan, cards):
     cfg = core.load_config()
     global_auto_merge = cfg["auto_merge"]
@@ -1628,6 +1835,10 @@ def claim_cards(scan, cards):
             continue
         expected = index.get((repo, number))
         if not expected:
+            continue
+        if _workflow_hold_denies_claim(
+            expected.get("state"), item.get("head_sha"), repo, number
+        ):
             continue
         try:
             current = render_card.get_card(expected["issue"])
@@ -1790,44 +2001,48 @@ def act_merge(
     card_token,
     repo_cfg,
 ):
-    """G7. Immediately re-read head SHA + mergeability + clean merge state, then
-    call the existing do_merge (which does its own head re-check and runs on the
-    ambient FLEET_TOKEN with the unchanged owner-safety / thank-you model).
+    """Run G7 and return (outcome, detail, merge_commit, workflow_gate).
 
-    Returns (outcome, detail, merge_commit) where outcome in
-    'merged' / 'held' / 'error'."""
+    The structured workflow result is evidence for a specialized denial only.
+    Every actual merge still reaches the live `do_merge` gate in this call.
+    """
+
+    def held(detail):
+        return ("held", detail, "", None)
+
     slug = "%s/%s" % (owner, repo)
     vision_present, live_vision_sha = vision_on_default_branch(slug)
     if not vision_present:
-        return ("held", "VISION.md disappeared before acting", "")
+        return held("VISION.md disappeared before acting")
     if live_vision_sha != vision_sha:
-        return ("held", "VISION.md changed before acting", "")
+        return held("VISION.md changed before acting")
     pr = live_pr(slug, number)
     if pr is None:
-        return ("held", "could not re-read PR before merging", "")
+        return held("could not re-read PR before merging")
     if pr.get("merged") or str(pr.get("state") or "").lower() != "open":
-        return ("held", "PR left the open merge-ready state before acting", "")
+        return held("PR left the open merge-ready state before acting")
     live_head = str((pr.get("head") or {}).get("sha") or "")
     if not live_head or live_head != head_sha:
-        return ("held", "head moved immediately before acting", "")
+        return held("head moved immediately before acting")
     live_base = str((pr.get("base") or {}).get("sha") or "")
     if not live_base or live_base != base_sha:
-        return ("held", "base changed immediately before acting", "")
+        return held("base changed immediately before acting")
     mc_ok, mc_reason = mergeable_clean(pr)
     if not mc_ok:
-        return ("held", "final re-check: %s" % mc_reason, "")
+        return held("final re-check: %s" % mc_reason)
     checks_ok, checks_reason = live_check_status(
         owner, repo, number, head_sha, repo_cfg
     )
     if not checks_ok:
-        return ("held", "final re-check: %s" % checks_reason, "")
+        return held("final re-check: %s" % checks_reason)
 
-    message, terminal, merge_commit = apply_decision.do_merge(
+    message, terminal, merge_commit, workflow_gate = apply_decision.do_merge(
         owner,
         repo,
         number,
         head_sha,
         return_merge_commit=True,
+        return_workflow_gate=True,
         expected_base_sha=base_sha,
         require_clean_merge_state=True,
         auto_merge_guard=final_auto_merge_guard(
@@ -1841,14 +2056,15 @@ def act_merge(
                 "post-merge-error",
                 "merge endpoint did not return a merge commit SHA for audit",
                 "",
+                workflow_gate,
             )
-        return ("merged", message, merge_commit)
+        return ("merged", message, merge_commit, workflow_gate)
     if terminal == "resolved":
         # do_merge saw already-merged / not-open (a race) - not our merge.
-        return ("held", message, "")
+        return ("held", message, "", workflow_gate)
     if terminal in ("blocked", "retryable"):
-        return ("held", message, "")
-    return ("error", message, "")
+        return ("held", message, "", workflow_gate)
+    return ("error", message, "", workflow_gate)
 
 
 # --------------------------------------------------------------------------- #
@@ -1858,8 +2074,10 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _audit_record(result, merge_commit="", merged_at="", detail=""):
-    return {
+def _audit_record(
+    result, merge_commit="", merged_at="", detail="", final_gate_pending=False
+):
+    record = {
         "repo": result["repo"],
         "number": result["number"],
         "card_issue": result["card_issue"],
@@ -1874,6 +2092,9 @@ def _audit_record(result, merge_commit="", merged_at="", detail=""):
         "gates": result["gates"],
         "detail": detail,
     }
+    if final_gate_pending:
+        record[AUDIT_FINAL_GATE_PENDING_FIELD] = True
+    return record
 
 
 def closed_audit_intent_entries(card_token):
@@ -1936,6 +2157,7 @@ def _closed_intent_audit_record(intent, pr):
 def recover_audit_intents(owner, index, closed_intents=None):
     merges = []
     releases = []
+    workflow_recoveries = []
     holds = []
     ambiguous = []
     recovered = set()
@@ -1981,9 +2203,37 @@ def recover_audit_intents(owner, index, closed_intents=None):
                 }
             )
             continue
+        if intent.get(AUDIT_FINAL_GATE_PENDING_FIELD) is True:
+            hold_status, hold = render_card.automerge_workflow_hold_status(
+                entry.get("state"), intent.get("head_sha")
+            )
+            if hold_status == "matching":
+                workflow_recoveries.append(
+                    {
+                        "card_issue": entry["issue"],
+                        "repo": repo,
+                        "number": number,
+                        "head_sha": intent.get("head_sha"),
+                        "hold": hold,
+                    }
+                )
+                recovered.add((repo, number))
+                continue
+            if hold_status in ("malformed", "stale"):
+                reason = "pre-merge recovery found %s manual-merge hold state" % (
+                    hold_status,
+                )
+                holds.append({"repo": repo, "number": number, "hold_reason": reason})
+                ambiguous.append("%s#%s: %s" % (repo, number, reason))
+                recovered.add((repo, number))
+                continue
+            # No hold reached durable state. Keep the claim and final-gate audit
+            # intent, then let the ordinary candidate path repeat the live final
+            # gate instead of releasing into a pure hourly reclaim loop.
+            continue
         releases.append({"card_issue": entry["issue"]})
         recovered.add((repo, number))
-    return merges, releases, holds, ambiguous, recovered
+    return merges, releases, workflow_recoveries, holds, ambiguous, recovered
 
 
 def act_on_scan(scan, cards):
@@ -1999,6 +2249,7 @@ def act_on_scan(scan, cards):
     index = _card_index(cards)
     merges = []
     holds = []
+    workflow_holds = []
     post_merge_errors = []
     recovery_discovery_errors = []
     try:
@@ -2011,6 +2262,7 @@ def act_on_scan(scan, cards):
     (
         recovered_merges,
         recovered_releases,
+        workflow_recoveries,
         recovery_holds,
         recovery_ambiguous,
         recovered_keys,
@@ -2019,6 +2271,24 @@ def act_on_scan(scan, cards):
     merges.extend(recovered_merges)
     releases = list(recovered_releases)
     holds.extend(recovery_holds)
+    for recovery in workflow_recoveries:
+        workflow_holds.append(recovery)
+        try:
+            persist_workflow_hold(recovery, card_token=card_token)
+        except Exception as error:
+            reason = "could not recover manual-merge hold: %s" % str(error)[:160]
+            holds.append(
+                {
+                    "repo": recovery["repo"],
+                    "number": recovery["number"],
+                    "hold_reason": reason,
+                }
+            )
+            ambiguous_outcomes.append(
+                "%s#%s: %s" % (recovery["repo"], recovery["number"], reason)
+            )
+        else:
+            releases.append({"card_issue": recovery["card_issue"]})
     protected_issues = {
         entry["issue"]
         for entry in index.values()
@@ -2086,7 +2356,7 @@ def act_on_scan(scan, cards):
                 }
             )
             continue
-        intent = _audit_record(result)
+        intent = _audit_record(result, final_gate_pending=True)
         try:
             staged_card = stage_audit_intent(card_entry, intent, card_token)
         except Exception as e:
@@ -2100,7 +2370,7 @@ def act_on_scan(scan, cards):
             if release.get("card_issue") != result["card_issue"]
         ]
         try:
-            outcome, detail, merge_commit = act_merge(
+            outcome, detail, merge_commit, workflow_gate = act_merge(
                 owner,
                 repo,
                 item["number"],
@@ -2112,11 +2382,58 @@ def act_on_scan(scan, cards):
                 repo_cfg,
             )
         except Exception as e:  # noqa: BLE001 - a merge hiccup must not crash
-            outcome, detail, merge_commit = (
+            outcome, detail, merge_commit, workflow_gate = (
                 "error",
                 "act raised: %s" % str(e)[:160],
                 "",
+                None,
             )
+        if (
+            outcome == "held"
+            and isinstance(workflow_gate, dict)
+            and workflow_gate.get("reason")
+            == apply_decision.WORKFLOW_GATE_HISTORY_ONLY_REASON
+        ):
+            workflow_hold = workflow_hold_from_gate(result, workflow_gate)
+            if workflow_hold is None:
+                reason = "proven history-only workflow hold could not be normalized"
+                _warn(repo, number, reason)
+                holds.append(
+                    {
+                        "repo": repo,
+                        "number": number,
+                        "hold_reason": reason,
+                    }
+                )
+                ambiguous_outcomes.append("%s#%s: %s" % (repo, number, reason))
+                continue
+            handoff = _workflow_hold_handoff(result, workflow_hold)
+            workflow_holds.append(handoff)
+            try:
+                persist_workflow_hold(handoff, card_token=card_token)
+            except Exception as error:
+                reason = "could not persist manual-merge hold: %s" % str(error)[:160]
+                _warn(repo, number, reason)
+                holds.append(
+                    {
+                        "repo": repo,
+                        "number": number,
+                        "hold_reason": reason,
+                    }
+                )
+                ambiguous_outcomes.append("%s#%s: %s" % (repo, number, reason))
+                continue
+            reason = "manual merge required: %s" % detail
+            _warn(repo, number, reason)
+            holds.append(
+                {
+                    "repo": repo,
+                    "number": number,
+                    "hold_reason": reason,
+                }
+            )
+            releases.append({"card_issue": result["card_issue"]})
+            continue
         if outcome == "post-merge-error":
             confirmed = live_pr("%s/%s" % (owner, repo), number)
             confirmed_commit = str((confirmed or {}).get("merge_commit_sha") or "")
@@ -2177,6 +2494,7 @@ def act_on_scan(scan, cards):
         "owner": owner,
         "merges": merges,
         "holds": holds,
+        "workflow_holds": workflow_holds,
         "releases": releases,
         "post_merge_errors": post_merge_errors,
         "ambiguous_outcomes": ambiguous_outcomes,
@@ -2629,7 +2947,7 @@ def clear_closed_audit_intent(record):
     )
 
 
-def clear_audit_intent(card_issue):
+def clear_audit_intent(card_issue, allow_final_gate_pending=False):
     card = render_card.get_card(card_issue)
     if not card or not render_card.issue_is_open(card):
         raise RuntimeError(
@@ -2638,8 +2956,17 @@ def clear_audit_intent(card_issue):
     state = core.parse_state_block(card.get("body") or "")
     if not state:
         raise RuntimeError("card #%s has no state to clear audit intent" % card_issue)
-    if not _audit_intent_record(state, card_issue):
+    intent = _audit_intent_record(state, card_issue)
+    if not intent:
         return False
+    if (
+        intent.get(AUDIT_FINAL_GATE_PENDING_FIELD) is True
+        and not allow_final_gate_pending
+    ):
+        raise RuntimeError(
+            "card #%s retains a final-gate audit intent for deterministic recovery"
+            % card_issue
+        )
     if _pending_audit_record(state, card_issue):
         raise RuntimeError("card #%s has a pending audit" % card_issue)
     new_state = dict(state)
@@ -2698,17 +3025,39 @@ def _fallback_claim_releases(path):
 def cmd_record(results_path, validated_claims_path=None):
     payload = _load_json(results_path, None)
     handoff_valid = isinstance(payload, dict) and all(
-        isinstance(payload.get(key, []), list) for key in ("merges", "releases")
+        isinstance(payload.get(key, []), list)
+        for key in ("merges", "releases", "workflow_holds")
     )
     if handoff_valid:
         records = payload.get("merges") or []
         releases = payload.get("releases") or []
+        workflow_holds = payload.get("workflow_holds") or []
     else:
         records = []
         releases = []
+        workflow_holds = []
         if validated_claims_path:
             releases = _fallback_claim_releases(validated_claims_path)
     errors = []
+    workflow_cards = {
+        record.get("card_issue")
+        for record in workflow_holds
+        if isinstance(record, dict) and record.get("card_issue")
+    }
+    # A workflow-hold card may release only after default-token persistence is
+    # independently confirmed in this record phase. Ignore the act-phase release
+    # handoff for it until that verification succeeds.
+    releases = [
+        record
+        for record in releases
+        if record.get("card_issue") not in workflow_cards
+    ]
+    for workflow_hold in workflow_holds:
+        try:
+            persisted = persist_workflow_hold(workflow_hold)
+            releases.append({"card_issue": persisted["card_issue"]})
+        except Exception as error:
+            errors.append(error)
     try:
         pending = pending_audit_records()
     except Exception as error:
@@ -2784,7 +3133,10 @@ def cmd_record(results_path, validated_claims_path=None):
         ):
             if handoff_valid:
                 try:
-                    clear_audit_intent(record.get("card_issue"))
+                    clear_audit_intent(
+                        record.get("card_issue"),
+                        allow_final_gate_pending=handoff_valid,
+                    )
                 except Exception as error:
                     errors.append(error)
                     continue

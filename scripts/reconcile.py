@@ -343,7 +343,7 @@ def main():
         # completely untouched. `upsert_card` re-checks both guards before it edits.
         refreshable = render_card.is_refreshable(ex["labels"])
         needs_full_refresh = refreshable and render_card.refresh_needed(
-            item, ex["state"], has_triage_token
+            item, ex["state"], has_triage_token, labels=ex["labels"]
         )
         if needs_full_refresh:
             try:
@@ -355,7 +355,10 @@ def main():
                     and render_card.is_refreshable(current["labels"])
                 ):
                     still_stale = render_card.refresh_needed(
-                        item, current["state"], has_triage_token
+                        item,
+                        current["state"],
+                        has_triage_token,
+                        labels=current["labels"],
                     )
                     if still_stale:
                         refresh_result = render_card.upsert_card(
@@ -388,7 +391,10 @@ def main():
                     and _matches_snapshot(current, ex)
                     and render_card.is_refreshable(current["labels"])
                     and not render_card.refresh_needed(
-                        item, current["state"], has_triage_token
+                        item,
+                        current["state"],
+                        has_triage_token,
+                        labels=current["labels"],
                     )
                     and not render_card.should_auto_triage(
                         item, current["state"], current["labels"], has_triage_token

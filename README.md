@@ -144,6 +144,8 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > It re-reads the head, base, `VISION.md`, merge state, checks, escape-hatch label, and card activity immediately before the existing deterministic merge call, so any uncertainty leaves the PR for normal review.
 > Every PR-review card shows each guarded criterion as `MET`, `UNMET`, or `UNAVAILABLE` with concise evidence from the same authoritative evaluator; these rows are read-only context and never authorize a merge.
 > When current-head triage succeeds and recommends merge but produces no structured behavior verdict, the eligible behavior class is `UNMET`, while its dependent behavior checks and verdict revision bindings are `UNAVAILABLE` because they were not evaluated; authorization still requires every criterion to be `MET`.
+> If the final merge gate finds a workflow-file touch only in commit history after the complete current net diff passed the earlier exclusions, the card gains a `wheelhouse:manual-merge-required` label and a head-scoped manual-merge section with the source PR, commit, and bounded path evidence.
+> The matching head is not claimed again on later hourly runs, and its G7 criterion is `UNMET`; a new head clears the hold through normal refresh, requires fresh triage, and still passes through the same live final workflow gate before any merge.
 > Wheelhouse never auto-reverts; every automatic merge closes its decision card with an audit record and appends to a closed, durable auto-merge ledger issue in the hub.
 
 > **Heads-up - `thank_on_merge` defaults ON (no Claude token needed).**
@@ -270,6 +272,8 @@ You drive the queue three ways - whichever fits the decision:
   Auto triage itself is still advisory: it gives you context before deciding and never acts without your tick.
 - **Optional scan-time auto-merge.** When a repository has opted into `auto_merge` and committed `VISION.md`, the hourly scan may merge only a PR that clears the separate fail-closed gate described in [step 2](#2-edit-wheelhouseconfigyml).
   It first claims the pure pending decision card, then rechecks the live PR and card before merging, so an owner/maintainer action or a new decision on the card wins instead.
+  A `wheelhouse:manual-merge-required` card is a specialized, refreshable auto-merge denial for its current head: commit history touched a workflow file even though the current net diff is clean, so review and merge that PR in the GitHub UI.
+  Wheelhouse will not reclaim that same head every hour; a new head removes the hold during normal refresh and must earn a fresh current-head verdict.
   Apply `wheelhouse:no-auto-merge` to the target PR to stop one pending automatic merge; this label does not block your normal `/merge` or *Merge it* decision.
   Each automatic merge resolves the card with its qualifying evidence and adds a row to Wheelhouse's closed auto-merge ledger issue.
 - **Quick calls - tick a consuming checkbox.** Each card offers the relevant final-decision boxes (e.g. *Merge it*, *Approve the CI run*, *Close / decline*, *Hold*).
@@ -419,6 +423,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The gate rejects sensitive, governance, release, dependency, security/auth, billing, migration, persistence, installation, and public-default surfaces; requires a returning human contributor, clean live mergeability, configured green checks, and a 20-file/1,000-line cap; and fails closed on every missing or stale read.
   `VISION.md` is fetched only from the default branch and a PR changing it is excluded, so a contribution cannot author the policy used to approve itself.
   Immediately before the merge, Wheelhouse rechecks the head, base, vision revision, live clean state, configured checks, target escape-hatch label, card activity, and the unchanged manual workflow-touch merge gate.
+  When that final gate proves a history-only workflow touch after a clean complete net diff, Wheelhouse persists a bounded head-scoped manual-merge hold on the decision card with the default card token before releasing the claim.
+  The hold can only deny repeated claims; it never skips the final gate or authorizes a later merge, and malformed hold state fails closed until an authoritative refresh.
   PR-review cards display every guarded criterion separately as `MET`, `UNMET`, or `UNAVAILABLE`, using a head-bound result from the same evaluator that enforces G0-G6 and explicitly reserving G7 for the immediate act boundary.
   Displayed rows are non-material, read-only evidence and are never consumed as authorization.
   The cross-repo merge uses `FLEET_TOKEN`, while the claim, audit record, decision-card close, and closed hub ledger issue use the default `GITHUB_TOKEN`.

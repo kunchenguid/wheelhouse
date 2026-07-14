@@ -699,70 +699,128 @@ def _read_commit_file_paths(slug, sha):
     return paths, None
 
 
-def _workflow_merge_block(owner, repo, number, pr):
-    """If this PR must not be API-merged, return terminal `blocked`; else None.
+WORKFLOW_GATE_CLEAR = "clear"
+WORKFLOW_GATE_BLOCKED = "blocked"
+WORKFLOW_GATE_HISTORY_ONLY_REASON = "history-only-workflow-touch"
 
-    Detects `.github/workflows/**` in the PR's net three-dot file list OR in any
-    commit in the PR's history, including either name of a renamed file.
-    History-only touches 403 the same way as net-diff touches when the automation
-    token lacks Workflows write. Terminal `blocked`
-    applies the durable open `blocked` label (not pure needs-decision), so the
-    card is soft-heal-protected and ineligible for auto-merge claim; hard-close
-    still auto-cleans once the target is genuinely merged/closed. Detection is
-    re-run on every subsequent `/merge` once the card is actionable again, so a
-    later rebase that drops workflow touches can proceed. Fail closed when the
-    answer is unknowable (same terminal `blocked` + manual UI-merge guidance).
+
+def _workflow_gate_result(status, reason, message="", paths=None, commit_sha="", url=""):
+    """One structured, denial-only result from the authoritative merge gate.
+
+    Human-facing direct-decision copy is carried alongside stable machine facts,
+    but auto-merge consumes only the structured fields. A result can deny or
+    explain a merge; it never authorizes one without the live gate being run.
+    """
+    return {
+        "status": status,
+        "reason": reason,
+        "message": message,
+        "paths": list(paths or []),
+        "commit_sha": str(commit_sha or ""),
+        "source_pr_url": str(url or ""),
+        "net_diff_complete": reason != "net-diff-unverifiable",
+    }
+
+
+def _workflow_merge_gate(owner, repo, number, pr):
+    """Return the structured authoritative workflow merge-gate result.
+
+    The gate checks the complete current net diff first, then every commit in
+    history. Only a history hit after the clean complete net-diff read receives
+    the specialized `history-only-workflow-touch` reason. Every unreadable or
+    incomplete shape remains a generic fail-closed denial.
     """
     slug = "%s/%s" % (owner, repo)
     url = _target_pr_url(owner, repo, number, pr)
     paths, err = _read_pr_file_paths(slug, number, (pr or {}).get("changed_files"))
     if err:
-        return (
+        message = (
             "BLOCKED: could not verify whether %s#%s touches workflow files (%s). "
             "Not merging. Review and merge by hand in the GitHub UI if "
-            "appropriate: %s" % (repo, number, err, url),
-            "blocked",
+            "appropriate: %s" % (repo, number, err, url)
+        )
+        return _workflow_gate_result(
+            WORKFLOW_GATE_BLOCKED,
+            "net-diff-unverifiable",
+            message=message,
+            url=url,
         )
     net_hits = core._workflow_merge_gated_files(paths)
     if net_hits:
         sample = _workflow_path_sample(net_hits)
         more = " (+%d more)" % (len(net_hits) - 5) if len(net_hits) > 5 else ""
-        return (
+        message = (
             "BLOCKED: %s#%s changes CI workflow files (%s%s). The automation "
             "token intentionally has no Workflows write permission, so an API "
             "merge would fail with 403. Review the workflow changes and merge "
-            "by hand in the GitHub UI: %s" % (repo, number, sample, more, url),
-            "blocked",
+            "by hand in the GitHub UI: %s" % (repo, number, sample, more, url)
+        )
+        return _workflow_gate_result(
+            WORKFLOW_GATE_BLOCKED,
+            "net-diff-workflow-touch",
+            message=message,
+            paths=net_hits,
+            url=url,
         )
     shas, err = _read_pr_commit_shas(slug, number, (pr or {}).get("commits"))
     if err:
-        return (
+        message = (
             "BLOCKED: could not verify whether %s#%s's commit history touches "
             "workflow files (%s). Not merging. Review and merge by hand in the "
-            "GitHub UI if appropriate: %s" % (repo, number, err, url),
-            "blocked",
+            "GitHub UI if appropriate: %s" % (repo, number, err, url)
+        )
+        return _workflow_gate_result(
+            WORKFLOW_GATE_BLOCKED,
+            "history-unverifiable",
+            message=message,
+            url=url,
         )
     for sha in shas:
         cpaths, err = _read_commit_file_paths(slug, sha)
         if err:
-            return (
+            message = (
                 "BLOCKED: could not verify commit %s on %s#%s for workflow "
                 "touches (%s). Not merging. Review and merge by hand in the "
-                "GitHub UI if appropriate: %s" % (sha[:8], repo, number, err, url),
-                "blocked",
+                "GitHub UI if appropriate: %s" % (sha[:8], repo, number, err, url)
+            )
+            return _workflow_gate_result(
+                WORKFLOW_GATE_BLOCKED,
+                "history-unverifiable",
+                message=message,
+                commit_sha=sha,
+                url=url,
             )
         hits = core._workflow_merge_gated_files(cpaths)
         if hits:
             sample = _workflow_path_sample(hits)
             more = " (+%d more)" % (len(hits) - 5) if len(hits) > 5 else ""
-            return (
+            message = (
                 "BLOCKED: %s#%s has a commit (%s) that changes CI workflow "
                 "files (%s%s), even if the net diff looks clean. The automation "
                 "token intentionally has no Workflows write permission, so an "
                 "API merge would fail with 403. Review and merge by hand in the "
-                "GitHub UI: %s" % (repo, number, sha[:8], sample, more, url),
-                "blocked",
+                "GitHub UI: %s" % (repo, number, sha[:8], sample, more, url)
             )
+            return _workflow_gate_result(
+                WORKFLOW_GATE_BLOCKED,
+                WORKFLOW_GATE_HISTORY_ONLY_REASON,
+                message=message,
+                paths=hits,
+                commit_sha=sha,
+                url=url,
+            )
+    return _workflow_gate_result(
+        WORKFLOW_GATE_CLEAR,
+        "no-workflow-touch",
+        url=url,
+    )
+
+
+def _workflow_merge_block(owner, repo, number, pr):
+    """Compatibility wrapper for direct decisions: blocked tuple or None."""
+    result = _workflow_merge_gate(owner, repo, number, pr)
+    if result["status"] == WORKFLOW_GATE_BLOCKED:
+        return (result["message"], "blocked")
     return None
 
 
@@ -838,14 +896,18 @@ def do_merge(
     number,
     head_sha,
     return_merge_commit=False,
+    return_workflow_gate=False,
     expected_base_sha=None,
     require_clean_merge_state=False,
     auto_merge_guard=None,
 ):
-    def outcome(message, terminal, merge_commit=""):
+    def outcome(message, terminal, merge_commit="", workflow_gate=None):
+        values = [message, terminal]
         if return_merge_commit:
-            return (message, terminal, merge_commit)
-        return (message, terminal)
+            values.append(merge_commit)
+        if return_workflow_gate:
+            values.append(workflow_gate)
+        return tuple(values)
 
     slug = "%s/%s" % (owner, repo)
     pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -862,9 +924,13 @@ def do_merge(
     # Option B: never attempt API merge of a workflow-touching PR. FLEET_TOKEN
     # intentionally has no Workflows write; pre-detect and leave the card open
     # and clearly blocked with manual UI-merge guidance instead of a doomed 403.
-    workflow_block = _workflow_merge_block(owner, repo, number, pr)
-    if workflow_block:
-        return outcome(*workflow_block)
+    workflow_gate = _workflow_merge_gate(owner, repo, number, pr)
+    if workflow_gate["status"] == WORKFLOW_GATE_BLOCKED:
+        return outcome(
+            workflow_gate["message"],
+            "blocked",
+            workflow_gate=workflow_gate,
+        )
     method = _merge_method(repo)
     try:
         pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))

@@ -96,8 +96,9 @@ jobs:
       # Merges are cross-repo writes, so this step needs FLEET_TOKEN, and
       # it reads the persisted per-card behavior verdict from cards.json (a local
       # file, no token needed to read it). Its separate default-token credential
-      # persists the pre-merge audit intent; the resolved decision record and
-      # ledger stay in the default-token "Record auto-merges" step below.
+      # persists the pre-merge audit intent and any proven history-only workflow
+      # manual-merge hold; the resolved decision record and ledger stay in the
+      # default-token "Record auto-merges" step below.
       - name: Auto-merge eligible PRs
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
@@ -106,9 +107,9 @@ jobs:
           WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/auto_merge.py act scan.json automerge-valid-claims.json cards.json
 
-      # Durable audit trail + resolved decision record for every auto-merge, in
-      # THIS repo (default token, never FLEET_TOKEN - this repo's own
-      # bookkeeping).
+      # Durable audit trail + resolved decision record for every auto-merge, plus
+      # default-token verification/retry of any manual-merge hold before claim
+      # release. This is THIS repo's bookkeeping, never FLEET_TOKEN.
       - name: Record auto-merges
         if: always()
         env:
