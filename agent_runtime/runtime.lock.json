@@ -34,12 +34,13 @@
       "TurnStartResponse.json": "7cfae42a4652fe38119d6a0a625910357c869c448c985513a4cd5966031e18bc"
     }
   },
-  "temporaryRollback": {
+  "claudeProduction": {
     "adapter": "claude-action-compat",
     "actionCommit": "fad22eb3fa582b7357fc0ea48af6645851b884fd",
     "actionRelease": "v1.0.161",
     "claudeCodeVersion": "2.1.197",
     "agentSdkVersion": "0.3.197",
-    "modelAlias": "sonnet"
+    "model": "claude-sonnet-4-6",
+    "allowModelAlias": false
   }
 }

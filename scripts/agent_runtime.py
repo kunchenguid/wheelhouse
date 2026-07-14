@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
+from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
 from agent_runtime.contract import ContractError, canonical_sha256, load_json_regular, validate_contract
@@ -105,6 +106,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
     validate_contract(value, args.kind or None)
     print("valid %s" % (args.kind or value["kind"]))
     return 0
+
+
+def cmd_bridge_claude(args: argparse.Namespace) -> int:
+    result = bridge(args.task, args.bundle, args.execution_file, args.delivered_file, args.result, args.events)
+    output("result", str(Path(args.result).resolve()))
+    output("events", str(Path(args.events).resolve()))
+    output("status", result["status"])
+    output("error_code", (result.get("error") or {}).get("code", ""))
+    print("Claude action bridge %s" % result["status"])
+    return 0 if result["status"] == "succeeded" else 1
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -245,6 +256,14 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--path", required=True)
     validate.add_argument("--kind", choices=("AgentTask", "AgentEvent", "AgentResult"), default="")
     validate.set_defaults(func=cmd_validate)
+    claude = commands.add_parser("bridge-claude")
+    claude.add_argument("--task", required=True)
+    claude.add_argument("--bundle", required=True)
+    claude.add_argument("--execution-file", default="")
+    claude.add_argument("--delivered-file", default="")
+    claude.add_argument("--result", required=True)
+    claude.add_argument("--events", required=True)
+    claude.set_defaults(func=cmd_bridge_claude)
     export = commands.add_parser("export-final")
     export.add_argument("--result", required=True)
     export.add_argument("--out", required=True)

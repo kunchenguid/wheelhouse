@@ -284,6 +284,38 @@ jobs:
           WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
         run: python scripts/nl_readonly_search.py install
 
+      - name: Enforce Claude subprocess token isolation
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          command -v bwrap >/dev/null
+
+      - id: nl-claude-task
+        name: Build the immutable Claude natural-language AgentTask
+        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
+        env:
+          NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.nl-gate.outputs.repo }}
+          NUMBER: ${{ steps.nl-gate.outputs.number }}
+          KIND: ${{ steps.nl-gate.outputs.kind }}
+          REVISION: ${{ steps.nl-gate.outputs.revision }}
+          SEARCH: ${{ steps.nl-readonly.outputs.enabled }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-nl-decision
+        run: |
+          set -euo pipefail
+          printf '%s' "$NL_PROMPT" > prompt.txt
+          rm -f decision.json
+          if [ "$SEARCH" = "true" ]; then action="nl-decision.search"; else action="nl-decision.local"; fi
+          python scripts/agent_runtime.py build-task \
+            --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt
+
       # Claude maps intent -> writes decision.json. If READONLY_TOKEN exists,
       # this branch may also run the scoped wheelhouse-search wrapper for answer
       # context. The action's github_token input is READONLY_TOKEN here because
@@ -312,6 +344,7 @@ jobs:
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -325,7 +358,7 @@ jobs:
           claude_args: |
             --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
             --max-turns 32
-            --model sonnet
+            --model claude-sonnet-4-6
 
       # No-search branch. This is the exact production tool posture: Write only,
       # no shell, and no GH_TOKEN environment. It runs whenever READONLY_TOKEN is
@@ -333,10 +366,13 @@ jobs:
       - id: nl-claude
         name: Claude interprets intent
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled != 'true' }}
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
+          allowed_non_write_users: ${{ github.event.sender.login }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           # Read/Grep/Glob let the model open the on-disk target.txt (pass-by-
           # reference, card #555). Still no shell and no GH_TOKEN: this
@@ -345,7 +381,20 @@ jobs:
           claude_args: |
             --allowedTools Read,Grep,Glob,Write
             --max-turns 32
-            --model sonnet
+            --model claude-sonnet-4-6
+
+      - id: nl-claude-bridge
+        name: Normalize Claude natural-language result through AgentResult
+        if: ${{ always() && steps.nl-claude-task.outcome == 'success' }}
+        env:
+          TASK: ${{ steps.nl-claude-task.outputs.task }}
+          BUNDLE: ${{ steps.nl-claude-task.outputs.bundle }}
+          EXECUTION_FILE: ${{ steps.nl-claude-search.outputs.execution_file || steps.nl-claude.outputs.execution_file }}
+        run: |
+          python scripts/agent_runtime.py bridge-claude \
+            --task "$TASK" --bundle "$BUNDLE" --execution-file "${EXECUTION_FILE:-}" \
+            --delivered-file decision.json --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
 
       - name: Prepare the pinned Codex sandboxed adapter worker
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
@@ -432,7 +481,7 @@ jobs:
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
-          RUNTIME_RESULT: ${{ steps.nl-agent-runtime.outputs.result }}
+          RUNTIME_RESULT: ${{ steps.nl-claude-bridge.outputs.result || steps.nl-agent-runtime.outputs.result }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -446,18 +495,6 @@ jobs:
           if [ -n "${RUNTIME_RESULT:-}" ]; then
             python scripts/agent_runtime.py export-final \
               --result "$RUNTIME_RESULT" --out "$out_file"
-          elif [ -e decision.json ]; then
-            if [ -L decision.json ] || [ ! -f decision.json ]; then
-              echo "::error::Invalid decision.json produced by the Claude production adapter"
-              exit 1
-            fi
-            size=$(wc -c < decision.json)
-            size=${size//[[:space:]]/}
-            if [ "$size" -gt 65536 ]; then
-              echo "::error::decision.json is too large"
-              exit 1
-            fi
-            cp decision.json "$out_file"
           fi
 
       # Validate the LLM's structured result against the per-kind allowlist and

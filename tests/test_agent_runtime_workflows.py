@@ -38,6 +38,23 @@ def main():
     check("production: every direct step keeps exact action pin", all(step["uses"] == PIN for _, step in claude))
     check("production: every direct step requires resolved Claude selection", all("mode == 'claude'" in str(step.get("if", "")) or "runtime_mode == 'claude'" in str(step.get("if", "")) for _, step in claude))
     check("production: direct Claude is never a failure fallback", all("failure()" not in str(step.get("if", "")) and "agent-runtime.outcome" not in str(step.get("if", "")) for _, step in claude))
+    check("production: every direct step pins immutable model", all("--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")) for _, step in claude))
+    check("production: every model subprocess enables credential scrub", all((step.get("env") or {}).get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1" for _, step in claude))
+    check("production: every direct step activates external subprocess isolation", all((step.get("with") or {}).get("allowed_non_write_users") for _, step in claude))
+    check("production: subprocess isolation never uses a wildcard actor", all((step.get("with") or {}).get("allowed_non_write_users") != "*" for _, step in claude))
+    acting_token_steps = [step for _, step in claude if (step.get("with") or {}).get("github_token") == "${{ github.token }}"]
+    check("production: acting tokens remain outside isolated model subprocesses", bool(acting_token_steps) and all((step.get("env") or {}).get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1" and (step.get("with") or {}).get("allowed_non_write_users") for step in acting_token_steps))
+
+    for name, doc in docs.items():
+        workflow_steps = steps(doc)
+        isolation = next((index for index, step in enumerate(workflow_steps) if step.get("name") == "Enforce Claude subprocess token isolation"), -1)
+        direct = [index for index, step in enumerate(workflow_steps) if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
+        task_steps = [index for index, step in enumerate(workflow_steps) if "claude" in str(step.get("id", "")) and "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
+        bridge = [index for index, step in enumerate(workflow_steps) if "scripts/agent_runtime.py bridge-claude" in str(step.get("run", ""))]
+        check("production: %s enforces isolation before every direct action" % name, isolation >= 0 and all(isolation < index for index in direct))
+        isolation_step = workflow_steps[isolation] if isolation >= 0 else {}
+        check("production: %s isolation requires bubblewrap and socat" % name, "bubblewrap socat" in str(isolation_step.get("run", "")) and not isolation_step.get("continue-on-error"))
+        check("production: %s wraps every direct action family in task and result contracts" % name, bool(task_steps) and bool(bridge) and min(task_steps) < min(direct) and max(bridge) > max(direct))
 
     text = "\n".join(path.read_text() for path in WORKFLOWS.values())
     for action in (
@@ -63,8 +80,13 @@ def main():
     check("runtime: triage, repair, deep review, and NL all invoke one CLI", len(runtime_runs) == 4)
     check("runtime: every invocation consumes AgentTask plus bundle", all("--task" in step["run"] and "--bundle" in step["run"] for step in runtime_runs))
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
-    check("runtime: every invocation has trusted immutable task construction", len(build_steps) == 4)
-    check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + build_steps))
+    claude_build_steps = [step for step in build_steps if "claude" in str(step.get("id", ""))]
+    codex_build_steps = [step for step in build_steps if step not in claude_build_steps]
+    bridge_steps = [step for _, step in all_steps if "scripts/agent_runtime.py bridge-claude" in str(step.get("run", ""))]
+    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 4 and len(codex_build_steps) == 4)
+    check("runtime: every Claude family emits normalized AgentResult", len(bridge_steps) == 4 and all("--task" in step["run"] and "--execution-file" in step["run"] for step in bridge_steps))
+    check("runtime: no consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if "bridge-claude" not in str(step.get("run", ""))))
+    check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
     check("runtime: no configured action can reach a Codex workflow path", all(row["target"] == "claude" for row in yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]["actions"].values()))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
     package_steps = [step for _, step in all_steps if "agent_runtime.py verify-package" in str(step.get("run", ""))]
@@ -84,10 +106,10 @@ def main():
 
     triage = docs["triage"]
     triage_steps = {step.get("id"): step for step in steps(triage) if step.get("id")}
-    check("triage consumer: normalized result preferred", "steps.agent-runtime.outputs.result" in str((triage_steps["triage-result"].get("env") or {}).get("EXECUTION_FILE")))
-    check("repair consumer: normalized repair result preferred", "RUNTIME_RESULT" in (triage_steps["repair-result"].get("env") or {}))
+    check("triage consumer: Claude AgentResult required", "steps.claude-bridge.outputs.result" in str((triage_steps["triage-result"].get("env") or {}).get("EXECUTION_FILE")))
+    check("repair consumer: normalized repair result required", "steps.claude-repair-bridge.outputs.result" in str((triage_steps["repair-result"].get("env") or {}).get("RUNTIME_RESULT")))
     deep_post = next(step for step in steps(docs["deep"]) if step.get("name") == "Post the verdict on the card")
-    check("deep consumer: normalized result preferred", "steps.agent-runtime.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
+    check("deep consumer: Claude AgentResult required", "steps.claude-bridge.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
     deep_steps = steps(docs["deep"])
     deep_ids = [step.get("id") for step in deep_steps]
     deep_gate = next(step for step in deep_steps if step.get("id") == "gate")
@@ -103,6 +125,7 @@ def main():
     check("selection: Claude primary profile selected", config["primary_profile"] == "claude-action-current-pinned")
     check("selection: every action explicitly targets Claude", config["target"] == "claude" and all(row["target"] == "claude" for row in config["actions"].values()))
     check("selection: fallback globally disabled", config["fallback"] == "none")
+    check("selection: immutable Claude model forbids aliases", config["profiles"][config["primary_profile"]]["model"] == "claude-sonnet-4-6" and config["profiles"][config["primary_profile"]]["allow_model_alias"] is False)
     check("selection: no activation or temporary rollback settings remain", "production_activation" not in config and "temporary_rollback_profile" not in config)
     check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
 

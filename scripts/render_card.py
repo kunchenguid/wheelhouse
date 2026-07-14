@@ -3177,12 +3177,12 @@ def _text_from_content(content):
 
 
 def extract_claude_result(path):
-    """Extract delivered text from AgentResult v1 or the temporary Claude bridge.
+    """Extract delivered text from AgentResult v1 or a legacy Claude transcript.
 
     AgentResult is tried first. A schema-invalid but delivered triage candidate
     remains extractable so the existing one-turn repair policy stays distinct
-    from missing-output failures. The Claude event-array parser is retained only
-    for the explicit temporary production/rollback bridge.
+    from missing-output failures. The Claude event-array parser remains for
+    cards produced before every production consumer required AgentResult.
     """
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return ""

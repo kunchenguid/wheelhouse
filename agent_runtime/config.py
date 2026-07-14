@@ -116,6 +116,8 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
         raise ConfigError("Claude production selection must use the pinned direct action profile")
     if profile["provider"] != "anthropic" or profile["auth_profile"] != "anthropic-subscription":
         raise ConfigError("Claude production selection must use subscription authentication")
+    if profile["model"] != "claude-sonnet-4-6" or profile["allow_model_alias"] is not False:
+        raise ConfigError("Claude production selection must use the immutable model pin")
     return {
         "mode": target,
         "profileName": profile_name,

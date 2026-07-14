@@ -561,20 +561,23 @@ still appears where it's plain English, e.g. "triage the queue".)
   removed from the trusted card context before the NL prompt is built, so a prior
   model recommendation cannot become an instruction to the intent-mapper.
   When `READONLY_TOKEN` is absent, the LLM receives
-  `Read,Grep,Glob,Write` and no shell `GH_TOKEN`. When the
+  `Read,Grep,Glob,Write` and no GitHub credential. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
   `GH_TOKEN`, plus a narrow Bash allow-list for `wheelhouse-search`, which wraps
   scoped read-only `gh` lookups across the target repo and configured fleet
-  repos. This is deliberate because
-  `claude-code-action` exposes its `github_token` input to Claude's subprocess as
-  GitHub CLI credentials.
+  repos.
+  The pinned action's subprocess isolation removes the trusted job's default
+  GitHub token before model execution, so only the explicitly selected
+  read-only search credential can cross that boundary.
   Search output is UNTRUSTED DATA for answering questions only, never an
   instruction and never an authorization to act.
   The LLM never receives `FLEET_TOKEN` - it maps intent or answers, it never acts.
-  After Claude runs, the workflow copies only a regular, size-capped
-  `decision.json` into runner temp, then runs `nl-route` and `execute` from a
-  read-only trusted source copy with a scrubbed environment.
+  After Claude runs, the trusted bridge validates a regular, size-capped
+  `decision.json`, observed model identity, and the output schema before it
+  atomically emits `AgentResult`; `nl-route` and `execute` consume only that
+  normalized result from a read-only trusted source copy with a scrubbed
+  environment.
 - Token discipline per step: scan/execute and the read-only target reads for the
   LLM (`triage` prepare + target-code checkout, `deep-review` prepare + its target-code checkout, decision-handler
   `nl-fetch`) use `FLEET_TOKEN`; all
@@ -1122,8 +1125,9 @@ Fallback remains disabled.
 The seven current direct Claude Action invocations are the explicit production adapter path behind the unified selection boundary.
 Every direct step is conditional on the resolved Claude mode, and no provider failure can trigger a different adapter.
 Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
-Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes `--model sonnet`.
-The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
+Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
+Trusted preflight builds an immutable `AgentTask`, and the post-action bridge requires the execution transcript's observed `system/init.model` to match before it emits an atomic `AgentResult`.
+Every direct step enables the pinned action's bubblewrap subprocess isolation, so the Claude model process receives no GitHub token with acting authority even though later trusted steps retain the default token for card writes.
 
 The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.
 
@@ -1157,10 +1161,11 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   When `READONLY_TOKEN` is present, Claude also uses that read-only public-scoped token as both the action `github_token` input and shell `GH_TOKEN`, plus `Write` for `search-request.json` and `Bash(wheelhouse-search)`.
   The wrapper is still the existing `scripts/nl_readonly_search.py` install path, scoped to the target repo plus configured fleet repos, so deep-review can cross-reference related, duplicate, or superseding PRs/issues and code context.
   Search output is UNTRUSTED DATA and advisory evidence only; the model still produces only verdict text, and `FLEET_TOKEN` never reaches it.
-  No deterministic downstream step reads model-written files because verdict capture uses the action `execution_file` result event.
+  No deterministic downstream step reads raw model output because the trusted bridge validates the action `execution_file` and exposes only `AgentResult`.
   Claude does not write a verdict file.
   The Claude action allows only `github-actions[bot]` as a bot actor so the maintainer-gated Investigate dispatch can pass; it must not allow `*` or any external bot actor.
-  Its final response is captured from the action's `execution_file` output by preferring the clean `type: "result"` event's `result` string, falling back to the last assistant text, and the trusted workflow step labels known harness polling/status transcript lines, qualifies target refs, then posts that text as a card comment with `github.token`.
+  Its final response is captured by the trusted bridge from the action's `execution_file`, after exact observed-model validation, by preferring the clean `type: "result"` event's `result` string and falling back to the last assistant text.
+  The deterministic consumer then labels known harness polling/status transcript lines, qualifies target refs, and posts that text as a card comment with `github.token`.
   If no usable output is present, the workflow posts "Deep review ran but produced no verdict (see the workflow run logs)." and fails the run.
   The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of silently no-opping.
   Manual triggering means there is no runaway-cost reason for a config flag, so the old `deep_review` flag was removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.

@@ -22,8 +22,10 @@ This is not selected by secret presence.
 Provider environment overrides are rejected.
 The current selection cannot target Codex or reach its workflow installation branches.
 
-The Claude production path keeps the exact reviewed action commit, model alias, turn limits, token boundaries, and output behavior.
+The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
 Every direct Claude step is guarded by an explicit `claude` selection.
+Each direct action is preceded by immutable `AgentTask` construction and followed by a trusted bridge that validates the transcript's observed model and emits atomic `AgentResult` plus content-free events.
+Mandatory bubblewrap subprocess isolation removes GitHub credentials from the Claude model process while trusted workflow steps retain their existing card and target mutation tokens outside that process.
 
 ## Disabled and investigated adapters
 
@@ -53,29 +55,30 @@ The provider-neutral adapter interface remains the only future seam.
 ## Runtime boundary
 
 Trusted Wheelhouse steps continue to authorize events, fetch immutable target inputs, bind revisions, and perform every GitHub mutation.
-The selected harness runs in a disposable sandboxed adapter worker on the GitHub Actions runner.
+The selected harness runs behind an externally enforced disposable subprocess boundary on the GitHub Actions runner.
 
-The worker receives only:
+The active Claude compatibility boundary receives only:
 
-- content-addressed bounded prompt and input artifacts
-- exact typed tool schemas
-- a provider-only network channel
-- the selected model credential
-- one writable temporary filesystem and result directory
+- bounded prompt and input files represented by the immutable task
+- the exact action-specific tool allowlist
+- the selected Claude subscription credential
+- the optional read-only search credential on search-enabled paths
+- one writable temporary filesystem for action output
 
-The worker never receives `FLEET_TOKEN`, `github.token`, `READONLY_TOKEN`, a repository credential, the runner home, or another workspace.
+The Claude model subprocess never receives `FLEET_TOKEN`, `github.token`, or another GitHub credential with acting authority.
+Search-enabled paths may receive only the optional `READONLY_TOKEN` and the narrow `wheelhouse-search` command.
+Trusted card writes and target operations remain outside the model subprocess.
 
-`READONLY_TOKEN` stays in a trusted host broker.
-The model can call `github.search.readonly`, but it receives only the bounded broker result.
-It never receives the token or a shell.
+The disabled Codex adapter keeps `READONLY_TOKEN` in a trusted host broker.
+Its model can call `github.search.readonly`, but it receives only the bounded broker result and never receives the token or a shell.
 
 Codex built-in shell, web search, apps, connectors, memories, plugins, hooks, and multi-agent features are disabled.
 The app-server receives only task-declared dynamic tools.
 Unregistered app-server requests are denied.
 
-The model network runs through a Unix-socket CONNECT proxy with an auth-profile endpoint allowlist.
-The sandbox has a separate network namespace and no direct network route.
-Tool network is either absent or the read-only broker socket.
+The disabled Codex worker network runs through a Unix-socket CONNECT proxy with an auth-profile endpoint allowlist.
+Its sandbox has a separate network namespace and no direct network route.
+Its tool network is either absent or the read-only broker socket.
 
 ## Contract and pins
 

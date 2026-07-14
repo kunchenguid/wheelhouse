@@ -219,8 +219,9 @@ def build_task(
 ) -> dict[str, Any]:
     if action not in ACTION_LIMITS:
         raise ArtifactError("unsupported agent runtime action")
-    if selection.get("mode") != "codex" or (selection.get("profile") or {}).get("adapter") != "codex-app-server":
-        raise ArtifactError("the selected adapter does not use this disabled app-server task compiler")
+    adapter = (selection.get("profile") or {}).get("adapter")
+    if (selection.get("mode"), adapter) not in (("claude", "claude-action-compat"), ("codex", "codex-app-server")):
+        raise ArtifactError("the selected adapter is not supported by the task compiler")
     bundle = Path(bundle_dir).resolve()
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -247,7 +248,7 @@ def build_task(
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]
-    compiled_prompt = prompt_text.rstrip() + "\n" + "\n".join(shim_lines) + "\n"
+    compiled_prompt = prompt_text if adapter == "claude-action-compat" else prompt_text.rstrip() + "\n" + "\n".join(shim_lines) + "\n"
     compiled_path = bundle / ".compiled-prompt"
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
@@ -272,13 +273,14 @@ def build_task(
     schema_digest, _, schema_artifact = _copy_file(schema_path, bundle, 65536)
     soft, hard, turns, tool_calls, final_bytes = ACTION_LIMITS[action]
     profile = selection["profile"]
+    shim_version = "claude-action-compat/v1" if adapter == "claude-action-compat" else "codex-app-server/v1"
     shim = {
-        "adapter": "codex-app-server",
-        "version": "codex-app-server/v1",
+        "adapter": adapter,
+        "version": shim_version,
         "promptRole": "user",
-        "nativeDefault": "pinned-codex-0.144.0",
-        "tools": "dynamic-only",
-        "output": "turn/start.outputSchema",
+        "nativeDefault": "pinned-claude-code-2.1.197" if adapter == "claude-action-compat" else "pinned-codex-0.144.0",
+        "tools": "claude-action-mapped" if adapter == "claude-action-compat" else "dynamic-only",
+        "output": "trusted-post-action-bridge" if adapter == "claude-action-compat" else "turn/start.outputSchema",
     }
     execution_id = str(uuid.uuid4())
     candidate = {
@@ -307,7 +309,7 @@ def build_task(
         "spec": {
             "selection": {"profile": selection["profileName"], "candidates": [candidate], "fallback": {"mode": "none"}},
             "prompt": {
-                "system": {"mode": "native-default-plus-core", "adapterShimVersion": "codex-app-server/v1", "adapterShimSha256": canonical_sha256(shim)},
+                "system": {"mode": "native-default-plus-core", "adapterShimVersion": shim_version, "adapterShimSha256": canonical_sha256(shim)},
                 "userArtifact": prompt_artifact,
                 "segments": _trust_segments(action, prompt_digest, prompt_bytes, inputs),
             },

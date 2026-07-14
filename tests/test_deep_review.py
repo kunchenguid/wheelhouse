@@ -365,8 +365,8 @@ def test_code_grounded_checkout_and_tool_isolation():
         dumped = yaml.safe_dump(legacy)
         args = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
-            "security: legacy Claude keeps no-search tools and Sonnet alias",
-            args == "--allowedTools Read,Grep,Glob\n--max-turns 64\n--model sonnet",
+            "security: legacy Claude keeps no-search tools and immutable model",
+            args == "--allowedTools Read,Grep,Glob\n--max-turns 64\n--model claude-sonnet-4-6",
         )
         check(
             "security: legacy Claude has no GH_TOKEN env",
@@ -389,8 +389,8 @@ def test_code_grounded_checkout_and_tool_isolation():
             "Write" not in args,
         )
         check(
-            "workflow: legacy Claude uses Sonnet alias",
-            "--model sonnet" in args,
+            "workflow: legacy Claude uses immutable model",
+            "--model claude-sonnet-4-6" in args,
         )
         check(
             "security: legacy Claude runs only when readonly search is disabled",
@@ -426,8 +426,8 @@ def test_code_grounded_checkout_and_tool_isolation():
             and "Bash(wheelhouse-search)" in args
         )
         check(
-            "workflow: search Claude uses Sonnet alias",
-            "--model sonnet" in args,
+            "workflow: search Claude uses immutable model",
+            "--model claude-sonnet-4-6" in args,
         )
         for forbidden in (
             "Bash(gh",
@@ -497,16 +497,15 @@ def test_code_grounded_checkout_and_tool_isolation():
             and "READONLY_TOKEN" not in yaml.safe_dump(post),
         )
         check(
-            "workflow: post step captures either Claude action execution_file output",
+            "workflow: post step consumes normalized Claude AgentResult",
             "EXECUTION_FILE" in env
-            and "steps.claude_search.outputs.execution_file" in env
-            and "steps.claude.outputs.execution_file" in env,
+            and "steps.claude-bridge.outputs.result" in env
+            and "steps.claude_search.outputs.execution_file" not in env
+            and "steps.claude.outputs.execution_file" not in env,
         )
         check(
-            "workflow: post step extracts the clean final result event",
-            'event.get("type") == "result"' in run
-            and 'event.get("result")' in run
-            and 'not event.get("is_error")' in run,
+            "workflow: post step reads the normalized result",
+            "result_text" in run,
         )
         check(
             "workflow: post step can fall back to last assistant text",

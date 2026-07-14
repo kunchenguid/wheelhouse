@@ -169,11 +169,11 @@ def test_claude_steps_split_legacy_vs_search():
         dumped = yaml.safe_dump(legacy)
         args = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
-            "workflow: legacy step keeps the no-shell tool mode and Sonnet alias "
+            "workflow: legacy step keeps the no-shell tool mode and immutable model "
             "(Read/Grep/Glob added for pass-by-reference target.txt, card #555; "
             "Write kept for decision.json, still no Bash)",
             args
-            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model sonnet",
+            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6",
         )
         check(
             "workflow: legacy step has no GH_TOKEN env",
@@ -184,9 +184,9 @@ def test_claude_steps_split_legacy_vs_search():
             (legacy.get("with") or {}).get("github_token") == "${{ github.token }}",
         )
         check(
-            "workflow: legacy step needs no actor-check bypass (github.token can "
-            "already read collaborator permissions)",
-            "allowed_non_write_users" not in (legacy.get("with") or {}),
+            "workflow: legacy step activates subprocess credential isolation",
+            bool((legacy.get("with") or {}).get("allowed_non_write_users"))
+            and (legacy.get("env") or {}).get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB") == "1",
         )
         check(
             "workflow: legacy step never receives FLEET_TOKEN or READONLY_TOKEN",
@@ -197,8 +197,8 @@ def test_claude_steps_split_legacy_vs_search():
             "steps.nl-readonly.outputs.enabled != 'true'" in str(legacy.get("if", "")),
         )
         check(
-            "workflow: legacy step uses Sonnet alias",
-            "--model sonnet" in args,
+            "workflow: legacy step uses immutable model",
+            "--model claude-sonnet-4-6" in args,
         )
 
     if search:
@@ -247,8 +247,8 @@ def test_claude_steps_split_legacy_vs_search():
         for pattern in ("Write", "Bash(wheelhouse-search)"):
             check("workflow: search step allows %s" % pattern, pattern in args)
         check(
-            "workflow: search step uses Sonnet alias",
-            "--model sonnet" in args,
+            "workflow: search step uses immutable model",
+            "--model claude-sonnet-4-6" in args,
         )
         for forbidden in (
             "FLEET_TOKEN",
@@ -490,17 +490,14 @@ def test_claude_output_is_isolated_before_routing():
             hardened_shell_env(preserve),
         )
         check(
-            "workflow: nl-result stores only decision.json in runner temp",
+            "workflow: nl-result exports only normalized decision.json in runner temp",
             "${RUNNER_TEMP}/wheelhouse-nl" in run
-            and 'cp decision.json "$out_file"' in run,
+            and "agent_runtime.py export-final" in run
+            and "steps.nl-claude-bridge.outputs.result" in str(env.get("RUNTIME_RESULT")),
         )
         check(
-            "workflow: nl-result rejects symlink or non-file results",
-            "[ -L decision.json ]" in run and "[ ! -f decision.json ]" in run,
-        )
-        check(
-            "workflow: nl-result caps the LLM result size",
-            "65536" in run and "wc -c < decision.json" in run,
+            "workflow: raw model decision bypass is absent",
+            'cp decision.json "$out_file"' not in run,
         )
 
     check(

@@ -218,11 +218,11 @@ agent_runtime:
       auth_profile: anthropic-subscription
       auth_mechanism: claude-action-oauth
       expected_workspace_id: ""
-      model: sonnet
+      model: claude-sonnet-4-6
       effort: provider-default
       cost_class: subscription
       data_boundary: anthropic-subscription
-      allow_model_alias: true
+      allow_model_alias: false
       provider_hosts:
         - api.anthropic.com
 
@@ -283,7 +283,8 @@ auto_triage_issues: true
 # Read/Grep/Glob-only behavior. Known claude-code-action harness polling/status
 # lines are preserved in the posted verdict but labeled as automated status.
 # All Claude-powered paths use the pinned
-# claude-code-action v1.0.161 commit and pass `--model sonnet` to every Claude
+# claude-code-action v1.0.161 commit and pass immutable
+# `--model claude-sonnet-4-6` to every Claude
 # step.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic

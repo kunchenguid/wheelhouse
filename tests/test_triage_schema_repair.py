@@ -545,12 +545,12 @@ def test_triage_yml_repair_wiring():
     check("yaml: claude_repair is tokenless (no FLEET_TOKEN)", "FLEET_TOKEN" not in dumped)
     check("yaml: claude_repair is tokenless (no READONLY_TOKEN)", "READONLY_TOKEN" not in dumped)
     check("yaml: claude_repair allowed_bots stays narrow", repw.get("allowed_bots") == "github-actions[bot]")
-    check("yaml: claude_repair uses sonnet", "--model sonnet" in str(repw.get("claude_args", "")))
+    check("yaml: claude_repair uses immutable model", "--model claude-sonnet-4-6" in str(repw.get("claude_args", "")))
 
     res = steps[res_i]
     rrun = str(res.get("run", ""))
     check("yaml: repair-result extracts via the trusted render_card.py", "extract-result" in rrun)
-    check("yaml: repair-result reads the repair execution file", res.get("env", {}).get("EXECUTION_FILE") == "${{ steps.claude_repair.outputs.execution_file }}")
+    check("yaml: repair-result reads normalized AgentResult", "steps.claude-repair-bridge.outputs.result" in str(res.get("env", {}).get("RUNTIME_RESULT")))
 
     upd = steps[upd_i]
     check(
