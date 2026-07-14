@@ -240,9 +240,11 @@ python tests/test_agent_runtime_capabilities.py
 python tests/test_agent_runtime_security.py
 python tests/test_agent_runtime_lifecycle.py
 python tests/test_agent_runtime_consumers.py
+python tests/test_agent_runtime_dispatch.py
 python tests/test_agent_runtime_claude_handoff.py
 python tests/test_agent_runtime_claude_bridge.py
 python tests/test_agent_runtime_workflows.py
+python tests/test_claude_model_dispatch.py
 ```
 
 The fake adapter exercises all action profiles without network or credentials.
