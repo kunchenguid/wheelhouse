@@ -5,10 +5,10 @@ Wheelhouse - backstop reconciler.
 The safety net behind the event-driven `ingest` path. Given a fresh scan of the
 fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
 
-  * opens a decision card for any worklist item that has no open card,
-    reads that freshly-created card back by the issue number returned from
-    `upsert_card`, and queues its first eligible auto-triage attempt in the same
-    pass,
+  * for any worklist item with no open card, safely reopens one uniquely
+    trusted machine-soft-closed card or creates a new card, reads that card back
+    by the issue number returned from `upsert_card`, and queues its first
+    eligible auto-triage attempt in the same pass,
   * refreshes an OPEN `needs-decision` card in place when its target's material
     state changed (head_sha/compliance/tests/kind/priority/options), when its
     render version is stale, or when a held card should be published because
@@ -290,7 +290,8 @@ def main():
 
     worklist_keys = {(item["repo"], int(item["number"])) for item in items}
 
-    # 1) For each scanned worklist item, create a card if none exists, else
+    # 1) For each scanned worklist item, reuse a trusted machine-soft-closed
+    #    card or create a card if no open card exists, else
     #    refresh it in place when its target materially changed, its card
     #    render_version is stale, or a held card should now be published. If no
     #    full refresh is needed, reflect newer target activity with a hidden
@@ -573,7 +574,6 @@ def main():
                 continue
             if not render_card.is_refreshable(current["labels"]):
                 continue
-
             count = render_card.reconcile_absence_count(current.get("body", ""))
             absence_run_number = render_card.reconcile_absence_run_number(
                 current.get("body", "")
@@ -641,10 +641,7 @@ def main():
                 current = latest
             elif count != render_card.RECONCILE_ABSENCE_THRESHOLD:
                 continue
-            elif absence_run_number not in (
-                reconcile_run_number,
-                reconcile_run_number - 1,
-            ):
+            elif absence_run_number < reconcile_run_number - 1:
                 try:
                     render_card.update_reconcile_absence(
                         current["number"],
@@ -657,6 +654,38 @@ def main():
                         "::warning::failed to restart reconcile absence on card "
                         "#%s: %s" % (current["number"], str(e)[:160])
                     )
+                continue
+            elif absence_run_number == reconcile_run_number - 1:
+                closed_at = _soft_close_timestamp()
+                expected_body = render_card.body_with_reconcile_absence(
+                    current.get("body", ""),
+                    render_card.RECONCILE_ABSENCE_THRESHOLD,
+                    run_number=reconcile_run_number,
+                    closed_at=closed_at,
+                )
+                if expected_body == current.get("body", ""):
+                    continue
+                try:
+                    if not render_card.update_reconcile_absence(
+                        current["number"],
+                        current.get("body", ""),
+                        render_card.RECONCILE_ABSENCE_THRESHOLD,
+                        run_number=reconcile_run_number,
+                        closed_at=closed_at,
+                    ):
+                        continue
+                except Exception as e:
+                    print(
+                        "::warning::failed to refresh reconcile soft-close "
+                        "provenance on card #%s: %s"
+                        % (current["number"], str(e)[:160])
+                    )
+                    continue
+                latest = current_card(current)
+                if not _matches_expected_write(latest, current, expected_body):
+                    continue
+                current = latest
+            elif absence_run_number != reconcile_run_number:
                 continue
 
             # Re-read and validate the exact threshold/provenance state
@@ -702,13 +731,37 @@ def main():
             )
             if number in live_open_set:
                 continue
+            # A definitive target close must never leave reusable soft-close
+            # provenance behind. Clear any uniquely parsed absence record while
+            # the issue is still open, then verify that exact state-only write
+            # before taking the unchanged immediate hard-close path.
+            if render_card.reconcile_absence_needs_clear(current.get("body", "")):
+                expected_body = render_card.body_without_reconcile_absence(
+                    current.get("body", "")
+                )
+                try:
+                    if not render_card.clear_reconcile_absence(
+                        current["number"], current.get("body", "")
+                    ):
+                        continue
+                except Exception as e:
+                    print(
+                        "::warning::failed to clear non-reusable absence state "
+                        "before hard-closing card #%s: %s"
+                        % (current["number"], str(e)[:160])
+                    )
+                    continue
+                latest = current_card(current)
+                if not _matches_expected_write(latest, current, expected_body):
+                    continue
+                current = latest
             card_number = current["number"]
             msg = (
                 "Self-healed by the scheduled backstop: %s#%s is no longer open "
                 "(merged/closed) - consuming this card." % (repo, number)
             )
         try:
-            render_card.close_card(card_number, msg)
+            render_card.close_card(card_number, msg, expected=current)
             closed += 1
         except Exception as e:
             print(

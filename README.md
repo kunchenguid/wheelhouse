@@ -341,6 +341,10 @@ Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive v
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
 If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled workflow run and is soft-closed only when the immediately following workflow run also observes a qualifying absence.
 The first absence is hidden card state bound to the trusted workflow run number, and a worklist return clears it while keeping the same card.
+If that still-open target returns after the soft close, Wheelhouse reuses the same issue only when exactly one closed card has the exact target identity, trusted automation authorship and close actor, and valid current-schema reconcile soft-close provenance.
+The current body and managed labels are prepared while the issue remains closed, then the issue is reopened and uniqueness is verified before triage or any decision can proceed.
+Legacy, owner-resolved, blocked, hard-closed, audit-protected, malformed, untrusted, or ambiguous closed cards are never reopened; an incomplete or ambiguous lookup fails closed instead of creating another card.
+The scan, ingest, and decision workflows share one queued card-lifecycle concurrency group so create, reopen, close, and owner decisions cannot race each other.
 Any intervening present, manually dispatched, failed, truncated, unresolved-mergeability, or fork-CI-wait run breaks the streak without closing, even when that run cannot safely edit the stored absence record.
 An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a non-retryable action error stays visible.
 If that target is genuinely merged or closed, the scheduled backstop still hard-closes the `blocked` card.
@@ -466,7 +470,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   So a malicious PR that tries to prompt-inject through its own source can at worst produce a wrong verdict comment - never run code or exfiltrate a secret.
   The Investigate trigger is owner/maintainer-gated like every other acting path, while direct manual label and issue-only workflow runs remain repo-owner-only.
 - **Public = world-readable.** A public Wheelhouse repo makes your queue and decisions visible to everyone. That transparency is a feature, but state it plainly to yourself before listing private work here; use a private repo if you need it.
-- **Least privilege.** Every workflow declares a minimal `permissions:` block, and `decision-handler` plus `scan-backstop` share the queued `wheelhouse-backstop` concurrency group so card claims, decisions, and reconciliation cannot race.
+- **Least privilege.** Every workflow declares a minimal `permissions:` block, and `ingest`, `decision-handler`, plus `scan-backstop` share the queued `wheelhouse-backstop` concurrency group so card creates, reopens, claims, decisions, and reconciliation cannot race.
 
 ## Troubleshooting
 
@@ -554,15 +558,15 @@ wheelhouse.config.yml          the one file you edit
 .github/ISSUE_TEMPLATE/
   wheelhouse-decision.yml      schema for machine-rendered card decisions (held cards intentionally render no checkboxes)
 .github/workflows/
-  ingest.yml                   repository_dispatch / manual -> create, refresh, or activity-reflect a decision card
+  ingest.yml                   repository_dispatch / manual -> create, safely reuse, refresh, or activity-reflect a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close resolved cards, block non-retryable errors, or leave retries actionable
-  scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
+  scan-backstop.yml            hourly scan -> create, safely reuse, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           resilient GraphQL scan/classify, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
-  render_card.py               build decision cards, including held pending-triage placeholders, auto-merge criteria, and advisory CI security reviews; create/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
+  render_card.py               build decision cards, including held pending-triage placeholders, auto-merge criteria, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   auto_merge.py                evaluate criteria, claim, validate, merge, and audit strictly eligible scan-time PR auto-merges
   automerge_criteria.py        stable schema for authoritative auto-merge criterion rows
@@ -573,6 +577,7 @@ tests/test_decision.py         offline unit test for parse/route logic, workflow
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, fixed-K soft-close hysteresis, race guards, and self-healing
+tests/test_card_reuse.py       offline end-to-end card soft-close, trusted reuse, ambiguity, and lifecycle serialization tests
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging

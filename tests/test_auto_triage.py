@@ -184,7 +184,7 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         current_by_number[number] = refreshed
         return number
 
-    def fake_close(number, message, label="resolved"):
+    def fake_close(number, message, label="resolved", expected=None):
         calls["close"].append({"number": number, "message": message, "label": label})
 
     def fake_get_card(number):
@@ -2800,13 +2800,11 @@ def test_render_held_card_placeholder_and_labels():
 
 
 def test_upsert_card_creates_held_only_when_triage_would_be_queued():
-    old_find, old_ensure, old_create = (
-        rc.find_card,
-        rc.ensure_labels,
-        rc._create_card,
+    old_lookup, old_create = (
+        rc.lookup_card_lifecycle,
+        rc._create_and_verify_card,
     )
-    rc.find_card = lambda marker: None
-    rc.ensure_labels = lambda labels_: None
+    rc.lookup_card_lifecycle = lambda item_: {"open": None, "reusable": None}
     scenarios = [
         ("pr-review token+config on -> held", item(auto_triage=True), True, True),
         ("pr-review no token -> unheld", item(auto_triage=True), False, False),
@@ -2833,7 +2831,9 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
     try:
         for label, scenario_item, has_token, expect_held in scenarios:
             captured = {}
-            rc._create_card = lambda card: captured.update(card) or 99
+            rc._create_and_verify_card = (
+                lambda item_, card: captured.update(card) or 99
+            )
             number = rc.upsert_card(scenario_item, has_token=has_token)
             check("create: %s" % label, number == 99)
             check(
@@ -2845,9 +2845,8 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
                 ("<!-- opt:" not in captured["body"]) == expect_held,
             )
     finally:
-        rc.find_card, rc.ensure_labels, rc._create_card = (
-            old_find,
-            old_ensure,
+        rc.lookup_card_lifecycle, rc._create_and_verify_card = (
+            old_lookup,
             old_create,
         )
 

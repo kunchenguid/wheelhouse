@@ -5,10 +5,10 @@ Wheelhouse - decision-card renderer + card operations.
 `render(item)` turns one classified item into a decision card: a human-readable
 body with quick-decision checkboxes (or a held auto-triage placeholder) and a
 hidden machine-readable state block.
-`upsert_card`/`reflect_activity`/`close_card` create, refresh, activity-stamp,
-or consume cards in THIS repo (via the ambient GH_TOKEN, which the workflow
-sets to the default GITHUB_TOKEN so that card-side activity never re-triggers
-the handler).
+`upsert_card`/`reflect_activity`/`close_card` create, safely reuse, refresh,
+activity-stamp, or consume cards in THIS repo (via the ambient GH_TOKEN, which
+each workflow sets to the default GITHUB_TOKEN so card-side activity never
+re-triggers the handler).
 
 When auto triage is enabled (`should_hold`), a brand-new pr-review/issue-
 triage card is created HELD - `pending-triage` on top of `needs-decision`, a
@@ -43,7 +43,9 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
+from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
@@ -184,6 +186,17 @@ RECONCILE_ABSENCE_VERSION = 2
 RECONCILE_ABSENCE_THRESHOLD = 2
 RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
 RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
+
+# Card lifecycle trust uses the two exact GitHub API spellings for the same
+# GitHub Actions automation actor. REST issue rows use `github-actions[bot]`;
+# `gh issue view` returns `app/github-actions`. No other alias is accepted.
+CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
+GET_CARD_AUTOMATION_AUTHOR = "app/github-actions"
+LIFECYCLE_VERIFY_ATTEMPTS = 3
+LIFECYCLE_VERIFY_DELAY_SECONDS = 0.25
+SOFT_CLOSE_TIMESTAMP_SKEW_SECONDS = 60
+SOFT_CLOSE_MAX_COMPLETION_SECONDS = 15 * 60
+_lifecycle_sleep = time.sleep
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -1749,6 +1762,564 @@ def ensure_labels(labels):
         _gh(["label", "create", label, "--force", "--color", color], check=False)
 
 
+class CardLifecycleError(RuntimeError):
+    """A fail-closed card lookup, trust, mutation, or uniqueness failure."""
+
+
+def _strict_lifecycle_labels(value):
+    if not isinstance(value, list):
+        raise CardLifecycleError("issue labels are not a list")
+    names = []
+    for label in value:
+        if isinstance(label, str):
+            name = label
+        elif isinstance(label, dict):
+            name = label.get("name")
+        else:
+            name = None
+        if not isinstance(name, str) or not name:
+            raise CardLifecycleError("issue has a malformed label")
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise CardLifecycleError("issue has duplicate labels")
+    return names
+
+
+def _lifecycle_actor_login(issue, field):
+    actor = (issue or {}).get(field)
+    if field == "user" and actor is None:
+        actor = (issue or {}).get("author")
+    if actor is None:
+        return ""
+    if not isinstance(actor, dict) or not isinstance(actor.get("login"), str):
+        raise CardLifecycleError("issue has a malformed %s actor" % field)
+    return actor.get("login", "")
+
+
+def _normalize_lifecycle_issue(issue, marker="", expected_state=""):
+    """Normalize one REST/GraphQL issue row at the lifecycle trust boundary."""
+    if not isinstance(issue, dict):
+        raise CardLifecycleError("issue lookup returned a non-object row")
+    number = issue.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise CardLifecycleError("issue lookup returned an invalid number")
+    if issue.get("pull_request"):
+        raise CardLifecycleError("target marker matched a pull request, not a card")
+    body = issue.get("body")
+    if not isinstance(body, str):
+        raise CardLifecycleError("issue #%s has a malformed body" % number)
+    labels = _strict_lifecycle_labels(issue.get("labels"))
+    if marker and marker not in labels:
+        raise CardLifecycleError(
+            "issue #%s did not carry requested marker %s" % (number, marker)
+        )
+    state = str(issue.get("state") or "").upper()
+    if state not in {"OPEN", "CLOSED"}:
+        raise CardLifecycleError("issue #%s has malformed state" % number)
+    if expected_state and state != expected_state.upper():
+        raise CardLifecycleError("issue #%s changed state during lookup" % number)
+    updated_at = issue.get("updated_at") or issue.get("updatedAt")
+    if not isinstance(updated_at, str) or not updated_at:
+        raise CardLifecycleError("issue #%s has no trustworthy updatedAt" % number)
+    comments = issue.get("comments")
+    if isinstance(comments, list):
+        comment_count = len(comments)
+    elif isinstance(comments, bool) or not isinstance(comments, int) or comments < 0:
+        raise CardLifecycleError("issue #%s has malformed comment count" % number)
+    else:
+        comment_count = comments
+    author = _lifecycle_actor_login(issue, "user")
+    if not author:
+        raise CardLifecycleError("issue #%s has no author identity" % number)
+    closed_at = issue.get("closed_at") or issue.get("closedAt") or ""
+    closed_by = _lifecycle_actor_login(issue, "closed_by")
+    if state == "CLOSED":
+        if not _valid_reconcile_close_timestamp(closed_at):
+            raise CardLifecycleError("closed issue #%s has invalid closedAt" % number)
+        if not closed_by:
+            raise CardLifecycleError("closed issue #%s has no close actor" % number)
+    return {
+        "number": number,
+        "body": body,
+        "labels": [{"name": name} for name in labels],
+        "title": (
+            issue.get("title", "")
+            if isinstance(issue.get("title", ""), str)
+            else ""
+        ),
+        "state": state,
+        "updatedAt": updated_at,
+        "comments": comment_count,
+        "author": {"login": author},
+        "closedAt": closed_at,
+        "closedBy": {"login": closed_by} if closed_by else None,
+    }
+
+
+def _list_target_issues(marker, state):
+    """Completely list one target label in one issue state via REST pagination."""
+    endpoint = (
+        "repos/{owner}/{repo}/issues?state=%s&labels=%s&per_page=100"
+        % (state.lower(), url_quote(marker, safe=""))
+    )
+    try:
+        result = _gh(["api", "--paginate", "--slurp", endpoint])
+        pages = json.loads(result.stdout or "null")
+    except Exception as error:
+        raise CardLifecycleError(
+            "could not completely list %s cards for %s: %s"
+            % (state.lower(), marker, str(error)[:180])
+        ) from error
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise CardLifecycleError(
+            "%s card lookup for %s returned malformed pagination"
+            % (state.lower(), marker)
+        )
+    rows = []
+    seen = set()
+    for page in pages:
+        for raw in page:
+            row = _normalize_lifecycle_issue(
+                raw, marker=marker, expected_state=state
+            )
+            if row["number"] in seen:
+                raise CardLifecycleError(
+                    "%s card lookup for %s returned issue #%s twice"
+                    % (state.lower(), marker, row["number"])
+                )
+            seen.add(row["number"])
+            rows.append(row)
+    return rows
+
+
+def _get_lifecycle_issue(number):
+    try:
+        result = _gh(["api", "repos/{owner}/{repo}/issues/%s" % int(number)])
+        raw = json.loads(result.stdout or "null")
+        return _normalize_lifecycle_issue(raw)
+    except Exception as error:
+        if isinstance(error, CardLifecycleError):
+            raise
+        raise CardLifecycleError(
+            "could not re-read card #%s: %s" % (number, str(error)[:180])
+        ) from error
+
+
+def _trusted_automation_login(login):
+    return login in {CARD_AUTOMATION_AUTHOR, GET_CARD_AUTOMATION_AUTHOR}
+
+
+def _lifecycle_label_names(issue):
+    return set(_strict_lifecycle_labels((issue or {}).get("labels")))
+
+
+def _trusted_target_state(issue, item):
+    """Return strict target state or raise when an exact marker is ambiguous."""
+    state = _unique_state_block((issue or {}).get("body", ""))
+    number = (issue or {}).get("number", "?")
+    if state is None:
+        raise CardLifecycleError(
+            "card #%s has a malformed or non-unique state marker" % number
+        )
+    target_number = state.get("number")
+    if (
+        state.get("repo") != item.get("repo")
+        or isinstance(target_number, bool)
+        or not isinstance(target_number, int)
+        or target_number != int(item.get("number") or 0)
+    ):
+        raise CardLifecycleError(
+            "card #%s target state does not match %s"
+            % (number, marker_label(item))
+        )
+    kind = state.get("kind")
+    if kind not in CHECKBOX_OPTIONS:
+        raise CardLifecycleError("card #%s has an invalid kind" % number)
+    names = _lifecycle_label_names(issue)
+    target_labels = {name for name in names if name.startswith("target:")}
+    repo_labels = {name for name in names if name.startswith("repo:")}
+    if target_labels != {marker_label(item)}:
+        raise CardLifecycleError("card #%s target labels are ambiguous" % number)
+    if repo_labels != {"repo:%s" % item["repo"]}:
+        raise CardLifecycleError("card #%s repo labels are ambiguous" % number)
+    if "kind:%s" % kind not in names:
+        raise CardLifecycleError("card #%s kind label does not match state" % number)
+    return state
+
+
+def _trusted_open_target_card(issue, item):
+    _trusted_target_state(issue, item)
+    login = ((issue or {}).get("author") or {}).get("login", "")
+    if not _trusted_automation_login(login):
+        raise CardLifecycleError(
+            "open card #%s is not authored by trusted Wheelhouse automation"
+            % issue.get("number")
+        )
+    if str(issue.get("state") or "").upper() != "OPEN":
+        raise CardLifecycleError("card #%s is no longer open" % issue.get("number"))
+    return True
+
+
+def reusable_closed_card(issue, item):
+    """Return (eligible, reason) for one exact closed target-label candidate.
+
+    Structural identity ambiguity raises CardLifecycleError and blocks creation.
+    A well-formed historical or explicitly consumed card is simply ineligible,
+    so it stays closed and current create-new behavior remains available.
+    """
+    state = _trusted_target_state(issue, item)
+    if str(issue.get("state") or "").upper() != "CLOSED":
+        return False, "candidate is no longer closed"
+    author = ((issue.get("author") or {}).get("login") or "")
+    if not _trusted_automation_login(author):
+        return False, "card author is not trusted Wheelhouse automation"
+    closed_by = ((issue.get("closedBy") or {}).get("login") or "")
+    if not _trusted_automation_login(closed_by):
+        return False, "latest close actor is not trusted Wheelhouse automation"
+    names = _lifecycle_label_names(issue)
+    if "resolved" not in names:
+        return False, "closed card is not resolved"
+    forbidden_labels = {
+        "needs-decision",
+        "processing",
+        "blocked",
+        HOLD_LABEL,
+        "wheelhouse:auto-merge-claim",
+    }
+    present_forbidden = sorted(names.intersection(forbidden_labels))
+    if present_forbidden:
+        return False, "closed card carries forbidden lifecycle labels: %s" % ", ".join(
+            present_forbidden
+        )
+    if state.get("held"):
+        return False, "closed card carries held triage state"
+    if state.get("automerge_audit_intent") or state.get("automerge_audit_pending"):
+        return False, "closed card carries protected auto-merge audit state"
+    provenance = reconcile_soft_close_provenance(issue.get("body", ""))
+    if not provenance:
+        return False, "no valid current-schema reconcile soft-close provenance"
+    provenance_at = _parse_iso_timestamp(provenance.get("at"))
+    closed_at = _parse_iso_timestamp(issue.get("closedAt"))
+    if not provenance_at or not closed_at:
+        return False, "soft-close timing is unavailable"
+    if issue.get("updatedAt") != issue.get("closedAt"):
+        return False, "closed card was modified after its close"
+    elapsed = (closed_at - provenance_at).total_seconds()
+    if (
+        elapsed < -SOFT_CLOSE_TIMESTAMP_SKEW_SECONDS
+        or elapsed > SOFT_CLOSE_MAX_COMPLETION_SECONDS
+    ):
+        return False, "issue close time does not match the reconcile soft close"
+    return True, "trusted reconcile soft close"
+
+
+def _same_lifecycle_snapshot(current, expected):
+    if not current or not expected:
+        return False
+    return bool(
+        current.get("number") == expected.get("number")
+        and current.get("body") == expected.get("body")
+        and _lifecycle_label_names(current) == _lifecycle_label_names(expected)
+        and current.get("state") == expected.get("state")
+        and current.get("updatedAt") == expected.get("updatedAt")
+        and current.get("comments") == expected.get("comments")
+        and current.get("author") == expected.get("author")
+        and current.get("closedAt") == expected.get("closedAt")
+        and current.get("closedBy") == expected.get("closedBy")
+    )
+
+
+def lookup_card_lifecycle(item):
+    """Find one trusted open card or one uniquely reusable closed card."""
+    marker = marker_label(item)
+    open_rows = _list_target_issues(marker, "OPEN")
+    if len(open_rows) > 1:
+        raise CardLifecycleError(
+            "multiple open cards carry exact target identity %s: %s"
+            % (marker, ", ".join("#%s" % row["number"] for row in open_rows))
+        )
+    if open_rows:
+        _trusted_open_target_card(open_rows[0], item)
+        return {"open": open_rows[0], "reusable": None}
+
+    reusable = []
+    for candidate in _list_target_issues(marker, "CLOSED"):
+        eligible, reason = reusable_closed_card(candidate, item)
+        if eligible:
+            reusable.append(candidate)
+        else:
+            print(
+                "closed card #%s for %s is not reusable: %s"
+                % (candidate["number"], marker, reason)
+            )
+    if len(reusable) > 1:
+        raise CardLifecycleError(
+            "multiple reusable closed cards carry exact target identity %s: %s"
+            % (marker, ", ".join("#%s" % row["number"] for row in reusable))
+        )
+    return {"open": None, "reusable": reusable[0] if reusable else None}
+
+
+def _edit_issue_body_and_labels(number, body, add_labels=None, remove_labels=None):
+    body_path = _write_body(body)
+    try:
+        args = ["issue", "edit", str(number), "--body-file", body_path]
+        for label in add_labels or []:
+            args += ["--add-label", label]
+        for label in remove_labels or []:
+            args += ["--remove-label", label]
+        _gh(args)
+    finally:
+        os.unlink(body_path)
+
+
+def _reused_card_render(item, candidate, has_token):
+    old_state = _trusted_target_state(candidate, item)
+    same_revision = bool(
+        old_state.get("kind") == item.get("kind", "pr-review")
+        and state_revision(old_state, old_state.get("kind")) == triage_revision(item)
+    )
+    held = should_hold(item, has_token) and not same_revision
+    card = render(item, held=held)
+    if same_revision:
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        card["body"] = _preserve_same_revision_triage(
+            card["body"],
+            candidate.get("body", ""),
+            item,
+            old_state,
+            owner=owner,
+        )
+    return card, old_state
+
+
+def _prepared_lifecycle_matches(issue, body, labels, state):
+    return bool(
+        issue
+        and issue.get("body") == body
+        and _lifecycle_label_names(issue) == set(labels)
+        and issue.get("state") == state
+        and _trusted_automation_login(
+            ((issue.get("author") or {}).get("login") or "")
+        )
+    )
+
+
+def verify_unique_open_card(item, expected_number, expected_body, expected_labels):
+    """Verify exactly one trusted open identity after create or reopen."""
+    marker = marker_label(item)
+    last_reason = "card was not visible in the complete open lookup"
+    for attempt in range(LIFECYCLE_VERIFY_ATTEMPTS):
+        rows = _list_target_issues(marker, "OPEN")
+        if len(rows) > 1:
+            raise CardLifecycleError(
+                "post-operation uniqueness failed for %s: open cards %s"
+                % (marker, ", ".join("#%s" % row["number"] for row in rows))
+            )
+        if rows:
+            row = rows[0]
+            _trusted_open_target_card(row, item)
+            if expected_number and row["number"] != int(expected_number):
+                raise CardLifecycleError(
+                    "post-operation uniqueness found card #%s instead of #%s"
+                    % (row["number"], expected_number)
+                )
+            if not _prepared_lifecycle_matches(
+                row, expected_body, expected_labels, "OPEN"
+            ):
+                raise CardLifecycleError(
+                    "post-operation card #%s does not match the prepared body/labels"
+                    % row["number"]
+                )
+            return row
+        if attempt + 1 < LIFECYCLE_VERIFY_ATTEMPTS:
+            _lifecycle_sleep(LIFECYCLE_VERIFY_DELAY_SECONDS)
+    raise CardLifecycleError(
+        "post-operation uniqueness failed for %s: %s" % (marker, last_reason)
+    )
+
+
+def _rollback_open_lifecycle_card(number, expected_body):
+    """Best-effort fail-closed rollback for our own just-opened card."""
+    current = _get_lifecycle_issue(number)
+    if current.get("state") != "OPEN" or current.get("body") != expected_body:
+        raise CardLifecycleError(
+            "cannot roll back card #%s because its live state changed" % number
+        )
+    _gh(["issue", "close", str(number)])
+    closed = _get_lifecycle_issue(number)
+    if closed.get("state") != "CLOSED" or closed.get("body") != expected_body:
+        raise CardLifecycleError("card #%s did not close during rollback" % number)
+    names = _lifecycle_label_names(closed)
+    add = [] if "resolved" in names else ["resolved"]
+    remove = [name for name in ("needs-decision", HOLD_LABEL) if name in names]
+    if add or remove:
+        live = _get_lifecycle_issue(number)
+        if not _same_lifecycle_snapshot(live, closed):
+            raise CardLifecycleError(
+                "card #%s changed before rollback label cleanup" % number
+            )
+        args = ["issue", "edit", str(number)]
+        for label in add:
+            args += ["--add-label", label]
+        for label in remove:
+            args += ["--remove-label", label]
+        _gh(args)
+
+
+def _force_close_reused_card(number):
+    close_error = None
+    try:
+        _gh(["issue", "close", str(number)])
+    except Exception as error:
+        close_error = error
+    cleanup_error = None
+    try:
+        _gh(
+            [
+                "issue",
+                "edit",
+                str(number),
+                "--add-label",
+                "resolved",
+                "--remove-label",
+                "needs-decision",
+                "--remove-label",
+                HOLD_LABEL,
+            ]
+        )
+    except Exception as error:
+        cleanup_error = error
+    if close_error or cleanup_error:
+        raise CardLifecycleError(
+            "could not force reused card #%s closed and inert: %s"
+            % (number, cleanup_error or close_error)
+        ) from (cleanup_error or close_error)
+
+
+def reuse_closed_card(item, candidate, has_token=False):
+    """Prepare one trusted closed card, then reopen and verify it."""
+    eligible, reason = reusable_closed_card(candidate, item)
+    if not eligible:
+        raise CardLifecycleError(
+            "card #%s is not reusable: %s" % (candidate.get("number"), reason)
+        )
+    card, old_state = _reused_card_render(item, candidate, has_token)
+    ensure_labels(card["labels"])
+    current = _get_lifecycle_issue(candidate["number"])
+    if not _same_lifecycle_snapshot(current, candidate):
+        raise CardLifecycleError(
+            "closed card #%s changed before reuse" % candidate["number"]
+        )
+    eligible, reason = reusable_closed_card(current, item)
+    if not eligible:
+        raise CardLifecycleError(
+            "closed card #%s lost reuse eligibility: %s"
+            % (candidate["number"], reason)
+        )
+
+    current_names = _lifecycle_label_names(current)
+    desired_labels = list(card["labels"])
+    inert_labels = [
+        label for label in desired_labels if label not in {"needs-decision", HOLD_LABEL}
+    ] + ["resolved"]
+    to_add, to_remove = plan_label_update(inert_labels, current.get("labels"))
+    expected_inert_labels = (current_names | set(to_add)) - set(to_remove)
+    _edit_issue_body_and_labels(
+        current["number"], card["body"], add_labels=to_add, remove_labels=to_remove
+    )
+
+    prepared = _get_lifecycle_issue(current["number"])
+    if not _prepared_lifecycle_matches(
+        prepared, card["body"], expected_inert_labels, "CLOSED"
+    ):
+        raise CardLifecycleError(
+            "card #%s preparation did not land while closed" % current["number"]
+        )
+    try:
+        _gh(["issue", "reopen", str(current["number"])])
+        verified_inert = verify_unique_open_card(
+            item, current["number"], card["body"], expected_inert_labels
+        )
+    except Exception as error:
+        try:
+            _force_close_reused_card(current["number"])
+        except Exception as rollback_error:
+            raise CardLifecycleError(
+                "card #%s post-reopen verification failed and rollback failed: %s"
+                % (current["number"], rollback_error)
+            ) from rollback_error
+        raise CardLifecycleError(
+            "card #%s could not be reopened and verified while inert"
+            % current["number"]
+        ) from error
+    activation_add, activation_remove = plan_label_update(
+        desired_labels, verified_inert.get("labels")
+    )
+    if "resolved" in expected_inert_labels:
+        activation_remove = sorted(set(activation_remove) | {"resolved"})
+    expected_labels = (
+        expected_inert_labels | set(activation_add)
+    ) - set(activation_remove)
+    try:
+        args = ["issue", "edit", str(current["number"])]
+        for label in activation_add:
+            args += ["--add-label", label]
+        for label in activation_remove:
+            args += ["--remove-label", label]
+        _gh(args)
+        verify_unique_open_card(
+            item, current["number"], card["body"], expected_labels
+        )
+    except Exception as error:
+        _force_close_reused_card(current["number"])
+        raise CardLifecycleError(
+            "card #%s activation failed after inert verification" % current["number"]
+        ) from error
+
+    old_sha = (old_state or {}).get("head_sha", "") or ""
+    new_sha = item.get("head_sha", "") or ""
+    if old_sha and new_sha and old_sha != new_sha:
+        latest = _get_lifecycle_issue(current["number"])
+        if _prepared_lifecycle_matches(
+            latest, card["body"], expected_labels, "OPEN"
+        ):
+            _gh(
+                [
+                    "issue",
+                    "comment",
+                    str(current["number"]),
+                    "--body",
+                    "Target updated: head moved from `%s` to `%s`. Re-rendered this card "
+                    "with current state - a fresh review is warranted."
+                    % (old_sha[:8], new_sha[:8]),
+                ],
+                check=False,
+            )
+    print("reopened card #%s for %s" % (current["number"], marker_label(item)))
+    return current["number"]
+
+
+def _create_and_verify_card(item, card):
+    ensure_labels(card["labels"])
+    number = _create_card(card)
+    try:
+        verified = verify_unique_open_card(
+            item, number, card["body"], card["labels"]
+        )
+    except Exception:
+        if number:
+            try:
+                _rollback_open_lifecycle_card(number, card["body"])
+            except Exception as rollback_error:
+                print(
+                    "::error::failed to roll back ambiguous new card #%s: %s"
+                    % (number, str(rollback_error)[:180])
+                )
+        raise
+    return verified["number"]
+
+
 def find_card(marker):
     """Find the open card for this target. Returns {number, body, labels} (the
     full row, so the caller can diff state + labels without a second fetch), or
@@ -2130,7 +2701,7 @@ def upsert_card(
     preserve_reconcile_absence=False,
     expected_existing=None,
 ):
-    """Create a new card, or refresh the existing one for this target in place.
+    """Create, safely reuse, or refresh this target's card in place.
 
     `has_token` gates whether a BRAND-NEW eligible card is created HELD (see
     "Held cards" above / `should_hold`) - pass the same
@@ -2181,12 +2752,30 @@ def upsert_card(
             print("skip card #%s for %s: card changed" % (known_number, marker))
             return None
     else:
-        existing = find_card(marker)
+        try:
+            lifecycle = lookup_card_lifecycle(item)
+            existing = lifecycle["open"]
+            if lifecycle["reusable"] is not None:
+                return reuse_closed_card(
+                    item, lifecycle["reusable"], has_token=has_token
+                )
+        except CardLifecycleError as error:
+            print(
+                "::error::card lifecycle failed closed for %s: %s"
+                % (marker, str(error)[:240])
+            )
+            raise
 
     if not existing:
         card = render(item, held=should_hold(item, has_token))
-        ensure_labels(card["labels"])
-        return _create_card(card)
+        try:
+            return _create_and_verify_card(item, card)
+        except CardLifecycleError as error:
+            print(
+                "::error::card creation failed closed for %s: %s"
+                % (marker, str(error)[:240])
+            )
+            raise
 
     number = existing["number"]
     if not is_refreshable(existing.get("labels")):
@@ -2224,22 +2813,42 @@ def upsert_card(
     )
 
 
-def close_card(number, message, label="resolved"):
+def close_card(number, message, label="resolved", expected=None):
     ensure_labels([label])
     _gh(["issue", "comment", str(number), "--body", message], check=False)
-    _gh(
-        [
-            "issue",
-            "edit",
-            str(number),
-            "--add-label",
-            label,
-            "--remove-label",
-            "needs-decision",
-        ],
-        check=False,
-    )
-    _gh(["issue", "close", str(number)], check=False)
+    current = _get_lifecycle_issue(number)
+    if current.get("state") != "OPEN":
+        raise CardLifecycleError("card #%s is no longer open" % number)
+    if expected is not None and (
+        current.get("body") != expected.get("body")
+        or _lifecycle_label_names(current)
+        != _lifecycle_label_names(expected)
+        or current.get("comments") != int(expected.get("comments") or 0) + 1
+    ):
+        raise CardLifecycleError("card #%s changed before close" % number)
+    labels = _lifecycle_label_names(current)
+    expected_labels = (labels | {label}) - {"needs-decision"}
+    args = [
+        "api",
+        "--method",
+        "PATCH",
+        "repos/{owner}/{repo}/issues/%s" % int(number),
+        "-f",
+        "state=closed",
+    ]
+    for name in sorted(expected_labels):
+        args += ["-f", "labels[]=%s" % name]
+    result = _gh(args)
+    try:
+        closed = _normalize_lifecycle_issue(json.loads(result.stdout or "null"))
+    except Exception as error:
+        raise CardLifecycleError(
+            "card #%s close returned an invalid issue: %s" % (number, error)
+        ) from error
+    if not _prepared_lifecycle_matches(
+        closed, current.get("body", ""), expected_labels, "CLOSED"
+    ):
+        raise CardLifecycleError("card #%s did not close atomically" % number)
 
 
 def _text_from_content(content):

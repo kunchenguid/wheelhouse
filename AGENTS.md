@@ -72,10 +72,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   Reconcile may also add one bounded, versioned, NON-material `reconcile_absence` record to a pure pending card after a conclusive scheduled run finds its still-open target outside the worklist.
   The fixed threshold is two adjacent scheduled workflow run numbers.
   The threshold record includes exact trusted machine soft-close provenance before close; malformed, duplicate, wrong-version, boolean, negative, oversized, or otherwise untrusted state reads as count zero and can never accelerate close or qualify future reuse.
-  Closed cards are never queried, reopened, or reused.
+  When no open card exists, `render_card.lookup_card_lifecycle` completely lists the exact target label and may reuse exactly one closed card only when its strict state identity, managed target/repo labels, issue author, latest close actor, close timing, terminal labels, and current-schema soft-close provenance are independently trustworthy.
+  Legacy, owner/decision-resolved, blocked, held, hard-target-closed, auto-merged/audit-protected, manually authored, malformed, target-mismatched, and ambiguous closed cards are never reopened.
+  A reusable card is rendered and relabeled while still closed, re-read before reopening, then checked through a complete trusted-open lookup; a partial failure stays closed, and post-open ambiguity rolls the local card back closed.
+  New-head or incompatible-kind rendering naturally drops stale triage, recommendation, verdict, criteria, held, audit, and absence state; same-revision triage is preserved only through the normal `_preserve_same_revision_triage` path.
   A conclusive worklist return clears the record while reusing the open card.
-  Definitive target closure remains an immediate hard close, while `ok:false`, truncated, unresolved-mergeability, CI-wait, audit-protected, and owner/handler-raced cards remain frozen.
+  Definitive target closure remains an immediate hard close and clears any uniquely parsed absence record first so hard-close cards cannot later satisfy reuse provenance, while `ok:false`, truncated, unresolved-mergeability, CI-wait, audit-protected, and owner/handler-raced cards remain frozen.
   Every reconcile mutation and close re-reads the live card and requires it to match the scan snapshot.
+  `ingest`, `decision-handler`, and `scan-backstop` share the queued `wheelhouse-backstop` concurrency group, and create/reopen still performs a post-write uniqueness check, so the event and global paths cannot mint two actionable cards for one target.
   `render_card.py` writes state markers, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
@@ -94,7 +98,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   (tick/slash/**plain-English** -> act on target -> consume resolved cards,
   block non-retryable errors, or leave retryable/non-terminal cards open), `scan-backstop`
   (hourly scan -> deterministic target-side cleanup plus reconcile:
-  create/refresh/activity-reflect/close - the primary keep-current path
+  create/reuse/refresh/activity-reflect/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a
   held-card publish trigger, and can make a hidden state-only activity stamp
   write when live target activity is newer than the card's reflected stamp;
@@ -132,7 +136,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `auto-triage-enabled`, `auto-triage-issues-enabled`, `qualify_issue_refs`
   (rewrites a bare GitHub-autolink `#N` in model text to `owner/repo#N` - see
   "Cross-repo reference qualification" in Sharp edges)),
-  `render_card.py` (render + card CRUD; `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
+  `render_card.py` (render + card CRUD, including the shared strict closed-card
+  lookup/trust/reuse operation used by both ingest and reconcile;
+  `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
   the per-kind checkboxes, including the non-consuming `investigate` box on
   pr-review/issue-triage; held `pending-triage` placeholder rendering;
   automatic triage section rendering, structured recommendation persistence,
@@ -159,7 +165,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   normalization shared by evaluator and renderer), `auto_merge.py`
   (authoritative G0-G6 criterion evaluation plus claim/validate/G7 act/audit),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
-  create/**refresh**/activity-reflect/close and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
+  create/**refresh**/activity-reflect/close/reuse and automatic triage dispatch). `apply_decision` imports `wheelhouse_core` and
   `nl_readonly_search`; `reconcile`/`render_card` import `wheelhouse_core` (and
   `build_item` imports `render_card`) via
   `sys.path.insert(0, dirname(__file__))`.
@@ -1200,6 +1206,7 @@ Run the unit tests:
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, fixed-K adjacent-run soft-close lifecycle/provenance, hard-close and stale-snapshot race safety, and stale-card self-healing, no network. Also covers the #551 approve/wait freeze: a `ci_wait_pr_numbers` PR-kind card is FROZEN (never consumed), its stale-head display is refreshed to the new head's pending state via `ci_wait_refresh_items` (anti-masquerade) without ever creating a card, the refresh is a no-op once the card is already current (no churn), and the intervening workflow run invalidates any prior absence streak before terminal checks release the freeze.
+- `python tests/test_card_reuse.py` - deterministic end-to-end coverage through the actual reconcile, renderer/upsert, triage, decision, criteria, and trusted auto-merge indexing modules with an in-memory GitHub boundary: same/new-head and CI-to-PR reuse, strict provenance/actor/identity exclusions, legacy behavior, complete pagination, mutation races, partial failures, global lifecycle serialization, post-open uniqueness rollback, unchanged auto-merge duplicate denial, and the full two-absence waiting/re-entry lifecycle.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, the contributor-fork CI-noop conflict-nudge exception (including UNKNOWN/error no-nudge and no cleanup arming), author-filter nudge skips, optional pending-contributor cleanup arming for normal `needs-rebase` nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed. Also covers `approve_ci`'s dedup-by-`workflowDatabaseId`: two `action_required` runs of the same workflow for one head_sha approve exactly one (the higher/newer run id), same-named distinct workflows or runs without workflow identity stay distinct, and the risky-file HOLD still short-circuits before dedup/run-list/approve even when duplicates are present. Also asserts the advisory security summary is attached to a carded risky ci-approval PR (via a stubbed summarizer) but never computed on the auto-approved or suppressed-card paths. Also covers the #551 approve/wait emission: a freshly auto-approved fork PR and a `ci-running` PR are reported in `ci_wait_pr_numbers` with a non-green refresh-only pr-review item in `ci_wait_refresh_items`, while an unsafe carded PR, a verified `noop`, an author-excluded approved PR, and a terminal merge-ready PR are all deliberately NOT frozen (approval eligibility and the author-filter self-heal are unchanged).
 - `python tests/test_ci_security_summary.py` - the advisory read-only CI-approval security summary (`ci_security_summary`), no network: the HOLD stays effective and the summary CANNOT act (every gh call is a read, `approve_ci` is never invoked); risky patterns are surfaced (`pull_request_target` + PR-head checkout, write permissions, `secrets: inherit`, referenced secret NAMES, unpinned third-party actions) while SHA-pinned actions and benign first-party workflows raise no flags; secret VALUES / verbatim file lines are never echoed and contributor values are sanitized against markdown breakout; it fails closed (unreadable/incomplete file lists and unreadable/unparseable files -> a manual-review note, never raises); composite `action.yml` files are analyzed; and the render side scopes `### Security review (advisory)` to ci-approval, frames it advisory/untrusted, keeps `security_summary` out of the state block, and never triggers a material refresh.

@@ -1,8 +1,9 @@
 name: scan-backstop
 
 # The primary keep-current path. On a schedule (and on demand), scan the whole
-# fleet, run deterministic target-side stale pending-contributor cleanup, open
-# cards for anything new that needs a decision, REFRESH an open
+# fleet, run deterministic target-side stale pending-contributor cleanup, safely
+# reuse a uniquely trusted machine-soft-closed card (or open a new card) for
+# anything that needs a decision, REFRESH an open
 # `needs-decision` card whose target materially changed or whose card render
 # version is stale, publish a held card whose auto-triage path is no longer
 # available, make a hidden state-only activity-stamp edit when target activity
@@ -116,7 +117,7 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/auto_merge.py record automerge.json automerge-valid-claims.json
 
-      # Reconcile (create, refresh, activity-reflect, close) in THIS repo -
+      # Reconcile (create, trusted reuse, refresh, activity-reflect, close) in THIS repo -
       # default token, so backstop activity never re-triggers the handler.
       - name: Reconcile the queue
         if: always()

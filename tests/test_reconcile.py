@@ -126,7 +126,7 @@ def run_reconcile(
         calls["triage_rows"].append(row)
         return False
 
-    def fake_close(number, message, label="resolved"):
+    def fake_close(number, message, label="resolved", expected=None):
         calls["close"].append({"number": number, "message": message, "label": label})
 
     def fake_get_card(number):
@@ -336,6 +336,8 @@ class ReconcileLifecycle:
         self.body_write_attempts = 0
         self._clock = 0
         self.fail_body_write_attempts = set()
+        self.fail_close_attempts = set()
+        self.close_attempts = 0
         self.run_number = 0
 
     def _tick(self):
@@ -357,6 +359,57 @@ class ReconcileLifecycle:
         ]
 
     def _gh(self, args, check=True):
+        if args[:3] == ["api", "--method", "PATCH"]:
+            if self.close_attempts in self.fail_close_attempts:
+                raise RuntimeError("simulated close failure")
+            names = {
+                value.removeprefix("labels[]=")
+                for value in args
+                if value.startswith("labels[]=")
+            }
+            self.issue["labels"] = labels(*sorted(names))
+            provenance = reconcile.render_card.reconcile_soft_close_provenance(
+                self.issue["body"]
+            )
+            closed_at = (provenance or {}).get("at", "2026-07-13T12:00:00Z")
+            self.issue["state"] = "CLOSED"
+            self.issue["updatedAt"] = closed_at
+            self.issue["closedAt"] = closed_at
+            self.issue["closedBy"] = {"login": "app/github-actions"}
+            self.close_calls.append(
+                {
+                    "number": self.issue["number"],
+                    "body": self.issue["body"],
+                    "labels": copy.deepcopy(self.issue["labels"]),
+                }
+            )
+            response = {
+                "number": self.issue["number"],
+                "body": self.issue["body"],
+                "labels": copy.deepcopy(self.issue["labels"]),
+                "title": self.issue["title"],
+                "state": "closed",
+                "updated_at": closed_at,
+                "user": {"login": "github-actions[bot]"},
+                "closed_at": closed_at,
+                "closed_by": {"login": "github-actions[bot]"},
+                "comments": len(self.issue["comments"]),
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr="")
+        if args and args[0] == "api":
+            response = {
+                "number": self.issue["number"],
+                "body": self.issue["body"],
+                "labels": copy.deepcopy(self.issue["labels"]),
+                "title": self.issue["title"],
+                "state": self.issue["state"].lower(),
+                "updated_at": self.issue["updatedAt"],
+                "user": {"login": "github-actions[bot]"},
+                "closed_at": self.issue.get("closedAt"),
+                "closed_by": self.issue.get("closedBy"),
+                "comments": len(self.issue["comments"]),
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr="")
         if args[:2] == ["issue", "view"]:
             return SimpleNamespace(
                 returncode=0,
@@ -391,27 +444,23 @@ class ReconcileLifecycle:
             self.issue["labels"] = labels(*sorted(names))
             self._tick()
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if args[:2] == ["issue", "close"]:
-            self.close_calls.append(
-                {
-                    "number": int(args[2]),
-                    "body": self.issue["body"],
-                    "labels": copy.deepcopy(self.issue["labels"]),
-                }
-            )
-            self.issue["state"] = "CLOSED"
-            self._tick()
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError("unexpected gh call: %r" % (args,))
 
     def run(self, scan, event_name="schedule"):
         old_argv = sys.argv[:]
         old_gh = reconcile.render_card._gh
+        old_close = reconcile.render_card.close_card
         old_token = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN")
         old_github_actions = os.environ.get("GITHUB_ACTIONS")
         old_event_name = os.environ.get("GITHUB_EVENT_NAME")
         old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
         reconcile.render_card._gh = self._gh
+
+        def guarded_close(*args, **kwargs):
+            self.close_attempts += 1
+            return old_close(*args, **kwargs)
+
+        reconcile.render_card.close_card = guarded_close
         os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = "false"
         self.run_number += 1
         os.environ["GITHUB_ACTIONS"] = "true"
@@ -431,6 +480,7 @@ class ReconcileLifecycle:
         finally:
             sys.argv = old_argv
             reconcile.render_card._gh = old_gh
+            reconcile.render_card.close_card = old_close
             if old_token is None:
                 os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
             else:
@@ -1491,6 +1541,88 @@ def test_lifecycle_two_absences_close_with_provenance():
     )
 
 
+def test_lifecycle_failed_close_refreshes_provenance_before_retry():
+    lifecycle = ReconcileLifecycle(work_item())
+    absent = scan_payload(items=[])
+    lifecycle.run(absent)
+    lifecycle.fail_close_attempts = {1}
+    lifecycle.run(absent)
+    failed_provenance = reconcile.render_card.reconcile_soft_close_provenance(
+        lifecycle.issue["body"]
+    )
+    partial_state = lifecycle.issue["state"]
+    partial_labels = {
+        label["name"] if isinstance(label, dict) else label
+        for label in lifecycle.issue["labels"]
+    }
+    lifecycle.run(absent)
+    retried_provenance = reconcile.render_card.reconcile_soft_close_provenance(
+        lifecycle.issue["body"]
+    )
+    candidate = {
+        "number": lifecycle.issue["number"],
+        "body": lifecycle.issue["body"],
+        "labels": lifecycle.issue["labels"],
+        "state": lifecycle.issue["state"],
+        "updatedAt": lifecycle.issue["updatedAt"],
+        "author": lifecycle.issue["author"],
+        "closedAt": lifecycle.issue.get("closedAt", ""),
+        "closedBy": lifecycle.issue.get("closedBy"),
+    }
+    reusable, _reason = reconcile.render_card.reusable_closed_card(
+        candidate, work_item()
+    )
+    check(
+        "close retry: failed close leaves a trusted threshold record open",
+        failed_provenance is not None
+        and partial_state == "OPEN"
+        and "needs-decision" in partial_labels
+        and "resolved" not in partial_labels
+        and lifecycle.close_attempts == 2,
+    )
+    check(
+        "close retry: next scheduled run refreshes provenance before closing",
+        lifecycle.issue["state"] == "CLOSED"
+        and lifecycle.body_writes == 3
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.close_calls[0]["body"]
+        )
+        == 3
+        and retried_provenance
+        == reconcile.render_card.reconcile_soft_close_provenance(
+            lifecycle.close_calls[0]["body"]
+        )
+        and reusable,
+    )
+
+
+def test_owner_resolution_cannot_be_retried_as_reconcile_close():
+    lifecycle = ReconcileLifecycle(work_item())
+    absent = scan_payload(items=[])
+    lifecycle.run(absent)
+    lifecycle.fail_close_attempts = {1}
+    lifecycle.run(absent)
+    names = {
+        label["name"] if isinstance(label, dict) else label
+        for label in lifecycle.issue["labels"]
+    }
+    names.add("resolved")
+    names.discard("needs-decision")
+    lifecycle.issue["labels"] = labels(*sorted(names))
+    lifecycle._tick()
+    lifecycle.run(absent)
+    check(
+        "owner resolution: threshold provenance is never refreshed or closed",
+        lifecycle.issue["state"] == "OPEN"
+        and lifecycle.close_attempts == 1
+        and lifecycle.body_writes == 2
+        and reconcile.render_card.reconcile_absence_run_number(
+            lifecycle.issue["body"]
+        )
+        == 2,
+    )
+
+
 def test_lifecycle_pr_and_issue_cards_share_threshold():
     cases = [
         (
@@ -1851,6 +1983,8 @@ def main():
     test_lifecycle_present_absent_present_reuses_and_clears()
     test_failed_present_reset_cannot_authorize_later_close()
     test_lifecycle_two_absences_close_with_provenance()
+    test_lifecycle_failed_close_refreshes_provenance_before_retry()
+    test_owner_resolution_cannot_be_retried_as_reconcile_close()
     test_lifecycle_pr_and_issue_cards_share_threshold()
     test_lifecycle_kind_transition_reuses_and_resets()
     test_intervening_runs_break_absence_adjacency()
