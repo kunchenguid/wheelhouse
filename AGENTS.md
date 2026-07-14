@@ -98,7 +98,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   (tick/slash/**plain-English** -> act on target -> consume resolved cards,
   block non-retryable errors, or leave retryable/non-terminal cards open), `scan-backstop`
   (hourly scan -> deterministic target-side cleanup plus reconcile:
-  create/refresh/activity-reflect/close - the primary keep-current path
+  create/reuse/refresh/activity-reflect/close - the primary keep-current path
   now that cards refresh on material change, render-version staleness, or a
   held-card publish trigger, and can make a hidden state-only activity stamp
   write when live target activity is newer than the card's reflected stamp;

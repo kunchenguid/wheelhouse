@@ -3,7 +3,7 @@
 The scheduled `scan-backstop` already finds, refreshes, and activity-sorts items in your fleet hourly with **no** changes to your other repos.
 This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up, refresh, or rise in Recently updated sort in your queue in real time instead of waiting for the next hourly scan.
 
-Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card, refreshes a pure pending card when material state has changed, updates the hidden activity stamp when the target `updatedAt` advanced, re-renders when Wheelhouse's internal card render version is stale, or publishes a held card when auto triage is no longer eligible; the backstop still reconciles everything later.
+Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates or safely reuses a card, refreshes a pure pending card when material state has changed, updates the hidden activity stamp when the target `updatedAt` advanced, re-renders when Wheelhouse's internal card render version is stale, or publishes a held card when auto triage is no longer eligible; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 An ingest dispatch never performs scan-time auto-merge; this fork enables `auto_merge` fleet-wide, but only a later `scan-backstop` pass can evaluate a target repository after it has practically opted in with a non-empty default-branch `VISION.md` and every live safety gate passes.
@@ -62,7 +62,9 @@ If you override `options`, include `investigate` only on `pr-review` or `issue-t
 Non-checkbox actions are not valid `options`: `/comment <text>` and the pr-review-only `/request-changes <text>` require slash-command text, while `/decline <reason>` is also shown in the card's slash-command hint for custom decline wording.
 A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
-The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
+The hub's `ingest` workflow dedupes open cards by target: a second dispatch for the same `repo`+`number` uses the existing open card instead of creating another one.
+If no open card exists, ingest shares the scheduled backstop's strict lifecycle lookup: it reuses the issue number only for one uniquely trusted automation-authored card carrying current-schema reconcile soft-close provenance, and otherwise creates a new card only after the complete lookup rules out ambiguity.
+See the [scheduled backstop lifecycle](../README.md#daily-use) for the full reuse and fail-closed trust contract.
 If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or source-provided checkbox `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
 If no full refresh is needed but target `updated_at` is newer than the card's hidden `activity_reflected_at`, the hub edits only the hidden state block so GitHub's Recently updated sort can surface the target's activity.
 The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
@@ -150,7 +152,7 @@ jobs:
   After a base-branch push, GitHub can temporarily return `UNKNOWN` while it recalculates mergeability.
   The scan polls that pending value before changing membership; if it cannot settle it, it leaves any existing card unchanged rather than creating or consuming a card from an indeterminate answer.
 - **`ci-approval` items.** If you want every fork-CI approval to surface fast, add a job that dispatches with `kind:"ci-approval"` when a run reaches `action_required` (e.g. on `workflow_run`).
-  Ingest dispatches create, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
+  Ingest dispatches create, safely reuse, refresh, or activity-reflect a card immediately; they do not run the scan-time `auto_approve_ci` path or the scan author filter.
   Only a scan-created contributor card that holds for changed workflow/action files receives the deterministic, read-only *Security review (advisory)* section; it is context for the unchanged manual hold, not a dispatch-payload feature or an approval.
   If you want provably-safe runs auto-cleared instead of carded, rely on `scan-backstop` for CI approvals.
   If the scan later verifies that no matching run is awaiting approval, it normally emits no worklist item and any stale CI-approval card follows the [scheduled backstop lifecycle](../README.md#daily-use).

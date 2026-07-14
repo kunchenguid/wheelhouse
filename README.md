@@ -558,15 +558,15 @@ wheelhouse.config.yml          the one file you edit
 .github/ISSUE_TEMPLATE/
   wheelhouse-decision.yml      schema for machine-rendered card decisions (held cards intentionally render no checkboxes)
 .github/workflows/
-  ingest.yml                   repository_dispatch / manual -> create, refresh, or activity-reflect a decision card
+  ingest.yml                   repository_dispatch / manual -> create, safely reuse, refresh, or activity-reflect a decision card
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close resolved cards, block non-retryable errors, or leave retries actionable
-  scan-backstop.yml            hourly scan -> create, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
+  scan-backstop.yml            hourly scan -> create, safely reuse, refresh, activity-reflect, close cards, run target-side stale pending-contributor cleanup, and surface persistent scan failures
   triage.yml                   automatic lightweight PR/issue card triage -> read-only target pass -> publish held cards / edit card context
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           resilient GraphQL scan/classify, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
-  render_card.py               build decision cards, including held pending-triage placeholders, auto-merge criteria, and advisory CI security reviews; create/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
+  render_card.py               build decision cards, including held pending-triage placeholders, auto-merge criteria, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   auto_merge.py                evaluate criteria, claim, validate, merge, and audit strictly eligible scan-time PR auto-merges
   automerge_criteria.py        stable schema for authoritative auto-merge criterion rows
