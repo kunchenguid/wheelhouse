@@ -122,13 +122,28 @@ def main():
             "42",
             "main",
             "d" * 32,
+            True,
             str(mismatch_result_path),
             str(mismatch_events_path),
         )
         validate_contract(revision_mismatch, "AgentResult")
         check("bridge: trusted revision mismatch preserves possible spend", revision_mismatch["status"] == "failed" and revision_mismatch["error"]["code"] == "target.stale" and revision_mismatch["error"]["spendStarted"] is True)
-        check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["proof"]["revisionBinding"]["cancellationStatus"] == "cancelled-and-waited" and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] is None and revision_mismatch["usage"]["toolCalls"] is None)
+        check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["proof"]["revisionBinding"]["cancellationConfirmed"] is True and revision_mismatch["proof"]["revisionBinding"]["cancellationError"] is None and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] is None and revision_mismatch["usage"]["toolCalls"] is None)
         check("bridge: revision mismatch events remain content free", "fixture target" not in mismatch_events_path.read_text(encoding="utf-8"))
+
+        unconfirmed_mismatch = write_revision_mismatch_result(
+            str(bundle / "task.json"),
+            str(bundle),
+            task["metadata"]["wheelhouseRevision"],
+            "c" * 40,
+            "43",
+            "main",
+            "f" * 32,
+            False,
+            str(bundle / "unconfirmed-mismatch-result.json"),
+            str(bundle / "unconfirmed-mismatch-events.ndjson"),
+        )
+        check("bridge: unconfirmed mismatch cancellation remains conservative", unconfirmed_mismatch["error"]["spendStarted"] is True and unconfirmed_mismatch["proof"]["revisionBinding"]["cancellationConfirmed"] is False and unconfirmed_mismatch["proof"]["revisionBinding"]["cancellationError"] == "lifecycle.cancel_unconfirmed")
 
         controller_failure = write_controller_failure_result(
             str(bundle / "task.json"),

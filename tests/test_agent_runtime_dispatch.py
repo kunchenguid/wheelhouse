@@ -103,7 +103,7 @@ def main():
         dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
         dispatch.cancel_and_wait = lambda run_id: mismatch_calls.append(("cancel", run_id))
         dispatch.recover_attempt = lambda run_id, conclusion, reason: mismatch_calls.append(("recover", run_id, conclusion, reason))
-        dispatch.write_revision_mismatch_result = lambda *args: mismatch_calls.append(("result",) + args[2:7])
+        dispatch.write_revision_mismatch_result = lambda *args: mismatch_calls.append(("result",) + args[2:8])
         dispatch.output = lambda name, value: mismatch_calls.append(("output", name, value))
         try:
             dispatch.supervise(arguments(), task())
@@ -114,9 +114,34 @@ def main():
             setattr(dispatch, name, value)
     check("dispatch: branch advance remains correlated by title", ("cancel", "8") in mismatch_calls)
     check("dispatch: SHA mismatch result follows bounded cancellation", mismatch_calls.index(("cancel", "8")) < next(index for index, row in enumerate(mismatch_calls) if row[0] == "result"))
-    check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"]) in mismatch_calls)
+    check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"], True) in mismatch_calls)
     check("dispatch: SHA mismatch exposes the parent result", any(row[:2] == ("output", "result_file") for row in mismatch_calls))
     check("dispatch: SHA mismatch skips impossible checkpoint recovery", not any(row[0] == "recover" for row in mismatch_calls))
+
+    def failed_mismatch_cancel(error):
+        calls = []
+        saved_values = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output")}
+        try:
+            dispatch.run = lambda *args, **kwargs: ""
+            dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
+            dispatch.cancel_and_wait = lambda _run_id: (_ for _ in ()).throw(error)
+            dispatch.recover_attempt = lambda *_args: calls.append(("recover",))
+            dispatch.write_revision_mismatch_result = lambda *args: calls.append(("result", args[7]))
+            dispatch.output = lambda name, value: calls.append(("output", name, value))
+            try:
+                dispatch.supervise(arguments(), task())
+            except SystemExit:
+                pass
+        finally:
+            for name, value in saved_values.items():
+                setattr(dispatch, name, value)
+        return calls
+
+    api_failure = failed_mismatch_cancel(subprocess.CalledProcessError(1, "gh"))
+    timeout_failure = failed_mismatch_cancel(subprocess.TimeoutExpired("gh", 20))
+    check("dispatch: mismatch API cancellation failure preserves spend result", ("result", False) in api_failure and any(row[:2] == ("output", "result_file") for row in api_failure))
+    check("dispatch: mismatch cancellation timeout preserves spend result", ("result", False) in timeout_failure and any(row[:2] == ("output", "result_file") for row in timeout_failure))
+    check("dispatch: failed mismatch cancellation still skips checkpoint recovery", not any(row[0] == "recover" for row in api_failure + timeout_failure))
 
     saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_controller_failure_result", "output")}
     malformed_calls = []

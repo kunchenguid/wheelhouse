@@ -343,6 +343,7 @@ def write_revision_mismatch_result(
     run_id: str,
     dispatch_ref: str,
     correlation_id: str,
+    cancellation_confirmed: bool,
     result_path: str,
     events_path: str,
 ) -> dict[str, Any]:
@@ -362,7 +363,8 @@ def write_revision_mismatch_result(
         "quality": "trusted-parent-run-metadata",
         "status": "mismatched",
         "spendEvidenceQuality": "conservative-possible-spend",
-        "cancellationStatus": "cancelled-and-waited",
+        "cancellationConfirmed": cancellation_confirmed,
+        "cancellationError": None if cancellation_confirmed else "lifecycle.cancel_unconfirmed",
         "expectedCommitSha": expected_sha,
         "observedCommitSha": observed_sha,
         "modelRunId": run_id,

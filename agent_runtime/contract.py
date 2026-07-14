@@ -243,6 +243,7 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
         revision_binding = document["proof"].get("revisionBinding")
         if revision_binding is not None and (
             revision_binding["expectedCommitSha"] == revision_binding["observedCommitSha"]
+            or (revision_binding["cancellationConfirmed"] != (revision_binding["cancellationError"] is None))
             or document["proof"]["sandboxPolicySha256"] != canonical_sha256(revision_binding)
             or document["status"] != "failed"
             or document.get("error", {}).get("code") != "target.stale"

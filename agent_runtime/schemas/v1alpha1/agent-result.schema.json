@@ -57,12 +57,13 @@
         "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "revisionBinding": {
           "type": "object", "additionalProperties": false,
-          "required": ["quality", "status", "spendEvidenceQuality", "cancellationStatus", "expectedCommitSha", "observedCommitSha", "modelRunId", "dispatchRef", "correlationId"],
+          "required": ["quality", "status", "spendEvidenceQuality", "cancellationConfirmed", "cancellationError", "expectedCommitSha", "observedCommitSha", "modelRunId", "dispatchRef", "correlationId"],
           "properties": {
             "quality": {"const": "trusted-parent-run-metadata"},
             "status": {"const": "mismatched"},
             "spendEvidenceQuality": {"const": "conservative-possible-spend"},
-            "cancellationStatus": {"const": "cancelled-and-waited"},
+            "cancellationConfirmed": {"type": "boolean"},
+            "cancellationError": {"type": ["string", "null"], "enum": [null, "lifecycle.cancel_unconfirmed"]},
             "expectedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
             "observedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
             "modelRunId": {"type": "string", "minLength": 1},

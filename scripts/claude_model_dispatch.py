@@ -192,7 +192,14 @@ def terminate_parent(_signum: int, _frame: object) -> None:
     raise ParentCancelled
 
 
-def emit_revision_mismatch(args: argparse.Namespace, run_id: str, observed_sha: str, correlation: str, destination: Path) -> None:
+def emit_revision_mismatch(
+    args: argparse.Namespace,
+    run_id: str,
+    observed_sha: str,
+    correlation: str,
+    cancellation_confirmed: bool,
+    destination: Path,
+) -> None:
     result_path = destination / "result.json"
     events_path = destination / "events.ndjson"
     write_revision_mismatch_result(
@@ -203,6 +210,7 @@ def emit_revision_mismatch(args: argparse.Namespace, run_id: str, observed_sha: 
         run_id,
         args.dispatch_ref,
         correlation,
+        cancellation_confirmed,
         str(result_path),
         str(events_path),
     )
@@ -358,14 +366,20 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                     except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                         cleanup_failure = "Claude model run correlation failed: %s" % type(error).__name__
             if run_id:
+                cancellation_confirmed = False
                 try:
                     if not completed:
                         cancel_and_wait(run_id)
+                    cancellation_confirmed = True
                     cancellation_status = "cancelled-and-waited"
-                    if termination_reason == "revision-mismatch":
-                        emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
                 except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                     cleanup_failure = "Claude model cancellation failed: %s" % type(error).__name__
+                finally:
+                    if termination_reason == "revision-mismatch":
+                        try:
+                            emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, cancellation_confirmed, destination)
+                        except (json.JSONDecodeError, OSError, ValueError) as error:
+                            cleanup_failure = cleanup_failure or "Claude mismatch result was unavailable: %s" % type(error).__name__
                 if termination_reason != "revision-mismatch":
                     try:
                         recover_attempt(run_id, recovery_conclusion, termination_reason)
