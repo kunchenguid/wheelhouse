@@ -81,7 +81,7 @@ def main():
             calls += 1
             if calls == 1:
                 raise json.JSONDecodeError("malformed", "x", 0)
-            return {"id": 7, "status": "completed", "conclusion": "success", "head_sha": "b" * 40, "head_branch": "main"}
+            return {"id": 7, "display_title": "ignored", "status": "completed", "conclusion": "success", "head_sha": "b" * 40, "head_branch": "main"}
 
         dispatch.matching_run = matching
         dispatch.download_artifact = lambda *args: True
@@ -113,16 +113,37 @@ def main():
         for name, value in saved.items():
             setattr(dispatch, name, value)
     check("dispatch: branch advance remains correlated by title", ("cancel", "8") in mismatch_calls)
+    check("dispatch: SHA mismatch result follows bounded cancellation", mismatch_calls.index(("cancel", "8")) < next(index for index, row in enumerate(mismatch_calls) if row[0] == "result"))
     check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"]) in mismatch_calls)
     check("dispatch: SHA mismatch exposes the parent result", any(row[:2] == ("output", "result_file") for row in mismatch_calls))
     check("dispatch: SHA mismatch skips impossible checkpoint recovery", not any(row[0] == "recover" for row in mismatch_calls))
+
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_controller_failure_result", "output")}
+    malformed_calls = []
+    try:
+        dispatch.run = lambda *args, **kwargs: ""
+        dispatch.matching_run = lambda *_args: (_ for _ in ()).throw(dispatch.RunMetadataError("malformed", "11"))
+        dispatch.cancel_and_wait = lambda run_id: malformed_calls.append(("cancel", run_id))
+        dispatch.recover_attempt = lambda run_id, conclusion, reason: malformed_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.write_controller_failure_result = lambda *args: malformed_calls.append(("result", args[2], args[5]))
+        dispatch.output = lambda name, value: malformed_calls.append(("output", name, value))
+        try:
+            dispatch.supervise(arguments(), task())
+        except SystemExit:
+            pass
+    finally:
+        for name, value in saved.items():
+            setattr(dispatch, name, value)
+    check("dispatch: malformed correlated metadata cancels identified run", ("cancel", "11") in malformed_calls)
+    check("dispatch: malformed correlated metadata attempts checkpoint recovery", ("recover", "11", "failure", "controller-failure") in malformed_calls)
+    check("dispatch: malformed metadata emits stable parent protocol result", ("result", "11", "cancelled-and-waited") in malformed_calls)
 
     saved_run = dispatch.run
     lookup_calls = []
     try:
         def lookup_run(*args, **_kwargs):
             lookup_calls.append(args)
-            rows = [{"display_title": "other", "head_branch": "main"}] * 100 if len(lookup_calls) == 1 else [{"display_title": "wanted", "id": 9, "head_sha": "c" * 40, "head_branch": "main"}]
+            rows = [{"display_title": "other", "id": index + 100, "head_sha": "a" * 40, "head_branch": "main", "status": "completed", "conclusion": "success"} for index in range(100)] if len(lookup_calls) == 1 else [{"display_title": "wanted", "id": 9, "head_sha": "c" * 40, "head_branch": "main", "status": "queued", "conclusion": None}]
             return json.dumps({"workflow_runs": rows})
 
         dispatch.run = lookup_run
@@ -139,13 +160,33 @@ def main():
     try:
         def first_page_run(*args, **_kwargs):
             lookup_calls.append(args)
-            return json.dumps({"workflow_runs": [{"display_title": "wanted", "id": 10, "head_sha": "b" * 40, "head_branch": "main"}] + [{"display_title": "other", "head_branch": "main"}] * 99})
+            return json.dumps({"workflow_runs": [{"display_title": "wanted", "id": 10, "head_sha": "b" * 40, "head_branch": "main", "status": "queued", "conclusion": None}] + [{"display_title": "other", "id": index + 100, "head_sha": "a" * 40, "head_branch": "main", "status": "completed", "conclusion": "success"} for index in range(99)]})
 
         dispatch.run = first_page_run
         dispatch.matching_run("owner/repo", "wanted", "main", "2026-01-01T00:00:00Z")
     finally:
         dispatch.run = saved_run
     check("dispatch: successful correlation stops API pagination", len(lookup_calls) == 1)
+
+    saved_run = dispatch.run
+    try:
+        dispatch.run = lambda *_args, **_kwargs: json.dumps({"workflow_runs": ["malformed"]})
+        try:
+            dispatch.matching_run("owner/repo", "wanted", "main", "2026-01-01T00:00:00Z")
+        except dispatch.RunMetadataError as error:
+            check("dispatch: non-object run rows fail with bounded protocol error", not error.run_id)
+        else:
+            check("dispatch: non-object run rows fail with bounded protocol error", False)
+
+        dispatch.run = lambda *_args, **_kwargs: json.dumps({"workflow_runs": [{"display_title": "wanted", "head_sha": "c" * 40, "head_branch": "main", "status": "queued", "conclusion": None}]})
+        try:
+            dispatch.matching_run("owner/repo", "wanted", "main", "2026-01-01T00:00:00Z")
+        except dispatch.RunMetadataError as error:
+            check("dispatch: correlated rows require a cancellable run id", not error.run_id)
+        else:
+            check("dispatch: correlated rows require a cancellable run id", False)
+    finally:
+        dispatch.run = saved_run
 
     if FAILURES:
         raise SystemExit("%d Claude dispatch checks failed" % len(FAILURES))

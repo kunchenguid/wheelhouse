@@ -244,13 +244,13 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
         if revision_binding is not None and (
             revision_binding["expectedCommitSha"] == revision_binding["observedCommitSha"]
             or document["proof"]["sandboxPolicySha256"] != canonical_sha256(revision_binding)
-            or document["status"] != "rejected"
+            or document["status"] != "failed"
             or document.get("error", {}).get("code") != "target.stale"
-            or document.get("error", {}).get("spendStarted") is not False
+            or document.get("error", {}).get("spendStarted") is not True
             or document["selection"]["actualProvider"]
             or document["selection"]["actualModel"]
             or document["selection"]["actualEffort"]
-            or document["usage"]["providerRequests"] != 0
+            or any(document["usage"][name] is not None for name in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "providerRequests", "toolCalls", "turns", "durationMs"))
         ):
             raise ContractError("revision mismatch evidence is inconsistent")
         selection = document["selection"]

@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.claude_bridge import write_revision_mismatch_result
+from agent_runtime.claude_bridge import write_controller_failure_result, write_revision_mismatch_result
 
 COMMAND_TIMEOUT_SECONDS = 20
 CANCEL_WAIT_SECONDS = 30
@@ -30,6 +30,12 @@ STATE: dict[str, object] = {}
 
 class ParentCancelled(Exception):
     pass
+
+
+class RunMetadataError(ValueError):
+    def __init__(self, message: str, run_id: str = "") -> None:
+        super().__init__(message)
+        self.run_id = run_id
 
 
 def run(*args: str, capture: bool = False, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS) -> str:
@@ -44,6 +50,31 @@ def output(name: str, value: str) -> None:
             handle.write("%s=%s\n" % (name, value.replace("\n", " ")))
 
 
+def validate_run_row(row: object, title: str, branch: str) -> dict:
+    if not isinstance(row, dict):
+        raise RunMetadataError("Claude model workflow run row was not an object")
+    correlated = row.get("display_title") == title and row.get("head_branch") == branch
+    value_id = row.get("id")
+    run_id = str(value_id) if correlated and isinstance(value_id, int) and not isinstance(value_id, bool) and value_id > 0 else ""
+    head_sha = row.get("head_sha")
+    conclusion = row.get("conclusion")
+    if (
+        not isinstance(value_id, int)
+        or isinstance(value_id, bool)
+        or value_id <= 0
+        or not isinstance(row.get("display_title"), str)
+        or not isinstance(row.get("head_branch"), str)
+        or not isinstance(head_sha, str)
+        or len(head_sha) != 40
+        or any(character not in "0123456789abcdef" for character in head_sha)
+        or not isinstance(row.get("status"), str)
+        or not row.get("status")
+        or (conclusion is not None and not isinstance(conclusion, str))
+    ):
+        raise RunMetadataError("Claude model workflow run row was malformed", run_id)
+    return row
+
+
 def matching_run(repo: str, title: str, branch: str, created_after: str, deadline: float | None = None) -> dict | None:
     matches = []
     for page in range(1, MAX_LOOKUP_PAGES + 1):
@@ -55,7 +86,8 @@ def matching_run(repo: str, title: str, branch: str, created_after: str, deadlin
         page_rows = value.get("workflow_runs") if isinstance(value, dict) else None
         if not isinstance(page_rows, list):
             raise ValueError("Claude model workflow lookup response is invalid")
-        matches.extend(row for row in page_rows if row.get("display_title") == title and row.get("head_branch") == branch)
+        validated_rows = [validate_run_row(row, title, branch) for row in page_rows]
+        matches.extend(row for row in validated_rows if row["display_title"] == title and row["head_branch"] == branch)
         if len(matches) > 1:
             raise SystemExit("ambiguous Claude model workflow correlation")
         if matches:
@@ -66,15 +98,24 @@ def matching_run(repo: str, title: str, branch: str, created_after: str, deadlin
 
 
 def discover_run(repo: str, title: str, branch: str, created_after: str, deadline: float) -> dict | None:
+    malformed = None
     while time.monotonic() < deadline:
         try:
             match = matching_run(repo, title, branch, created_after, deadline)
+        except RunMetadataError as error:
+            if error.run_id:
+                raise
+            malformed = error
+            time.sleep(POLL_SECONDS)
+            continue
         except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
             time.sleep(POLL_SECONDS)
             continue
         if match:
             return match
         time.sleep(POLL_SECONDS)
+    if malformed is not None:
+        raise malformed
     return None
 
 
@@ -168,6 +209,22 @@ def emit_revision_mismatch(args: argparse.Namespace, run_id: str, observed_sha: 
     output("result_file", str(result_path))
 
 
+def emit_controller_failure(args: argparse.Namespace, run_id: str, correlation: str, cancellation_status: str, destination: Path) -> None:
+    result_path = destination / "result.json"
+    events_path = destination / "events.ndjson"
+    write_controller_failure_result(
+        args.task,
+        args.bundle,
+        run_id,
+        args.dispatch_ref,
+        correlation,
+        cancellation_status,
+        str(result_path),
+        str(events_path),
+    )
+    output("result_file", str(result_path))
+
+
 def supervise(args: argparse.Namespace, task: dict) -> None:
     dispatch_ms = int(task["spec"]["limits"]["dispatchDeadlineMs"])
     child_timeout_ms = int(task["spec"]["limits"]["childExecutionTimeoutMs"])
@@ -194,6 +251,8 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
     cleanup_failure = ""
     recovery_conclusion = "failure"
     termination_reason = "controller-failure"
+    metadata_failure = False
+    cancellation_status = "run-id-unavailable"
     try:
         STATE["dispatched"] = True
         run(
@@ -214,19 +273,31 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
         while time.monotonic() < dispatch_deadline:
             try:
                 match = matching_run(repo, title, args.dispatch_ref, created_after, dispatch_deadline)
+            except RunMetadataError as error:
+                metadata_failure = True
+                if error.run_id:
+                    run_id = error.run_id
+                    termination_reason = "controller-failure"
+                    failure = "Claude model workflow returned malformed correlated run metadata"
+                    break
+                failure = "Claude model workflow returned malformed run metadata"
+                time.sleep(POLL_SECONDS)
+                continue
             except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
                 time.sleep(POLL_SECONDS)
                 continue
             if match:
+                metadata_failure = False
                 run_id = str(match["id"])
                 STATE["observed_sha"] = match.get("head_sha")
                 break
             time.sleep(POLL_SECONDS)
-        if not run_id:
-            failure = "Claude model run correlation was unavailable within its dispatch deadline"
+        if metadata_failure:
+            failure = failure or "Claude model workflow returned malformed run metadata"
+        elif not run_id:
+            failure = failure or "Claude model run correlation was unavailable within its dispatch deadline"
         elif STATE["observed_sha"] != args.expected_sha:
             termination_reason = "revision-mismatch"
-            emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
             failure = "Claude model workflow revision did not match the trusted parent"
         else:
             child_deadline = time.monotonic() + child_timeout_ms / 1000
@@ -276,13 +347,23 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                             if STATE["observed_sha"] != args.expected_sha:
                                 recovery_conclusion = "failure"
                                 termination_reason = "revision-mismatch"
-                                emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
+                    except RunMetadataError as error:
+                        metadata_failure = True
+                        if error.run_id:
+                            run_id = error.run_id
+                        termination_reason = "controller-failure"
+                        failure = failure or "Claude model workflow returned malformed run metadata"
+                        if not error.run_id:
+                            cleanup_failure = "Claude model workflow metadata was malformed"
                     except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                         cleanup_failure = "Claude model run correlation failed: %s" % type(error).__name__
             if run_id:
                 try:
                     if not completed:
                         cancel_and_wait(run_id)
+                    cancellation_status = "cancelled-and-waited"
+                    if termination_reason == "revision-mismatch":
+                        emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
                 except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                     cleanup_failure = "Claude model cancellation failed: %s" % type(error).__name__
                 if termination_reason != "revision-mismatch":
@@ -292,6 +373,11 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                         cleanup_failure = "Claude model attempt checkpoint recovery failed: %s" % type(error).__name__
             elif not cleanup_failure:
                 cleanup_failure = "Claude model run correlation was unavailable"
+    if metadata_failure and termination_reason != "revision-mismatch":
+        try:
+            emit_controller_failure(args, run_id, correlation, cancellation_status, destination)
+        except (json.JSONDecodeError, OSError, ValueError) as error:
+            cleanup_failure = cleanup_failure or "Claude model protocol failure result was unavailable: %s" % type(error).__name__
     if cleanup_failure:
         raise SystemExit(cleanup_failure)
     if failure:

@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge, write_revision_mismatch_result
+from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge, write_controller_failure_result, write_revision_mismatch_result
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, canonical_sha256, file_sha256, result_projection_sha256, validate_contract
 from agent_runtime.task_builder import build_task, claude_declared_outputs, claude_declared_tools
@@ -126,9 +126,22 @@ def main():
             str(mismatch_events_path),
         )
         validate_contract(revision_mismatch, "AgentResult")
-        check("bridge: trusted revision mismatch rejects before invocation", revision_mismatch["status"] == "rejected" and revision_mismatch["error"]["code"] == "target.stale" and revision_mismatch["error"]["spendStarted"] is False)
-        check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] == 0)
+        check("bridge: trusted revision mismatch preserves possible spend", revision_mismatch["status"] == "failed" and revision_mismatch["error"]["code"] == "target.stale" and revision_mismatch["error"]["spendStarted"] is True)
+        check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["proof"]["revisionBinding"]["cancellationStatus"] == "cancelled-and-waited" and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] is None and revision_mismatch["usage"]["toolCalls"] is None)
         check("bridge: revision mismatch events remain content free", "fixture target" not in mismatch_events_path.read_text(encoding="utf-8"))
+
+        controller_failure = write_controller_failure_result(
+            str(bundle / "task.json"),
+            str(bundle),
+            "42",
+            "main",
+            "e" * 32,
+            "cancelled-and-waited",
+            str(bundle / "controller-failure-result.json"),
+            str(bundle / "controller-failure-events.ndjson"),
+        )
+        validate_contract(controller_failure, "AgentResult")
+        check("bridge: malformed run metadata has stable conservative failure", controller_failure["error"]["code"] == "harness.protocol" and controller_failure["error"]["spendStarted"] is True and controller_failure["usage"]["providerRequests"] is None)
 
         _, timeout_bundle = make_bundle(root / "timeout")
         timeout, _ = run_bridge(timeout_bundle, root / "missing-timeout.json", "timeout", "timed_out", "child-timeout")

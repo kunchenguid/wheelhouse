@@ -57,10 +57,12 @@
         "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "revisionBinding": {
           "type": "object", "additionalProperties": false,
-          "required": ["quality", "status", "expectedCommitSha", "observedCommitSha", "modelRunId", "dispatchRef", "correlationId"],
+          "required": ["quality", "status", "spendEvidenceQuality", "cancellationStatus", "expectedCommitSha", "observedCommitSha", "modelRunId", "dispatchRef", "correlationId"],
           "properties": {
             "quality": {"const": "trusted-parent-run-metadata"},
             "status": {"const": "mismatched"},
+            "spendEvidenceQuality": {"const": "conservative-possible-spend"},
+            "cancellationStatus": {"const": "cancelled-and-waited"},
             "expectedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
             "observedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
             "modelRunId": {"type": "string", "minLength": 1},
@@ -141,9 +143,9 @@
         "cacheReadTokens": {"type": ["integer", "null"], "minimum": 0},
         "cacheWriteTokens": {"type": ["integer", "null"], "minimum": 0},
         "providerRequests": {"type": ["integer", "null"], "minimum": 0},
-        "toolCalls": {"type": "integer", "minimum": 0},
-        "turns": {"type": "integer", "minimum": 0},
-        "durationMs": {"type": "integer", "minimum": 0},
+        "toolCalls": {"type": ["integer", "null"], "minimum": 0},
+        "turns": {"type": ["integer", "null"], "minimum": 0},
+        "durationMs": {"type": ["integer", "null"], "minimum": 0},
         "quota": {
           "type": "object", "additionalProperties": false,
           "required": ["available", "snapshotSha256", "observedAt", "primaryUsedPercent", "secondaryUsedPercent"],
