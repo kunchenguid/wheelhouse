@@ -22,7 +22,7 @@ from .contract import (
 )
 from .events import EventWriter
 from .supervisor import _anchor_ok, _error, _verify_artifacts
-from .task_builder import claude_capabilities, claude_declared_tools, claude_isolation
+from .task_builder import claude_capabilities, claude_declared_outputs, claude_declared_tools, claude_isolation, claude_limit_enforcement
 
 ACTION_COMMIT = "fad22eb3fa582b7357fc0ea48af6645851b884fd"
 ACTION_VERSION = "1.0.161"
@@ -165,8 +165,17 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
     expected_readonly_token = "broker-only" if action.endswith(".search") else "absent"
     action_metadata_sha = proof.get("actionMetadataSha256")
     action_metadata_quality = proof.get("actionMetadataQuality")
-    unavailable_limits = ("softDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxProviderRequests", "maxInputTokens", "maxOutputTokens")
+    observation_before = proof.get("preActionInputObservationSha256")
+    observation_after = proof.get("postActionInputObservationSha256")
     termination_reason = controller.get("terminationReason") if isinstance(controller, dict) else None
+    conclusion = controller.get("conclusion") if isinstance(controller, dict) else None
+    inputs_verified = proof.get("targetInputsReadOnly") is True and observation_after == observation_before
+    inputs_unavailable = proof.get("targetInputsReadOnly") is False and observation_after is None
+    externally_enforced_limits = {
+        name: task["spec"]["limits"][name]
+        for name, quality in task["spec"]["limits"]["enforcement"].items()
+        if quality == "externally-enforced"
+    }
     if (
         not isinstance(handoff_sha256, str)
         or len(handoff_sha256) != 64
@@ -180,7 +189,11 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or not isinstance(proof.get("spendStarted"), bool)
         or proof.get("isolationLevel") != "github-readonly-artifact-bridge-v1"
         or proof.get("artifactHydration") != "content-addressed-bounded-verified"
-        or proof.get("targetInputsReadOnly") is not True
+        or not isinstance(observation_before, str)
+        or len(observation_before) != 64
+        or (conclusion == "success" and not inputs_verified)
+        or (conclusion != "success" and not (inputs_verified or inputs_unavailable))
+        or proof.get("declaredOutputPaths") != claude_declared_outputs(action)
         or proof.get("workspaceRepository") != "local-no-remote"
         or proof.get("declaredTools") != claude_declared_tools(action)
         or proof.get("actionSourceCommit") != ACTION_COMMIT
@@ -191,19 +204,20 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or task["spec"]["capabilities"] != claude_capabilities(action, task["spec"]["output"]["schemaSha256"])
         or task["spec"]["tools"] != {"default": "deny", "parallel": False, "tools": []}
         or task["spec"]["isolation"] != claude_isolation(action)
-        or any(task["spec"]["limits"][name] is not None for name in unavailable_limits)
+        or task["spec"]["limits"]["enforcement"] != claude_limit_enforcement()
         or proof.get("taskSha256") != canonical_sha256(task)
         or proof.get("handoffManifestSha256") != handoff_sha256
         or proof.get("action") != task["metadata"]["action"]
         or proof.get("transcriptSha256") != transcript_sha
         or not isinstance(controller, dict)
         or controller.get("hardDeadlineMs") != task["spec"]["limits"]["hardDeadlineMs"]
-        or controller.get("conclusion") not in ("success", "failure", "timed_out", "cancelled")
-        or termination_reason not in ("completed", "hard-deadline", "parent-sigterm")
+        or conclusion not in ("success", "failure", "timed_out", "cancelled")
+        or termination_reason not in ("completed", "hard-deadline", "parent-sigterm", "controller-failure")
         or (termination_reason == "completed" and controller.get("conclusion") not in ("success", "failure"))
         or (termination_reason == "hard-deadline" and controller.get("conclusion") != "timed_out")
         or (termination_reason == "parent-sigterm" and controller.get("conclusion") != "cancelled")
-        or controller.get("enforcedLimits") != {"hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"]}
+        or (termination_reason == "controller-failure" and controller.get("conclusion") != "failure")
+        or controller.get("enforcedLimits") != externally_enforced_limits
         or controller.get("expectedCommitSha") != task["metadata"]["wheelhouseRevision"]
         or not isinstance(controller.get("dispatchRef"), str)
         or not controller.get("dispatchRef")
@@ -288,7 +302,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                     delivered = {"value": raw, "valueSha256": canonical_sha256(raw), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
     started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["hardDeadlineMs"])
-    status = "succeeded" if final is not None else "failed"
+    status = "succeeded" if final is not None else ("cancelled" if error and error["code"] == "lifecycle.cancelled" else "failed")
     selection = {
         "candidateIndex": 0,
         "harness": candidate["harness"],
@@ -327,12 +341,14 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             "contractMajor": 1,
             "isolationLevel": "github-readonly-artifact-bridge-v1",
             "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
-            "negotiationSha256": canonical_sha256({"candidate": candidate, "tools": task["spec"]["tools"], "fallback": "none"}),
+            "negotiationSha256": canonical_sha256({"candidate": candidate, "tools": task["spec"]["tools"], "limitEnforcement": task["spec"]["limits"]["enforcement"], "fallback": "none"}),
             "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),
             "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
             "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
             "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
             "sandboxPolicySha256": canonical_sha256(enforcement or {"status": "unverified"}),
+            "limitEnforcement": task["spec"]["limits"]["enforcement"],
+            "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
         },
         "usage": _usage(rows, terminal, duration),
         "artifacts": [],

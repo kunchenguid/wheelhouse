@@ -243,6 +243,8 @@ def _proof(task: dict[str, Any], descriptor: dict[str, Any], negotiation: dict[s
         "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
         "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
         "sandboxPolicySha256": canonical_sha256(host),
+        "limitEnforcement": task["spec"]["limits"]["enforcement"],
+        "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
     }
 
 
@@ -699,6 +701,8 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
             "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
             "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
             "sandboxPolicySha256": canonical_sha256({"status": "not-started"}),
+            "limitEnforcement": task["spec"]["limits"]["enforcement"],
+            "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
         },
         "error": rejected_error,
         "usage": _usage(checkpoint, max(0, int(time.monotonic() * 1000) - int(recovery.get("startedMonotonicMs") or 0))) if spend_started else {

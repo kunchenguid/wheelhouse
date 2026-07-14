@@ -44,7 +44,7 @@
     },
     "proof": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractMajor", "isolationLevel", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256"],
+      "required": ["contractMajor", "isolationLevel", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256", "limitEnforcement", "limitEnforcementSha256"],
       "properties": {
         "contractMajor": {"const": 1},
         "isolationLevel": {"type": "string", "enum": ["sandboxed-adapter-worker-v1", "github-readonly-artifact-bridge-v1"]},
@@ -54,7 +54,24 @@
         "compiledPromptSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "inputManifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "outputSchemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "limitEnforcement": {
+          "type": "object", "additionalProperties": false,
+          "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+          "properties": {
+            "softDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "hardDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "cancelGraceMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxTurns": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxToolCalls": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxFinalBytes": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxEventBytes": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxProviderRequests": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxInputTokens": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxOutputTokens": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]}
+          }
+        },
+        "limitEnforcementSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "delivered": {

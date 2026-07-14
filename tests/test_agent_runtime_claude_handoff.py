@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.claude_handoff import hydrate, pack, verify
+from agent_runtime.claude_handoff import hydrate, pack, verify, workspace_input_observation
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, canonical_sha256
 from agent_runtime.task_builder import build_task
@@ -60,6 +60,18 @@ def main():
         workspace = root / "workspace"
         hydrated = hydrate(str(handoff), str(workspace))
         check("handoff: fresh workspace receives only declared inputs", sorted(path.name for path in workspace.iterdir()) == ["target-src", "target.txt"] and hydrated["action"] == "deep-review.search")
+        before = workspace_input_observation(task, str(workspace))
+        (workspace / "target.txt").chmod(0o600)
+        (workspace / "target.txt").write_text("mutated target\n", encoding="utf-8")
+        try:
+            workspace_input_observation(task, str(workspace))
+        except ContractError:
+            check("handoff: post-action input mutation fails closed", True)
+        else:
+            check("handoff: post-action input mutation fails closed", False)
+        (workspace / "target.txt").write_text("bounded target\n", encoding="utf-8")
+        (workspace / "target.txt").chmod(0o400)
+        check("handoff: stable input observation is deterministic", workspace_input_observation(task, str(workspace)) == before)
         for path in workspace.rglob("*"):
             os.chmod(path, 0o700 if path.is_dir() else 0o600)
         artifact = next(path for path in (handoff / "bundle" / "artifacts" / "sha256").iterdir() if path.is_file())

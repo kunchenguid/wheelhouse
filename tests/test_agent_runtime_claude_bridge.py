@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, canonical_sha256, file_sha256, result_projection_sha256, validate_contract
-from agent_runtime.task_builder import build_task, claude_declared_tools
+from agent_runtime.task_builder import build_task, claude_declared_outputs, claude_declared_tools
 
 FAILURES = []
 
@@ -67,7 +67,9 @@ def run_bridge(bundle: Path, execution: Path, suffix: str, conclusion: str = "su
     task = json.loads((bundle / "task.json").read_text(encoding="utf-8"))
     enforcement = bundle / ("enforcement-%s.json" % suffix)
     handoff_sha256 = "a" * 64
-    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "readonlyTokenBoundary": "broker-only" if task["metadata"]["action"].endswith(".search") else "absent", "spendStarted": True, "isolationLevel": "github-readonly-artifact-bridge-v1", "artifactHydration": "content-addressed-bounded-verified", "targetInputsReadOnly": True, "workspaceRepository": "local-no-remote", "declaredTools": claude_declared_tools(task["metadata"]["action"]), "action": task["metadata"]["action"], "actionSourceCommit": ACTION_COMMIT, "actionMetadataQuality": "pinned-action-reference", "actionMetadataSha256": None, "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution) if execution.is_file() else None, "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"], "enforcedLimits": {"hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"]}, "conclusion": conclusion, "terminationReason": termination_reason, "dispatchRef": "main", "expectedCommitSha": task["metadata"]["wheelhouseRevision"], "correlationId": "a" * 32}}), encoding="utf-8")
+    inputs_verified = termination_reason == "completed"
+    observation = "b" * 64
+    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "readonlyTokenBoundary": "broker-only" if task["metadata"]["action"].endswith(".search") else "absent", "spendStarted": True, "isolationLevel": "github-readonly-artifact-bridge-v1", "artifactHydration": "content-addressed-bounded-verified", "targetInputsReadOnly": inputs_verified, "preActionInputObservationSha256": observation, "postActionInputObservationSha256": observation if inputs_verified else None, "declaredOutputPaths": claude_declared_outputs(task["metadata"]["action"]), "workspaceRepository": "local-no-remote", "declaredTools": claude_declared_tools(task["metadata"]["action"]), "action": task["metadata"]["action"], "actionSourceCommit": ACTION_COMMIT, "actionMetadataQuality": "pinned-action-reference", "actionMetadataSha256": None, "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution) if execution.is_file() else None, "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"], "enforcedLimits": {"hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"]}, "conclusion": conclusion, "terminationReason": termination_reason, "dispatchRef": "main", "expectedCommitSha": task["metadata"]["wheelhouseRevision"], "correlationId": "a" * 32}}), encoding="utf-8")
     value = bridge(str(bundle / "task.json"), str(bundle), str(execution), "", str(enforcement), handoff_sha256, str(result), str(events))
     validate_contract(value, "AgentResult")
     return value, events
@@ -86,14 +88,20 @@ def main():
         check("bridge: honest artifact isolation is recorded", task["spec"]["isolation"]["profile"] == "claude-artifact-bridge-v1" and task["spec"]["isolation"]["modelNetwork"]["mode"] == "runner-default" and result["proof"]["isolationLevel"] == "github-readonly-artifact-bridge-v1")
         check("bridge: unsupported worker guarantees are absent", task["spec"]["isolation"]["dropCapabilities"] is False and task["spec"]["isolation"]["noNewPrivileges"] is False and task["spec"]["isolation"]["denyHostHome"] is False)
         check("bridge: unenforceable provider limits are explicit unavailable", all(task["spec"]["limits"][name] is None for name in ("softDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxProviderRequests", "maxInputTokens", "maxOutputTokens")))
+        check("bridge: result preserves generic limit enforcement", result["proof"]["limitEnforcement"] == task["spec"]["limits"]["enforcement"] and result["proof"]["limitEnforcementSha256"] == canonical_sha256(task["spec"]["limits"]["enforcement"]))
         task["spec"]["limits"]["maxToolCalls"] = 1
+        task["spec"]["limits"]["enforcement"]["maxToolCalls"] = "adapter-enforced"
+        validate_contract(task, "AgentTask")
+        check("bridge: mixed limit enforcement is provider neutral", True)
+        task["spec"]["limits"]["enforcement"]["maxToolCalls"] = "unavailable"
         try:
             validate_contract(task, "AgentTask")
         except ContractError:
-            check("bridge: unenforced non-null Claude limit is rejected", True)
+            check("bridge: mismatched limit evidence is rejected", True)
         else:
-            check("bridge: unenforced non-null Claude limit is rejected", False)
+            check("bridge: mismatched limit evidence is rejected", False)
         task["spec"]["limits"]["maxToolCalls"] = None
+        task["spec"]["limits"]["enforcement"]["maxToolCalls"] = "unavailable"
         check("bridge: harness executable provenance remains unavailable", result["selection"]["harnessVersion"] is None and result["selection"]["harnessDigest"] is None and result["selection"]["harnessProvenanceQuality"] == "pinned-action-reference" and result["selection"]["harnessSourceCommit"] == ACTION_COMMIT)
         check("bridge: observed model accepted", result["status"] == "succeeded" and result["selection"]["actualModel"] == IMMUTABLE_MODEL)
         check("bridge: usage remains unavailable when action omits tokens", result["usage"]["inputTokens"] is None and result["usage"]["providerRequests"] is None)
@@ -105,6 +113,10 @@ def main():
         _, timeout_bundle = make_bundle(root / "timeout")
         timeout, _ = run_bridge(timeout_bundle, root / "missing-timeout.json", "timeout", "timed_out", "hard-deadline")
         check("bridge: pre-invocation checkpoint preserves conservative spend", timeout["error"]["code"] == "lifecycle.timeout" and timeout["error"]["spendStarted"] is True)
+
+        _, cancelled_bundle = make_bundle(root / "cancelled")
+        cancelled, _ = run_bridge(cancelled_bundle, root / "missing-cancelled.json", "cancelled", "cancelled", "parent-sigterm")
+        check("bridge: parent cancellation has normalized cancelled status", cancelled["status"] == "cancelled" and cancelled["error"]["code"] == "lifecycle.cancelled")
 
         _, overclaim_bundle = make_bundle(root / "overclaim")
         overclaim_task_path = overclaim_bundle / "task.json"

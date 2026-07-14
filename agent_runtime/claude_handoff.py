@@ -24,14 +24,14 @@ def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]
     total = 0
     excluded = excluded or set()
     for base, dirs, names in os.walk(root, topdown=True, followlinks=False):
-        dirs[:] = sorted(name for name in dirs if name != "__pycache__")
+        dirs[:] = sorted(dirs)
         for name in dirs:
             if (Path(base) / name).is_symlink():
                 raise ContractError("handoff contains a directory symlink")
         for name in sorted(names):
             path = Path(base) / name
             relative = path.relative_to(root).as_posix()
-            if relative in excluded or name.endswith((".pyc", ".pyo")):
+            if relative in excluded:
                 continue
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -170,6 +170,55 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
         "allowedRepos": metadata["allowedRepos"],
         "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"],
     }
+
+
+def declared_output_paths(task: dict[str, Any]) -> list[str]:
+    matches = [
+        row.get("constraints", {}).get("declaredOutputPaths")
+        for row in task["spec"]["capabilities"]["required"]
+        if row.get("name") == "target.inputs"
+    ]
+    if len(matches) != 1 or not isinstance(matches[0], list) or any(not isinstance(path, str) or not path for path in matches[0]):
+        raise ContractError("declared output paths are invalid")
+    return matches[0]
+
+
+def workspace_input_observation(task: dict[str, Any], workspace_dir: str) -> str:
+    validate_contract(task, "AgentTask")
+    workspace = Path(workspace_dir).resolve()
+    output_paths = declared_output_paths(task)
+    allowed = [Path(item["logicalPath"]) for item in task["spec"]["inputs"]] + [Path(path) for path in output_paths] + [Path(".git")]
+    for path in workspace.rglob("*"):
+        relative = path.relative_to(workspace)
+        if not any(relative == root or root in relative.parents or relative in root.parents for root in allowed):
+            raise ContractError("model workspace contains an undeclared output path")
+    observed: list[dict[str, Any]] = []
+    for item in task["spec"]["inputs"]:
+        path = workspace / item["logicalPath"]
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise ContractError("hydrated input is missing") from error
+        if stat.S_ISLNK(info.st_mode):
+            raise ContractError("hydrated input is a symlink")
+        if path.is_file():
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o400 or info.st_size != item["bytes"] or file_sha256(path) != item["sha256"]:
+                raise ContractError("hydrated file input changed")
+            observed.append({"logicalPath": item["logicalPath"], "kind": "file", "bytes": info.st_size, "sha256": item["sha256"], "mode": "0400"})
+            continue
+        if not path.is_dir() or stat.S_IMODE(info.st_mode) != 0o500:
+            raise ContractError("hydrated directory input changed")
+        for directory in [path, *(candidate for candidate in path.rglob("*") if candidate.is_dir())]:
+            directory_info = directory.lstat()
+            if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode) or stat.S_IMODE(directory_info.st_mode) != 0o500:
+                raise ContractError("hydrated directory permissions changed")
+        rows = _files(path)
+        if any(stat.S_IMODE((path / row["path"]).lstat().st_mode) != 0o400 for row in rows):
+            raise ContractError("hydrated file permissions changed")
+        if canonical_sha256(rows) != item["sha256"] or sum(row["bytes"] for row in rows) != item["bytes"] or len(rows) != item["git"]["fileCount"]:
+            raise ContractError("hydrated directory input changed")
+        observed.append({"logicalPath": item["logicalPath"], "kind": "directory", "bytes": item["bytes"], "sha256": item["sha256"], "fileCount": len(rows), "mode": "0500"})
+    return canonical_sha256({"inputs": observed, "declaredOutputPaths": output_paths})
 
 
 def _output(name: str, value: Any) -> None:

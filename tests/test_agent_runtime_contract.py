@@ -65,6 +65,13 @@ def main():
         changed = copy.deepcopy(task)
         changed["spec"]["limits"]["maxFinalBytes"] = 999999
         check("task: output byte limit bounded", rejects(changed, "maximum"))
+        changed = copy.deepcopy(task)
+        changed["spec"]["limits"]["maxToolCalls"] = None
+        changed["spec"]["limits"]["enforcement"]["maxToolCalls"] = "unavailable"
+        validate_contract(changed, "AgentTask")
+        check("task: mixed generic limit enforcement validates", True)
+        changed["spec"]["limits"]["enforcement"]["maxToolCalls"] = "adapter-enforced"
+        check("task: unavailable limit evidence must match null value", rejects(changed, "enforcement availability"))
         check("task: no host source path is serialized", str(root) not in json.dumps(task))
         check("task: every artifact reference is content-addressed", all("artifacts/sha256/" in row["artifact"] for row in task["spec"]["inputs"]))
 

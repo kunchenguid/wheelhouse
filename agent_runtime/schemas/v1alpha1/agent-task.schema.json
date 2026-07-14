@@ -176,7 +176,7 @@
         },
         "limits": {
           "type": "object", "additionalProperties": false,
-          "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+          "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens", "enforcement"],
           "properties": {
             "softDeadlineMs": {"type": ["integer", "null"], "minimum": 1000, "maximum": 3600000},
             "hardDeadlineMs": {"type": "integer", "minimum": 1000, "maximum": 3600000},
@@ -187,7 +187,23 @@
             "maxEventBytes": {"type": "integer", "minimum": 1024, "maximum": 16777216},
             "maxProviderRequests": {"type": ["integer", "null"], "minimum": 1, "maximum": 128},
             "maxInputTokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 1000000},
-            "maxOutputTokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 131072}
+            "maxOutputTokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 131072},
+            "enforcement": {
+              "type": "object", "additionalProperties": false,
+              "required": ["softDeadlineMs", "hardDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+              "properties": {
+                "softDeadlineMs": {"$ref": "#/$defs/limitEnforcement"},
+                "hardDeadlineMs": {"$ref": "#/$defs/limitEnforcement"},
+                "cancelGraceMs": {"$ref": "#/$defs/limitEnforcement"},
+                "maxTurns": {"$ref": "#/$defs/limitEnforcement"},
+                "maxToolCalls": {"$ref": "#/$defs/limitEnforcement"},
+                "maxFinalBytes": {"$ref": "#/$defs/limitEnforcement"},
+                "maxEventBytes": {"$ref": "#/$defs/limitEnforcement"},
+                "maxProviderRequests": {"$ref": "#/$defs/limitEnforcement"},
+                "maxInputTokens": {"$ref": "#/$defs/limitEnforcement"},
+                "maxOutputTokens": {"$ref": "#/$defs/limitEnforcement"}
+              }
+            }
           }
         },
         "output": {
@@ -225,6 +241,7 @@
     }
   },
   "$defs": {
+    "limitEnforcement": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
     "capability": {
       "type": "object", "additionalProperties": false,
       "required": ["name", "constraints"],

@@ -58,6 +58,8 @@ def main():
     check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
     capture = next(step for step in model_steps if step.get("id") == "capture")
     check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
+    check("production: immutable inputs are revalidated after every action", "workspace_input_observation" in capture["run"] and "postActionInputObservationSha256" in capture["run"] and "targetInputsReadOnly" in capture["run"])
+    check("production: workspace changes are limited to declared outputs", "declaredOutputPaths" in model_steps[checkpoint]["run"] and "declared_output_paths" in Path("agent_runtime/claude_handoff.py").read_text())
 
     component = Path(".github/actions/claude-model-call/action.yml").read_text()
     handoff = Path("agent_runtime/claude_handoff.py").read_text()
@@ -97,7 +99,7 @@ def main():
     check("runtime: trusted parent dispatches by ref and binds expected commit", "--dispatch-ref" in component and "--expected-sha" in component and "expected_commit_sha" in dispatch and '"--ref", args.dispatch_ref' in dispatch)
     check("runtime: child correlation is paginated and unambiguous", '"--paginate", "--slurp"' in dispatch and "correlation_id" in dispatch and "ambiguous Claude model workflow correlation" in dispatch and '"--limit", "40"' not in dispatch)
     check("runtime: parent discovery, cancellation, and commands are bounded", "DISCOVERY_GRACE_SECONDS" in dispatch and "CANCEL_WAIT_SECONDS" in dispatch and "COMMAND_TIMEOUT_SECONDS" in dispatch and "while not run_id" not in dispatch and "def cancel_and_wait" in dispatch)
-    check("runtime: parent SIGTERM cancels and recovers durable checkpoint", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and 'recover_attempt(run_id, "cancelled", "parent-sigterm")' in dispatch)
+    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason)" in dispatch)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))

@@ -231,15 +231,15 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
             if logical.is_absolute() or any(part in ("", ".", "..") for part in logical.parts):
                 raise ContractError("$.spec.inputs logicalPath has an invalid format")
         limits = document["spec"]["limits"]
-        capability_limits = ("softDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxProviderRequests", "maxInputTokens", "maxOutputTokens")
-        bridge_profile = document["spec"]["isolation"]["profile"] == "claude-artifact-bridge-v1"
-        if bridge_profile and any(limits[name] is not None for name in capability_limits):
-            raise ContractError("Claude bridge limits must be unavailable unless externally enforced")
-        if not bridge_profile and any(limits[name] is None for name in capability_limits):
-            raise ContractError("sandboxed worker limits must be explicit")
+        enforcement = limits["enforcement"]
+        for name, quality in enforcement.items():
+            if (limits[name] is None) != (quality == "unavailable"):
+                raise ContractError("limit values must match their enforcement availability")
         if limits["softDeadlineMs"] is not None and limits["cancelGraceMs"] is not None and limits["hardDeadlineMs"] <= limits["softDeadlineMs"] + limits["cancelGraceMs"]:
             raise ContractError("hard deadline must exceed soft deadline plus cancellation grace")
     if actual_kind == "AgentResult":
+        if document["proof"]["limitEnforcementSha256"] != canonical_sha256(document["proof"]["limitEnforcement"]):
+            raise ContractError("limit enforcement evidence digest does not match")
         selection = document["selection"]
         quality = selection["harnessProvenanceQuality"]
         if quality == "verified-executable" and (selection["harnessVersion"] is None or selection["harnessDigest"] is None):

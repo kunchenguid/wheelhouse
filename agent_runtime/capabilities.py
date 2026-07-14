@@ -105,5 +105,6 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
         "exactTools": requested_tools,
         "structuredOutputMechanism": "native-schema",
         "fallback": "none",
+        "limitEnforcement": task["spec"]["limits"]["enforcement"],
     }
     return Negotiation(descriptor=descriptor, proof=proof)

@@ -134,6 +134,28 @@ def claude_declared_tools(action: str) -> list[str]:
     return tools
 
 
+def claude_declared_outputs(action: str) -> list[str]:
+    outputs = ["search-request.json"] if action.endswith(".search") else []
+    if action.startswith("nl-decision"):
+        outputs.append("decision.json")
+    return outputs
+
+
+def claude_limit_enforcement() -> dict[str, str]:
+    return {
+        "softDeadlineMs": "unavailable",
+        "hardDeadlineMs": "externally-enforced",
+        "cancelGraceMs": "unavailable",
+        "maxTurns": "unavailable",
+        "maxToolCalls": "unavailable",
+        "maxFinalBytes": "adapter-enforced",
+        "maxEventBytes": "adapter-enforced",
+        "maxProviderRequests": "unavailable",
+        "maxInputTokens": "unavailable",
+        "maxOutputTokens": "unavailable",
+    }
+
+
 def claude_isolation(action: str) -> dict[str, Any]:
     return {
         "profile": "claude-artifact-bridge-v1",
@@ -160,7 +182,7 @@ def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
         {"name": "github.permissions", "constraints": {"actions": "read", "contents": "read", "issues": "none", "actingToken": False}},
         {"name": "credentials.isolated", "constraints": {"fleetToken": "absent", "readonlyToken": "broker-only" if action.endswith(".search") else "absent"}},
         {"name": "tools.declared", "constraints": {"exact": claude_declared_tools(action)}},
-        {"name": "target.inputs", "constraints": {"mount": "read-only", "writes": False}},
+        {"name": "target.inputs", "constraints": {"mount": "read-only", "writes": False, "declaredOutputPaths": claude_declared_outputs(action)}},
         {"name": "transcript.bounded", "constraints": {"maxBytes": 8388608, "reduced": True}},
     ]
     return {
@@ -229,6 +251,23 @@ def _tools(action: str, adapter: str) -> dict[str, Any]:
             }
             for name in names
         ],
+    }
+
+
+def _limit_enforcement(adapter: str) -> dict[str, str]:
+    if adapter == "claude-action-compat":
+        return claude_limit_enforcement()
+    return {
+        "softDeadlineMs": "externally-enforced",
+        "hardDeadlineMs": "externally-enforced",
+        "cancelGraceMs": "externally-enforced",
+        "maxTurns": "adapter-enforced",
+        "maxToolCalls": "adapter-enforced",
+        "maxFinalBytes": "externally-enforced",
+        "maxEventBytes": "externally-enforced",
+        "maxProviderRequests": "adapter-enforced",
+        "maxInputTokens": "adapter-enforced",
+        "maxOutputTokens": "adapter-enforced",
     }
 
 
@@ -394,6 +433,7 @@ def build_task(
                 "maxProviderRequests": None if adapter == "claude-action-compat" else (64 if turns > 32 else 40),
                 "maxInputTokens": None if adapter == "claude-action-compat" else 180000,
                 "maxOutputTokens": None if adapter == "claude-action-compat" else (16000 if action.startswith("deep-review") else 8000),
+                "enforcement": _limit_enforcement(adapter),
             },
             "output": {
                 "schemaArtifact": schema_artifact,

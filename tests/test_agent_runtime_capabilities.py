@@ -73,6 +73,7 @@ def main():
         check("capability: complete exact proof accepted", proof.proof["fallback"] == "none")
         check("capability: exact typed tools retained", proof.proof["exactTools"] == ["fs.read", "fs.grep", "fs.glob"])
         check("capability: native strict schema selected", proof.proof["structuredOutputMechanism"] == "native-schema")
+        check("capability: generic limit enforcement survives negotiation", proof.proof["limitEnforcement"] == task["spec"]["limits"]["enforcement"])
 
         bad = copy.deepcopy(task)
         bad["spec"]["selection"]["fallback"]["mode"] = "declared"
