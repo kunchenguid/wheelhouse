@@ -1658,7 +1658,10 @@ def persist_workflow_hold(record, card_token=""):
         )
         body_change = new_body != card.get("body")
         label_change = render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL not in labels
+        mutation_snapshot = card
         if body_change or label_change:
+            if label_change:
+                render_card.ensure_labels([render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL])
             current = render_card.get_card(handoff["card_issue"])
             matches, reason = _workflow_hold_snapshot_matches(card, current)
             if not matches:
@@ -1667,26 +1670,31 @@ def persist_workflow_hold(record, card_token=""):
                 )
             if not render_card.issue_is_open(current):
                 raise RuntimeError("manual-merge hold card closed before persistence")
-        if body_change:
-            render_card._edit_issue_body(handoff["card_issue"], new_body)
-        if label_change:
-            render_card.ensure_labels([render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL])
-            render_card._gh(
-                [
-                    "issue",
-                    "edit",
-                    str(handoff["card_issue"]),
-                    "--add-label",
-                    render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL,
-                ]
+            mutation_snapshot = current
+            render_card._edit_issue_body_and_labels(
+                handoff["card_issue"],
+                new_body,
+                add_labels=[render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL]
+                if label_change
+                else None,
             )
         confirmed = render_card.get_card(handoff["card_issue"])
         confirmed_entry = _card_index([confirmed]).get(
             (handoff["repo"], handoff["number"])
         )
+        expected_labels = set(labels)
+        expected_labels.add(render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL)
+        owner_action, _ = _card_has_pending_owner_action(confirmed)
         if (
             not confirmed_entry
             or not render_card.issue_is_open(confirmed)
+            or not render_card.card_updated_at(confirmed)
+            or confirmed.get("body") != new_body
+            or _card_label_names(confirmed) != expected_labels
+            or confirmed.get("comments") != mutation_snapshot.get("comments")
+            or owner_action
+            or _selected_card_option(confirmed.get("body"))
+            or _card_has_pending_decision(confirmed_entry.get("labels") or set())
             or not _card_is_claimed(confirmed_entry.get("labels") or set())
             or not _audit_intent_record(
                 confirmed_entry.get("state"), handoff["card_issue"]

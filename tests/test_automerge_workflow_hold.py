@@ -101,6 +101,8 @@ class LifecycleWorld:
         self.history_mode = history_mode
         self.clock = 0
         self.fail_hold_body_writes = False
+        self.on_label_metadata_create = None
+        self.after_hold_card_edit = None
         self.metrics = {
             "history_reads": 0,
             "merge_calls": 0,
@@ -108,6 +110,7 @@ class LifecycleWorld:
             "audit_intent_writes": 0,
             "hold_body_writes": 0,
             "hold_label_writes": 0,
+            "hold_atomic_writes": 0,
             "comments": 0,
         }
         self.card_write_tokens = []
@@ -174,10 +177,20 @@ class LifecycleWorld:
     def gh(self, args, check=True, input_text=None):
         token = os.environ.get("GH_TOKEN")
         if args[:2] == ["issue", "edit"]:
+            before = core.parse_state_block(self.card["body"]) or {}
+            body = self.card["body"]
             if "--body-file" in args:
                 body_path = args[args.index("--body-file") + 1]
                 with open(body_path, encoding="utf-8") as handle:
-                    self.card["body"] = handle.read()
+                    body = handle.read()
+            after = core.parse_state_block(body) or {}
+            adding_hold = (
+                render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD not in before
+                and render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD in after
+            )
+            if adding_hold and self.fail_hold_body_writes:
+                raise RuntimeError("simulated manual-hold persistence failure")
+            self.card["body"] = body
             additions = [args[i + 1] for i, value in enumerate(args) if value == "--add-label"]
             removals = [
                 args[i + 1] for i, value in enumerate(args) if value == "--remove-label"
@@ -192,8 +205,14 @@ class LifecycleWorld:
                 self.metrics["claim_label_writes"] += 1
             if render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL in additions:
                 self.metrics["hold_label_writes"] += 1
+            if adding_hold:
+                self.metrics["hold_body_writes"] += 1
+                if render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL in additions:
+                    self.metrics["hold_atomic_writes"] += 1
             self.card_write_tokens.append(token)
             self.touch()
+            if adding_hold and self.after_hold_card_edit:
+                self.after_hold_card_edit(self)
         elif args[:2] == ["issue", "comment"]:
             self.metrics["comments"] += 1
             self.card_write_tokens.append(token)
@@ -207,6 +226,10 @@ class LifecycleWorld:
             self.touch()
         elif args and args[0] == "label":
             self.card_write_tokens.append(token)
+            if self.on_label_metadata_create:
+                callback = self.on_label_metadata_create
+                self.on_label_metadata_create = None
+                callback(self)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     def edit_body(self, number, body, remove_labels=None):
@@ -436,6 +459,7 @@ def test_two_hour_hold_and_head_lifecycle():
         check("hour one: hold carries commit and bounded path evidence", hold_one["commit_sha"] == HISTORY_COMMIT and hold_one["paths"] == [".github/workflows/ci.yml"])
         check("hour one: source PR is visible in trusted state", hold_one["source_pr_url"] == "https://github.com/owner/fmt/pull/5")
         check("hour one: dedicated managed label is present", render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL in labels_one)
+        check("hour one: hold body and label use one card edit", delta_one["hold_atomic_writes"] == 1)
         check("hour one: owner-visible section appears exactly once", world.card["body"].count("### Manual merge required") == 1)
         check("hour one: owner-visible section explains history-only shape", "complete current net diff is clean" in world.card["body"] and "commit history" in world.card["body"])
         check("hour one: no target-facing or duplicate comment is posted", delta_one["comments"] == 0)
@@ -712,7 +736,103 @@ def test_hold_persistence_rejects_card_snapshot_races():
                 "%s race: reads and attempted writes use only the card token"
                 % race_name,
                 world.card_read_tokens[reads_before:] == ["card-token", "card-token"]
-                and not world.card_write_tokens,
+                and set(world.card_write_tokens) == {"card-token"},
+            )
+        finally:
+            world.restore()
+
+
+def test_hold_persistence_rejects_split_write_window_races():
+    race_cases = {
+        "label metadata owner edit": (
+            "before",
+            lambda world: world.card.update(
+                {"body": world.card["body"] + "\nOwner edit preserved.\n"}
+            ),
+        ),
+        "post-edit owner comment": (
+            "after",
+            lambda world: world.card["comments"].append(
+                {
+                    "id": 1001,
+                    "body": "Please hold this PR.",
+                    "author": {"login": "owner"},
+                }
+            ),
+        ),
+        "post-edit handler transition": (
+            "after",
+            lambda world: world.card["labels"].append({"name": "decision:merge"}),
+        ),
+    }
+    for race_name, (window, mutate) in race_cases.items():
+        world = LifecycleWorld().install()
+        try:
+            result = {
+                "repo": "fmt",
+                "number": "5",
+                "slug": "owner/fmt",
+                "head_sha": HEAD_ONE,
+                "card_issue": 101,
+            }
+            gate = {
+                "status": apply_decision.WORKFLOW_GATE_BLOCKED,
+                "reason": apply_decision.WORKFLOW_GATE_HISTORY_ONLY_REASON,
+                "net_diff_complete": True,
+                "commit_sha": HISTORY_COMMIT,
+                "paths": [".github/workflows/ci.yml"],
+            }
+            hold = am.workflow_hold_from_gate(result, gate)
+            intent = {
+                "repo": "fmt",
+                "number": "5",
+                "head_sha": HEAD_ONE,
+                "card_issue": 101,
+                am.AUDIT_FINAL_GATE_PENDING_FIELD: True,
+            }
+            state = core.parse_state_block(world.card["body"])
+            state[am.AUDIT_INTENT_FIELD] = intent
+            world.card["body"] = render_card._replace_state_block(
+                world.card["body"], state
+            )
+            world.card["labels"].extend(
+                [{"name": "processing"}, {"name": am.AUTO_MERGE_CLAIM_LABEL}]
+            )
+            if window == "before":
+                world.on_label_metadata_create = mutate
+            else:
+                world.after_hold_card_edit = mutate
+            failed_closed = False
+            try:
+                am.persist_workflow_hold(
+                    am._workflow_hold_handoff(result, hold), card_token="card-token"
+                )
+            except RuntimeError as error:
+                failed_closed = (
+                    "changed before persistence" in str(error)
+                    or "could not confirm persisted" in str(error)
+                )
+            raced_state = core.parse_state_block(world.card["body"])
+            raced_labels = {label["name"] for label in world.card["labels"]}
+            check("%s: persistence fails closed" % race_name, failed_closed)
+            check(
+                "%s: audit and claim remain recoverable" % race_name,
+                raced_state.get(am.AUDIT_INTENT_FIELD) == intent
+                and {"needs-decision", "processing", am.AUTO_MERGE_CLAIM_LABEL}.issubset(
+                    raced_labels
+                ),
+            )
+            check(
+                "%s: claim is never released" % race_name,
+                world.metrics["claim_label_writes"] == 0,
+            )
+            check(
+                "%s: hold transition uses at most one atomic card edit" % race_name,
+                world.metrics["hold_atomic_writes"] == (0 if window == "before" else 1),
+            )
+            check(
+                "%s: every persistence operation uses the card token" % race_name,
+                set(world.card_write_tokens) == {"card-token"},
             )
         finally:
             world.restore()
@@ -788,6 +908,7 @@ def main():
     test_net_diff_and_unproven_history_never_create_specialized_hold()
     test_malformed_stale_and_persistence_failure_fail_closed()
     test_hold_persistence_rejects_card_snapshot_races()
+    test_hold_persistence_rejects_split_write_window_races()
     test_refresh_reuse_hard_close_and_token_boundaries()
     test_structured_authoritative_gate_contract()
     if _failures:
