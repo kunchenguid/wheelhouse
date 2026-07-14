@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_runtime.contract import canonical_json_bytes
 from agent_runtime.redaction import REDACTED, contains_secret, redact_text
 from agent_runtime.sandbox import build_command
 from agent_runtime.tools import CanonicalTools, ToolError
@@ -58,6 +59,14 @@ def main():
         check("tools: grep returns bounded typed matches", grep["matches"][0]["path"] == "target-src/safe.py")
         glob = tools.call("fs.glob", {"root": "target-src", "pattern": "*.py"})
         check("tools: glob excludes symlinks", glob["paths"] == ["target-src/safe.py"])
+
+        for index in range(12):
+            (source / ("long-%02d-%s.txt" % (index, "x" * 80))).write_text("match %s\n" % ("y" * 300), encoding="utf-8")
+        tiny_tools = CanonicalTools(root, ["fs.grep", "fs.glob"], {"fs.grep": 220, "fs.glob": 180})
+        bounded_grep = tiny_tools.call("fs.grep", {"path": "target-src", "query": "match", "maxMatches": 500})
+        bounded_glob = tiny_tools.call("fs.glob", {"root": "target-src", "pattern": "*.txt", "maxResults": 2000})
+        check("tools: grep enforces canonical maxResultBytes", bounded_grep["truncated"] is True and len(canonical_json_bytes(bounded_grep)) <= 220)
+        check("tools: glob enforces canonical maxResultBytes", bounded_glob["truncated"] is True and len(canonical_json_bytes(bounded_glob)) <= 180)
 
         # Inspect the production command without executing bubblewrap on macOS.
         bundle = Path(directory) / "bundle"
@@ -136,6 +145,7 @@ def main():
     check("worker: model reroute fails closed", 'method == "model/rerouted"' in worker and '"model.mismatch"' in worker)
     check("worker: diagnostics compare exact credential values in memory", "self.secret_values" in worker and 'clean.replace(secret, "[REDACTED_SECRET]")' in worker)
     check("worker: final result is scanned against exact credential values", "any(secret in final_text for secret in secret_values)" in worker)
+    check("worker: provider retries disabled for exact request accounting", "request_max_retries = 0" in worker and "stream_max_retries = 0" in worker)
 
     if FAILURES:
         raise SystemExit("%d agent runtime security checks failed" % len(FAILURES))

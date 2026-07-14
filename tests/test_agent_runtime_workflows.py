@@ -66,7 +66,7 @@ def main():
     check("runtime: every invocation has trusted immutable task construction", len(build_steps) == 4)
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + build_steps))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
-    check("runtime: all verify pinned npm package integrity before install", text.count("agent_runtime.py verify-package") >= 3 and text.count("dist.integrity") >= 3)
+    check("runtime: all verify pinned npm and platform package integrity before install", text.count("agent_runtime.py verify-package") >= 3 and text.count("platform_integrity") >= 3 and text.count("--platform-package") >= 3)
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
     check("runtime: external bubblewrap sandbox installed", text.count("bubblewrap") >= 3)
 

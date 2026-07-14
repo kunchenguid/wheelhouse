@@ -114,10 +114,11 @@ def main():
     check("pins: quota response schema included", "GetAccountRateLimitsResponse.json" in lock["codex"]["protocolSchemas"])
     check("pins: thread and turn response schemas included", {"ThreadStartResponse.json", "TurnStartResponse.json"}.issubset(lock["codex"]["protocolSchemas"]))
     cli = str(Path(__file__).resolve().parents[1] / "scripts" / "agent_runtime.py")
-    valid_package = subprocess.run([sys.executable, cli, "verify-package", "--package", lock["codex"]["npmPackage"], "--integrity", lock["codex"]["npmPackageIntegrity"]], capture_output=True, text=True, check=False)
-    check("pins: exact npm package integrity accepted", valid_package.returncode == 0)
-    invalid_package = subprocess.run([sys.executable, cli, "verify-package", "--package", lock["codex"]["npmPackage"], "--integrity", "sha512-wrong"], capture_output=True, text=True, check=False)
-    check("pins: npm package integrity mismatch rejected", invalid_package.returncode != 0)
+    package_args = [sys.executable, cli, "verify-package", "--package", lock["codex"]["npmPackage"], "--integrity", lock["codex"]["npmPackageIntegrity"], "--platform", "linux-x64", "--platform-package", "@openai/codex@0.144.0-linux-x64", "--platform-integrity", lock["codex"]["linuxX64BinaryPackageIntegrity"]]
+    valid_package = subprocess.run(package_args, capture_output=True, text=True, check=False)
+    check("pins: exact npm and executable platform package integrity accepted", valid_package.returncode == 0)
+    invalid_package = subprocess.run(package_args[:-1] + ["sha512-wrong"], capture_output=True, text=True, check=False)
+    check("pins: executable platform package integrity mismatch rejected", invalid_package.returncode != 0)
 
     worker = Path("agent_runtime/worker.py").read_text(encoding="utf-8")
     check("auth: forced ChatGPT login configured", 'forced_login_method = "chatgpt"' in worker)

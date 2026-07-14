@@ -141,7 +141,18 @@ def cmd_verify_package(args: argparse.Namespace) -> int:
     if not hmac.compare_digest(args.integrity.strip(), codex["npmPackageIntegrity"]):
         print("Codex package integrity does not match the runtime lock", file=sys.stderr)
         return 1
-    print("Codex package integrity verified: %s" % args.package)
+    platforms = {
+        "linux-x64": ("@openai/codex@0.144.0-linux-x64", codex["linuxX64BinaryPackageIntegrity"]),
+        "linux-arm64": ("@openai/codex@0.144.0-linux-arm64", codex["linuxArm64BinaryPackageIntegrity"]),
+    }
+    expected_platform = platforms.get(args.platform)
+    if expected_platform is None or not hmac.compare_digest(args.platform_package, expected_platform[0]):
+        print("Codex platform package identity does not match the runtime lock", file=sys.stderr)
+        return 1
+    if not hmac.compare_digest(args.platform_integrity.strip(), expected_platform[1]):
+        print("Codex platform package integrity does not match the runtime lock", file=sys.stderr)
+        return 1
+    print("Codex package integrity verified: %s and %s" % (args.package, args.platform_package))
     return 0
 
 
@@ -227,6 +238,9 @@ def parser() -> argparse.ArgumentParser:
     package = commands.add_parser("verify-package")
     package.add_argument("--package", required=True)
     package.add_argument("--integrity", required=True)
+    package.add_argument("--platform", choices=("linux-x64", "linux-arm64"), required=True)
+    package.add_argument("--platform-package", required=True)
+    package.add_argument("--platform-integrity", required=True)
     package.set_defaults(func=cmd_verify_package)
     summary = commands.add_parser("summary")
     summary.add_argument("--result", required=True)

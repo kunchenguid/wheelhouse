@@ -6,12 +6,14 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.contract import atomic_write_json, validate_contract
-from agent_runtime.supervisor import run
-from agent_runtime_testlib import environment, make_task
+from agent_runtime.contract import atomic_write_json, load_json_regular, validate_contract
+from agent_runtime.supervisor import _anchor_ok, run
+from agent_runtime.worker import RuntimeBudget, WorkerFailure
+from agent_runtime_testlib import default_final, environment, make_task
 
 FAILURES = []
 
@@ -45,6 +47,10 @@ def main():
         check("lifecycle: raw transcript discarded", not list(bundle.rglob("*transcript*")))
         check("lifecycle: normalized terminal emitted once", events.read_text().count('"type":"execution.completed"') == 1)
 
+        task = load_json_regular(bundle / "task.json")
+        with mock.patch.object(Path, "read_text", side_effect=OSError("fixture read failure")):
+            check("output: unreadable evidence target fails closed", _anchor_ok(default_final("triage.issue.local"), task, bundle) is False)
+
         invalid = {
             "summary": "missing most fields",
         }
@@ -52,6 +58,11 @@ def main():
         check("output: malformed schema fails", result["error"]["code"] == "output.schema_invalid")
         check("output: delivered candidate remains independent for bounded repair", result["delivered"]["value"] == invalid)
         check("output: malformed candidate never becomes final", "final" not in result)
+
+        result, _, _, _ = execute(base / "post-spend-validation", {"nonCanonicalFinal": True, "spendStarted": True})
+        check("output: post-spend validation failure is not rewritten as rejection", result["status"] == "failed" and result["error"]["spendStarted"] is True)
+        check("output: post-spend usage provenance is preserved", result["usage"]["providerRequests"] == 1 and result["usage"]["inputTokens"] == 10)
+        check("output: non-canonical repair candidate remains bounded", isinstance(result["delivered"]["value"], str) and '"score":1.5' in result["delivered"]["value"])
 
         result, _, _, _ = execute(base / "missing", {"final": None})
         check("output: missing final classified stably", result["error"]["code"] == "output.missing")
@@ -85,6 +96,38 @@ def main():
 
         result, _, _, _ = execute(base / "crash", {"crash": True})
         check("crash: no guessed final after adapter crash", result["error"]["code"] == "harness.crash" and "final" not in result)
+
+        turn_budget = RuntimeBudget({"maxTurns": 1, "maxProviderRequests": 2, "maxInputTokens": 20, "maxOutputTokens": 10})
+        turn_budget.begin_provider_request()
+        try:
+            turn_budget.begin_provider_request()
+            turn_limited = False
+        except WorkerFailure:
+            turn_limited = True
+        check("limits: turn budget enforced before another provider request", turn_limited and turn_budget.provider_requests == 1)
+
+        request_budget = RuntimeBudget({"maxTurns": 2, "maxProviderRequests": 1, "maxInputTokens": 20, "maxOutputTokens": 10})
+        request_budget.begin_provider_request()
+        try:
+            request_budget.begin_provider_request()
+            request_limited = False
+        except WorkerFailure:
+            request_limited = True
+        check("limits: provider-request budget enforced externally", request_limited and request_budget.provider_requests == 1)
+
+        token_budget = RuntimeBudget({"maxTurns": 2, "maxProviderRequests": 2, "maxInputTokens": 20, "maxOutputTokens": 10})
+        try:
+            token_budget.observe_tokens({"total": {"inputTokens": 21, "outputTokens": 4}})
+            input_limited = False
+        except WorkerFailure:
+            input_limited = True
+        try:
+            token_budget.observe_tokens({"total": {"inputTokens": 20, "outputTokens": 11}})
+            output_limited = False
+        except WorkerFailure:
+            output_limited = True
+        check("limits: observed input-token budget enforced", input_limited)
+        check("limits: observed output-token budget enforced", output_limited)
 
     if FAILURES:
         raise SystemExit("%d agent runtime lifecycle checks failed" % len(FAILURES))

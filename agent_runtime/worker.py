@@ -22,18 +22,59 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .contract import atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular, validate_schema
+from .contract import ContractError, atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular, validate_schema
 from .redaction import redact_text, sanitize_message
 from .tools import CanonicalTools, ToolError, dynamic_tool_spec
 
 
 class WorkerFailure(Exception):
-    def __init__(self, code: str, message: str, adapter_code: str | None = None, spend_started: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        adapter_code: str | None = None,
+        spend_started: bool = False,
+        usage: dict[str, Any] | None = None,
+        actual_model: str = "",
+        actual_provider: str = "",
+        actual_effort: str = "",
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.adapter_code = adapter_code
         self.spend_started = spend_started
+        self.usage = usage
+        self.actual_model = actual_model
+        self.actual_provider = actual_provider
+        self.actual_effort = actual_effort
+
+
+class RuntimeBudget:
+    def __init__(self, limits: dict[str, Any]) -> None:
+        self.max_turns = int(limits["maxTurns"])
+        self.max_provider_requests = int(limits["maxProviderRequests"])
+        self.max_input_tokens = int(limits["maxInputTokens"])
+        self.max_output_tokens = int(limits["maxOutputTokens"])
+        self.turns = 0
+        self.provider_requests = 0
+
+    def begin_provider_request(self) -> None:
+        if self.turns + 1 > self.max_turns:
+            raise WorkerFailure("context.exceeded", "Agent exceeded the task turn limit.", spend_started=self.provider_requests > 0)
+        if self.provider_requests + 1 > self.max_provider_requests:
+            raise WorkerFailure("context.exceeded", "Agent exceeded the task provider-request limit.", spend_started=self.provider_requests > 0)
+        self.turns += 1
+        self.provider_requests += 1
+
+    def observe_tokens(self, usage: dict[str, Any]) -> None:
+        normalized = _token_counts(usage)
+        input_tokens = normalized["inputTokens"]
+        output_tokens = normalized["outputTokens"]
+        if input_tokens is not None and input_tokens > self.max_input_tokens:
+            raise WorkerFailure("context.exceeded", "Agent exceeded the task input-token limit.", spend_started=True)
+        if output_tokens is not None and output_tokens > self.max_output_tokens:
+            raise WorkerFailure("context.exceeded", "Agent exceeded the task output-token limit.", spend_started=True)
 
 
 class InternalEvents:
@@ -293,6 +334,10 @@ enabled = false
 [history]
 persistence = "none"
 
+[model_providers.openai]
+request_max_retries = 0
+stream_max_retries = 0
+
 [features]
 apps = false
 browser_use = false
@@ -306,6 +351,8 @@ multi_agent = false
 multi_agent_mode = false
 plugins = false
 remote_control = false
+responses_websockets = false
+responses_websockets_v2 = false
 search_tool = false
 shell_snapshot = false
 shell_tool = false
@@ -351,7 +398,36 @@ def _item_text(item: dict[str, Any]) -> str:
     return ""
 
 
+def _checkpoint(
+    output: Path,
+    *,
+    spend_started: bool,
+    actual_model: str,
+    actual_provider: str,
+    actual_effort: str,
+    usage: dict[str, Any],
+) -> None:
+    atomic_write_json(
+        output / "worker-state.json",
+        {
+            "spendStarted": spend_started,
+            "actualModel": actual_model,
+            "actualProvider": actual_provider,
+            "actualEffort": actual_effort,
+            "usage": usage,
+        },
+    )
+
+
 def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cancel_path: Path) -> dict[str, Any]:
+    actual_model = ""
+    actual_provider = ""
+    actual_effort = ""
+    spend_started = False
+    usage: dict[str, Any] = {}
+    quota: dict[str, Any] = {}
+    tools: CanonicalTools | None = None
+    budget = RuntimeBudget(plan["limits"])
     credential_environment, secret_values = _prepare_auth(plan["candidate"])
     proxy_path = os.environ.get("WHEELHOUSE_PROVIDER_SOCKET", "")
     if not proxy_path:
@@ -437,7 +513,6 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         provider_id = client.request("modelProvider/capabilities/read", {})
         provider_capabilities = _wait_response(client, provider_id, cancel_path)
         quota_available = False
-        quota: dict[str, Any] = {}
         try:
             quota_id = client.request("account/rateLimits/read", {})
             quota = _wait_response(client, quota_id, cancel_path)
@@ -498,6 +573,16 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
             schema_path = Path(os.environ["WHEELHOUSE_BUNDLE_ROOT"]) / plan["output"]["schemaArtifact"]
         output_schema = load_json_regular(schema_path, max_bytes=65536)
         events.emit("model.request.started", {"model": actual_model, "provider": actual_provider, "effort": candidate["effort"]})
+        budget.begin_provider_request()
+        spend_started = True
+        _checkpoint(
+            output,
+            spend_started=True,
+            actual_model=actual_model,
+            actual_provider=actual_provider,
+            actual_effort=actual_effort or candidate["effort"],
+            usage=_normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
+        )
         turn_request = client.request(
             "turn/start",
             {
@@ -515,11 +600,9 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
         turn_id = str((started.get("turn") or {}).get("id") or "")
         if not turn_id:
             raise WorkerFailure("harness.protocol", "Codex app-server did not return a turn id.", spend_started=True)
-        spend_started = True
         events.emit("adapter.codex.turn.started", {"turnIdSha256": hashlib.sha256(turn_id.encode()).hexdigest()})
 
         final_text = ""
-        usage: dict[str, Any] = {}
         interrupted = False
         cancel_sent = False
         terminal_status = ""
@@ -547,6 +630,20 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
                 before = time.monotonic()
                 try:
                     value = tools.call(name, arguments)
+                    try:
+                        budget.begin_provider_request()
+                    except WorkerFailure:
+                        client.respond(message["id"], error={"code": -32000, "message": "runtime budget reached"})
+                        client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
+                        raise
+                    _checkpoint(
+                        output,
+                        spend_started=True,
+                        actual_model=actual_model,
+                        actual_provider=actual_provider,
+                        actual_effort=actual_effort or candidate["effort"],
+                        usage=_normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
+                    )
                     client.respond(message["id"], result=_tool_response(value))
                     encoded = canonical_json_bytes(value)
                     events.emit("tool.completed", {"callId": call_id, "tool": name, "status": "success", "resultSha256": hashlib.sha256(encoded).hexdigest(), "resultBytes": len(encoded), "truncated": bool(value.get("truncated")), "durationMs": int((time.monotonic() - before) * 1000)})
@@ -577,6 +674,21 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
                 if isinstance(token_usage, dict):
                     usage = token_usage
                     events.emit("usage.updated", {"usageSha256": canonical_sha256(token_usage)})
+                    _checkpoint(
+                        output,
+                        spend_started=True,
+                        actual_model=actual_model,
+                        actual_provider=actual_provider,
+                        actual_effort=actual_effort or candidate["effort"],
+                        usage=_normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
+                    )
+                    try:
+                        budget.observe_tokens(usage)
+                    except WorkerFailure:
+                        if not cancel_sent:
+                            client.request("turn/interrupt", {"threadId": thread["thread"]["id"], "turnId": turn_id})
+                            cancel_sent = True
+                        raise
             elif method == "item/agentMessage/delta":
                 delta = str(params.get("delta") or "")
                 events.emit("message.delta", {"bytes": len(delta.encode("utf-8")), "sha256": hashlib.sha256(delta.encode("utf-8")).hexdigest()})
@@ -619,7 +731,7 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
                 "actualProvider": actual_provider,
                 "actualEffort": actual_effort or candidate["effort"],
                 "delivered": final_text,
-                "usage": _normalize_usage(usage, tools.calls, quota),
+                "usage": _normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
                 "spendStarted": spend_started,
                 "error": {
                     "code": "output.schema_invalid",
@@ -633,17 +745,65 @@ def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cance
             "actualProvider": actual_provider,
             "actualEffort": actual_effort or candidate["effort"],
             "final": final,
-            "usage": _normalize_usage(usage, tools.calls, quota),
+            "usage": _normalize_usage(usage, tools.calls, quota, budget.provider_requests, budget.turns),
             "spendStarted": spend_started,
         }
+    except WorkerFailure as error:
+        if spend_started:
+            error.spend_started = True
+        error.actual_model = actual_model
+        error.actual_provider = actual_provider
+        error.actual_effort = actual_effort or plan["candidate"]["effort"]
+        error.usage = _normalize_usage(
+            usage,
+            tools.calls if tools is not None else 0,
+            quota,
+            budget.provider_requests,
+            budget.turns,
+        )
+        _checkpoint(
+            output,
+            spend_started=error.spend_started,
+            actual_model=error.actual_model,
+            actual_provider=error.actual_provider,
+            actual_effort=error.actual_effort,
+            usage=error.usage,
+        )
+        raise
+    except Exception as error:
+        failure = WorkerFailure(
+            "internal.error",
+            "Sandboxed adapter worker failed internally.",
+            spend_started=spend_started,
+            usage=_normalize_usage(
+                usage,
+                tools.calls if tools is not None else 0,
+                quota,
+                budget.provider_requests,
+                budget.turns,
+            ),
+            actual_model=actual_model,
+            actual_provider=actual_provider,
+            actual_effort=actual_effort,
+        )
+        _checkpoint(
+            output,
+            spend_started=failure.spend_started,
+            actual_model=failure.actual_model,
+            actual_provider=failure.actual_provider,
+            actual_effort=failure.actual_effort,
+            usage=failure.usage or {},
+        )
+        raise failure from error
     finally:
         client.terminate()
         bridge.close()
 
 
-def _normalize_usage(usage: dict[str, Any], tool_calls: int, quota: dict[str, Any]) -> dict[str, Any]:
+def _token_counts(usage: dict[str, Any]) -> dict[str, int | None]:
     last = usage.get("last") if isinstance(usage.get("last"), dict) else usage
     total = usage.get("total") if isinstance(usage.get("total"), dict) else last
+
     def pick(*names: str) -> int | None:
         for source in (total, last):
             for name in names:
@@ -651,6 +811,17 @@ def _normalize_usage(usage: dict[str, Any], tool_calls: int, quota: dict[str, An
                 if isinstance(value, int) and value >= 0:
                     return value
         return None
+
+    return {
+        "inputTokens": pick("inputTokens", "input_tokens"),
+        "outputTokens": pick("outputTokens", "output_tokens"),
+        "cacheReadTokens": pick("cachedInputTokens", "cacheReadTokens", "cached_input_tokens"),
+        "cacheWriteTokens": pick("cacheWriteTokens", "cache_write_tokens"),
+    }
+
+
+def _normalize_usage(usage: dict[str, Any], tool_calls: int, quota: dict[str, Any], provider_requests: int, turns: int) -> dict[str, Any]:
+    tokens = _token_counts(usage)
     snapshot = quota.get("rateLimits") if isinstance(quota.get("rateLimits"), dict) else {}
     primary = snapshot.get("primary") if isinstance(snapshot.get("primary"), dict) else {}
     secondary = snapshot.get("secondary") if isinstance(snapshot.get("secondary"), dict) else {}
@@ -661,13 +832,10 @@ def _normalize_usage(usage: dict[str, Any], tool_calls: int, quota: dict[str, An
         "secondaryUsedPercent": secondary.get("usedPercent") if isinstance(secondary.get("usedPercent"), int) else None,
     }
     return {
-        "inputTokens": pick("inputTokens", "input_tokens"),
-        "outputTokens": pick("outputTokens", "output_tokens"),
-        "cacheReadTokens": pick("cachedInputTokens", "cacheReadTokens", "cached_input_tokens"),
-        "cacheWriteTokens": pick("cacheWriteTokens", "cache_write_tokens"),
-        "providerRequests": None,
+        **tokens,
+        "providerRequests": provider_requests,
         "toolCalls": tool_calls,
-        "turns": 1,
+        "turns": turns,
         "quota": quota_summary,
         "cost": {"amount": None, "currency": None, "quality": "unavailable"},
     }
@@ -709,7 +877,13 @@ def _run_fake(plan: dict[str, Any], output: Path, events: InternalEvents, cancel
     final = script.get("final")
     if final is None:
         raise WorkerFailure("output.missing", "Fake adapter produced no final result.", spend_started=bool(script.get("spendStarted")))
-    events.emit("message.completed", {"bytes": len(canonical_json_bytes(final)), "sha256": canonical_sha256(final)})
+    if script.get("nonCanonicalFinal") and isinstance(final, dict):
+        final = dict(final, score=1.5)
+    try:
+        final_bytes = canonical_json_bytes(final)
+    except ContractError:
+        final_bytes = json.dumps(final, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    events.emit("message.completed", {"bytes": len(final_bytes), "sha256": hashlib.sha256(final_bytes).hexdigest()})
     return {
         "status": "succeeded",
         "actualModel": str(script.get("actualModel") or plan["candidate"]["model"]),
@@ -728,6 +902,33 @@ def _run_fake(plan: dict[str, Any], output: Path, events: InternalEvents, cancel
         },
         "spendStarted": bool(script.get("spendStarted", True)),
     }
+
+
+def _canonical_worker_result(result: dict[str, Any], max_final_bytes: int) -> dict[str, Any]:
+    try:
+        canonical_json_bytes(result)
+        return result
+    except ContractError:
+        candidate = result.get("final") if "final" in result else result.get("delivered")
+        try:
+            raw = json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            encoded = canonical_json_bytes(raw)
+        except (ContractError, TypeError, ValueError):
+            raw = ""
+            encoded = b""
+        normalized = dict(result)
+        normalized.pop("final", None)
+        normalized.pop("delivered", None)
+        normalized["status"] = "failed"
+        normalized["error"] = {
+            "code": "output.schema_invalid",
+            "message": "Adapter delivered a result outside canonical contract JSON.",
+            "adapterCode": "non-canonical-json",
+        }
+        if raw and len(encoded) <= max_final_bytes:
+            normalized["delivered"] = raw
+        canonical_json_bytes(normalized)
+        return normalized
 
 
 def main() -> None:
@@ -752,10 +953,10 @@ def main() -> None:
     except WorkerFailure as error:
         result = {
             "status": "cancelled" if error.code == "lifecycle.cancelled" else "failed",
-            "actualModel": "",
-            "actualProvider": "",
-            "actualEffort": "",
-            "usage": {
+            "actualModel": error.actual_model,
+            "actualProvider": error.actual_provider,
+            "actualEffort": error.actual_effort,
+            "usage": error.usage or {
                 "inputTokens": None,
                 "outputTokens": None,
                 "cacheReadTokens": None,
@@ -781,6 +982,7 @@ def main() -> None:
     result["durationMs"] = int((time.monotonic() - started) * 1000)
     events.close()
     if not result.pop("skipWrite", False):
+        result = _canonical_worker_result(result, int(plan["limits"]["maxFinalBytes"]))
         atomic_write_json(output / "worker-result.json", result)
 
 

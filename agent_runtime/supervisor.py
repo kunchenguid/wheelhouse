@@ -188,24 +188,41 @@ def _usage(worker: dict[str, Any], duration_ms: int) -> dict[str, Any]:
     usage = worker.get("usage") if isinstance(worker.get("usage"), dict) else {}
     cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {"amount": None, "currency": None, "quality": "unavailable"}
     quota = usage.get("quota") if isinstance(usage.get("quota"), dict) else {}
-    quota_available = quota.get("available") is True
+    snapshot = quota.get("snapshotSha256")
+    quota_available = quota.get("available") is True and isinstance(snapshot, str) and len(snapshot) == 64 and all(character in "0123456789abcdef" for character in snapshot)
+
+    def count(name: str) -> int | None:
+        value = usage.get(name)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    def count_or_zero(name: str) -> int:
+        value = count(name)
+        return value if value is not None else 0
+
+    def percent(name: str) -> int | None:
+        value = quota.get(name)
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
+
+    amount = cost.get("amount")
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+        amount = None
     return {
-        "inputTokens": usage.get("inputTokens"),
-        "outputTokens": usage.get("outputTokens"),
-        "cacheReadTokens": usage.get("cacheReadTokens"),
-        "cacheWriteTokens": usage.get("cacheWriteTokens"),
-        "providerRequests": usage.get("providerRequests") if isinstance(usage.get("providerRequests"), int) else None,
-        "toolCalls": int(usage.get("toolCalls") or 0),
-        "turns": int(usage.get("turns") or 0),
+        "inputTokens": count("inputTokens"),
+        "outputTokens": count("outputTokens"),
+        "cacheReadTokens": count("cacheReadTokens"),
+        "cacheWriteTokens": count("cacheWriteTokens"),
+        "providerRequests": count("providerRequests"),
+        "toolCalls": count_or_zero("toolCalls"),
+        "turns": count_or_zero("turns"),
         "durationMs": max(0, duration_ms),
         "quota": {
             "available": quota_available,
-            "snapshotSha256": quota.get("snapshotSha256") if quota_available else None,
+            "snapshotSha256": snapshot if quota_available else None,
             "observedAt": _now() if quota_available else None,
-            "primaryUsedPercent": quota.get("primaryUsedPercent") if quota_available else None,
-            "secondaryUsedPercent": quota.get("secondaryUsedPercent") if quota_available else None,
+            "primaryUsedPercent": percent("primaryUsedPercent") if quota_available else None,
+            "secondaryUsedPercent": percent("secondaryUsedPercent") if quota_available else None,
         },
-        "cost": {"amount": cost.get("amount"), "currency": cost.get("currency"), "quality": cost.get("quality") if cost.get("quality") in ("actual", "estimated", "unavailable") else "unavailable"},
+        "cost": {"amount": amount, "currency": cost.get("currency") if isinstance(cost.get("currency"), str) else None, "quality": cost.get("quality") if cost.get("quality") in ("actual", "estimated", "unavailable") else "unavailable"},
     }
 
 
@@ -241,6 +258,8 @@ def _read_worker_events(path: Path, events: EventWriter) -> None:
     }
     with path.open(encoding="utf-8") as handle:
         for line in handle:
+            if events.written >= events.max_bytes - 16384:
+                return
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
@@ -248,7 +267,10 @@ def _read_worker_events(path: Path, events: EventWriter) -> None:
                 continue
             event_type = row.get("type") if isinstance(row, dict) else ""
             if isinstance(event_type, str) and (event_type in allowed or event_type.startswith("adapter.")) and isinstance(row.get("data"), dict):
-                events.emit(event_type, row["data"])
+                try:
+                    events.emit(event_type, row["data"])
+                except ValueError:
+                    return
 
 
 def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
@@ -262,7 +284,7 @@ def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
     try:
         text = (bundle / target["artifact"]).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return True
+        return False
     import re
     normalized = re.sub(r"\s+", " ", text).strip().lower()
     for quote in re.findall(r'"([^"\n]{1,240})"', value["evidence"]):
@@ -278,12 +300,30 @@ def _validate_worker(task: dict[str, Any], bundle: Path, worker: dict[str, Any])
     delivered = None
     secret_match = False
     if delivered_value is not None:
-        encoded = canonical_json_bytes(delivered_value)
+        try:
+            encoded = canonical_json_bytes(delivered_value)
+            retained_value = delivered_value
+        except ContractError:
+            try:
+                raw = json.dumps(delivered_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            except (TypeError, ValueError):
+                raw = ""
+            retained_value = raw
+            encoded = canonical_json_bytes(raw)
         secret_match = contains_secret(encoded.decode("utf-8", "replace"))
         if not secret_match and len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
-            delivered = {"value": delivered_value, "valueSha256": canonical_sha256(delivered_value), "bytes": len(encoded)}
+            delivered = {"value": retained_value, "valueSha256": canonical_sha256(retained_value), "bytes": len(encoded)}
     if secret_match:
         return None, None, _error("sandbox.violation", "Secret scanner rejected the delivered result.", spend_started=bool(worker.get("spendStarted")))
+    usage = _usage(worker, 0)
+    limits = task["spec"]["limits"]
+    if (
+        usage["turns"] > limits["maxTurns"]
+        or (usage["providerRequests"] is not None and usage["providerRequests"] > limits["maxProviderRequests"])
+        or (usage["inputTokens"] is not None and usage["inputTokens"] > limits["maxInputTokens"])
+        or (usage["outputTokens"] is not None and usage["outputTokens"] > limits["maxOutputTokens"])
+    ):
+        return None, delivered, _error("context.exceeded", "Sandboxed adapter worker exceeded a task usage limit.", spend_started=bool(worker.get("spendStarted")))
     if worker.get("status") != "succeeded":
         error = worker.get("error") or {}
         return None, delivered, _error(str(error.get("code") or "internal.error"), str(error.get("message") or "Sandboxed adapter worker failed."), spend_started=bool(worker.get("spendStarted")), adapter_code=error.get("adapterCode"))
@@ -414,18 +454,35 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str) ->
                 signal.signal(signal.SIGTERM, old_term)
                 signal.signal(signal.SIGINT, old_int)
 
-            _read_worker_events(output_dir / "adapter-events.ndjson", events)
             worker_path = output_dir / "worker-result.json"
+            state_path = output_dir / "worker-state.json"
+            try:
+                checkpoint = load_json_regular(state_path, max_bytes=65536)
+                if not isinstance(checkpoint, dict):
+                    checkpoint = {}
+            except ContractError:
+                checkpoint = {}
             if killed_code:
-                worker = {"status": "failed", "actualModel": "", "actualProvider": "", "actualEffort": "", "spendStarted": True, "usage": {}, "error": {"code": killed_code, "message": "Sandboxed adapter worker exceeded its deadline.", "adapterCode": None}}
+                worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted", True)), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": killed_code, "message": "Sandboxed adapter worker exceeded its deadline.", "adapterCode": None}}
             elif process.returncode != 0 and not worker_path.exists():
-                worker = {"status": "failed", "actualModel": "", "actualProvider": "", "actualEffort": "", "spendStarted": False, "usage": {}, "error": {"code": "harness.crash", "message": "Sandboxed adapter worker exited without an atomic result.", "adapterCode": str(process.returncode)}}
+                worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted")), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": "harness.crash", "message": "Sandboxed adapter worker exited without an atomic result.", "adapterCode": str(process.returncode)}}
             else:
                 try:
                     worker = load_json_regular(worker_path, max_bytes=2 * 1024 * 1024)
                 except ContractError:
-                    worker = {"status": "failed", "actualModel": "", "actualProvider": "", "actualEffort": "", "spendStarted": False, "usage": {}, "error": {"code": "harness.protocol", "message": "Sandboxed adapter worker result was missing or malformed.", "adapterCode": None}}
-            final, delivered, validation_error = _validate_worker(task, bundle, worker)
+                    worker = {"status": "failed", "actualModel": str(checkpoint.get("actualModel") or ""), "actualProvider": str(checkpoint.get("actualProvider") or ""), "actualEffort": str(checkpoint.get("actualEffort") or ""), "spendStarted": bool(checkpoint.get("spendStarted")), "usage": checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}, "error": {"code": "harness.protocol", "message": "Sandboxed adapter worker result was missing or malformed.", "adapterCode": None}}
+            _read_worker_events(output_dir / "adapter-events.ndjson", events)
+            try:
+                final, delivered, validation_error = _validate_worker(task, bundle, worker)
+            except Exception:
+                final = None
+                delivered = None
+                validation_error = _error(
+                    "internal.error",
+                    "Trusted output validation failed after model spend.",
+                    phase="validating-output",
+                    spend_started=bool(worker.get("spendStarted")),
+                )
             duration = int((time.monotonic() - started) * 1000)
             status = "succeeded" if final is not None else ("cancelled" if validation_error and validation_error["code"] == "lifecycle.cancelled" else "failed")
             result = {

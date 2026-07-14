@@ -11,7 +11,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from .contract import ContractError, canonical_sha256, validate_schema
+from .contract import ContractError, canonical_json_bytes, canonical_sha256, validate_schema
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "fs.read": {
@@ -168,16 +168,31 @@ class CanonicalTools:
             raise ToolError("tool arguments failed the canonical schema") from error
         self.calls += 1
         if name == "fs.read":
-            return self._read(arguments)
-        if name == "fs.grep":
-            return self._grep(arguments)
-        if name == "fs.glob":
-            return self._glob(arguments)
-        if name == "github.search.readonly":
-            return self._search(arguments)
-        if name.startswith("final."):
-            return {"accepted": True, "value": arguments}
-        raise ToolError("tool implementation is unavailable")
+            result = self._read(arguments)
+        elif name == "fs.grep":
+            result = self._grep(arguments)
+        elif name == "fs.glob":
+            result = self._glob(arguments)
+        elif name == "github.search.readonly":
+            result = self._search(arguments)
+        elif name.startswith("final."):
+            result = {"accepted": True, "value": arguments}
+        else:
+            raise ToolError("tool implementation is unavailable")
+        maximum = self.max_results.get(name)
+        if maximum is not None and len(canonical_json_bytes(result)) > maximum:
+            raise ToolError("tool result exceeded its negotiated byte bound")
+        return result
+
+    def _append_bounded(self, name: str, key: str, values: list[Any], value: Any) -> bool:
+        maximum = self.max_results.get(name, 0)
+        candidate = {key: values + [value], "truncated": False}
+        if len(canonical_json_bytes(candidate)) > maximum:
+            if len(canonical_json_bytes({key: values, "truncated": True})) > maximum:
+                raise ToolError("tool result byte bound cannot hold its canonical envelope")
+            return False
+        values.append(value)
+        return True
 
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
         path = _safe_path(self.root, str(args.get("path") or ""), regular=True)
@@ -231,7 +246,9 @@ class CanonicalTools:
                 with path.open(encoding="utf-8", errors="replace") as handle:
                     for number, line in enumerate(handle, 1):
                         if pattern.search(line):
-                            matches.append({"path": rel, "line": number, "text": line.rstrip("\r\n")[:1000]})
+                            match = {"path": rel, "line": number, "text": line.rstrip("\r\n")[:1000]}
+                            if not self._append_bounded("fs.grep", "matches", matches, match):
+                                return {"matches": matches, "truncated": True}
                             if len(matches) >= maximum:
                                 return {"matches": matches, "truncated": True}
             except OSError:
@@ -255,7 +272,8 @@ class CanonicalTools:
                 rel = str(candidate.relative_to(self.root))
                 scoped = str(candidate.relative_to(root))
                 if fnmatch.fnmatch(scoped, pattern):
-                    paths.append(rel)
+                    if not self._append_bounded("fs.glob", "paths", paths, rel):
+                        return {"paths": paths, "truncated": True}
                     if len(paths) >= maximum:
                         return {"paths": paths, "truncated": True}
         return {"paths": paths, "truncated": False}
