@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import agent_runtime.config as runtime_config
 from agent_runtime.adapters.codex import CodexAppServerAdapter, CodexProbeError, _load_lock, _protocol_digest
 from agent_runtime.capabilities import CapabilityError, codex_descriptor, negotiate
 from agent_runtime.config import ConfigError, resolve_selection
@@ -44,21 +45,23 @@ def fails(call, exception=Exception):
 
 def main():
     selection = resolve_selection("triage.issue.local", "lavish-axi")
-    check("selection: Codex is named primary", __import__("agent_runtime.config", fromlist=["load_runtime_config"]).load_runtime_config()["primary_profile"] == "codex-subscription-pinned")
-    check("selection: current public production remains explicit legacy", selection["mode"] == "legacy")
-    check("selection: direct Claude bridge is explicit profile", selection["profile"]["adapter"] == "claude-action-compat")
+    runtime = __import__("agent_runtime.config", fromlist=["load_runtime_config"]).load_runtime_config()
+    check("selection: Claude is named production primary", runtime["primary_profile"] == "claude-action-current-pinned")
+    check("selection: current production target resolves as Claude", selection["mode"] == "claude")
+    check("selection: pinned direct Claude adapter selected", selection["profile"]["adapter"] == "claude-action-compat")
     check("selection: fallback disabled", selection["fallback"] == "none")
     check("selection: unsupported emergency provider override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="codex"), ConfigError))
-
-    runtime = __import__("agent_runtime.config", fromlist=["load_runtime_config"]).load_runtime_config()
-    gate = runtime["codex_auth_gate"]
-    check("auth audit: Pro plus public topology recorded unavailable", gate["audit_status"] == "unavailable-pro-public")
-    check("auth audit: no captain alternative inferred", gate["captain_alternative"] == "none")
-    check("auth audit: private credential boundary not invented", gate["private_credential_boundary"] is False)
-    check("auth audit: nonproduction proof not fabricated", gate["nonproduction_proof"] == "not-run")
-    check("auth audit: production activation false", runtime["production_activation"] is False)
-    check("automerge: alternate PR verdict semantic gate remains pending", gate["pr_automerge_semantic_parity"] == "pending")
-    check("automerge: selection code requires separate approval", "pr_automerge_semantic_parity" in Path("agent_runtime/config.py").read_text(encoding="utf-8"))
+    check("selection: former legacy override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="legacy"), ConfigError))
+    check("selection: Codex absent from active profiles", "codex-subscription-pinned" not in runtime["profiles"])
+    check("selection: Codex recorded only as disabled adapter evidence", runtime["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"})
+    check("selection: no production activation promise remains", "production_activation" not in runtime and "codex_auth_gate" not in runtime)
+    check("selection: every action remains on Claude", all(row["target"] == "claude" for row in runtime["actions"].values()))
+    core = Path("agent_runtime/config.py").read_text(encoding="utf-8")
+    check("selection: core contains no OpenCode or Z.AI policy", "OpenCode" not in core and "Z.AI" not in core and "glm" not in core.lower())
+    invalid_target = copy.deepcopy(runtime)
+    invalid_target["actions"]["triage.issue.local"]["target"] = "codex"
+    with mock.patch.object(runtime_config, "load_runtime_config", return_value=invalid_target):
+        check("selection: any Codex-targeted action invalidates configuration", fails(lambda: resolve_selection("triage.issue.local"), ConfigError))
 
     with tempfile.TemporaryDirectory() as directory:
         task, _, _ = make_task(Path(directory), "triage.issue.local")

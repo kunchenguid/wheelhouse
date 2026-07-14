@@ -3,35 +3,33 @@
 Wheelhouse has one versioned contract for every agent-assisted task.
 The contract covers automatic PR and issue triage with and without search, bounded schema repair, deep review with and without search, and natural-language decision mapping with and without search.
 
-Codex CLI app-server is the selected future primary adapter.
-It is fully implemented but deliberately inactive.
-The current direct Claude Action remains the explicit production and rollback bridge while the Codex authentication and activation gates are unmet.
-Fallback is disabled, so a Codex failure never invokes Claude automatically.
+Claude is the production primary adapter.
+Every current action resolves to the exact pinned direct Claude Action implementation through the shared selection boundary.
+Codex CLI app-server remains implemented and tested only as disabled non-target adapter evidence because public GitHub Actions cannot securely authenticate the captain's ChatGPT Pro subscription noninteractively.
+Fallback is disabled, so no provider failure invokes a different adapter automatically.
 
 ## Current operating state
 
 The checked-in state is intentionally:
 
-- `primary_profile: codex-subscription-pinned`
-- `rollout: legacy`
-- `production_activation: false`
+- `primary_profile: claude-action-current-pinned`
+- `target: claude`
 - `fallback: none`
-- every action `rollout: legacy`
+- every action `target: claude`
+- `codex-app-server` recorded only under `disabled_adapters`
 
 This is not selected by secret presence.
-Only a reviewed `wheelhouse.config.yml` change can activate Codex.
-The emergency environment override can select `legacy` only.
-It cannot select a provider, model, effort, credential, or stronger tool policy.
+Provider environment overrides are rejected.
+The current selection cannot target Codex or reach its workflow installation branches.
 
-The temporary Claude bridge keeps the exact reviewed action commit, model alias, turn limits, token boundaries, and output fallback behavior.
-Every direct Claude step is guarded by an explicit `legacy` selection.
-A failed Codex task cannot make one of those steps run.
+The Claude production path keeps the exact reviewed action commit, model alias, turn limits, token boundaries, and output behavior.
+Every direct Claude step is guarded by an explicit `claude` selection.
 
-## Why Codex is inactive
+## Disabled and investigated adapters
 
 The authentication audit found no officially supported secure noninteractive way to use the current ChatGPT Pro subscription from this public GitHub Actions repository.
 
-Do not add any of these merely to unblock activation:
+Do not add any of these to target the disabled Codex adapter:
 
 - `OPENAI_API_KEY`
 - `CODEX_API_KEY`
@@ -41,18 +39,16 @@ Do not add any of these merely to unblock activation:
 The official Codex GitHub Action uses OpenAI Platform API-key billing.
 That is not ChatGPT subscription authentication and is forbidden unless the captain separately changes the billing decision.
 
-A Codex access token is the preferred future noninteractive subscription credential, but it is available only to ChatGPT Business and Enterprise workspaces and is intended for trusted private automation.
-It is a Codex-scoped credential rather than a full ChatGPT browser session, but it can spend the creating user's or workspace's Codex entitlement and must be treated as a high-impact credential.
-
 Managed `auth.json` is officially documented only for trusted private CI.
 It is forbidden by the official guidance for public or open-source repositories.
 It contains refreshable OAuth material and requires one serialized consumer plus secure mutable persistence of every refreshed replacement.
 A repository secret cannot safely implement that write-back lifecycle.
 
-The runtime does not accept ambient Codex credentials.
-A future approved private credential boundary must provide one mode-`0600` named handoff file to the trusted supervisor.
-The public workflows do not create that file.
-Managed `auth.json` activation remains fail-closed even after a policy change until serialized secure refresh persistence and stale-seed rejection are implemented and approved.
+The runtime's disabled Codex adapter does not accept ambient Codex credentials, and no public workflow creates a credential handoff.
+OpenCode with Z.AI Coding Plan is a deferred disabled candidate only.
+No purchase decision, credential request, provider call, workflow target, or OpenCode adapter is authorized in this phase.
+Provider-specific OpenCode or Z.AI policy must not enter runtime core schemas, lifecycle, tools, or consumers.
+The provider-neutral adapter interface remains the only future seam.
 
 ## Runtime boundary
 
@@ -96,15 +92,16 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
-Each workflow downloads the exact wrapper and selected Linux executable tarballs, verifies their bytes and safe archive shape against the committed SHA-512 integrity pins, and installs only those verified local artifacts.
+Offline evidence verifies the exact wrapper and selected Linux executable tarballs against the committed SHA-512 integrity pins.
+Current production selection cannot reach the disabled Codex installation branches in workflows.
 
 The app-server is driven over stdio JSONL.
 Human terminal output is never scraped.
 The worker performs `initialize`, `account/read` with `refreshToken:false`, model listing, provider capability reading, quota reading when available, `thread/start`, `turn/start`, and `turn/interrupt`.
 
-The worker requires observed account type `chatgpt`.
-A future access-token profile also requires an eligible Business or Enterprise plan.
-The generated config forces `chatgpt` login and the captain-approved workspace ID.
+The disabled Codex worker requires observed account type `chatgpt`.
+Its offline adapter evidence also requires an eligible Business or Enterprise plan for the access-token mechanism.
+Its generated test configuration forces `chatgpt` login and an explicitly supplied workspace ID.
 Ambient `OPENAI_API_KEY`, `CODEX_API_KEY`, and `CODEX_ACCESS_TOKEN` are rejected before the worker starts.
 An undeclared provider, model reroute, model mismatch, or effort mismatch fails closed.
 
@@ -202,36 +199,16 @@ To inspect a failure:
 4. Fix configuration or the named auth profile instead of weakening a capability.
 5. Never replay a natural-language action against a changed card or PR head.
 
-## Rollback
+## Provider changes
 
-The current production selection is already the temporary exact Claude bridge.
-After Codex activation, set the allowlisted emergency rollout profile to `legacy` or commit the action rollout back to `legacy`.
+Claude remains the production primary until the captain approves a supported, subscription-funded, secure, and behaviorally compatible alternative.
+Provider changes require an explicit reviewed plan covering credentials, billing, data boundaries, all seven action paths, and deterministic consumer parity.
+They must preserve `fallback: none` and cannot be selected by secret presence or an environment override.
 
-Rollback does not edit secrets, models, providers, tools, or output consumers.
-It does not run automatically after a Codex error.
-
-The direct bridge must remain until Codex has production evidence.
-The dependency-ordered follow-up is to add the pinned Claude Agent SDK as another adapter behind this same contract, then remove all workflow-specific direct Claude Action calls.
-That follow-up must not create automatic fallback.
-
-## Production activation prerequisites
-
-Codex activation requires every item below.
-The runtime rejects selection before model spend when any item is missing.
-
-1. The captain approves one authentication and topology alternative.
-2. Security review approves a private credential-bearing runner or workflow boundary.
-3. A manually approved non-production proof passes and its proof credential is revoked.
-4. A separate production credential has an owner, finite expiry, rotation date, revocation owner, and incident runbook.
-5. All seven paths pass contract, sandbox, cancellation, malformed-output, provenance, and consumer-parity tests.
-6. ChatGPT auth, exact provider, exact model, exact effort, and no API-key substitution are proven.
-7. Claude remains explicit rollback and automatic fallback remains disabled.
-8. A captain-approved config commit sets the selected action rollouts and `production_activation: true`.
-9. Alternate PR triage is separately approved before its verdict may influence auto-merge.
-
-For the preferred future path, the captain must first choose a Business or Enterprise workspace and a trusted private automation boundary.
-Only after that decision should an operator create a finite-expiry `CODEX_ACCESS_TOKEN` owned by a dedicated least-privilege workflow identity.
-No credential request is appropriate under the current Pro plus public-repository topology.
+Codex is not an active target or expected future primary under the current plan.
+OpenCode with Z.AI Coding Plan is deferred and disabled, with no adapter implemented.
+Neither status authorizes a credential request, paid proof, workflow target, fallback, or production promise.
+The provider-neutral adapter contract should be extended only after a new captain decision and without embedding provider-specific policy in runtime core.
 
 ## Local verification
 

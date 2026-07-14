@@ -219,8 +219,8 @@ def build_task(
 ) -> dict[str, Any]:
     if action not in ACTION_LIMITS:
         raise ArtifactError("unsupported agent runtime action")
-    if selection.get("mode") != "codex":
-        raise ArtifactError("only the Codex rollout builds runtime tasks")
+    if selection.get("mode") != "codex" or (selection.get("profile") or {}).get("adapter") != "codex-app-server":
+        raise ArtifactError("the selected adapter does not use this disabled app-server task compiler")
     bundle = Path(bundle_dir).resolve()
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -241,8 +241,8 @@ def build_task(
         "<wheelhouse-adapter-shim trust=\"trusted\" version=\"codex-app-server/v1\">",
         tool_instruction,
         "Any earlier request-file, Write, Bash, wheelhouse-search command, or",
-        "decision.json instruction describes the temporary Claude rollback and is",
-        "superseded here. You have no shell and no file-write tool.",
+        "decision.json instruction describes the direct Claude production path and",
+        "is superseded for this adapter task. You have no shell or file-write tool.",
         "Submit the final value through the native strict output schema.",
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",

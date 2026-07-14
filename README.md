@@ -41,10 +41,12 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
 Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through a typed, scoped read-only search broker.
-The current production selection is the exact pinned direct Claude Action bridge.
-Codex CLI app-server is fully implemented as the selected future primary but is deliberately inactive because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
-No Codex secret should be added, and fallback is disabled.
-See [Agent runtime operations](docs/AGENT_RUNTIME.md) for selection, authentication, rollback, provenance, failure recovery, and activation prerequisites.
+The current production selection is the exact pinned direct Claude Action implementation.
+Claude is the named production primary across every action selection.
+Codex CLI app-server remains disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
+OpenCode with Z.AI Coding Plan is a deferred disabled candidate only, with no adapter or credential request authorized in this phase.
+No alternative provider is an active target or fallback.
+See [Agent runtime operations](docs/AGENT_RUNTIME.md) for selection, provenance, failure recovery, and the provider-neutral adapter boundary.
 When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
 For auto triage and deep review, trusted rendering also preserves known claude-code-action harness polling/status transcript lines but prefixes them with `[automated status]` so they are visible as metadata instead of review substance.
 When auto triage will run for a newly created PR-review or issue-triage card, Wheelhouse holds the card under `pending-triage` and publishes the decision boxes only after that first attempt records a result or an unavailable note.
@@ -193,11 +195,12 @@ Only you can mint it (it's tied to your account).
 
 That is the only secret the deterministic machine needs.
 
-### 4. (Optional) Add the current Claude rollback token for the agent-assisted features
+### 4. (Optional) Add the Claude production token for agent-assisted features
 
 Skip this for the deterministic machine.
-The direct Claude Action is the explicit current production and rollback selection while Codex activation remains blocked by the documented authentication gate.
+The direct Claude Action is the explicit production selection behind the shared action boundary.
 Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
+Do not add credentials for disabled or deferred provider candidates.
 See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider selection.
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
 Auto triage and deep review keep their action prompts independent of target size by writing fetched target content to runner files for Claude to read; PR diffs are bounded to 1,500,000 bytes on disk instead of being embedded in the action input.
@@ -221,11 +224,11 @@ Auto triage and deep review keep their action prompts independent of target size
   There is **no flag** - it runs whenever you trigger it, as long as the token is set.
   With the token missing it posts a one-line "needs token" note on the card so you know why nothing ran.
   With an optional public-read `READONLY_TOKEN`, it can use the same scoped `wheelhouse-search` wrapper for advisory related-work and code context.
-  Without `READONLY_TOKEN`, it keeps the legacy no-shell, Read/Grep/Glob-only behavior.
+  Without `READONLY_TOKEN`, it keeps the production no-shell, Read/Grep/Glob-only behavior.
 - **`nl_decisions` (opt-in)** - reply to a decision card in plain English and Claude maps it onto the existing actions (see [Daily use](#daily-use)).
   This one stays inert until `nl_decisions: true` **and** the token is present.
   With an optional public-read `READONLY_TOKEN`, its answer mode can search the target repo and configured fleet repos through a read-only `gh` wrapper.
-  Without `READONLY_TOKEN`, it keeps the legacy no-shell behavior.
+  Without `READONLY_TOKEN`, it keeps the production no-shell behavior.
 
 To set it up:
 
@@ -292,7 +295,7 @@ You drive the queue three ways - whichever fits the decision:
 - **Want a deeper look first? - tick *Investigate*.** PR-review and issue-triage cards also offer an *Investigate - deep code-grounded review* box.
   It is the one tick that **does not consume the card**: it kicks off a code-grounded deep review, captures Claude's final response from the action output, posts that merit/triage verdict as a comment, and leaves the card open with the box cleared, so you can investigate again after new commits and still make your real call afterwards.
   (CI-approval cards don't offer it - that's a fast security gate, not a merit review.)
-  Under the current production selection it needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-current-claude-rollback-token-for-the-agent-assisted-features)); without it the card just gets a one-line "needs token" note.
+  Under the current production selection it needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)); without it the card just gets a one-line "needs token" note.
   The repo owner can also apply the `needs-deep-review` label by hand or run the `deep-review` workflow from Actions with only the card issue number; those manual paths parse the current card body before resolving the target.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
@@ -309,7 +312,7 @@ You drive the queue three ways - whichever fits the decision:
     Security note: a "changes requested" review can put the target PR into a merge-blocked state under branch-protection required-reviews - a slightly larger effect on the target repo than the comment-only path.
     It is a GitHub PR review, not a terminal card decision: submitting more than one just posts another GitHub review (allowed by the API, but noisy), so treat it as one review per push cycle rather than something you repeat.
     If `pending_contributor_cleanup` is enabled for that repo, a successful `/request-changes` also writes a hidden target-side marker and pending label so the scheduled scan can remind once and later close if the contributor never follows up.
-- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-current-claude-rollback-token-for-the-agent-assisted-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
+- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
     It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card after a successful terminal decision like merge/close/decline, leaving it open for a non-terminal one like comment/request-changes, or marking it `blocked` after a non-retryable action error.
@@ -559,8 +562,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   If plain-English answers work but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the answer path intentionally has no shell or search access.
 - **Deep review does nothing.**
   It has no enable flag - it only needs `CLAUDE_CODE_OAUTH_TOKEN`.
-  If that secret is missing, the card gets a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of a verdict; add the secret (see [step 4](#4-optional-add-the-current-claude-rollback-token-for-the-agent-assisted-features)).
-  If deep review runs but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the workflow intentionally keeps the legacy no-shell, no-search posture.
+  If that secret is missing, the card gets a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of a verdict; add the secret (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)).
+  If deep review runs but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the workflow intentionally keeps the production no-shell, no-search posture.
   If the card says "Deep review ran but produced no verdict", the workflow could not extract usable output from Claude's action log and the run fails intentionally; check the **deep-review** workflow logs.
   For direct verification, the repo owner can run **Actions** ▸ **deep-review** ▸ **Run workflow** with just the decision-card issue number; the workflow fetches the current card body before resolving the target.
   If you ticked *Investigate* and nothing happened at all, confirm you're the repo owner or configured `maintainer` and check the **deep-review** workflow run in the Actions tab.
