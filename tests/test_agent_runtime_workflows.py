@@ -52,6 +52,9 @@ def main():
     direct = [index for index, step in enumerate(model_steps) if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
     repository = next((index for index, step in enumerate(model_steps) if step.get("name") == "Initialize bounded local repository"), -1)
     check("production: verified handoff becomes a bounded no-fetch repository", repository >= 0 and all(repository < index for index in direct) and "git init" in model_steps[repository]["run"] and "git remote" in model_steps[repository]["run"] and "fetch" not in model_steps[repository]["run"])
+    checkpoint = next((index for index, step in enumerate(model_steps) if step.get("name") == "Write conservative pre-invocation checkpoint"), -1)
+    checkpoint_upload = next((index for index, step in enumerate(model_steps) if step.get("name") == "Upload durable pre-invocation checkpoint"), -1)
+    check("production: durable spend checkpoint precedes every direct action", repository < checkpoint < checkpoint_upload < min(direct) and '"spendStarted": True' in model_steps[checkpoint]["run"] and "-attempt" in str(model_steps[checkpoint_upload]))
     check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
     capture = next(step for step in model_steps if step.get("id") == "capture")
     check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
@@ -93,7 +96,8 @@ def main():
     dispatch = Path("scripts/claude_model_dispatch.py").read_text()
     check("runtime: trusted parent dispatches by ref and binds expected commit", "--dispatch-ref" in component and "--expected-sha" in component and "expected_commit_sha" in dispatch and '"--ref", args.dispatch_ref' in dispatch)
     check("runtime: child correlation is paginated and unambiguous", '"--paginate", "--slurp"' in dispatch and "correlation_id" in dispatch and "ambiguous Claude model workflow correlation" in dispatch and '"--limit", "40"' not in dispatch)
-    check("runtime: trusted parent always discovers, cancels, and waits on timeout", "while not run_id:" in dispatch and "def cancel_and_wait" in dispatch and '"gh", "run", "cancel"' in dispatch and '"gh", "run", "view"' in dispatch)
+    check("runtime: parent discovery, cancellation, and commands are bounded", "DISCOVERY_GRACE_SECONDS" in dispatch and "CANCEL_WAIT_SECONDS" in dispatch and "COMMAND_TIMEOUT_SECONDS" in dispatch and "while not run_id" not in dispatch and "def cancel_and_wait" in dispatch)
+    check("runtime: parent SIGTERM cancels and recovers durable checkpoint", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and 'recover_attempt(run_id, "cancelled", "parent-sigterm")' in dispatch)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
@@ -107,6 +111,7 @@ def main():
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
     model_text = WORKFLOWS["model"].read_text()
     check("runtime: Claude proof records only observed bridge controls", all(value in model_text for value in ("github-readonly-artifact-bridge-v1", "content-addressed-bounded-verified", "targetInputsReadOnly", "local-no-remote", "declaredTools")) and "subprocessIsolation" not in model_text and "bubblewrap socat" not in model_text)
+    check("runtime: Claude harness provenance is observed or explicitly pinned", all(value in model_text for value in ("actionSourceCommit", "actionMetadataQuality", "actionMetadataSha256")) and "canonical_sha256({\"actionCommit\"" not in Path("agent_runtime/claude_bridge.py").read_text())
 
     check("search: wrapper follows resolved Claude production branches", all("claude" in str(step.get("if", "")) for _, step in all_steps if step.get("id") in ("search-tool", "nl-search-tool")))
     check("search: Codex receives no model GH_TOKEN", all("GH_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))

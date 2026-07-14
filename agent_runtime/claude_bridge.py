@@ -18,6 +18,7 @@ from .contract import (
     load_json_regular,
     validate_contract,
     validate_schema,
+    result_projection_sha256,
 )
 from .events import EventWriter
 from .supervisor import _anchor_ok, _error, _verify_artifacts
@@ -162,6 +163,10 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
     expected_permissions = {"actions": "read", "contents": "read", "issues": "none"}
     action = task["metadata"]["action"]
     expected_readonly_token = "broker-only" if action.endswith(".search") else "absent"
+    action_metadata_sha = proof.get("actionMetadataSha256")
+    action_metadata_quality = proof.get("actionMetadataQuality")
+    unavailable_limits = ("softDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxProviderRequests", "maxInputTokens", "maxOutputTokens")
+    termination_reason = controller.get("terminationReason") if isinstance(controller, dict) else None
     if (
         not isinstance(handoff_sha256, str)
         or len(handoff_sha256) != 64
@@ -178,16 +183,27 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or proof.get("targetInputsReadOnly") is not True
         or proof.get("workspaceRepository") != "local-no-remote"
         or proof.get("declaredTools") != claude_declared_tools(action)
+        or proof.get("actionSourceCommit") != ACTION_COMMIT
+        or action_metadata_quality not in ("verified-action-metadata", "pinned-action-reference")
+        or (action_metadata_quality == "verified-action-metadata" and (not isinstance(action_metadata_sha, str) or len(action_metadata_sha) != 64))
+        or (isinstance(action_metadata_sha, str) and any(character not in "0123456789abcdef" for character in action_metadata_sha))
+        or (action_metadata_quality == "pinned-action-reference" and action_metadata_sha is not None)
         or task["spec"]["capabilities"] != claude_capabilities(action, task["spec"]["output"]["schemaSha256"])
         or task["spec"]["tools"] != {"default": "deny", "parallel": False, "tools": []}
         or task["spec"]["isolation"] != claude_isolation(action)
+        or any(task["spec"]["limits"][name] is not None for name in unavailable_limits)
         or proof.get("taskSha256") != canonical_sha256(task)
         or proof.get("handoffManifestSha256") != handoff_sha256
         or proof.get("action") != task["metadata"]["action"]
         or proof.get("transcriptSha256") != transcript_sha
         or not isinstance(controller, dict)
         or controller.get("hardDeadlineMs") != task["spec"]["limits"]["hardDeadlineMs"]
-        or controller.get("conclusion") != "success"
+        or controller.get("conclusion") not in ("success", "failure", "timed_out", "cancelled")
+        or termination_reason not in ("completed", "hard-deadline", "parent-sigterm")
+        or (termination_reason == "completed" and controller.get("conclusion") not in ("success", "failure"))
+        or (termination_reason == "hard-deadline" and controller.get("conclusion") != "timed_out")
+        or (termination_reason == "parent-sigterm" and controller.get("conclusion") != "cancelled")
+        or controller.get("enforcedLimits") != {"hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"]}
         or controller.get("expectedCommitSha") != task["metadata"]["wheelhouseRevision"]
         or not isinstance(controller.get("dispatchRef"), str)
         or not controller.get("dispatchRef")
@@ -227,6 +243,10 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         error = _error("harness.protocol", "Claude action execution data failed bounded protocol validation.", spend_started=spend_started)
     elif enforcement is None:
         error = _error("sandbox.violation", "Claude action job enforcement proof was missing or invalid.", spend_started=spend_started)
+    elif enforcement["controller"]["terminationReason"] == "hard-deadline":
+        error = _error("lifecycle.timeout", "Claude action exceeded the externally enforced hard deadline.", spend_started=spend_started)
+    elif enforcement["controller"]["terminationReason"] == "parent-sigterm":
+        error = _error("lifecycle.cancelled", "Claude action was cancelled with its trusted parent.", spend_started=spend_started)
     elif not rows:
         error = _error("output.missing", "Claude action delivered no execution data.", spend_started=spend_started)
     elif terminal is None:
@@ -275,8 +295,11 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "adapter": candidate["adapter"],
         "adapterVersion": "1.0.0",
         "adapterDigest": file_sha256(Path(__file__)),
-        "harnessVersion": CLAUDE_CODE_VERSION,
-        "harnessDigest": canonical_sha256({"actionCommit": ACTION_COMMIT, "actionVersion": ACTION_VERSION, "claudeCodeVersion": CLAUDE_CODE_VERSION}),
+        "harnessVersion": None,
+        "harnessDigest": None,
+        "harnessProvenanceQuality": enforcement["actionMetadataQuality"] if enforcement else "unavailable",
+        "harnessSourceCommit": enforcement["actionSourceCommit"] if enforcement else None,
+        "harnessMetadataSha256": enforcement["actionMetadataSha256"] if enforcement else None,
         "protocol": PROTOCOL,
         "protocolSchemaSha256": canonical_sha256({"protocol": PROTOCOL, "systemInitModel": True}),
         "provider": candidate["provider"],
@@ -327,7 +350,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": candidate["adapter"], "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
         events.emit("capabilities.negotiated", {"proofSha256": result["proof"]["negotiationSha256"], "exactTools": [row["name"] for row in task["spec"]["tools"]["tools"]]})
         events.emit("validation.completed", {"status": "passed" if final else "failed", "errorCode": None if final else result["error"]["code"], "spendStarted": spend_started})
-        events.emit("execution.completed", {"status": status, "resultSha256": canonical_sha256(result)})
+        events.emit("execution.completed", {"status": status, "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
     event_file = Path(events_path)
     result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
     validate_contract(result, "AgentResult")

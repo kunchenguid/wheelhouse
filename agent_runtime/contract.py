@@ -69,6 +69,10 @@ def canonical_sha256(value: Any) -> str:
     return sha256_bytes(canonical_json_bytes(value))
 
 
+def result_projection_sha256(result: dict[str, Any]) -> str:
+    return canonical_sha256({key: value for key, value in result.items() if key != "artifacts"})
+
+
 def file_sha256(path: os.PathLike[str] | str, max_bytes: int | None = None) -> str:
     digest = hashlib.sha256()
     total = 0
@@ -227,8 +231,25 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
             if logical.is_absolute() or any(part in ("", ".", "..") for part in logical.parts):
                 raise ContractError("$.spec.inputs logicalPath has an invalid format")
         limits = document["spec"]["limits"]
-        if limits["hardDeadlineMs"] <= limits["softDeadlineMs"] + limits["cancelGraceMs"]:
+        capability_limits = ("softDeadlineMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxProviderRequests", "maxInputTokens", "maxOutputTokens")
+        bridge_profile = document["spec"]["isolation"]["profile"] == "claude-artifact-bridge-v1"
+        if bridge_profile and any(limits[name] is not None for name in capability_limits):
+            raise ContractError("Claude bridge limits must be unavailable unless externally enforced")
+        if not bridge_profile and any(limits[name] is None for name in capability_limits):
+            raise ContractError("sandboxed worker limits must be explicit")
+        if limits["softDeadlineMs"] is not None and limits["cancelGraceMs"] is not None and limits["hardDeadlineMs"] <= limits["softDeadlineMs"] + limits["cancelGraceMs"]:
             raise ContractError("hard deadline must exceed soft deadline plus cancellation grace")
+    if actual_kind == "AgentResult":
+        selection = document["selection"]
+        quality = selection["harnessProvenanceQuality"]
+        if quality == "verified-executable" and (selection["harnessVersion"] is None or selection["harnessDigest"] is None):
+            raise ContractError("verified executable provenance requires an observed version and digest")
+        if quality == "verified-action-metadata" and (selection["harnessSourceCommit"] is None or selection["harnessMetadataSha256"] is None):
+            raise ContractError("verified action provenance requires source and metadata identities")
+        if quality == "pinned-action-reference" and (selection["harnessSourceCommit"] is None or selection["harnessMetadataSha256"] is not None):
+            raise ContractError("pinned action provenance must not claim observed metadata")
+        if quality == "unavailable" and any(selection[name] is not None for name in ("harnessVersion", "harnessDigest", "harnessSourceCommit", "harnessMetadataSha256")):
+            raise ContractError("unavailable harness provenance cannot carry observed identities")
 
 
 def load_json_regular(path: os.PathLike[str] | str, max_bytes: int = 16 * 1024 * 1024) -> Any:

@@ -96,6 +96,61 @@ jobs:
           echo "$tool_dir" >> "$GITHUB_PATH"
           echo "WHEELHOUSE_SEARCH_ALLOWED_REPOS=$ALLOWED_REPOS" >> "$GITHUB_ENV"
 
+      - name: Write conservative pre-invocation checkpoint
+        env:
+          ACTION: ${{ steps.hydrate.outputs.action }}
+          TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
+          ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
+          RUNNER_WORKSPACE: ${{ runner.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ATTEMPT"
+          python - <<'PY'
+          import hashlib, json, os, stat, subprocess
+          from pathlib import Path
+          task = json.loads((Path(os.environ["HANDOFF"]) / "bundle" / "task.json").read_text(encoding="utf-8"))
+          declared_tools = next(row["constraints"]["exact"] for row in task["spec"]["capabilities"]["required"] if row["name"] == "tools.declared")
+          input_paths = [Path(item["logicalPath"]) for item in task["spec"]["inputs"]]
+          inputs_read_only = all(path.exists() and not path.is_symlink() and not (path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)) for path in input_paths)
+          local_repository = Path(".git").is_dir() and not subprocess.run(["git", "remote"], check=True, text=True, capture_output=True).stdout.strip()
+          action_root = Path(os.environ["RUNNER_WORKSPACE"]).parent / "_actions" / "anthropics" / "claude-code-action" / os.environ["ACTION_COMMIT"]
+          metadata = next((path for path in (action_root / "action.yml", action_root / "action.yaml") if path.is_file() and not path.is_symlink() and path.stat().st_size <= 1048576), None)
+          metadata_sha = hashlib.sha256(metadata.read_bytes()).hexdigest() if metadata else None
+          proof = {
+              "version": 1,
+              "boundary": "separate-read-only-github-job",
+              "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"},
+              "writeCapableGithubTokenAvailable": False,
+              "fleetTokenAvailable": False,
+              "readonlyTokenBoundary": "broker-only" if os.environ["ACTION"].endswith(".search") else "absent",
+              "spendStarted": True,
+              "isolationLevel": "github-readonly-artifact-bridge-v1",
+              "artifactHydration": "content-addressed-bounded-verified",
+              "targetInputsReadOnly": inputs_read_only,
+              "workspaceRepository": "local-no-remote" if local_repository else "unverified",
+              "declaredTools": declared_tools,
+              "action": os.environ["ACTION"],
+              "actionSourceCommit": os.environ["ACTION_COMMIT"],
+              "actionMetadataQuality": "verified-action-metadata" if metadata_sha else "pinned-action-reference",
+              "actionMetadataSha256": metadata_sha,
+              "taskSha256": os.environ["TASK_SHA"],
+              "handoffManifestSha256": os.environ["HANDOFF_SHA256"],
+              "transcriptSha256": None,
+          }
+          (Path(os.environ["ATTEMPT"]) / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+
+      - name: Upload durable pre-invocation checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}-attempt
+          path: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
+          if-no-files-found: error
+          retention-days: 1
+
       - id: triage_search
         if: ${{ startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         continue-on-error: true
@@ -197,6 +252,7 @@ jobs:
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
           EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file }}
           OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
+          ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT"
@@ -204,22 +260,13 @@ jobs:
             cp decision.json "$OUTPUT/decision.json"
           fi
           python - <<'PY'
-          import hashlib, json, os, stat, subprocess
+          import hashlib, json, os
           from pathlib import Path
           output = Path(os.environ["OUTPUT"])
           execution = output / "execution.json"
           source_name = os.environ.get("EXECUTION_FILE", "")
           source = Path(source_name) if source_name else None
           spent = bool(source and source.is_file() and not source.is_symlink())
-          task = json.loads((Path(os.environ["HANDOFF"]) / "bundle" / "task.json").read_text(encoding="utf-8"))
-          declared_tools = next(row["constraints"]["exact"] for row in task["spec"]["capabilities"]["required"] if row["name"] == "tools.declared")
-          input_paths = [Path(item["logicalPath"]) for item in task["spec"]["inputs"]]
-          target_inputs_read_only = len(input_paths) == len(task["spec"]["inputs"]) and all(
-              path.exists() and not path.is_symlink() and
-              not (path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-              for path in input_paths
-          )
-          local_repository = Path(".git").is_dir() and not subprocess.run(["git", "remote"], check=True, text=True, capture_output=True).stdout.strip()
           if spent and source.stat().st_size <= 8388608:
               try:
                   rows = json.loads(source.read_text(encoding="utf-8"))
@@ -239,24 +286,9 @@ jobs:
                   execution.write_text(json.dumps(bounded, sort_keys=True, separators=(",", ":")) + "\n")
               except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                   execution.write_text('[{"subtype":"invalid","type":"capture"}]\n')
-          proof = {
-              "version": 1,
-              "boundary": "separate-read-only-github-job",
-              "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"},
-              "writeCapableGithubTokenAvailable": False,
-              "fleetTokenAvailable": False,
-              "readonlyTokenBoundary": "broker-only" if os.environ["ACTION"].endswith(".search") else "absent",
-              "spendStarted": spent,
-              "isolationLevel": "github-readonly-artifact-bridge-v1",
-              "artifactHydration": "content-addressed-bounded-verified",
-              "targetInputsReadOnly": target_inputs_read_only,
-              "workspaceRepository": "local-no-remote" if local_repository else "unverified",
-              "declaredTools": declared_tools,
-              "action": os.environ["ACTION"],
-              "taskSha256": os.environ["TASK_SHA"],
-              "handoffManifestSha256": os.environ["HANDOFF_SHA256"],
-              "transcriptSha256": hashlib.sha256(execution.read_bytes()).hexdigest() if execution.is_file() else None,
-          }
+          proof = json.loads(Path(os.environ["ATTEMPT"]).read_text(encoding="utf-8"))
+          proof["spendStarted"] = True
+          proof["transcriptSha256"] = hashlib.sha256(execution.read_bytes()).hexdigest() if execution.is_file() else None
           (output / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
           PY
 

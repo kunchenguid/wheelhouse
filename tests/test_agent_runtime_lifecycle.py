@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.contract import atomic_write_json, canonical_sha256, load_json_regular, validate_contract
+from agent_runtime.contract import atomic_write_json, canonical_sha256, load_json_regular, result_projection_sha256, validate_contract
 from agent_runtime.supervisor import _anchor_ok, run
 from agent_runtime.worker import RuntimeBudget, WorkerFailure, _bounded_output_schema
 from agent_runtime_testlib import default_final, environment, make_task
@@ -46,7 +47,17 @@ def main():
         check("lifecycle: final independent from transcript retention", result["final"]["value"] and result["artifacts"][0]["role"] == "normalized-events")
         check("lifecycle: raw transcript discarded", not list(bundle.rglob("*transcript*")))
         check("lifecycle: normalized terminal emitted once", events.read_text().count('"type":"execution.completed"') == 1)
+        terminal = json.loads(events.read_text().splitlines()[-1])
+        check("lifecycle: terminal result projection remains stable after artifacts", terminal["data"]["projection"] == "agent-result-without-artifacts/v1" and terminal["data"]["resultSha256"] == result_projection_sha256(result))
         check("provenance: observed provider retained", result["selection"]["actualProvider"] == "fake-provider")
+        false_provenance = json.loads(json.dumps(result))
+        false_provenance["selection"]["harnessProvenanceQuality"] = "verified-action-metadata"
+        try:
+            validate_contract(false_provenance, "AgentResult")
+        except Exception:
+            check("provenance: unobserved verified harness evidence is rejected", True)
+        else:
+            check("provenance: unobserved verified harness evidence is rejected", False)
 
         task = load_json_regular(bundle / "task.json")
         with mock.patch.object(Path, "read_text", side_effect=OSError("fixture read failure")):

@@ -198,7 +198,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
         "",
         "- Status: `%s`" % result["status"],
         "- Adapter: `%s` `%s`" % (selection["adapter"], selection["adapterVersion"]),
-        "- Harness: `%s` `%s`" % (selection["harness"], selection["harnessVersion"]),
+        "- Harness: `%s` `%s` (%s)" % (selection["harness"], selection["harnessVersion"] or "unavailable", selection["harnessProvenanceQuality"]),
         "- Provider: requested `%s`, observed `%s` via auth profile `%s`" % (selection["provider"], selection["actualProvider"] or "unavailable", selection["authProfile"]),
         "- Model: requested `%s`, observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
         "- Effort: requested `%s`, observed `%s`" % (selection["requestedEffort"], selection["actualEffort"] or "unavailable"),

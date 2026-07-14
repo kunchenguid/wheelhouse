@@ -27,8 +27,11 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 The trusted parent supervises the hard deadline, cancels overruns, binds the returned artifact to the task and model run, and atomically emits `AgentResult` plus content-free events.
+Claude task limits that cannot be enforced outside the pinned action are explicitly `null`; only the hard deadline and trusted artifact, transcript, event, and final-output bounds are claimed.
+The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before action invocation, so cancellation or an action crash cannot downgrade a possibly spent attempt.
 The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
+Claude harness provenance records the pinned action source commit and a checked-out action metadata digest when the runner exposes it, while the installed Claude executable version and digest remain unavailable.
 
 ## Disabled and investigated adapters
 
@@ -96,6 +99,7 @@ The public documents are:
 The schemas live under `agent_runtime/schemas/`.
 Unknown fields are rejected.
 Canonical contract and proof hashes use deterministic JSON plus SHA-256.
+The terminal event's `resultSha256` uses the explicit `agent-result-without-artifacts/v1` projection so the normalized-event artifact cannot create a cyclic or order-dependent digest.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.

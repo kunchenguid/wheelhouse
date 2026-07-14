@@ -29,6 +29,7 @@ from .contract import (
     load_json_regular,
     validate_contract,
     validate_schema,
+    result_projection_sha256,
 )
 from .events import EventWriter
 from .redaction import contains_secret, sanitize_message
@@ -168,6 +169,9 @@ def _selection(task: dict[str, Any], probe: Any, worker: dict[str, Any] | None =
         "adapterDigest": _adapter_digest(candidate["adapter"]),
         "harnessVersion": descriptor["harnessVersion"],
         "harnessDigest": descriptor["harnessDigest"],
+        "harnessProvenanceQuality": "test-fixture" if candidate["adapter"] == "fake" else "verified-executable",
+        "harnessSourceCommit": None,
+        "harnessMetadataSha256": None,
         "protocol": descriptor["protocol"],
         "protocolSchemaSha256": descriptor["protocolSchemaSha256"],
         "provider": candidate["provider"],
@@ -561,7 +565,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                 result["error"] = validation_error or _error("internal.error", "Agent runtime failed without a classified error.")
             events.emit("attempt.completed", {"status": status, "attempt": 1})
             events.emit("validation.completed", {"status": "passed" if final else "failed", "errorCode": None if final else result["error"]["code"]})
-            events.emit("execution.completed", {"status": status, "resultSha256": canonical_sha256(result)})
+            events.emit("execution.completed", {"status": status, "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
         event_file = Path(events_path)
         if event_file.is_file():
             result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
@@ -646,8 +650,11 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         "adapter": adapter_id,
         "adapterVersion": adapter_version,
         "adapterDigest": _adapter_digest(adapter_id),
-        "harnessVersion": harness_version,
-        "harnessDigest": canonical_sha256({"status": "unobserved-before-spend", "harness": candidate["harness"], "version": harness_version}),
+        "harnessVersion": None,
+        "harnessDigest": None,
+        "harnessProvenanceQuality": "unavailable",
+        "harnessSourceCommit": None,
+        "harnessMetadataSha256": None,
         "protocol": protocol,
         "protocolSchemaSha256": protocol_digest,
         "provider": candidate["provider"],
@@ -714,7 +721,7 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         events.emit("execution.accepted", {"requestSha256": request_sha256})
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": adapter_id, "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
         events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": spend_started})
-        events.emit("execution.completed", {"status": result["status"], "resultSha256": canonical_sha256(result)})
+        events.emit("execution.completed", {"status": result["status"], "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
     event_file = Path(events_path)
     result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
     validate_contract(result, "AgentResult")
