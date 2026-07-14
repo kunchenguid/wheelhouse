@@ -886,6 +886,9 @@ def _run_fake(plan: dict[str, Any], output: Path, events: InternalEvents, cancel
         search_socket=os.environ.get("WHEELHOUSE_SEARCH_SOCKET", ""),
     )
     events.emit("capabilities.probed", {"fake": True})
+    if script.get("truncatedEvents"):
+        events.handle.write(b"\xff")
+        events.handle.flush()
     for call in script.get("toolCalls") or []:
         name = call.get("name")
         args = call.get("arguments")

@@ -87,6 +87,22 @@ def main():
         check("output: non-object result preserves checkpoint spend", result["error"]["spendStarted"] is True and result["usage"]["providerRequests"] == 2)
         check("output: non-object result preserves checkpoint provenance", result["selection"]["actualModel"] == "fake-model" and result["usage"]["inputTokens"] == 12)
 
+        result, _, events, _ = execute(base / "truncated-events", {"truncatedEvents": True, "nonObjectResult": True})
+        check("events: truncated UTF-8 cannot erase checkpoint-backed failure", result["status"] == "failed" and result["error"]["spendStarted"] is True and result["usage"]["providerRequests"] == 2)
+        check("events: truncated diagnostics emit content-free warning", "adapter-events-unavailable" in events.read_text(encoding="utf-8"))
+
+        original_open = Path.open
+
+        def fail_adapter_events(path, *args, **kwargs):
+            if path.name == "adapter-events.ndjson" and kwargs.get("encoding") == "utf-8":
+                raise OSError("fixture event read failure")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", fail_adapter_events):
+            result, _, events, _ = execute(base / "unreadable-events", {"nonObjectResult": True})
+        check("events: OSError cannot erase checkpoint-backed failure", result["status"] == "failed" and result["error"]["spendStarted"] is True and result["usage"]["providerRequests"] == 2)
+        check("events: unreadable diagnostics emit content-free warning", "adapter-events-unavailable" in events.read_text(encoding="utf-8"))
+
         fast = {"softDeadlineMs": 1000, "hardDeadlineMs": 1800, "cancelGraceMs": 200}
         result, _, events, _ = execute(base / "cancel", {"sleepMs": 5000}, fast)
         check("cancel: soft deadline requests adapter-native cancel", result["status"] == "cancelled" and result["error"]["code"] == "lifecycle.cancelled")

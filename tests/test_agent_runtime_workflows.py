@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Workflow-level migration and temporary rollback wiring checks."""
+"""Workflow-level migration and production provider wiring checks."""
 
 from __future__ import annotations
 
@@ -34,10 +34,10 @@ def main():
     docs = {name: yaml.safe_load(path.read_text()) for name, path in WORKFLOWS.items()}
     all_steps = [(name, step) for name, doc in docs.items() for step in steps(doc)]
     claude = [(name, step) for name, step in all_steps if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
-    check("rollback: exactly seven inventoried direct Claude steps remain", len(claude) == 7)
-    check("rollback: every direct step keeps exact action pin", all(step["uses"] == PIN for _, step in claude))
-    check("rollback: every direct step is explicitly legacy-only", all("mode == 'legacy'" in str(step.get("if", "")) or "runtime_mode == 'legacy'" in str(step.get("if", "")) for _, step in claude))
-    check("rollback: direct Claude is never a failure fallback", all("failure()" not in str(step.get("if", "")) and "agent-runtime.outcome" not in str(step.get("if", "")) for _, step in claude))
+    check("production: exactly seven inventoried direct Claude steps remain", len(claude) == 7)
+    check("production: every direct step keeps exact action pin", all(step["uses"] == PIN for _, step in claude))
+    check("production: every direct step requires resolved Claude selection", all("mode == 'claude'" in str(step.get("if", "")) or "runtime_mode == 'claude'" in str(step.get("if", "")) for _, step in claude))
+    check("production: direct Claude is never a failure fallback", all("failure()" not in str(step.get("if", "")) and "agent-runtime.outcome" not in str(step.get("if", "")) for _, step in claude))
 
     text = "\n".join(path.read_text() for path in WORKFLOWS.values())
     for action in (
@@ -65,6 +65,7 @@ def main():
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
     check("runtime: every invocation has trusted immutable task construction", len(build_steps) == 4)
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + build_steps))
+    check("runtime: no configured action can reach a Codex workflow path", all(row["target"] == "claude" for row in yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]["actions"].values()))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
     package_steps = [step for _, step in all_steps if "agent_runtime.py verify-package" in str(step.get("run", ""))]
     check("runtime: every Codex setup verifies wrapper and platform tarball bytes", len(package_steps) == 4 and all("--tarball" in step["run"] and "--platform-tarball" in step["run"] and step["run"].count("npm pack --silent") == 2 for step in package_steps))
@@ -74,12 +75,12 @@ def main():
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
     check("runtime: external bubblewrap sandbox installed", text.count("bubblewrap") >= 3)
 
-    check("search: old wrapper only exists on legacy branches", all("legacy" in str(step.get("if", "")) for _, step in all_steps if step.get("id") in ("search-tool", "nl-search-tool")))
+    check("search: wrapper follows resolved Claude production branches", all("claude" in str(step.get("if", "")) for _, step in all_steps if step.get("id") in ("search-tool", "nl-search-tool")))
     check("search: Codex receives no model GH_TOKEN", all("GH_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))
     check("search: trusted supervisor alone receives optional broker token", any("READONLY_TOKEN" in (step.get("env") or {}) for step in runtime_runs))
     check("credentials: no Codex credential secret invented", all(name not in text for name in ("secrets.CODEX_ACCESS_TOKEN", "secrets.CODEX_AUTH", "secrets.OPENAI_API_KEY", "secrets.CODEX_API_KEY")))
     check("credentials: no auth.json blob workflow", "auth.json" not in text)
-    check("credentials: current Claude secret remains rollback-only gate", "CLAUDE_CODE_OAUTH_TOKEN" in text)
+    check("credentials: current Claude subscription secret remains production gate", "CLAUDE_CODE_OAUTH_TOKEN" in text)
 
     triage = docs["triage"]
     triage_steps = {step.get("id"): step for step in steps(triage) if step.get("id")}
@@ -99,11 +100,16 @@ def main():
     check("NL safety: model runtime never receives FLEET_TOKEN", all("FLEET_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))
 
     config = yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]
-    check("activation: Codex primary profile selected", config["primary_profile"] == "codex-subscription-pinned")
-    check("activation: public production remains safely legacy", config["rollout"] == "legacy" and config["production_activation"] is False)
-    check("activation: every action is explicitly legacy pending approval", all(row["rollout"] == "legacy" for row in config["actions"].values()))
-    check("activation: fallback globally disabled", config["fallback"] == "none")
-    check("activation: exact Claude bridge named temporary rollback", config["temporary_rollback_profile"] == "claude-action-current-pinned")
+    check("selection: Claude primary profile selected", config["primary_profile"] == "claude-action-current-pinned")
+    check("selection: every action explicitly targets Claude", config["target"] == "claude" and all(row["target"] == "claude" for row in config["actions"].values()))
+    check("selection: fallback globally disabled", config["fallback"] == "none")
+    check("selection: no activation or temporary rollback settings remain", "production_activation" not in config and "temporary_rollback_profile" not in config)
+    check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
+
+    policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
+    check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)
+    check("docs: Codex is disabled non-target evidence", "disabled non-target adapter evidence" in policy_text and "Codex is not an active target or expected future primary" in policy_text)
+    check("docs: GLM OpenCode remains investigation-only", "GLM through Z.AI OpenCode" in policy_text and "unapproved investigation" in policy_text)
 
     if FAILURES:
         raise SystemExit("%d agent runtime workflow checks failed" % len(FAILURES))

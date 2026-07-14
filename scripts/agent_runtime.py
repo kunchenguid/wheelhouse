@@ -54,15 +54,8 @@ def cmd_auth_status(args: argparse.Namespace) -> int:
         output("reason", str(error))
         print("agent runtime auth unavailable: %s" % error)
         return 0
-    if selection["mode"] == "legacy":
-        enabled = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-        reason = "" if enabled else "CLAUDE_CODE_OAUTH_TOKEN is absent for explicit Claude rollback"
-    else:
-        # The public workflow intentionally has no credential handoff. A future
-        # approved private boundary must materialize this path mode 0600.
-        path = os.environ.get("WHEELHOUSE_CODEX_CREDENTIAL_FILE", "")
-        enabled = bool(path and os.path.isfile(path))
-        reason = "" if enabled else "approved private codex-subscription credential handoff is unavailable"
+    enabled = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+    reason = "" if enabled else "CLAUDE_CODE_OAUTH_TOKEN is absent for the Claude production profile"
     output("enabled", "true" if enabled else "false")
     output("mode", selection["mode"])
     output("reason", reason)

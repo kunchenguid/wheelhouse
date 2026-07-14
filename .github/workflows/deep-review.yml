@@ -15,17 +15,16 @@ name: deep-review
 # In each case this workflow checks out the TARGET repo's code read-only, runs
 # the selected agent path, captures its normalized final response, and posts
 # that merit / triage verdict as a card comment.
-# Codex AgentTask v1 is the selected future primary integration but remains
-# fail-closed and inactive pending the approved private subscription-auth gate.
-# The direct Claude Action is an explicit temporary production/rollback bridge,
-# never an automatic fallback after a Codex failure.
+# Codex AgentTask v1 remains disabled non-target adapter evidence.
+# The direct Claude Action is the selected production implementation, never an
+# automatic fallback after another provider failure.
 # Known claude-code-action harness polling/status transcript lines are preserved
 # but labeled before posting, so they are visible as metadata rather than review
 # substance.
 #
 # There is NO feature enable flag.
 # The selected auth profile must be available.
-# In the current explicit legacy mode that is CLAUDE_CODE_OAUTH_TOKEN, a Claude
+# In the current Claude production mode that is CLAUDE_CODE_OAUTH_TOKEN, a Claude
 # subscription token from `claude setup-token`, not an Anthropic API key.
 # An unavailable selected profile posts a one-line note instead of silently
 # no-oping.
@@ -239,7 +238,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.target.outputs.issue }}
         run: |
-          if [ "${{ steps.gate.outputs.mode }}" = "legacy" ]; then
+          if [ "${{ steps.gate.outputs.mode }}" = "claude" ]; then
             body="Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run."
           else
             body="Deep-review needs the selected agent-runtime auth profile configured to run (${{ steps.gate.outputs.reason }})."
@@ -283,7 +282,7 @@ jobs:
 
       # Optional read-only model search. READONLY_TOKEN is a public-read token
       # that may be safely handed to Claude for context gathering. If the secret
-      # is absent, the prompt and Claude tool list stay in the legacy no-search
+      # is absent, the prompt and Claude tool list stay in the production no-search
       # mode.
       - id: readonly
         if: steps.gate.outputs.enabled == 'true' && steps.verify_head.outputs.head_ok != 'false'
@@ -424,7 +423,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
@@ -438,7 +437,7 @@ jobs:
       # shell command allowed is the scoped wheelhouse-search wrapper.
       - id: claude_search
         name: Claude deep review (code-grounded, read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
@@ -463,7 +462,7 @@ jobs:
       # feature can ship before the optional secret exists.
       - id: claude
         name: Claude deep review (code-grounded, read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

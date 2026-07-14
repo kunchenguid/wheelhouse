@@ -14,11 +14,10 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
-# Every primary and repair path has a Codex AgentTask v1 integration plus the
-# exact direct Claude Action as an explicit temporary legacy rollback.
-# Codex is the selected future primary but is fail-closed and inactive until
-# the reviewed production and private subscription-auth gates are approved.
-# No runtime failure automatically invokes the Claude bridge.
+# Every primary and repair path resolves through the shared selection boundary
+# to the exact direct Claude Action production implementation.
+# Codex remains disabled non-target adapter evidence, and no runtime failure
+# automatically invokes another provider.
 #
 # Bounded schema repair (cards #551/#547 class): when the model DELIVERS a
 # result that fails parse/normalize schema validation, exactly ONE extra
@@ -44,7 +43,7 @@ name: triage
 #   * No model process receives FLEET_TOKEN.
 #   * Codex search uses a typed host broker, so the worker receives neither
 #     READONLY_TOKEN nor a shell.
-#   * The temporary Claude rollback keeps the unchanged wheelhouse-search
+#   * The Claude production path keeps the unchanged wheelhouse-search
 #     wrapper and the narrow github-actions[bot] actor allowance.
 
 on:
@@ -533,7 +532,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
@@ -542,7 +541,7 @@ jobs:
 
       - id: claude_search
         name: Claude auto triage (read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
@@ -559,7 +558,7 @@ jobs:
 
       - id: claude
         name: Claude auto triage (read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'legacy' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
         continue-on-error: true
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
@@ -752,7 +751,7 @@ jobs:
 
       - id: claude_repair
         name: Claude schema repair (ONE bounded turn, tokenless, no tools)
-        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'legacy' }}
+        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
         continue-on-error: true
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
         with:
@@ -1006,7 +1005,7 @@ jobs:
           fi
           RECOVER_MESSAGE="Auto triage did not finish (the workflow run did not reach its update step)."
           if [ "${TRIAGE_GATE_ENABLED:-}" = "false" ]; then
-            if [ "${TRIAGE_GATE_MODE:-}" = "legacy" ]; then
+            if [ "${TRIAGE_GATE_MODE:-}" = "claude" ]; then
               RECOVER_MESSAGE="Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent."
             else
               RECOVER_MESSAGE="Auto triage could not run because the selected agent-runtime auth profile is unavailable: ${TRIAGE_GATE_REASON:-credential not configured}."

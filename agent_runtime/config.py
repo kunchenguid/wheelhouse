@@ -56,7 +56,7 @@ def _repo_override(runtime: dict[str, Any], repo: str, action: str) -> str:
     action_row = actions.get(action) or {}
     if action_row and not isinstance(action_row, dict):
         raise ConfigError("agent runtime action override must be an object")
-    return str(action_row.get("rollout") or "")
+    return str(action_row.get("target") or "")
 
 
 def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[str, Any]:
@@ -68,28 +68,32 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
         raise ConfigError("agent runtime contract pin is invalid")
     if runtime.get("fallback") != "none":
         raise ConfigError("automatic fallback must remain disabled")
+    if runtime.get("target") != "claude" or runtime.get("primary_profile") != "claude-action-current-pinned":
+        raise ConfigError("Claude must remain the captain-approved production primary")
+    if any(name in runtime for name in ("production_activation", "temporary_rollback_profile", "codex_auth_gate")):
+        raise ConfigError("retired provider activation settings are forbidden")
+    if runtime.get("disabled_adapters") != {"codex-app-server": "unsupported-public-chatgpt-pro-auth"}:
+        raise ConfigError("Codex must remain disabled non-target adapter evidence")
+    if runtime.get("investigations") != {"glm-opencode": "unapproved"}:
+        raise ConfigError("provider investigation state is invalid")
 
     emergency = emergency or os.environ.get("WHEELHOUSE_AGENT_ROLLOUT_PROFILE", "")
-    if emergency not in ("", "legacy"):
-        raise ConfigError("only the allowlisted legacy emergency rollback is accepted")
+    if emergency:
+        raise ConfigError("agent runtime provider overrides are disabled")
     actions = runtime.get("actions") or {}
+    if not isinstance(actions, dict) or set(actions) != ACTIONS:
+        raise ConfigError("agent runtime actions must be explicitly and completely configured")
+    primary_profile = runtime["primary_profile"]
+    if any(not isinstance(row, dict) or row.get("target") != "claude" or row.get("profile") != primary_profile for row in actions.values()):
+        raise ConfigError("every agent runtime action must target the Claude production profile")
     action_config = actions.get(action) or {}
-    if not isinstance(action_config, dict):
-        raise ConfigError("agent runtime action configuration must be an object")
-    rollout = "legacy" if emergency == "legacy" else (
+    target = (
         _repo_override(runtime, repo, action)
-        or str(action_config.get("rollout") or runtime.get("rollout") or "legacy")
+        or str(action_config.get("target") or "")
     )
-    if rollout not in ("legacy", "codex"):
-        raise ConfigError("agent runtime rollout must be legacy or codex")
-    if rollout == "codex" and runtime.get("production_activation") is not True:
-        raise ConfigError("Codex production activation is pending an explicit reviewed config change")
-
-    profile_name = (
-        str(runtime.get("temporary_rollback_profile") or "")
-        if rollout == "legacy"
-        else str(action_config.get("profile") or runtime.get("primary_profile") or "")
-    )
+    if target != "claude":
+        raise ConfigError("only the captain-approved Claude production target is selectable")
+    profile_name = str(action_config.get("profile") or "")
     profiles = runtime.get("profiles") or {}
     profile = profiles.get(profile_name)
     if not isinstance(profile, dict):
@@ -110,44 +114,14 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     for field in required:
         if field not in profile:
             raise ConfigError("selected agent runtime profile is incomplete")
-    if rollout == "codex":
-        auth_gate = runtime.get("codex_auth_gate") or {}
-        prerequisites = (
-            runtime.get("production_activation") is True,
-            auth_gate.get("captain_alternative") in {"business-access-token", "private-managed-auth-json", "platform-api-key"},
-            auth_gate.get("security_review") == "approved",
-            auth_gate.get("private_credential_boundary") is True,
-            auth_gate.get("nonproduction_proof") == "passed",
-            bool(auth_gate.get("credential_owner")),
-            bool(auth_gate.get("rotation_date")),
-            bool(auth_gate.get("revocation_owner")),
-        )
-        if not all(prerequisites):
-            raise ConfigError("Codex authentication and production activation prerequisites are not approved")
-        if auth_gate.get("captain_alternative") == "platform-api-key":
-            raise ConfigError("Platform API-key billing is not implemented or approved by this subscription profile")
-        if profile["auth_mechanism"] == "codex-access-token" and auth_gate.get("captain_alternative") != "business-access-token":
-            raise ConfigError("Codex access-token profile requires the approved Business or Enterprise alternative")
-        if profile["auth_mechanism"] == "managed-auth-json":
-            raise ConfigError("managed auth.json activation is unavailable until serialized secure refresh persistence is implemented and approved")
-        if not profile.get("expected_workspace_id"):
-            raise ConfigError("Codex activation requires an expected ChatGPT workspace id")
-        if action.startswith("triage.pr.") and auth_gate.get("pr_automerge_semantic_parity") != "approved":
-            raise ConfigError("Codex PR-triage activation requires separate auto-merge semantic parity approval")
-        if profile["adapter"] != "codex-app-server" or profile["harness"] != "codex-cli":
-            raise ConfigError("Codex rollout must select the pinned Codex adapter")
-        if profile["provider"] != "openai" or profile["auth_profile"] != "codex-subscription":
-            raise ConfigError("Codex rollout must use the ChatGPT subscription auth profile")
-        if profile["cost_class"] != "subscription" or profile["allow_model_alias"] is not False:
-            raise ConfigError("Codex rollout forbids billing and model substitution")
-    else:
-        if profile["adapter"] != "claude-action-compat":
-            raise ConfigError("legacy rollout must remain the exact direct Claude Action bridge")
+    if profile_name != runtime.get("primary_profile") or profile["adapter"] != "claude-action-compat":
+        raise ConfigError("Claude production selection must use the pinned direct action profile")
+    if profile["provider"] != "anthropic" or profile["auth_profile"] != "anthropic-subscription":
+        raise ConfigError("Claude production selection must use subscription authentication")
     return {
-        "mode": rollout,
+        "mode": target,
         "profileName": profile_name,
         "profile": dict(profile),
         "fallback": "none",
-        "productionActivation": bool(runtime.get("production_activation")),
-        "source": "emergency-legacy" if emergency == "legacy" else "wheelhouse.config.yml",
+        "source": "wheelhouse.config.yml",
     }

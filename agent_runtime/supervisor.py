@@ -240,37 +240,46 @@ def _proof(task: dict[str, Any], descriptor: dict[str, Any], negotiation: dict[s
 
 
 def _read_worker_events(path: Path, events: EventWriter) -> None:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > 8 * 1024 * 1024:
-        return
-    allowed = {
-        "capabilities.probed",
-        "model.request.started",
-        "message.delta",
-        "message.completed",
-        "tool.started",
-        "tool.completed",
-        "usage.updated",
-        "warning",
-        "cancellation.requested",
-        "adapter.codex.turn.started",
-        "adapter.codex.turn.completed",
-        "adapter.fake.scripted",
-    }
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if events.written >= events.max_bytes - 16384:
-                return
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                events.warning("adapter-events-invalid", "Adapter event record was malformed.")
-                continue
-            event_type = row.get("type") if isinstance(row, dict) else ""
-            if isinstance(event_type, str) and (event_type in allowed or event_type.startswith("adapter.")) and isinstance(row.get("data"), dict):
-                try:
-                    events.emit(event_type, row["data"])
-                except ValueError:
+    def warn(code: str, message: str) -> None:
+        try:
+            events.warning(code, message)
+        except (OSError, ValueError):
+            pass
+
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 8 * 1024 * 1024:
+            return
+        allowed = {
+            "capabilities.probed",
+            "model.request.started",
+            "message.delta",
+            "message.completed",
+            "tool.started",
+            "tool.completed",
+            "usage.updated",
+            "warning",
+            "cancellation.requested",
+            "adapter.codex.turn.started",
+            "adapter.codex.turn.completed",
+            "adapter.fake.scripted",
+        }
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if events.written >= events.max_bytes - 16384:
                     return
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    warn("adapter-events-invalid", "Adapter event record was malformed.")
+                    continue
+                event_type = row.get("type") if isinstance(row, dict) else ""
+                if isinstance(event_type, str) and (event_type in allowed or event_type.startswith("adapter.")) and isinstance(row.get("data"), dict):
+                    try:
+                        events.emit(event_type, row["data"])
+                    except (OSError, ValueError):
+                        return
+    except (OSError, UnicodeError):
+        warn("adapter-events-unavailable", "Adapter event diagnostics were unavailable.")
 
 
 def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
