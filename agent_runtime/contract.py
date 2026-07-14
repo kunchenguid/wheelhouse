@@ -240,6 +240,19 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
     if actual_kind == "AgentResult":
         if document["proof"]["limitEnforcementSha256"] != canonical_sha256(document["proof"]["limitEnforcement"]):
             raise ContractError("limit enforcement evidence digest does not match")
+        revision_binding = document["proof"].get("revisionBinding")
+        if revision_binding is not None and (
+            revision_binding["expectedCommitSha"] == revision_binding["observedCommitSha"]
+            or document["proof"]["sandboxPolicySha256"] != canonical_sha256(revision_binding)
+            or document["status"] != "rejected"
+            or document.get("error", {}).get("code") != "target.stale"
+            or document.get("error", {}).get("spendStarted") is not False
+            or document["selection"]["actualProvider"]
+            or document["selection"]["actualModel"]
+            or document["selection"]["actualEffort"]
+            or document["usage"]["providerRequests"] != 0
+        ):
+            raise ContractError("revision mismatch evidence is inconsistent")
         selection = document["selection"]
         quality = selection["harnessProvenanceQuality"]
         if quality == "verified-executable" and (selection["harnessVersion"] is None or selection["harnessDigest"] is None):

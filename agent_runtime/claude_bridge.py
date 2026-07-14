@@ -215,12 +215,11 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or controller.get("childExecutionTimeoutMs") != task["spec"]["limits"]["childExecutionTimeoutMs"]
         or proof.get("childExecutionTimeoutMs") != task["spec"]["limits"]["childExecutionTimeoutMs"]
         or conclusion not in ("success", "failure", "timed_out", "cancelled")
-        or termination_reason not in ("completed", "child-timeout", "parent-sigterm", "controller-failure", "revision-mismatch")
+        or termination_reason not in ("completed", "child-timeout", "parent-sigterm", "controller-failure")
         or (termination_reason == "completed" and controller.get("conclusion") not in ("success", "failure"))
         or (termination_reason == "child-timeout" and controller.get("conclusion") != "timed_out")
         or (termination_reason == "parent-sigterm" and controller.get("conclusion") != "cancelled")
         or (termination_reason == "controller-failure" and controller.get("conclusion") != "failure")
-        or (termination_reason == "revision-mismatch" and controller.get("conclusion") != "failure")
         or controller.get("enforcedLimits") != externally_enforced_limits
         or controller.get("expectedCommitSha") != task["metadata"]["wheelhouseRevision"]
         or controller.get("observedCommitSha") != task["metadata"]["wheelhouseRevision"]
@@ -235,6 +234,124 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
     ):
         return None
     return proof
+
+
+def write_revision_mismatch_result(
+    task_path: str,
+    bundle_dir: str,
+    expected_sha: str,
+    observed_sha: str,
+    run_id: str,
+    dispatch_ref: str,
+    correlation_id: str,
+    result_path: str,
+    events_path: str,
+) -> dict[str, Any]:
+    task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
+    validate_contract(task, "AgentTask")
+    _verify_artifacts(task, Path(bundle_dir).resolve())
+    if (
+        expected_sha != task["metadata"]["wheelhouseRevision"]
+        or len(observed_sha) != 40
+        or any(character not in "0123456789abcdef" for character in observed_sha)
+        or observed_sha == expected_sha
+        or not run_id
+        or not dispatch_ref
+        or len(correlation_id) != 32
+        or any(character not in "0123456789abcdef" for character in correlation_id)
+    ):
+        raise ContractError("trusted revision mismatch metadata was invalid")
+    candidate = task["spec"]["selection"]["candidates"][0]
+    binding = {
+        "quality": "trusted-parent-run-metadata",
+        "status": "mismatched",
+        "expectedCommitSha": expected_sha,
+        "observedCommitSha": observed_sha,
+        "modelRunId": run_id,
+        "dispatchRef": dispatch_ref,
+        "correlationId": correlation_id,
+    }
+    selection = {
+        "candidateIndex": 0,
+        "harness": candidate["harness"],
+        "adapter": candidate["adapter"],
+        "adapterVersion": "1.0.0",
+        "adapterDigest": file_sha256(Path(__file__)),
+        "harnessVersion": None,
+        "harnessDigest": None,
+        "harnessProvenanceQuality": "unavailable",
+        "harnessSourceCommit": None,
+        "harnessMetadataSha256": None,
+        "protocol": PROTOCOL,
+        "protocolSchemaSha256": canonical_sha256({"protocol": PROTOCOL, "systemInitModel": True}),
+        "provider": candidate["provider"],
+        "actualProvider": "",
+        "authProfile": candidate["authProfile"],
+        "authMechanism": candidate["authMechanism"],
+        "expectedWorkspaceIdSha256": canonical_sha256(candidate["expectedWorkspaceId"]) if candidate.get("expectedWorkspaceId") else None,
+        "requestedModel": candidate["model"],
+        "actualModel": "",
+        "requestedEffort": candidate["effort"],
+        "actualEffort": "",
+        "costClass": candidate["costClass"],
+        "dataBoundary": candidate["dataBoundary"],
+        "fallbackUsed": False,
+        "fallbackReason": None,
+    }
+    result = {
+        "apiVersion": API_VERSION,
+        "kind": "AgentResult",
+        "executionId": task["metadata"]["executionId"],
+        "requestSha256": canonical_sha256(task),
+        "status": "rejected",
+        "selection": selection,
+        "proof": {
+            "contractMajor": 1,
+            "isolationLevel": "github-readonly-artifact-bridge-v1",
+            "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
+            "negotiationSha256": canonical_sha256({"status": "rejected-before-invocation", "code": "target.stale"}),
+            "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),
+            "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
+            "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
+            "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
+            "sandboxPolicySha256": canonical_sha256(binding),
+            "revisionBinding": binding,
+            "limitEnforcement": task["spec"]["limits"]["enforcement"],
+            "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
+        },
+        "error": _error(
+            "target.stale",
+            "Claude model workflow revision did not match the trusted parent.",
+            phase="validating",
+            spend_started=False,
+            adapter_code="revision-mismatch",
+        ),
+        "usage": {
+            "inputTokens": None,
+            "outputTokens": None,
+            "cacheReadTokens": None,
+            "cacheWriteTokens": None,
+            "providerRequests": 0,
+            "toolCalls": 0,
+            "turns": 0,
+            "durationMs": 0,
+            "quota": {"available": False, "snapshotSha256": None, "observedAt": None, "primaryUsedPercent": None, "secondaryUsedPercent": None},
+            "cost": {"amount": None, "currency": None, "quality": "unavailable"},
+        },
+        "artifacts": [],
+        "startedAt": _now(),
+        "completedAt": _now(),
+    }
+    with EventWriter(events_path, result["executionId"], task["spec"]["limits"]["maxEventBytes"]) as events:
+        events.emit("execution.accepted", {"requestSha256": result["requestSha256"]})
+        events.emit("selection.resolved", {"candidateIndex": 0, "adapter": candidate["adapter"], "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
+        events.emit("validation.completed", {"status": "failed", "errorCode": "target.stale", "spendStarted": False})
+        events.emit("execution.completed", {"status": "rejected", "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
+    event_file = Path(events_path)
+    result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
+    validate_contract(result, "AgentResult")
+    atomic_write_json(result_path, result)
+    return result
 
 
 def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file: str, enforcement_file: str, handoff_sha256: str, result_path: str, events_path: str) -> dict[str, Any]:

@@ -8,9 +8,9 @@ inputs:
   delivered-file: {required: false, default: "false"}
 outputs:
   result:
-    value: ${{ steps.bridge.outputs.result }}
+    value: ${{ steps.result.outputs.result }}
   status:
-    value: ${{ steps.bridge.outputs.status }}
+    value: ${{ steps.result.outputs.status }}
 runs:
   using: composite
   steps:
@@ -54,6 +54,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         TASK: ${{ inputs.task }}
+        BUNDLE: ${{ inputs.bundle }}
         INPUT_ARTIFACT: ${{ steps.names.outputs.input }}
         OUTPUT_ARTIFACT: ${{ steps.names.outputs.output }}
         HANDOFF_SHA256: ${{ steps.pack.outputs.manifestSha256 }}
@@ -63,14 +64,15 @@ runs:
         EXPECTED_SHA: ${{ github.sha }}
       run: |
         python scripts/claude_model_dispatch.py \
-          --task "$TASK" --input-artifact "$INPUT_ARTIFACT" \
+          --task "$TASK" --bundle "$BUNDLE" \
+          --input-artifact "$INPUT_ARTIFACT" \
           --output-artifact "$OUTPUT_ARTIFACT" --invocation-id "$INVOCATION" \
           --handoff-sha256 "$HANDOFF_SHA256" --dispatch-ref "$DISPATCH_REF" \
           --expected-sha "$EXPECTED_SHA" --out "$RECEIVED"
 
     - id: bridge
       name: Normalize the observed model transcript
-      if: ${{ always() }}
+      if: ${{ always() && steps.dispatch.outputs.result_file == '' }}
       shell: bash
       env:
         TASK: ${{ inputs.task }}
@@ -92,3 +94,19 @@ runs:
           --handoff-sha256 "${{ steps.pack.outputs.manifestSha256 }}" \
           "${delivered[@]}" --result "$BUNDLE/result.json" \
           --events "$BUNDLE/events.ndjson"
+
+    - id: result
+      name: Select the trusted normalized result
+      if: ${{ always() }}
+      shell: bash
+      env:
+        PARENT_RESULT: ${{ steps.dispatch.outputs.result_file }}
+        BRIDGE_RESULT: ${{ steps.bridge.outputs.result }}
+      run: |
+        set -euo pipefail
+        result="${PARENT_RESULT:-${BRIDGE_RESULT:-}}"
+        test -n "$result"
+        python scripts/agent_runtime.py validate --path "$result" --kind AgentResult
+        status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
+        echo "result=$result" >> "$GITHUB_OUTPUT"
+        echo "status=$status" >> "$GITHUB_OUTPUT"

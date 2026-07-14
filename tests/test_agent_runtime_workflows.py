@@ -105,6 +105,8 @@ def main():
     check("runtime: undiscovered delayed child has its own job timeout", "child_timeout_minutes" in WORKFLOWS["model"].read_text() and "timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}" in WORKFLOWS["model"].read_text() and "child_timeout_minutes=%d" in dispatch)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
+    model_action = Path(".github/actions/claude-model-call/action.yml").read_text(encoding="utf-8")
+    check("runtime: parent revision mismatch bypasses child evidence", "steps.dispatch.outputs.result_file == ''" in model_action and "PARENT_RESULT" in model_action and "steps.result.outputs.result" in model_action)
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
     check("runtime: no configured action can reach a Codex workflow path", all(row["target"] == "claude" for row in yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]["actions"].values()))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)

@@ -25,12 +25,14 @@ def check(name, condition):
 
 def arguments():
     return argparse.Namespace(
+        task="bundle/task.json",
         input_artifact="input",
         output_artifact="output",
         invocation_id="invocation",
         handoff_sha256="a" * 64,
         dispatch_ref="main",
         expected_sha="b" * 40,
+        bundle="bundle",
         out="result",
     )
 
@@ -94,13 +96,15 @@ def main():
         dispatch.time.sleep = saved_sleep
     check("dispatch: malformed transient poll is retried", calls == 2 and bool(finalized))
 
-    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt")}
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output")}
     mismatch_calls = []
     try:
         dispatch.run = lambda *args, **kwargs: ""
         dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
         dispatch.cancel_and_wait = lambda run_id: mismatch_calls.append(("cancel", run_id))
         dispatch.recover_attempt = lambda run_id, conclusion, reason: mismatch_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.write_revision_mismatch_result = lambda *args: mismatch_calls.append(("result",) + args[2:7])
+        dispatch.output = lambda name, value: mismatch_calls.append(("output", name, value))
         try:
             dispatch.supervise(arguments(), task())
         except SystemExit:
@@ -109,7 +113,9 @@ def main():
         for name, value in saved.items():
             setattr(dispatch, name, value)
     check("dispatch: branch advance remains correlated by title", ("cancel", "8") in mismatch_calls)
-    check("dispatch: SHA mismatch is cancelled and checkpointed", ("recover", "8", "failure", "revision-mismatch") in mismatch_calls)
+    check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"]) in mismatch_calls)
+    check("dispatch: SHA mismatch exposes the parent result", any(row[:2] == ("output", "result_file") for row in mismatch_calls))
+    check("dispatch: SHA mismatch skips impossible checkpoint recovery", not any(row[0] == "recover" for row in mismatch_calls))
 
     saved_run = dispatch.run
     lookup_calls = []

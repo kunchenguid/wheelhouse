@@ -10,10 +10,15 @@ import secrets
 import signal
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent_runtime.claude_bridge import write_revision_mismatch_result
 
 COMMAND_TIMEOUT_SECONDS = 20
 CANCEL_WAIT_SECONDS = 30
@@ -146,6 +151,23 @@ def terminate_parent(_signum: int, _frame: object) -> None:
     raise ParentCancelled
 
 
+def emit_revision_mismatch(args: argparse.Namespace, run_id: str, observed_sha: str, correlation: str, destination: Path) -> None:
+    result_path = destination / "result.json"
+    events_path = destination / "events.ndjson"
+    write_revision_mismatch_result(
+        args.task,
+        args.bundle,
+        args.expected_sha,
+        observed_sha,
+        run_id,
+        args.dispatch_ref,
+        correlation,
+        str(result_path),
+        str(events_path),
+    )
+    output("result_file", str(result_path))
+
+
 def supervise(args: argparse.Namespace, task: dict) -> None:
     dispatch_ms = int(task["spec"]["limits"]["dispatchDeadlineMs"])
     child_timeout_ms = int(task["spec"]["limits"]["childExecutionTimeoutMs"])
@@ -204,6 +226,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
             failure = "Claude model run correlation was unavailable within its dispatch deadline"
         elif STATE["observed_sha"] != args.expected_sha:
             termination_reason = "revision-mismatch"
+            emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
             failure = "Claude model workflow revision did not match the trusted parent"
         else:
             child_deadline = time.monotonic() + child_timeout_ms / 1000
@@ -253,6 +276,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                             if STATE["observed_sha"] != args.expected_sha:
                                 recovery_conclusion = "failure"
                                 termination_reason = "revision-mismatch"
+                                emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, destination)
                     except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                         cleanup_failure = "Claude model run correlation failed: %s" % type(error).__name__
             if run_id:
@@ -261,7 +285,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                         cancel_and_wait(run_id)
                 except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                     cleanup_failure = "Claude model cancellation failed: %s" % type(error).__name__
-                finally:
+                if termination_reason != "revision-mismatch":
                     try:
                         recover_attempt(run_id, recovery_conclusion, termination_reason)
                     except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
@@ -277,6 +301,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", required=True)
+    parser.add_argument("--bundle", required=True)
     parser.add_argument("--input-artifact", required=True)
     parser.add_argument("--output-artifact", required=True)
     parser.add_argument("--invocation-id", required=True)

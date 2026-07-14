@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge
+from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge, write_revision_mismatch_result
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, canonical_sha256, file_sha256, result_projection_sha256, validate_contract
 from agent_runtime.task_builder import build_task, claude_declared_outputs, claude_declared_tools
@@ -111,6 +111,24 @@ def main():
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
         terminal_event = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
         check("bridge: terminal hash uses stable non-cyclic projection", terminal_event["data"]["projection"] == "agent-result-without-artifacts/v1" and terminal_event["data"]["resultSha256"] == result_projection_sha256(result))
+
+        mismatch_result_path = bundle / "revision-mismatch-result.json"
+        mismatch_events_path = bundle / "revision-mismatch-events.ndjson"
+        revision_mismatch = write_revision_mismatch_result(
+            str(bundle / "task.json"),
+            str(bundle),
+            task["metadata"]["wheelhouseRevision"],
+            "c" * 40,
+            "42",
+            "main",
+            "d" * 32,
+            str(mismatch_result_path),
+            str(mismatch_events_path),
+        )
+        validate_contract(revision_mismatch, "AgentResult")
+        check("bridge: trusted revision mismatch rejects before invocation", revision_mismatch["status"] == "rejected" and revision_mismatch["error"]["code"] == "target.stale" and revision_mismatch["error"]["spendStarted"] is False)
+        check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] == 0)
+        check("bridge: revision mismatch events remain content free", "fixture target" not in mismatch_events_path.read_text(encoding="utf-8"))
 
         _, timeout_bundle = make_bundle(root / "timeout")
         timeout, _ = run_bridge(timeout_bundle, root / "missing-timeout.json", "timeout", "timed_out", "child-timeout")
