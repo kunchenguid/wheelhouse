@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import canonical_sha256, file_sha256, validate_contract
-from agent_runtime.task_builder import build_task
+from agent_runtime.task_builder import build_task, claude_declared_tools
 
 FAILURES = []
 
@@ -67,7 +67,7 @@ def run_bridge(bundle: Path, execution: Path, suffix: str):
     task = json.loads((bundle / "task.json").read_text(encoding="utf-8"))
     enforcement = bundle / ("enforcement-%s.json" % suffix)
     handoff_sha256 = "a" * 64
-    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "spendStarted": True, "action": task["metadata"]["action"], "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution), "subprocessIsolation": "dependencies-verified", "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"], "conclusion": "success"}}), encoding="utf-8")
+    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "readonlyTokenBoundary": "broker-only" if task["metadata"]["action"].endswith(".search") else "absent", "spendStarted": True, "isolationLevel": "github-readonly-artifact-bridge-v1", "artifactHydration": "content-addressed-bounded-verified", "targetInputsReadOnly": True, "workspaceRepository": "local-no-remote", "declaredTools": claude_declared_tools(task["metadata"]["action"]), "action": task["metadata"]["action"], "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution), "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": task["spec"]["limits"]["hardDeadlineMs"], "conclusion": "success", "dispatchRef": "main", "expectedCommitSha": task["metadata"]["wheelhouseRevision"], "correlationId": "a" * 32}}), encoding="utf-8")
     value = bridge(str(bundle / "task.json"), str(bundle), str(execution), "", str(enforcement), handoff_sha256, str(result), str(events))
     validate_contract(value, "AgentResult")
     return value, events
@@ -83,10 +83,22 @@ def main():
         transcript(execution, IMMUTABLE_MODEL, "HOLD\n\n- Reviewed the bounded target.")
         result, events = run_bridge(bundle, execution, "success")
         check("bridge: immutable Claude task validates", task["spec"]["selection"]["candidates"][0]["allowModelAlias"] is False)
+        check("bridge: honest artifact isolation is recorded", task["spec"]["isolation"]["profile"] == "claude-artifact-bridge-v1" and task["spec"]["isolation"]["modelNetwork"]["mode"] == "runner-default" and result["proof"]["isolationLevel"] == "github-readonly-artifact-bridge-v1")
+        check("bridge: unsupported worker guarantees are absent", task["spec"]["isolation"]["dropCapabilities"] is False and task["spec"]["isolation"]["noNewPrivileges"] is False and task["spec"]["isolation"]["denyHostHome"] is False)
         check("bridge: observed model accepted", result["status"] == "succeeded" and result["selection"]["actualModel"] == IMMUTABLE_MODEL)
         check("bridge: usage remains unavailable when action omits tokens", result["usage"]["inputTokens"] is None and result["usage"]["providerRequests"] is None)
         check("bridge: timing comes from the terminal action event", result["usage"]["durationMs"] == 2500 and result["startedAt"] < result["completedAt"])
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
+
+        _, overclaim_bundle = make_bundle(root / "overclaim")
+        overclaim_task_path = overclaim_bundle / "task.json"
+        overclaim_task = json.loads(overclaim_task_path.read_text(encoding="utf-8"))
+        overclaim_task["spec"]["isolation"]["dropCapabilities"] = True
+        overclaim_task_path.write_text(json.dumps(overclaim_task), encoding="utf-8")
+        overclaim_execution = root / "overclaim.json"
+        transcript(overclaim_execution, IMMUTABLE_MODEL, "HOLD\n\n- Reviewed the bounded target.")
+        overclaim, _ = run_bridge(overclaim_bundle, overclaim_execution, "overclaim")
+        check("bridge: Claude worker overclaims fail closed", overclaim["status"] == "failed" and overclaim["error"]["code"] == "sandbox.violation")
 
         _, partial_bundle = make_bundle(root / "partial")
         partial_execution = root / "partial.json"

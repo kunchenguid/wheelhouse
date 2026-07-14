@@ -41,9 +41,10 @@
     },
     "proof": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractMajor", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256"],
+      "required": ["contractMajor", "isolationLevel", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256"],
       "properties": {
         "contractMajor": {"const": 1},
+        "isolationLevel": {"type": "string", "enum": ["sandboxed-adapter-worker-v1", "github-readonly-artifact-bridge-v1"]},
         "capabilitySnapshotSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "negotiationSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "policySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

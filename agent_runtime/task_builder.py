@@ -123,17 +123,69 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
     raise ArtifactError("unsupported action output schema")
 
 
-def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, Any]:
-    claude = adapter == "claude-action-compat"
+def claude_declared_tools(action: str) -> list[str]:
+    if action == "triage.schema-repair":
+        return []
+    tools = ["Read", "Grep", "Glob"]
+    if action.startswith("nl-decision") or action.endswith(".search"):
+        tools.append("Write")
+    if action.endswith(".search"):
+        tools.append("Bash(wheelhouse-search)")
+    return tools
+
+
+def claude_isolation(action: str) -> dict[str, Any]:
+    return {
+        "profile": "claude-artifact-bridge-v1",
+        "worker": "separate-read-only-github-job",
+        "rootFilesystem": "verified-artifact-workspace",
+        "writableRoots": ["/github/workspace", "/tmp"],
+        "modelNetwork": {"mode": "runner-default", "allowedHosts": []},
+        "toolNetwork": {"mode": "broker-only" if action.endswith(".search") else "none"},
+        "inheritEnvironment": True,
+        "dropCapabilities": False,
+        "noNewPrivileges": False,
+        "denyHostHome": False,
+    }
+
+
+def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
     required = [
-        {"name": "input.text", "constraints": {}},
-        {"name": "process.exec", "constraints": {"mode": "scoped-readonly-broker" if claude and action.endswith(".search") else "none"}},
-        {"name": "tool.network", "constraints": {"mode": "broker-only" if action.endswith(".search") else "none"}},
-        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["trusted-post-action-bridge"] if claude else ["native-schema", "typed-terminating-tool"]}},
-        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000, "mechanism": "parent-workflow-cancel" if claude else "adapter-interrupt"}},
+        {"name": "input.text", "constraints": {"handoff": "content-addressed-bounded", "mount": "read-only"}},
+        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["trusted-post-action-bridge"]}},
+        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000, "mechanism": "parent-workflow-cancel"}},
         {"name": "provenance.actual-model", "constraints": {}},
         {"name": "provenance.actual-provider", "constraints": {}},
-        {"name": "isolation.external", "constraints": {"worker": "separate-read-only-github-job" if claude else "sandboxed-adapter-worker"}},
+        {"name": "isolation.external", "constraints": {"worker": "separate-read-only-github-job", "profile": "claude-artifact-bridge-v1"}},
+        {"name": "github.permissions", "constraints": {"actions": "read", "contents": "read", "issues": "none", "actingToken": False}},
+        {"name": "credentials.isolated", "constraints": {"fleetToken": "absent", "readonlyToken": "broker-only" if action.endswith(".search") else "absent"}},
+        {"name": "tools.declared", "constraints": {"exact": claude_declared_tools(action)}},
+        {"name": "target.inputs", "constraints": {"mount": "read-only", "writes": False}},
+        {"name": "transcript.bounded", "constraints": {"maxBytes": 8388608, "reduced": True}},
+    ]
+    return {
+        "required": required,
+        "optional": [
+            {"name": "usage.tokens", "constraints": {}},
+            {"name": "usage.cost", "constraints": {}},
+            {"name": "quota.snapshot", "constraints": {}},
+            {"name": "event.reasoning-summary", "constraints": {"retained": False}},
+        ],
+    }
+
+
+def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, Any]:
+    if adapter == "claude-action-compat":
+        return claude_capabilities(action, schema_digest)
+    required = [
+        {"name": "input.text", "constraints": {}},
+        {"name": "process.exec", "constraints": {"mode": "none"}},
+        {"name": "tool.network", "constraints": {"mode": "broker-only" if action.endswith(".search") else "none"}},
+        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["native-schema", "typed-terminating-tool"]}},
+        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000, "mechanism": "adapter-interrupt"}},
+        {"name": "provenance.actual-model", "constraints": {}},
+        {"name": "provenance.actual-provider", "constraints": {}},
+        {"name": "isolation.external", "constraints": {"worker": "sandboxed-adapter-worker"}},
     ]
     if action != "triage.schema-repair":
         required.extend(
@@ -156,7 +208,9 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
     }
 
 
-def _tools(action: str) -> dict[str, Any]:
+def _tools(action: str, adapter: str) -> dict[str, Any]:
+    if adapter == "claude-action-compat":
+        return {"default": "deny", "parallel": False, "tools": []}
     names: list[str] = []
     if action != "triage.schema-repair":
         names = ["fs.read", "fs.grep", "fs.glob"]
@@ -316,11 +370,12 @@ def build_task(
             },
             "inputs": inputs,
             "capabilities": _capabilities(action, schema_digest, adapter),
-            "tools": _tools(action),
-            "isolation": {
-                "worker": "separate-read-only-github-job" if adapter == "claude-action-compat" else "sandboxed-adapter-worker",
-                "rootFilesystem": "ephemeral-workspace" if adapter == "claude-action-compat" else "read-only",
-                "writableRoots": ["/github/workspace", "/tmp"] if adapter == "claude-action-compat" else ["/run/wheelhouse/output", "/tmp"],
+            "tools": _tools(action, adapter),
+            "isolation": claude_isolation(action) if adapter == "claude-action-compat" else {
+                "profile": "sandboxed-worker-v1",
+                "worker": "sandboxed-adapter-worker",
+                "rootFilesystem": "read-only",
+                "writableRoots": ["/run/wheelhouse/output", "/tmp"],
                 "modelNetwork": {"mode": "provider-only", "allowedHosts": list(profile["provider_hosts"])},
                 "toolNetwork": {"mode": "broker-only" if action.endswith(".search") else "none"},
                 "inheritEnvironment": False,

@@ -21,6 +21,7 @@ from .contract import (
 )
 from .events import EventWriter
 from .supervisor import _anchor_ok, _error, _verify_artifacts
+from .task_builder import claude_capabilities, claude_declared_tools, claude_isolation
 
 ACTION_COMMIT = "fad22eb3fa582b7357fc0ea48af6645851b884fd"
 ACTION_VERSION = "1.0.161"
@@ -159,6 +160,8 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
     except OSError:
         return None
     expected_permissions = {"actions": "read", "contents": "read", "issues": "none"}
+    action = task["metadata"]["action"]
+    expected_readonly_token = "broker-only" if action.endswith(".search") else "absent"
     if (
         not isinstance(handoff_sha256, str)
         or len(handoff_sha256) != 64
@@ -168,8 +171,16 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or proof.get("jobPermissions") != expected_permissions
         or proof.get("writeCapableGithubTokenAvailable") is not False
         or proof.get("fleetTokenAvailable") is not False
+        or proof.get("readonlyTokenBoundary") != expected_readonly_token
         or not isinstance(proof.get("spendStarted"), bool)
-        or proof.get("subprocessIsolation") != "dependencies-verified"
+        or proof.get("isolationLevel") != "github-readonly-artifact-bridge-v1"
+        or proof.get("artifactHydration") != "content-addressed-bounded-verified"
+        or proof.get("targetInputsReadOnly") is not True
+        or proof.get("workspaceRepository") != "local-no-remote"
+        or proof.get("declaredTools") != claude_declared_tools(action)
+        or task["spec"]["capabilities"] != claude_capabilities(action, task["spec"]["output"]["schemaSha256"])
+        or task["spec"]["tools"] != {"default": "deny", "parallel": False, "tools": []}
+        or task["spec"]["isolation"] != claude_isolation(action)
         or proof.get("taskSha256") != canonical_sha256(task)
         or proof.get("handoffManifestSha256") != handoff_sha256
         or proof.get("action") != task["metadata"]["action"]
@@ -177,6 +188,12 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         or not isinstance(controller, dict)
         or controller.get("hardDeadlineMs") != task["spec"]["limits"]["hardDeadlineMs"]
         or controller.get("conclusion") != "success"
+        or controller.get("expectedCommitSha") != task["metadata"]["wheelhouseRevision"]
+        or not isinstance(controller.get("dispatchRef"), str)
+        or not controller.get("dispatchRef")
+        or not isinstance(controller.get("correlationId"), str)
+        or len(controller.get("correlationId")) != 32
+        or any(character not in "0123456789abcdef" for character in controller.get("correlationId"))
         or not isinstance(controller.get("parentRunId"), str)
         or not isinstance(controller.get("parentRunAttempt"), str)
         or not isinstance(controller.get("modelRunId"), str)
@@ -285,6 +302,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "selection": selection,
         "proof": {
             "contractMajor": 1,
+            "isolationLevel": "github-readonly-artifact-bridge-v1",
             "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
             "negotiationSha256": canonical_sha256({"candidate": candidate, "tools": task["spec"]["tools"], "fallback": "none"}),
             "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),

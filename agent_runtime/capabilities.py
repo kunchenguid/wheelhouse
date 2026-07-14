@@ -53,6 +53,7 @@ def _require(condition: bool, message: str) -> None:
 
 def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict[str, Any]) -> Negotiation:
     candidate = task["spec"]["selection"]["candidates"][0]
+    _require(task["spec"]["isolation"]["profile"] == "sandboxed-worker-v1", "task did not request the sandboxed worker profile")
     _require(len(task["spec"]["selection"]["candidates"]) == 1, "fallback candidates are not enabled")
     _require(task["spec"]["selection"]["fallback"]["mode"] == "none", "automatic fallback is forbidden")
     _require(candidate["adapter"] == descriptor["adapter"], "adapter does not match the selected plan")

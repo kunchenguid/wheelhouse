@@ -59,11 +59,14 @@ runs:
         HANDOFF_SHA256: ${{ steps.pack.outputs.manifestSha256 }}
         INVOCATION: ${{ inputs.invocation-id }}
         RECEIVED: ${{ steps.names.outputs.received }}
+        DISPATCH_REF: ${{ github.ref_name }}
+        EXPECTED_SHA: ${{ github.sha }}
       run: |
         python scripts/claude_model_dispatch.py \
           --task "$TASK" --input-artifact "$INPUT_ARTIFACT" \
           --output-artifact "$OUTPUT_ARTIFACT" --invocation-id "$INVOCATION" \
-          --handoff-sha256 "$HANDOFF_SHA256" --ref "$GITHUB_SHA" --out "$RECEIVED"
+          --handoff-sha256 "$HANDOFF_SHA256" --dispatch-ref "$DISPATCH_REF" \
+          --expected-sha "$EXPECTED_SHA" --out "$RECEIVED"
 
     - id: bridge
       name: Normalize the observed model transcript

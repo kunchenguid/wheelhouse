@@ -153,24 +153,25 @@
         },
         "isolation": {
           "type": "object", "additionalProperties": false,
-          "required": ["worker", "rootFilesystem", "writableRoots", "modelNetwork", "toolNetwork", "inheritEnvironment", "dropCapabilities", "noNewPrivileges", "denyHostHome"],
+          "required": ["profile", "worker", "rootFilesystem", "writableRoots", "modelNetwork", "toolNetwork", "inheritEnvironment", "dropCapabilities", "noNewPrivileges", "denyHostHome"],
           "properties": {
+            "profile": {"type": "string", "enum": ["sandboxed-worker-v1", "claude-artifact-bridge-v1"]},
             "worker": {"type": "string", "enum": ["sandboxed-adapter-worker", "separate-read-only-github-job"]},
-            "rootFilesystem": {"type": "string", "enum": ["read-only", "ephemeral-workspace"]},
+            "rootFilesystem": {"type": "string", "enum": ["read-only", "verified-artifact-workspace"]},
             "writableRoots": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
             "modelNetwork": {
               "type": "object", "additionalProperties": false,
               "required": ["mode", "allowedHosts"],
               "properties": {
-                "mode": {"const": "provider-only"},
-                "allowedHosts": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z0-9.-]+$"}}
+                "mode": {"type": "string", "enum": ["provider-only", "runner-default"]},
+                "allowedHosts": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z0-9.-]+$"}}
               }
             },
             "toolNetwork": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"type": "string", "enum": ["none", "broker-only"]}}},
-            "inheritEnvironment": {"const": false},
-            "dropCapabilities": {"const": true},
-            "noNewPrivileges": {"const": true},
-            "denyHostHome": {"const": true}
+            "inheritEnvironment": {"type": "boolean"},
+            "dropCapabilities": {"type": "boolean"},
+            "noNewPrivileges": {"type": "boolean"},
+            "denyHostHome": {"type": "boolean"}
           }
         },
         "limits": {

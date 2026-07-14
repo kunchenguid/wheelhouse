@@ -25,8 +25,10 @@ The current selection cannot target Codex or reach its workflow installation bra
 The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
 Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff, and dispatch the selected action to `claude-model.yml`.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
-The model job verifies the complete handoff before hydrating a fresh workspace, applies the action sandbox controls, and returns only a bounded transcript and enforcement record.
+The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 The trusted parent supervises the hard deadline, cancels overruns, binds the returned artifact to the task and model run, and atomically emits `AgentResult` plus content-free events.
+The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
+Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
 
 ## Disabled and investigated adapters
 

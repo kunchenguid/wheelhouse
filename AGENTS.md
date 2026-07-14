@@ -616,7 +616,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `head_sha` from the tick event, and `deep-review.yml` uses those immutable
   inputs for bot-dispatched runs instead of re-reading the mutable card body.
   Owner-triggered `workflow_dispatch` can also be run with only `issue=...` for direct verification; that path fetches and parses the current card body with `github.token`.
-  The Claude action has `allowed_bots: github-actions[bot]` for the decision-handler dispatch only, because otherwise `anthropics/claude-code-action` rejects the `github.token`-dispatched bot run before it emits `execution_file`.
+  Every direct Claude action in the separately permissioned model workflow has `allowed_bots: github-actions[bot]`, because the trusted parent dispatch makes that bot the exact child-workflow actor and the action otherwise rejects the run before it emits `execution_file`.
   Keep that allow-list exact - never `*` and never an external bot actor.
   The manual `needs-deep-review` label path is unchanged (a human applying it raises the `labeled` event normally) and remains a card-body parse path in `deep-review.yml`, alongside owner-triggered issue-only `workflow_dispatch` verification runs.
   This is a deliberate asymmetry: the manual label and issue-only workflow-dispatch paths authorize only the repository owner.

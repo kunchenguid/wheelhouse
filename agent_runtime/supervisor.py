@@ -231,6 +231,7 @@ def _usage(worker: dict[str, Any], duration_ms: int) -> dict[str, Any]:
 def _proof(task: dict[str, Any], descriptor: dict[str, Any], negotiation: dict[str, Any], host: dict[str, Any]) -> dict[str, Any]:
     return {
         "contractMajor": 1,
+        "isolationLevel": "sandboxed-adapter-worker-v1",
         "capabilitySnapshotSha256": canonical_sha256(descriptor),
         "negotiationSha256": canonical_sha256(negotiation),
         "policySha256": canonical_sha256({"isolation": task["spec"]["isolation"], "limits": task["spec"]["limits"], "retention": task["spec"]["retention"], "retry": task["spec"]["retry"]}),
@@ -683,6 +684,7 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         "selection": selection,
         "proof": recovery["proof"] if spend_started else {
             "contractMajor": 1,
+            "isolationLevel": "sandboxed-adapter-worker-v1",
             "capabilitySnapshotSha256": canonical_sha256({"status": "unavailable", "code": code}),
             "negotiationSha256": canonical_sha256({"status": "failed-after-spend" if spend_started else "rejected-before-spend", "code": code}),
             "policySha256": canonical_sha256({"isolation": task["spec"]["isolation"], "limits": task["spec"]["limits"], "retention": task["spec"]["retention"], "retry": task["spec"]["retry"]}),
