@@ -176,19 +176,29 @@ def behavior_verdict_facts(verdict):
         }
 
     if not isinstance(verdict, dict):
-        for key in (
+        # Absence is one blocking prerequisite, not five negative behavior
+        # judgments. Enforcement still fails closed because every authoritative
+        # fact below must be MET and behavior class remains UNMET first.
+        fact(
             "g6_behavior_class",
+            False,
+            "structured behavior verdict absent; dependent behavior checks "
+            "were not evaluated",
+            "no structured behavior verdict",
+        )
+        for key in (
             "g6_vision_alignment",
             "g6_default_behavior",
             "g6_verdict_merge",
             "g6_class_c_mode",
         ):
-            fact(
-                key,
-                False,
-                "no structured behavior verdict",
-                "no structured behavior verdict",
-            )
+            facts[key] = {
+                "status": criteria_schema.STATUS_UNAVAILABLE,
+                "evidence": (
+                    "not evaluated because no structured behavior verdict exists"
+                ),
+                "reason": "no structured behavior verdict",
+            }
         return facts, ""
 
     cls = normalize_behavior_class(verdict.get("behavior_class"))
@@ -973,6 +983,7 @@ def evaluate_candidate(
         if stopped:
             return stopped
     verdict = state.get("automerge_verdict")
+    structured_verdict = isinstance(verdict, dict)
 
     vision_present, vision_sha = vision_on_default_branch(slug)
     if vision_present:
@@ -986,20 +997,37 @@ def evaluate_candidate(
         )
         if stopped:
             return stopped
-    verdict_vision_sha = str((verdict or {}).get("vision_sha") or "")
-    if vision_present and verdict_vision_sha == vision_sha:
-        met("g6_vision_revision", "verdict and default branch use %s" % vision_sha[:8])
-        result["audit"]["vision_sha"] = vision_sha
-    else:
+    if not structured_verdict:
         stopped = fail(
             "g6_vision_revision",
-            "verdict=%s current=%s"
-            % (verdict_vision_sha[:8] or "<none>", vision_sha[:8] or "<none>"),
-            "G6 behavior verdict is not for the current VISION.md revision",
-            unavailable=not vision_present,
+            "not evaluated because no structured behavior verdict exists to bind "
+            "to a VISION.md revision",
+            "G6 no structured behavior verdict",
+            unavailable=True,
         )
         if stopped:
             return stopped
+    else:
+        verdict_vision_sha = str(verdict.get("vision_sha") or "")
+        if vision_present and verdict_vision_sha == vision_sha:
+            met(
+                "g6_vision_revision",
+                "verdict and default branch use %s" % vision_sha[:8],
+            )
+            result["audit"]["vision_sha"] = vision_sha
+        else:
+            stopped = fail(
+                "g6_vision_revision",
+                "verdict=%s current=%s"
+                % (
+                    verdict_vision_sha[:8] or "<none>",
+                    vision_sha[:8] or "<none>",
+                ),
+                "G6 behavior verdict is not for the current VISION.md revision",
+                unavailable=not vision_present,
+            )
+            if stopped:
+                return stopped
 
     # Gather live PR state once (G2/G3/G4/G5). G7 does a fresh read again.
     pr = live_pr(slug, number)
@@ -1056,7 +1084,17 @@ def evaluate_candidate(
             return stopped
 
     base_sha = str((pr.get("base") or {}).get("sha") or "")
-    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha):
+    if not structured_verdict:
+        stopped = fail(
+            "g6_base_revision",
+            "not evaluated because no structured behavior verdict exists to bind "
+            "to a base revision",
+            "G6 no structured behavior verdict",
+            unavailable=True,
+        )
+        if stopped:
+            return stopped
+    elif not _GIT_OBJECT_ID_RE.fullmatch(base_sha):
         stopped = fail(
             "g6_base_revision",
             "live PR base SHA is unavailable",
@@ -1065,26 +1103,28 @@ def evaluate_candidate(
         )
         if stopped:
             return stopped
-    verdict_base_sha = str((verdict or {}).get("base_sha") or "")
-    if not _GIT_OBJECT_ID_RE.fullmatch(verdict_base_sha):
-        stopped = fail(
-            "g6_base_revision",
-            "behavior verdict is not bound to a base SHA",
-            "G6 behavior verdict is not bound to a base SHA",
-        )
-        if stopped:
-            return stopped
-    elif verdict_base_sha != base_sha:
-        stopped = fail(
-            "g6_base_revision",
-            "verdict=%s current=%s" % (verdict_base_sha[:8], base_sha[:8] or "<none>"),
-            "G6 behavior verdict is not for the current base SHA",
-        )
-        if stopped:
-            return stopped
-    elif base_sha:
-        met("g6_base_revision", "verdict and live base use %s" % base_sha[:8])
-        result["base_sha"] = base_sha
+    else:
+        verdict_base_sha = str(verdict.get("base_sha") or "")
+        if not _GIT_OBJECT_ID_RE.fullmatch(verdict_base_sha):
+            stopped = fail(
+                "g6_base_revision",
+                "behavior verdict is not bound to a base SHA",
+                "G6 behavior verdict is not bound to a base SHA",
+            )
+            if stopped:
+                return stopped
+        elif verdict_base_sha != base_sha:
+            stopped = fail(
+                "g6_base_revision",
+                "verdict=%s current=%s"
+                % (verdict_base_sha[:8], base_sha[:8] or "<none>"),
+                "G6 behavior verdict is not for the current base SHA",
+            )
+            if stopped:
+                return stopped
+        elif base_sha:
+            met("g6_base_revision", "verdict and live base use %s" % base_sha[:8])
+            result["base_sha"] = base_sha
 
     author = _pr_author_login(pr)
     author_ok = (

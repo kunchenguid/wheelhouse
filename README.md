@@ -143,6 +143,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > Before merging, Wheelhouse also requires a clean, merge-ready live PR with configured compliance and tests green, a returning non-maintainer human contributor, no excluded sensitive/governance/release/dependency/security/auth/billing/migration/schema/install/default-surface files, and at most 20 changed files and 1,000 changed lines.
 > It re-reads the head, base, `VISION.md`, merge state, checks, escape-hatch label, and card activity immediately before the existing deterministic merge call, so any uncertainty leaves the PR for normal review.
 > Every PR-review card shows each guarded criterion as `MET`, `UNMET`, or `UNAVAILABLE` with concise evidence from the same authoritative evaluator; these rows are read-only context and never authorize a merge.
+> When current-head triage succeeds and recommends merge but produces no structured behavior verdict, the eligible behavior class is `UNMET`, while its dependent behavior checks and verdict revision bindings are `UNAVAILABLE` because they were not evaluated; authorization still requires every criterion to be `MET`.
 > Wheelhouse never auto-reverts; every automatic merge closes its decision card with an audit record and appends to a closed, durable auto-merge ledger issue in the hub.
 
 > **Heads-up - `thank_on_merge` defaults ON (no Claude token needed).**
