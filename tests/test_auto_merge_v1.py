@@ -872,11 +872,21 @@ def test_G6_stale_absent_and_held_verdict_hold():
     payload, _ = run_act(w, items, cards)
     check("G6: stale verdict (head mismatch) holds", "G6" in _held_reason(payload))
 
-    # Absent verdict.
+    # Issue 621 shape: ordinary triage succeeded for the current head and its
+    # top-level recommendation is merge, but the default branch has no VISION.md,
+    # so triage did not produce a structured behavior verdict.
     w2, items2, cards2 = default_world(head="ab" * 20)
+    w2.vision = {}
     cards2[0] = make_card(101, "fmt", 5, "ab" * 20, automerge_verdict=None)
     payload2, _ = run_act(w2, items2, cards2)
-    check("G6: no verdict holds", "G6" in _held_reason(payload2))
+    check(
+        "G6: issue 621 missing verdict keeps the first decisive hold reason",
+        _held_reason(payload2) == "G6 no structured behavior verdict",
+    )
+    check(
+        "G6: issue 621 missing verdict never calls merge",
+        not payload2["merges"] and not w2.do_merge_calls,
+    )
 
     # triage_status not succeeded.
     w3, items3, cards3 = default_world(head="qd" * 20)

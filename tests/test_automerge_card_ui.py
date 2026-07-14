@@ -354,6 +354,325 @@ def test_owner_bot_and_security_exclusion_evidence_is_distinct():
     )
 
 
+def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
+    issue_head = "f4e096532b994d7a37a1161bdeaf6214e9d6439e"
+    issue_base = "b708731dc7840c088bcd8c79991b7f052f9a0096"
+    issue_item = item(
+        repo="firstmate",
+        number=527,
+        head_sha=issue_head,
+        title="issue 621 regression",
+        author="contributor",
+        url="https://github.com/kunchenguid/firstmate/pull/527",
+    )
+    base_card = render_card.render(issue_item)
+    state = core.parse_state_block(base_card["body"])
+    state.update(
+        {
+            "repo": "firstmate",
+            "number": 527,
+            "kind": "pr-review",
+            "head_sha": issue_head,
+            "triaged_sha": issue_head,
+            "triaged_base_sha": issue_base,
+            "triage_status": "succeeded",
+            "triage_recommendation": {"action": "merge", "reason": ""},
+        }
+    )
+    state.pop("automerge_verdict", None)
+    raw_card = {
+        "number": 621,
+        "body": render_card._replace_state_block(base_card["body"], state),
+        "labels": [
+            {"name": name}
+            for name in (
+                "needs-decision",
+                "repo:firstmate",
+                "kind:pr-review",
+                "priority:med",
+                "target:firstmate-527",
+            )
+        ],
+        "author": am.CARD_AUTOMATION_AUTHOR,
+        "comments": 0,
+    }
+    scan = {
+        "repos": {
+            "firstmate": {
+                "ok": True,
+                "truncated": False,
+                "indeterminate_pr_numbers": [],
+            }
+        },
+        "items": [issue_item],
+    }
+    issue_pr = live_pr(
+        head={"sha": issue_head},
+        base={"sha": issue_base},
+        user={"login": "contributor", "type": "User"},
+    )
+    old_token = os.environ.get("WHEELHOUSE_AUTOMERGE_HAS_TOKEN")
+    os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(core, "get_owner", return_value="kunchenguid")
+            )
+            stack.enter_context(
+                patch.object(core, "maintainers", return_value={"kunchenguid"})
+            )
+            stack.enter_context(
+                patch.object(
+                    core,
+                    "load_config",
+                    return_value={
+                        "auto_merge": True,
+                        "repos": {"firstmate": {}},
+                    },
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    am, "vision_on_default_branch", return_value=(False, "")
+                )
+            )
+            stack.enter_context(patch.object(am, "live_pr", return_value=issue_pr))
+            stack.enter_context(
+                patch.object(am, "has_prior_merged_pr", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    am,
+                    "immutable_compare_files",
+                    return_value=(["src/fix.py"], True, True),
+                )
+            )
+            handoff = am.collect_card_criteria(scan, [raw_card])
+    finally:
+        if old_token is None:
+            os.environ.pop("WHEELHOUSE_AUTOMERGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = old_token
+
+    criterion_rows = {
+        row["id"]: row for row in handoff[0]["criteria"]
+    }
+    met_rows = (
+        "g6_triage_available",
+        "g6_triage_success",
+        "g6_merge_recommendation",
+    )
+    dependent_rows = (
+        "g6_vision_alignment",
+        "g6_default_behavior",
+        "g6_verdict_merge",
+        "g6_class_c_mode",
+        "g6_vision_revision",
+        "g6_base_revision",
+    )
+    check(
+        "issue 621: ordinary triage facts remain independently MET",
+        all(criterion_rows[key]["status"] == schema.STATUS_MET for key in met_rows),
+    )
+    check(
+        "issue 621: behavior class is the only blocking UNMET G6 prerequisite",
+        [
+            key
+            for key in schema.CRITERIA_IDS
+            if key.startswith("g6_")
+            and criterion_rows[key]["status"] == schema.STATUS_UNMET
+        ]
+        == ["g6_behavior_class"],
+    )
+    check(
+        "issue 621: behavior class explains the absent verdict and skipped checks",
+        "structured behavior verdict absent"
+        in criterion_rows["g6_behavior_class"]["evidence"]
+        and "not evaluated" in criterion_rows["g6_behavior_class"]["evidence"],
+    )
+    check(
+        "issue 621: dependent behavior and binding rows are honestly UNAVAILABLE",
+        all(
+            criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
+            and "not evaluated" in criterion_rows[key]["evidence"]
+            for key in dependent_rows
+        ),
+    )
+    rendered = render_card.render(
+        item(
+            repo="firstmate",
+            number=527,
+            head_sha=issue_head,
+            automerge_criteria=handoff[0]["criteria"],
+        )
+    )
+    g6_lines = [
+        line for line in rendered["body"].splitlines() if "`G6 - " in line
+    ]
+    check(
+        "issue 621: renderer shows one red G6 blocker",
+        sum("❌ **UNMET**" in line for line in g6_lines) == 1
+        and "`G6 - eligible behavior class`" in next(
+            line for line in g6_lines if "❌ **UNMET**" in line
+        ),
+    )
+    check(
+        "issue 621: renderer shows every dependent G6 row as unavailable",
+        all(
+            any(
+                "⚪ **UNAVAILABLE**" in line
+                and "`%s`" % schema.CRITERIA_LABELS[key] in line
+                for line in g6_lines
+            )
+            for key in dependent_rows
+        ),
+    )
+
+
+def test_absent_none_and_non_dictionary_whole_verdicts_are_unavailable_dependents():
+    absent = object()
+    dependent_rows = (
+        "g6_vision_alignment",
+        "g6_default_behavior",
+        "g6_verdict_merge",
+        "g6_class_c_mode",
+        "g6_vision_revision",
+        "g6_base_revision",
+    )
+    for label, whole_verdict in (
+        ("absent", absent),
+        ("none", None),
+        ("string", "merge"),
+        ("list", ["merge"]),
+    ):
+        card = card_entry()
+        if whole_verdict is absent:
+            card["state"].pop("automerge_verdict", None)
+        else:
+            card["state"]["automerge_verdict"] = whole_verdict
+        result = evaluate(card_value=card, vision=(True, VISION))
+        criterion_rows = rows(result)
+        check(
+            "whole verdict %s: behavior class remains the blocking UNMET row" % label,
+            criterion_rows["g6_behavior_class"]["status"] == schema.STATUS_UNMET
+            and result["hold_reason"] == "G6 no structured behavior verdict",
+        )
+        check(
+            "whole verdict %s: dependent and binding rows are UNAVAILABLE" % label,
+            all(
+                criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
+                and "not evaluated" in criterion_rows[key]["evidence"]
+                for key in dependent_rows
+            ),
+        )
+
+
+def test_structured_verdict_field_failures_remain_unmet():
+    cases = (
+        ("behavior_class", "g6_behavior_class", "D", {}),
+        ("aligns_with_vision", "g6_vision_alignment", "true", {}),
+        (
+            "changes_existing_or_default_behavior",
+            "g6_default_behavior",
+            "false",
+            {},
+        ),
+        ("recommend_merge", "g6_verdict_merge", "true", {}),
+        (
+            "optin_default_off",
+            "g6_class_c_mode",
+            "true",
+            {"behavior_class": "C"},
+        ),
+        ("vision_sha", "g6_vision_revision", None, {}),
+        ("base_sha", "g6_base_revision", "not-a-sha", {}),
+    )
+    for field, criterion, malformed, overrides in cases:
+        for shape in ("missing", "malformed"):
+            candidate = verdict(**overrides)
+            if shape == "missing":
+                candidate.pop(field, None)
+            else:
+                candidate[field] = malformed
+            result = evaluate(
+                card_value=card_entry(automerge_verdict=candidate),
+                vision=(True, VISION),
+            )
+            check(
+                "structured verdict %s %s remains genuinely UNMET"
+                % (field, shape),
+                rows(result)[criterion]["status"] == schema.STATUS_UNMET,
+            )
+
+
+def test_real_verdict_negative_and_stale_facts_remain_unmet():
+    negative_cases = (
+        (
+            "g6_vision_alignment",
+            card_entry(automerge_verdict=verdict(aligns_with_vision=False)),
+            (True, VISION),
+        ),
+        (
+            "g6_default_behavior",
+            card_entry(
+                automerge_verdict=verdict(
+                    changes_existing_or_default_behavior=True
+                )
+            ),
+            (True, VISION),
+        ),
+        (
+            "g6_verdict_merge",
+            card_entry(automerge_verdict=verdict(recommend_merge=False)),
+            (True, VISION),
+        ),
+        (
+            "g6_class_c_mode",
+            card_entry(
+                automerge_verdict=verdict(
+                    behavior_class="C", optin_default_off=False
+                )
+            ),
+            (True, VISION),
+        ),
+        (
+            "g6_vision_revision",
+            card_entry(automerge_verdict=verdict(vision_sha="stale-vision")),
+            (True, VISION),
+        ),
+        (
+            "g6_base_revision",
+            card_entry(automerge_verdict=verdict(base_sha="c" * 40)),
+            (True, VISION),
+        ),
+        (
+            "g6_triage_success",
+            card_entry(triaged_sha="stale-head"),
+            (True, VISION),
+        ),
+    )
+    for criterion, card, vision_value in negative_cases:
+        result = evaluate(card_value=card, vision=vision_value)
+        check(
+            "real verdict negative/stale fact %s remains UNMET" % criterion,
+            rows(result)[criterion]["status"] == schema.STATUS_UNMET,
+        )
+
+    for behavior_class, optin in (("A", False), ("B", False), ("C", True)):
+        candidate = verdict(
+            behavior_class=behavior_class,
+            optin_default_off=optin,
+        )
+        result = evaluate(
+            card_value=card_entry(automerge_verdict=candidate),
+            full=False,
+        )
+        check(
+            "real eligible class %s retains authorization behavior" % behavior_class,
+            result["eligible"] is True,
+        )
+
+
 def test_unknown_evidence_and_historical_cards_degrade_safely():
     normalized = schema.normalize_criteria([{"id": "g4_mergeable", "status": "maybe"}])
     normalized_rows = {row["id"]: row for row in normalized}
