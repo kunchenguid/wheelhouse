@@ -432,9 +432,7 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
                 )
             )
             stack.enter_context(
-                patch.object(
-                    am, "vision_on_default_branch", return_value=(False, "")
-                )
+                patch.object(am, "vision_on_default_branch", return_value=(False, ""))
             )
             stack.enter_context(patch.object(am, "live_pr", return_value=issue_pr))
             stack.enter_context(
@@ -454,9 +452,7 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
         else:
             os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = old_token
 
-    criterion_rows = {
-        row["id"]: row for row in handoff[0]["criteria"]
-    }
+    criterion_rows = {row["id"]: row for row in handoff[0]["criteria"]}
     met_rows = (
         "g6_triage_available",
         "g6_triage_success",
@@ -506,15 +502,12 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
             automerge_criteria=handoff[0]["criteria"],
         )
     )
-    g6_lines = [
-        line for line in rendered["body"].splitlines() if "`G6 - " in line
-    ]
+    g6_lines = [line for line in rendered["body"].splitlines() if "`G6 - " in line]
     check(
         "issue 621: renderer shows one red G6 blocker",
         sum("❌ **UNMET**" in line for line in g6_lines) == 1
-        and "`G6 - eligible behavior class`" in next(
-            line for line in g6_lines if "❌ **UNMET**" in line
-        ),
+        and "`G6 - eligible behavior class`"
+        in next(line for line in g6_lines if "❌ **UNMET**" in line),
     )
     check(
         "issue 621: renderer shows every dependent G6 row as unavailable",
@@ -599,8 +592,7 @@ def test_structured_verdict_field_failures_remain_unmet():
                 vision=(True, VISION),
             )
             check(
-                "structured verdict %s %s remains genuinely UNMET"
-                % (field, shape),
+                "structured verdict %s %s remains genuinely UNMET" % (field, shape),
                 rows(result)[criterion]["status"] == schema.STATUS_UNMET,
             )
 
@@ -615,9 +607,7 @@ def test_real_verdict_negative_and_stale_facts_remain_unmet():
         (
             "g6_default_behavior",
             card_entry(
-                automerge_verdict=verdict(
-                    changes_existing_or_default_behavior=True
-                )
+                automerge_verdict=verdict(changes_existing_or_default_behavior=True)
             ),
             (True, VISION),
         ),
@@ -629,9 +619,7 @@ def test_real_verdict_negative_and_stale_facts_remain_unmet():
         (
             "g6_class_c_mode",
             card_entry(
-                automerge_verdict=verdict(
-                    behavior_class="C", optin_default_off=False
-                )
+                automerge_verdict=verdict(behavior_class="C", optin_default_off=False)
             ),
             (True, VISION),
         ),
