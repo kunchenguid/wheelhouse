@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wheelhouse.dev/schemas/agent-runtime/v1alpha1/agent-event.schema.json",
+  "title": "Wheelhouse AgentEvent v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "executionId", "seq", "time", "monotonicMs", "type", "data"],
+  "properties": {
+    "apiVersion": {"const": "wheelhouse.agent-runtime/v1alpha1"},
+    "kind": {"const": "AgentEvent"},
+    "executionId": {"type": "string", "pattern": "^[0-9a-f-]{36}$"},
+    "seq": {"type": "integer", "minimum": 1},
+    "time": {"type": "string", "minLength": 20, "maxLength": 40},
+    "monotonicMs": {"type": "integer", "minimum": 0},
+    "type": {
+      "type": "string",
+      "anyOf": [
+        {"enum": ["execution.accepted", "selection.resolved", "capabilities.probed", "capabilities.negotiated", "sandbox.started", "attempt.started", "model.request.started", "message.delta", "message.completed", "tool.started", "tool.progress", "tool.completed", "usage.updated", "warning", "checkpoint.created", "retry.scheduled", "fallback.selected", "cancellation.requested", "attempt.completed", "validation.completed", "execution.completed"]},
+        {"pattern": "^adapter\\.[a-z0-9][a-z0-9.-]{0,120}$"}
+      ]
+    },
+    "data": {"type": "object", "maxProperties": 40}
+  }
+}

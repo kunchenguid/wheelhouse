@@ -192,6 +192,51 @@ repos:
 # (github.repository_owner).
 maintainer: ""
 
+# Provider-agnostic agent runtime.
+# Claude is the production primary for every agent-assisted action.
+# The seven direct Claude Action steps remain the exact pinned production
+# implementation behind the shared selection boundary.
+# Codex remains disabled adapter evidence because this public deployment has no
+# supported secure noninteractive ChatGPT Pro authentication path.
+# Deferred provider candidates are not represented here and have no adapter or
+# provider-specific runtime-core policy in this phase.
+# Fallback is always disabled.
+agent_runtime:
+  contract: wheelhouse.agent-runtime/v1alpha1
+  runtime_version: 1.0.0
+  primary_profile: claude-action-current-pinned
+  target: claude
+  fallback: none
+  disabled_adapters:
+    codex-app-server: unsupported-public-chatgpt-pro-auth
+
+  profiles:
+    claude-action-current-pinned:
+      adapter: claude-action-compat
+      harness: claude-code
+      provider: anthropic
+      auth_profile: anthropic-subscription
+      auth_mechanism: claude-action-oauth
+      expected_workspace_id: ""
+      model: claude-sonnet-4-6
+      effort: provider-default
+      cost_class: subscription
+      data_boundary: anthropic-subscription
+      allow_model_alias: false
+      provider_hosts:
+        - api.anthropic.com
+
+  actions:
+    triage.issue.local: {target: claude, profile: claude-action-current-pinned}
+    triage.issue.search: {target: claude, profile: claude-action-current-pinned}
+    triage.pr.local: {target: claude, profile: claude-action-current-pinned}
+    triage.pr.search: {target: claude, profile: claude-action-current-pinned}
+    triage.schema-repair: {target: claude, profile: claude-action-current-pinned}
+    deep-review.local: {target: claude, profile: claude-action-current-pinned}
+    deep-review.search: {target: claude, profile: claude-action-current-pinned}
+    nl-decision.local: {target: claude, profile: claude-action-current-pinned}
+    nl-decision.search: {target: claude, profile: claude-action-current-pinned}
+
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
 # card gets one quick advisory triage per PR head SHA.
@@ -238,7 +283,8 @@ auto_triage_issues: true
 # Read/Grep/Glob-only behavior. Known claude-code-action harness polling/status
 # lines are preserved in the posted verdict but labeled as automated status.
 # All Claude-powered paths use the pinned
-# claude-code-action v1.0.161 commit and pass `--model sonnet` to every Claude
+# claude-code-action v1.0.161 commit and pass immutable
+# `--model claude-sonnet-4-6` to every Claude
 # step.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic

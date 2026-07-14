@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
@@ -3176,8 +3177,23 @@ def _text_from_content(content):
 
 
 def extract_claude_result(path):
+    """Extract delivered text from AgentResult v1 or a legacy Claude transcript.
+
+    AgentResult is tried first. A schema-invalid but delivered triage candidate
+    remains extractable so the existing one-turn repair policy stays distinct
+    from missing-output failures. The Claude event-array parser remains for
+    cards produced before every production consumer required AgentResult.
+    """
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return ""
+    try:
+        from agent_runtime.consumer import result_text
+
+        normalized = result_text(path, require_success=False)
+        if normalized:
+            return normalized
+    except (ImportError, OSError, ValueError):
+        pass
     try:
         with open(path, encoding="utf-8") as f:
             events = json.load(f)

@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wheelhouse.dev/schemas/agent-runtime/v1alpha1/agent-result.schema.json",
+  "title": "Wheelhouse AgentResult v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "executionId", "requestSha256", "status", "selection", "proof", "usage", "artifacts", "startedAt", "completedAt"],
+  "properties": {
+    "apiVersion": {"const": "wheelhouse.agent-runtime/v1alpha1"},
+    "kind": {"const": "AgentResult"},
+    "executionId": {"type": "string", "pattern": "^[0-9a-f-]{36}$"},
+    "requestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"type": "string", "enum": ["succeeded", "failed", "cancelled", "rejected"]},
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidateIndex", "harness", "adapter", "adapterVersion", "adapterDigest", "harnessVersion", "harnessDigest", "harnessProvenanceQuality", "harnessSourceCommit", "harnessMetadataSha256", "protocol", "protocolSchemaSha256", "provider", "actualProvider", "authProfile", "authMechanism", "expectedWorkspaceIdSha256", "requestedModel", "actualModel", "requestedEffort", "actualEffort", "costClass", "dataBoundary", "fallbackUsed", "fallbackReason"],
+      "properties": {
+        "candidateIndex": {"type": "integer", "minimum": 0},
+        "harness": {"type": "string"},
+        "adapter": {"type": "string"},
+        "adapterVersion": {"type": "string"},
+        "adapterDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "harnessVersion": {"type": ["string", "null"]},
+        "harnessDigest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "harnessProvenanceQuality": {"type": "string", "enum": ["verified-executable", "verified-action-metadata", "pinned-action-reference", "test-fixture", "unavailable"]},
+        "harnessSourceCommit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "harnessMetadataSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "protocol": {"type": "string"},
+        "protocolSchemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "provider": {"type": "string"},
+        "actualProvider": {"type": "string"},
+        "authProfile": {"type": "string"},
+        "authMechanism": {"type": "string"},
+        "expectedWorkspaceIdSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "requestedModel": {"type": "string"},
+        "actualModel": {"type": "string"},
+        "requestedEffort": {"type": "string"},
+        "actualEffort": {"type": "string"},
+        "costClass": {"type": "string"},
+        "dataBoundary": {"type": "string"},
+        "fallbackUsed": {"type": "boolean"},
+        "fallbackReason": {"type": ["string", "null"]}
+      }
+    },
+    "proof": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contractMajor", "isolationLevel", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256", "limitEnforcement", "limitEnforcementSha256"],
+      "properties": {
+        "contractMajor": {"const": 1},
+        "isolationLevel": {"type": "string", "enum": ["sandboxed-adapter-worker-v1", "github-readonly-artifact-bridge-v1"]},
+        "capabilitySnapshotSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "negotiationSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "compiledPromptSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "inputManifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "outputSchemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sandboxPolicySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "revisionBinding": {
+          "type": "object", "additionalProperties": false,
+          "required": ["quality", "status", "spendEvidenceQuality", "cancellationConfirmed", "cancellationError", "expectedCommitSha", "observedCommitSha", "modelRunId", "dispatchRef", "correlationId"],
+          "properties": {
+            "quality": {"const": "trusted-parent-run-metadata"},
+            "status": {"const": "mismatched"},
+            "spendEvidenceQuality": {"const": "conservative-possible-spend"},
+            "cancellationConfirmed": {"type": "boolean"},
+            "cancellationError": {"type": ["string", "null"], "enum": [null, "lifecycle.cancel_unconfirmed"]},
+            "expectedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "observedCommitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "modelRunId": {"type": "string", "minLength": 1},
+            "dispatchRef": {"type": "string", "minLength": 1},
+            "correlationId": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+          }
+        },
+        "limitEnforcement": {
+          "type": "object", "additionalProperties": false,
+          "required": ["softDeadlineMs", "hardDeadlineMs", "dispatchDeadlineMs", "childExecutionTimeoutMs", "cancelGraceMs", "maxTurns", "maxToolCalls", "maxFinalBytes", "maxEventBytes", "maxProviderRequests", "maxInputTokens", "maxOutputTokens"],
+          "properties": {
+            "softDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "hardDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "dispatchDeadlineMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "childExecutionTimeoutMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "cancelGraceMs": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxTurns": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxToolCalls": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxFinalBytes": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxEventBytes": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxProviderRequests": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxInputTokens": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]},
+            "maxOutputTokens": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]}
+          }
+        },
+        "limitEnforcementSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "delivered": {
+      "type": "object", "additionalProperties": false,
+      "required": ["value", "valueSha256", "bytes"],
+      "properties": {
+        "value": {},
+        "valueSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 131072}
+      }
+    },
+    "final": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaId", "value", "valueSha256", "bytes", "validation"],
+      "properties": {
+        "schemaId": {"type": "string"},
+        "value": {},
+        "valueSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 131072},
+        "validation": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "status"],
+            "properties": {"name": {"type": "string"}, "status": {"type": "string", "enum": ["passed", "failed", "not-applicable"]}}
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "phase", "message", "retryable", "fallbackEligible", "spendStarted", "safeToResume", "adapterCode", "httpStatus", "detailsArtifact"],
+      "properties": {
+        "code": {"type": "string", "enum": ["contract.invalid", "config.invalid", "selection.no_candidate", "capability.unsatisfied", "auth.missing", "auth.invalid", "quota.near_limit", "provider.quota_exhausted", "provider.rate_limited", "provider.overloaded", "provider.unavailable", "transport.connection", "transport.stream_interrupted", "input.too_large", "context.exceeded", "model.mismatch", "effort.mismatch", "tool.denied", "tool.failed", "sandbox.violation", "lifecycle.cancelled", "lifecycle.timeout", "lifecycle.hard_kill", "harness.crash", "harness.protocol", "output.missing", "output.schema_invalid", "output.evidence_invalid", "target.stale", "consumer.failed", "internal.error"]},
+        "phase": {"type": "string", "enum": ["validating", "selecting", "probing", "sandboxing", "running", "cancelling", "validating-output", "consumer"]},
+        "message": {"type": "string", "minLength": 1, "maxLength": 500},
+        "retryable": {"type": "boolean"},
+        "fallbackEligible": {"type": "boolean"},
+        "spendStarted": {"type": "boolean"},
+        "safeToResume": {"type": "boolean"},
+        "adapterCode": {"type": ["string", "null"], "maxLength": 120},
+        "httpStatus": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
+        "detailsArtifact": {"type": ["string", "null"]}
+      }
+    },
+    "usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "providerRequests", "toolCalls", "turns", "durationMs", "cost", "quota"],
+      "properties": {
+        "inputTokens": {"type": ["integer", "null"], "minimum": 0},
+        "outputTokens": {"type": ["integer", "null"], "minimum": 0},
+        "cacheReadTokens": {"type": ["integer", "null"], "minimum": 0},
+        "cacheWriteTokens": {"type": ["integer", "null"], "minimum": 0},
+        "providerRequests": {"type": ["integer", "null"], "minimum": 0},
+        "toolCalls": {"type": ["integer", "null"], "minimum": 0},
+        "turns": {"type": ["integer", "null"], "minimum": 0},
+        "durationMs": {"type": ["integer", "null"], "minimum": 0},
+        "quota": {
+          "type": "object", "additionalProperties": false,
+          "required": ["available", "snapshotSha256", "observedAt", "primaryUsedPercent", "secondaryUsedPercent"],
+          "properties": {
+            "available": {"type": "boolean"},
+            "snapshotSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "observedAt": {"type": ["string", "null"]},
+            "primaryUsedPercent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+            "secondaryUsedPercent": {"type": ["integer", "null"], "minimum": 0, "maximum": 100}
+          }
+        },
+        "cost": {
+          "type": "object", "additionalProperties": false,
+          "required": ["amount", "currency", "quality"],
+          "properties": {
+            "amount": {"type": ["number", "null"], "minimum": 0},
+            "currency": {"type": ["string", "null"]},
+            "quality": {"type": "string", "enum": ["actual", "estimated", "unavailable"]}
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array", "maxItems": 16,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["role", "sha256", "mediaType", "bytes", "retentionDays", "redaction"],
+        "properties": {
+          "role": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "mediaType": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "retentionDays": {"type": "integer", "minimum": 0, "maximum": 30},
+          "redaction": {"const": "wheelhouse-agent/v1"}
+        }
+      }
+    },
+    "startedAt": {"type": "string"},
+    "completedAt": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "succeeded"}}}, "then": {"required": ["final"]}},
+    {"if": {"properties": {"status": {"enum": ["failed", "cancelled", "rejected"]}}}, "then": {"required": ["error"]}}
+  ]
+}

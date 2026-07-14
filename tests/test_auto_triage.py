@@ -1923,7 +1923,8 @@ def test_triage_workflow_issue_path_isolation():
     resolve = step_by_id(steps, "resolve")
     verify_head = step_by_id(steps, "verify_head")
     prepare = step_by_id(steps, "prepare")
-    claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
+    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
 
     check(
         "workflow: kind input exists and is required",
@@ -2036,7 +2037,7 @@ def test_triage_workflow_issue_path_isolation():
     # The two MAIN triage branches (search / no-search) are not one-per-kind; the
     # bounded schema-repair branch (claude_repair) is a distinct, intentional
     # third Claude step and is asserted separately.
-    main_claude = [s for s in claude_steps if s.get("id") != "claude_repair"]
+    main_claude = [s for s in claude_steps if s.get("id") != "triage_repair"]
     check(
         "workflow: exactly two MAIN Claude branches (search / no-search), not one per kind",
         len(main_claude) == 2,
@@ -2056,8 +2057,8 @@ def test_triage_workflow_issue_path_isolation():
             step.get("uses") == CLAUDE_ACTION_PIN,
         )
         check(
-            "workflow(issue path): Claude uses --model sonnet",
-            "--model sonnet" in str((step.get("with") or {}).get("claude_args", "")),
+            "workflow(issue path): Claude uses immutable model",
+            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
         )
 
     check(
@@ -2142,10 +2143,11 @@ def test_triage_workflow_security_wiring():
             and "card is no longer queued for this auto-triage attempt" in run,
         )
 
-    claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
+    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
     # Two MAIN triage branches plus the bounded schema-repair branch.
-    main_claude = [s for s in claude_steps if s.get("id") != "claude_repair"]
-    repair = step_by_id(steps, "claude_repair")
+    main_claude = [s for s in claude_steps if s.get("id") != "triage_repair"]
+    repair = step_by_id(model_steps, "triage_repair")
     check(
         "workflow: search and no-search Claude branches exist", len(main_claude) == 2
     )
@@ -2157,8 +2159,8 @@ def test_triage_workflow_security_wiring():
             step.get("uses") == CLAUDE_ACTION_PIN,
         )
         check(
-            "workflow: Claude uses Sonnet alias",
-            "--model sonnet" in str((step.get("with") or {}).get("claude_args", "")),
+            "workflow: Claude uses immutable model",
+            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
         )
         check(
             "security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped
@@ -2200,8 +2202,8 @@ def test_triage_workflow_security_wiring():
             and "READONLY_TOKEN" not in yaml.safe_dump(repair),
         )
 
-    search = next(s for s in claude_steps if s.get("id") == "claude_search")
-    legacy = next(s for s in claude_steps if s.get("id") == "claude")
+    search = next(s for s in claude_steps if s.get("id") == "triage_search")
+    legacy = next(s for s in claude_steps if s.get("id") == "triage_local")
     check(
         "security: search branch receives READONLY_TOKEN only",
         search.get("env", {}).get("GH_TOKEN") == "${{ secrets.READONLY_TOKEN }}"
@@ -2211,7 +2213,7 @@ def test_triage_workflow_security_wiring():
     check(
         "security: legacy branch has no shell and no GH_TOKEN env",
         "Bash" not in str((legacy.get("with") or {}).get("claude_args", ""))
-        and "env" not in legacy,
+        and "GH_TOKEN" not in (legacy.get("env") or {}),
     )
     check(
         "workflow: prompt marks target content as untrusted",
@@ -2257,10 +2259,11 @@ def test_triage_workflow_security_wiring():
         env = yaml.safe_dump(preserve.get("env", {}))
         run = str(preserve.get("run", ""))
         check(
-            "workflow: triage result captures either Claude execution file",
+            "workflow: triage result consumes normalized Claude AgentResult",
             "EXECUTION_FILE" in env
-            and "steps.claude_search.outputs.execution_file" in env
-            and "steps.claude.outputs.execution_file" in env,
+            and "steps.claude-model.outputs.result" in env
+            and "steps.claude_search.outputs.execution_file" not in env
+            and "steps.claude.outputs.execution_file" not in env,
         )
         check(
             "workflow: triage result uses trusted shell PATH",
@@ -2375,18 +2378,11 @@ def test_triage_workflow_security_wiring():
     install_i = step_index(steps, lambda s: s.get("name") == "Install deps")
     preserve_i = step_index(steps, lambda s: s.get("id") == "triage-result")
     update_i = step_index(steps, lambda s: s.get("name") == "Update the decision card")
-    claude_indexes = [
-        i for i, s in enumerate(steps) if "claude-code-action" in str(s.get("uses", ""))
-    ]
+    claude_indexes = [step_index(steps, lambda s: s.get("id") == "claude-model")]
     # The original triage-result handoff must run after the MAIN triage turns;
     # the bounded schema-repair turn deliberately runs AFTER it (it consumes the
     # handoff's delivered result to decide whether repair is needed).
-    main_claude_indexes = [
-        i
-        for i, s in enumerate(steps)
-        if "claude-code-action" in str(s.get("uses", ""))
-        and s.get("id") != "claude_repair"
-    ]
+    main_claude_indexes = claude_indexes
     check(
         "workflow: trusted source is prepared before Claude",
         trusted_i is not None

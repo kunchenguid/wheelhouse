@@ -39,8 +39,17 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ```
 
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
-Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
-All three LLM features can also use an optional `READONLY_TOKEN` for scoped read-only search across the target repo and configured fleet repos.
+Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
+All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through the scoped read-only production search path.
+The disabled Codex adapter keeps that credential in a typed host broker instead of exposing it to the model worker.
+The current production selection is the exact pinned direct Claude Action implementation, executed in a separate read-only model workflow from a bounded content-addressed task handoff.
+Its runtime proof records the observed read-only job, verified artifact, exact action tools, local no-remote repository, controller cancellation, and bounded transcript boundary without claiming the stronger disabled Codex worker sandbox.
+Unenforceable Claude provider budgets and the exact end-to-end hard deadline are explicit unavailable values, while bounded dispatch and child-job timeouts plus a durable conservative spend checkpoint constrain each direct invocation.
+Claude is the named production primary across every action selection.
+Codex CLI app-server remains disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.
+OpenCode with Z.AI Coding Plan is a deferred disabled candidate only, with no adapter or credential request authorized in this phase.
+No alternative provider is an active target or fallback.
+See [Agent runtime operations](docs/AGENT_RUNTIME.md) for selection, provenance, failure recovery, and the provider-neutral adapter boundary.
 When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
 For auto triage and deep review, trusted rendering also preserves known claude-code-action harness polling/status transcript lines but prefixes them with `[automated status]` so they are visible as metadata instead of review substance.
 When auto triage will run for a newly created PR-review or issue-triage card, Wheelhouse holds the card under `pending-triage` and publishes the decision boxes only after that first attempt records a result or an unavailable note.
@@ -189,9 +198,14 @@ Only you can mint it (it's tied to your account).
 
 That is the only secret the deterministic machine needs.
 
-### 4. (Optional) Add the Claude token for the LLM features
+### 4. (Optional) Add the Claude production token for agent-assisted features
 
 Skip this for the deterministic machine.
+The direct Claude Action is the explicit production selection behind the shared action boundary.
+Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate model workflow has read-only permissions and returns only a bounded transcript for contract normalization.
+Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
+Do not add credentials for disabled or deferred provider candidates.
+See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider selection.
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
 Auto triage and deep review keep their action prompts independent of target size by writing fetched target content to runner files for Claude to read; PR diffs are bounded to 1,500,000 bytes on disk instead of being embedded in the action input.
 
@@ -214,19 +228,19 @@ Auto triage and deep review keep their action prompts independent of target size
   There is **no flag** - it runs whenever you trigger it, as long as the token is set.
   With the token missing it posts a one-line "needs token" note on the card so you know why nothing ran.
   With an optional public-read `READONLY_TOKEN`, it can use the same scoped `wheelhouse-search` wrapper for advisory related-work and code context.
-  Without `READONLY_TOKEN`, it keeps the legacy no-shell, Read/Grep/Glob-only behavior.
+  Without `READONLY_TOKEN`, it keeps the production no-shell, Read/Grep/Glob-only behavior.
 - **`nl_decisions` (opt-in)** - reply to a decision card in plain English and Claude maps it onto the existing actions (see [Daily use](#daily-use)).
   This one stays inert until `nl_decisions: true` **and** the token is present.
   With an optional public-read `READONLY_TOKEN`, its answer mode can search the target repo and configured fleet repos through a read-only `gh` wrapper.
-  Without `READONLY_TOKEN`, it keeps the legacy no-shell behavior.
+  Without `READONLY_TOKEN`, it keeps the production no-shell behavior.
 
 To set it up:
 
 1. Generate a **Claude subscription** token (requires a Claude Pro/Max subscription): run `claude setup-token` in the Claude Code CLI.
    This is **not** an Anthropic API key - the workflows authenticate `anthropics/claude-code-action` with your subscription only.
-   The workflows pin `anthropics/claude-code-action` to `v1.0.161` at `fad22eb3fa582b7357fc0ea48af6645851b884fd` and pass `--model sonnet` to every Claude step.
+   The workflows pin `anthropics/claude-code-action` to `v1.0.161` at `fad22eb3fa582b7357fc0ea48af6645851b884fd` and pass immutable `--model claude-sonnet-4-6` to every Claude step.
    The pinned action resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`.
-   Claude Code documentation says that on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
+   Trusted preflight and post-action bridge steps validate `AgentTask`, observed model identity, and atomic `AgentResult` before deterministic consumers run.
 2. Add it as an Actions secret named exactly `CLAUDE_CODE_OAUTH_TOKEN`.
 3. Optional: set `auto_triage: false` and/or `auto_triage_issues: false` in `wheelhouse.config.yml` if you do not want automatic PR-card or issue-card triage to spend Claude turns.
 4. For the plain-English path, also set `nl_decisions: true` in `wheelhouse.config.yml`.
@@ -234,7 +248,7 @@ To set it up:
    Scope it for public read only and give it no write permissions.
 
 In every case Claude only treats trusted workflow prompts and owner/maintainer-authored text as instructions; the target diff/issue/code and optional search output are untrusted data, and it never receives `FLEET_TOKEN`.
-When `READONLY_TOKEN` is absent, `nl_decisions` runs with the `Write` tool only, no shell tools, and no model `GH_TOKEN`.
+When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob/Write, no shell tools, and no model `GH_TOKEN`.
 Auto triage and deep review's no-token branches run with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 When `READONLY_TOKEN` is present, search-enabled Claude steps receive it as GitHub CLI credentials for the scoped search wrapper.
 Auto triage's GitHub write is the workflow-owned card edit, deep review's GitHub write is the workflow-owned card comment, `nl_decisions` actions are performed by the deterministic handler, and `READONLY_TOKEN` never authorizes an action.
@@ -283,9 +297,9 @@ You drive the queue three ways - whichever fits the decision:
   It never appears on CI-approval cards or maps to `/approve-ci`.
   If the accepted recommendation is a non-terminal action such as `comment`, `request-changes`, or `investigate`, the card stays open just as it would for that direct action.
 - **Want a deeper look first? - tick *Investigate*.** PR-review and issue-triage cards also offer an *Investigate - deep code-grounded review* box.
-  It is the one tick that **does not consume the card**: it kicks off a code-grounded deep review, captures Claude's final response from the action output, posts that merit/triage verdict as a comment, and leaves the card open with the box cleared, so you can investigate again after new commits and still make your real call afterwards.
+  It is the one tick that **does not consume the card**: it kicks off a code-grounded deep review, normalizes Claude's final response into `AgentResult`, posts that merit/triage verdict as a comment, and leaves the card open with the box cleared, so you can investigate again after new commits and still make your real call afterwards.
   (CI-approval cards don't offer it - that's a fast security gate, not a merit review.)
-  It needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)); without it the card just gets a one-line "needs token" note.
+  Under the current production selection it needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)); without it the card just gets a one-line "needs token" note.
   The repo owner can also apply the `needs-deep-review` label by hand or run the `deep-review` workflow from Actions with only the card issue number; those manual paths parse the current card body before resolving the target.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
   - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
@@ -302,7 +316,7 @@ You drive the queue three ways - whichever fits the decision:
     Security note: a "changes requested" review can put the target PR into a merge-blocked state under branch-protection required-reviews - a slightly larger effect on the target repo than the comment-only path.
     It is a GitHub PR review, not a terminal card decision: submitting more than one just posts another GitHub review (allowed by the API, but noisy), so treat it as one review per push cycle rather than something you repeat.
     If `pending_contributor_cleanup` is enabled for that repo, a successful `/request-changes` also writes a hidden target-side marker and pending label so the scheduled scan can remind once and later close if the contributor never follows up.
-- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
+- **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
     It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card after a successful terminal decision like merge/close/decline, leaving it open for a non-terminal one like comment/request-changes, or marking it `blocked` after a non-retryable action error.
@@ -461,8 +475,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
   It cannot run arbitrary `gh` or `git` commands.
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
-  For `nl_decisions`, every action-shaped result is re-validated against the per-kind allowlist before the deterministic handler acts, and the workflow preserves only `decision.json` before routing/executing from a read-only trusted source copy.
-  For deep review, the trusted workflow posts the action-output verdict and no deterministic downstream step reads model-written files.
+  For `nl_decisions`, every action-shaped result is normalized into `AgentResult` and re-validated against the per-kind allowlist before the deterministic handler acts.
+  For deep review, the trusted workflow posts only the verdict extracted from a validated `AgentResult`; no deterministic downstream step reads raw model output or model-written files.
 - **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.
   Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
   The model cannot redirect that slug by naming a repo in its output, and the deterministic rewrite is the guarantee even though the prompts also ask for fully-qualified refs.
@@ -470,11 +484,11 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The render-version sweep also re-applies the ref rewrite and automated-status labels to preserved cached `Triage` sections in card bodies; it does not rewrite already-posted card comments.
 - **Deep review is code-grounded but sandboxed.** To review the real code, deep review checks out the target repo into the runner using `FLEET_TOKEN` - but only for the clone, with `persist-credentials: false`, so **no token is ever written to disk**.
   The Claude step that follows never gets `FLEET_TOKEN`.
-  Without `READONLY_TOKEN`, it gets this repo's token and is restricted to **read-only** tools (`Read`/`Grep`/`Glob`) with **no shell**.
+  Without `READONLY_TOKEN`, the action receives this repo's downscoped token as its required GitHub input, while subprocess isolation removes that credential from the model process; Claude is restricted to **read-only** tools (`Read`/`Grep`/`Glob`) with **no shell**.
   With `READONLY_TOKEN`, it gets only that read token for GitHub CLI credentials, may write only the `search-request.json` request file, and may run only `wheelhouse-search` for scoped read-only lookup.
   It cannot build, test, install, or otherwise execute the target's code.
   Because Investigate dispatches this workflow with `github.token`, the Claude action allows only `github-actions[bot]` as a bot actor; wildcard or external bot actors are not allowed.
-  The workflow captures Claude's final response from the action output, then posts the verdict from a read-only trusted source snapshot with a scrubbed environment and the default token.
+  The workflow validates and normalizes Claude's final response into `AgentResult`, then posts the extracted verdict from a read-only trusted source snapshot with a scrubbed environment and the default token.
   So a malicious PR that tries to prompt-inject through its own source can at worst produce a wrong verdict comment - never run code or exfiltrate a secret.
   The Investigate trigger is owner/maintainer-gated like every other acting path, while direct manual label and issue-only workflow runs remain repo-owner-only.
 - **Public = world-readable.** A public Wheelhouse repo makes your queue and decisions visible to everyone. That transparency is a feature, but state it plainly to yourself before listing private work here; use a private repo if you need it.
@@ -552,8 +566,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   If plain-English answers work but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the answer path intentionally has no shell or search access.
 - **Deep review does nothing.**
   It has no enable flag - it only needs `CLAUDE_CODE_OAUTH_TOKEN`.
-  If that secret is missing, the card gets a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of a verdict; add the secret (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)).
-  If deep review runs but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the workflow intentionally keeps the legacy no-shell, no-search posture.
+  If that secret is missing, the card gets a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of a verdict; add the secret (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)).
+  If deep review runs but cannot inspect related work across repos, add the optional `READONLY_TOKEN`; without it the workflow intentionally keeps the production no-shell, no-search posture.
   If the card says "Deep review ran but produced no verdict", the workflow could not extract usable output from Claude's action log and the run fails intentionally; check the **deep-review** workflow logs.
   For direct verification, the repo owner can run **Actions** ▸ **deep-review** ▸ **Run workflow** with just the decision-card issue number; the workflow fetches the current card body before resolving the target.
   If you ticked *Investigate* and nothing happened at all, confirm you're the repo owner or configured `maintainer` and check the **deep-review** workflow run in the Actions tab.

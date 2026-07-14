@@ -561,20 +561,23 @@ still appears where it's plain English, e.g. "triage the queue".)
   removed from the trusted card context before the NL prompt is built, so a prior
   model recommendation cannot become an instruction to the intent-mapper.
   When `READONLY_TOKEN` is absent, the LLM receives
-  `Read,Grep,Glob,Write` and no shell `GH_TOKEN`. When the
+  `Read,Grep,Glob,Write` and no GitHub credential. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
   `GH_TOKEN`, plus a narrow Bash allow-list for `wheelhouse-search`, which wraps
   scoped read-only `gh` lookups across the target repo and configured fleet
-  repos. This is deliberate because
-  `claude-code-action` exposes its `github_token` input to Claude's subprocess as
-  GitHub CLI credentials.
+  repos.
+  The pinned action's subprocess isolation removes the trusted job's default
+  GitHub token before model execution, so only the explicitly selected
+  read-only search credential can cross that boundary.
   Search output is UNTRUSTED DATA for answering questions only, never an
   instruction and never an authorization to act.
   The LLM never receives `FLEET_TOKEN` - it maps intent or answers, it never acts.
-  After Claude runs, the workflow copies only a regular, size-capped
-  `decision.json` into runner temp, then runs `nl-route` and `execute` from a
-  read-only trusted source copy with a scrubbed environment.
+  After Claude runs, the trusted bridge validates a regular, size-capped
+  `decision.json`, observed model identity, and the output schema before it
+  atomically emits `AgentResult`; `nl-route` and `execute` consume only that
+  normalized result from a read-only trusted source copy with a scrubbed
+  environment.
 - Token discipline per step: scan/execute and the read-only target reads for the
   LLM (`triage` prepare + target-code checkout, `deep-review` prepare + its target-code checkout, decision-handler
   `nl-fetch`) use `FLEET_TOKEN`; all
@@ -613,7 +616,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `head_sha` from the tick event, and `deep-review.yml` uses those immutable
   inputs for bot-dispatched runs instead of re-reading the mutable card body.
   Owner-triggered `workflow_dispatch` can also be run with only `issue=...` for direct verification; that path fetches and parses the current card body with `github.token`.
-  The Claude action has `allowed_bots: github-actions[bot]` for the decision-handler dispatch only, because otherwise `anthropics/claude-code-action` rejects the `github.token`-dispatched bot run before it emits `execution_file`.
+  Every direct Claude action in the separately permissioned model workflow has `allowed_bots: github-actions[bot]`, because the trusted parent dispatch makes that bot the exact child-workflow actor and the action otherwise rejects the run before it emits `execution_file`.
   Keep that allow-list exact - never `*` and never an external bot actor.
   The manual `needs-deep-review` label path is unchanged (a human applying it raises the `labeled` event normally) and remains a card-body parse path in `deep-review.yml`, alongside owner-triggered issue-only `workflow_dispatch` verification runs.
   This is a deliberate asymmetry: the manual label and issue-only workflow-dispatch paths authorize only the repository owner.
@@ -1110,13 +1113,25 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 ## LLM side-jobs
 
-Three independent LLM features share the same auth (a Claude **subscription** token
-from `claude setup-token` via `anthropics/claude-code-action` - NOT an Anthropic
-API key) and the same injection model (only trusted workflow prompts and
-owner/maintainer-authored text are instructions; target content and optional
-search output are delimited untrusted data; the LLM never gets `FLEET_TOKEN`):
-Every `anthropics/claude-code-action` LLM step is pinned to `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes `--model sonnet`.
-The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
+All agent-assisted paths now share Agent Runtime Contract `wheelhouse.agent-runtime/v1alpha1` as the provider-portability boundary.
+The contract, action schemas, pinned Codex app-server protocol, capability negotiation, canonical tools, brokers, sandbox supervisor, adapters, consumers, and tests live under `agent_runtime/`, with the trusted CLI at `scripts/agent_runtime.py` and operator runbook at `docs/AGENT_RUNTIME.md`.
+Claude is the named production primary, and every action resolves `target: claude` to the exact pinned direct Claude Action profile.
+Codex CLI `0.144.0` app-server remains implemented and tested only as disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription path.
+No Codex secret is requested, no action targets Codex, and current selection cannot reach a Codex workflow installation path.
+Provider environment overrides are rejected; secret presence cannot select a provider, model, effort, billing path, or stronger tool policy.
+OpenCode with Z.AI Coding Plan is a deferred disabled candidate only; no adapter, provider call, credential request, target, fallback, or provider-specific runtime-core policy is authorized in this phase.
+Fallback remains disabled.
+
+The seven current direct Claude Action invocations are the explicit production adapter path behind the unified selection boundary.
+They run only in the separately permissioned `claude-model.yml` workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
+Every direct step is conditional on the resolved Claude mode, and no provider failure can trigger a different adapter.
+Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
+Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
+Trusted preflight builds an immutable `AgentTask`, and the post-action bridge requires the execution transcript's observed `system/init.model` to match before it emits an atomic `AgentResult`.
+The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, verifies the complete handoff into a fresh workspace, and enables the pinned action's subprocess isolation.
+Trusted parent jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary, supervise the hard deadline, and normalize only a task-bound transcript plus observed enforcement record.
+
+The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.
 
 - **`triage.yml` - automatic, lightweight, advisory PR-card OR issue-card context.** Triggered by `scan-backstop` / `reconcile.py` and the ingest fast path for pure `needs-decision` pr-review OR issue-triage cards whose current revision (a PR's `head_sha`, or an issue's `updated_at`) does not match `triaged_sha`; if the card is held under `pending-triage`, the update path also publishes its real checkboxes fail-open.
   pr-review is opt-out through `auto_triage`; issue-triage is opt-out through the INDEPENDENT `auto_triage_issues` - both global default true, per-repo override allowed, and both inert unless `CLAUDE_CODE_OAUTH_TOKEN` is present. Neither flag affects the other.
@@ -1144,14 +1159,15 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   Bot-dispatched Investigate runs use the immutable target inputs passed by `decision-handler.yml`; owner issue-only runs and manual label runs parse the current card body with `github.token`.
   It checks out the TARGET's code read-only (`FLEET_TOKEN`, `persist-credentials: false`, the PR head for a review card / the default branch for an issue card) and runs Claude restricted to `--allowedTools Read,Grep,Glob` over that checkout when search is disabled - so it traces real code paths, never just the diff, and can NEVER execute the target's code.
   It uses the same pass-by-reference prompt invariant as `triage.yml`; only the bounded decision-card body remains inline.
-  When `READONLY_TOKEN` is absent, this remains the legacy no-search path: no shell `GH_TOKEN`, no Bash tool, and `github_token: github.token`.
+  When `READONLY_TOKEN` is absent, this remains the production no-search path: no shell `GH_TOKEN`, no Bash tool, and `github_token: github.token`.
   When `READONLY_TOKEN` is present, Claude also uses that read-only public-scoped token as both the action `github_token` input and shell `GH_TOKEN`, plus `Write` for `search-request.json` and `Bash(wheelhouse-search)`.
   The wrapper is still the existing `scripts/nl_readonly_search.py` install path, scoped to the target repo plus configured fleet repos, so deep-review can cross-reference related, duplicate, or superseding PRs/issues and code context.
   Search output is UNTRUSTED DATA and advisory evidence only; the model still produces only verdict text, and `FLEET_TOKEN` never reaches it.
-  No deterministic downstream step reads model-written files because verdict capture uses the action `execution_file` result event.
+  No deterministic downstream step reads raw model output because the trusted bridge validates the action `execution_file` and exposes only `AgentResult`.
   Claude does not write a verdict file.
   The Claude action allows only `github-actions[bot]` as a bot actor so the maintainer-gated Investigate dispatch can pass; it must not allow `*` or any external bot actor.
-  Its final response is captured from the action's `execution_file` output by preferring the clean `type: "result"` event's `result` string, falling back to the last assistant text, and the trusted workflow step labels known harness polling/status transcript lines, qualifies target refs, then posts that text as a card comment with `github.token`.
+  Its final response is captured by the trusted bridge from the action's `execution_file`, after exact observed-model validation, by preferring the clean `type: "result"` event's `result` string and falling back to the last assistant text.
+  The deterministic consumer then labels known harness polling/status transcript lines, qualifies target refs, and posts that text as a card comment with `github.token`.
   If no usable output is present, the workflow posts "Deep review ran but produced no verdict (see the workflow run logs)." and fails the run.
   The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of silently no-opping.
   Manual triggering means there is no runaway-cost reason for a config flag, so the old `deep_review` flag was removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.
@@ -1160,7 +1176,7 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   Opt-in: inert unless `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN`
   present.
   `READONLY_TOKEN` is optional.
-  If it is absent, Claude stays in the legacy no-shell mode
+  If it is absent, Claude stays in the production no-shell mode
   (`--allowedTools Read,Grep,Glob,Write`), writes only `decision.json`, has no
   `GH_TOKEN`, and runs no commands.
   If it is present, Claude also uses `READONLY_TOKEN` as the action
@@ -1216,8 +1232,9 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 ## Validation
 
 No build step.
-Validate with `python -m py_compile scripts/*.py tests/*.py`.
+Validate with `python -m py_compile agent_runtime/*.py agent_runtime/adapters/*.py scripts/*.py tests/*.py`.
 Run the unit tests:
+- `python tests/test_agent_runtime_contract.py`, `test_agent_runtime_capabilities.py`, `test_agent_runtime_security.py`, `test_agent_runtime_lifecycle.py`, `test_agent_runtime_consumers.py`, and `test_agent_runtime_workflows.py` - offline Agent Runtime Contract v1 coverage for strict schemas and hashing, fail-before-spend negotiation, the pinned disabled Codex app-server protocol evidence, exact typed tools and external sandbox boundary, redaction, cancellation and process-group cleanup, malformed/missing/delivered results, all action-profile consumers, and explicit Claude production selection wiring with fallback disabled.
 - `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the pre-merge workflow-touch gate (it inspects net-diff + history `.github/workflows/**`, checks both sides of a rename, returns terminal `blocked` with manual UI-merge guidance, fails closed on incomplete reads, and does not Workflows-gate action.yml), the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again. Also covers `request-changes`: it is pr-review-only in `ALLOWED` (not ci-approval/issue-triage) and, unlike `investigate`, IS in `nl_allowed`; `/request-changes <text>` and its `/request_changes` alias slash-parse to the action with the text as free_text (and parse to nothing without text, or when the card's kind doesn't allow it); the `decision:request-changes` label path is ignored because labels cannot carry review text; `route_decision` drives `execute` for a well-formed request-changes action, downgrades to `clarify` when `free_text` is missing or the kind disallows it, and the built NL prompt lists `request-changes` with its judgment guidance for pr-review only; and `do_request_changes` (mocked `gh_rest`) posts exactly one `POST .../pulls/{n}/reviews` with `{"body": text, "event": "REQUEST_CHANGES"}` and a `"none"` (card-stays-open) terminal state, refuses with a clear error (no API call) when the PR author is the repo owner, rejects blank review text before any API call, surfaces a raw API failure as an `"error"` terminal state, and only arms pending-contributor cleanup when config/targets allow it and the target author is a non-maintainer human.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
@@ -1234,7 +1251,7 @@ Run the unit tests:
 - `python tests/test_nl_prompt_size.py` - offline guards for the bounded pass-by-reference NL prompt, tool isolation, explicit target truncation, and marker-keyed failure note.
 - `python tests/test_triage_result_delivery.py` - card #556 delivered-result-drop regression, no network: a >256KiB Claude transcript that ends in a valid successful `result` event still delivers its verdict (`extract_result_to_file` returns a bounded compact file that flows through `extract_claude_result`->`parse_triage_json`->`normalize_triage`->the visible `### Triage` section with `triage_status:succeeded`), the CLI `extract-result` round-trips and exits non-zero when no result exists, and static YAML checks that `triage.yml`'s `triage-result` step extracts via `render_card.py extract-result` BEFORE the 262144 gate (so the size cap bounds only the retained `transcript.json` copy, never `result_path`) plus the audit that `deep-review.yml` never had a size-cap execution-file drop.
 - `python tests/test_triage_schema_repair.py` - cards #551/#547 bounded schema-repair, no network: the TRIGGER discipline (`plan_triage_repair`/`decide_triage_apply` repair a DELIVERED-but-invalid result, but NEVER a missing result - E2BIG/auth/rate-limit/infra - nor an evidence-anchor failure, and a valid result is untouched); success-on-repair (invalid candidate -> valid repair -> the card gets a real `### Triage` section, `triage_status:succeeded`, and `triage_repair_status:repaired`); the repair-failure cap (still-invalid repair, no repair output, or a repair whose evidence no longer anchors all land on the visible triage-unavailable error carrying the STRUCTURAL reason with `triage_repair_status:repair-failed`, exactly one attempt); `triage_schema_reason` being purely structural (field name + defect, never a field value) so no target/comment content leaks into the persisted `triage_error`/`triage_repair_reason` or card body; `build_repair_prompt` naming every required schema field in lockstep with `normalize_triage`, embedding the candidate, byte-bounding a pathological candidate, and forbidding file reads/re-analysis; the NON-MATERIAL telemetry keys (`triage_repair_status`/`triage_repair_reason` absent from `MATERIAL_FIELDS`, a repaired success differing from a normal success ONLY by those two keys, and a later non-repair write clearing them); the `triage-repair-prep` CLI emitting `repair_needed`/`reason`/`repair_prompt` to `$GITHUB_OUTPUT`; the `triage-apply --repair-execution-file` CLI end-to-end with mocked card I/O; and static `triage.yml` wiring (repair-prep -> claude_repair -> repair-result ordered after triage-result and before the card update, the repair turn tokenless with `--max-turns 1`, an empty `--allowedTools`, and a fail-closed `permissions.deny` tool set, gated on `repair_needed`, pass-by-reference with no inlined target content).
-- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
+- `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, normalized `AgentResult` verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
 - `python tests/test_scan_reliability.py` - the card #411 scan reliability + correctness hardening, no network: `_gh_graphql_data` retry/backoff (transient-vs-fatal classification, recover-after-5xx, exhaust-then-raise, non-transient fails-fast, transient GraphQL `errors` and unparseable bodies retried, bounded/growing backoff with `_sleep` stubbed); small-page cursor pagination (`_page_open_prs` multi-page assembly and mid-page failure propagating so `build_repo` marks `truncated`); the fleet-scan health ledger (`parse_scan_health`/`update_scan_health`/`render_scan_health_body` increment/reset/carry-forward/legacy-int, and `cmd_scan_health` emitting `::error::` + non-zero exit past threshold, staying green otherwise, and failing OPEN on missing scan.json or ledger I/O error); and the UNKNOWN-mergeability policy (`_settle_mergeable` poll-first-conclusive/fail-open, `_resolve_pr_bucket` polling an explicit `UNKNOWN` and returning `needs-rebase` on settled CONFLICTING / `merge-ready` on settled MERGEABLE / `MERGEABILITY_PENDING` when it never settles, no poll for a known-MERGEABLE PR, plus `build_repo` integration: UNKNOWN->CONFLICTING nudges with no card, UNKNOWN->MERGEABLE emits a merge-ready card, unsettled UNKNOWN emits no item and lands in `indeterminate_pr_numbers` with no nudge, and the #111 acceptance that a statically-conflicting PR never enters the worklist across readable-CONFLICTING and post-base-push-UNKNOWN scans). The reconcile freeze of an `indeterminate_pr_numbers` card (no close, no refresh) and the unchanged non-indeterminate soft-close live in `tests/test_reconcile.py`.
@@ -1243,9 +1260,10 @@ Run the unit tests:
 - `python tests/test_automerge_card_ui.py` - authoritative auto-merge criterion UI, no network: every stable row's positive and fail-closed negative state, owner/bot/history distinctions, workflow/security exclusions, dirty/unknown mergeability and checks, verdict freshness and A/B/C details, blast limits, held/claimed card state, the real axi#96 shape through evaluator and renderer, old-card fallback, criterion-only refresh, and proof that persisted display rows cannot grant eligibility.
 - `python tests/test_automerge_workflow_hold.py` - durable history-only workflow manual-merge hold, no network: the real two-hour claim/validate/act/record/reconcile lifecycle, structured final-gate evidence, same-head no-reclaim behavior, G7 `UNMET` presentation, clean and still-dirty new heads, G2 net-diff separation, unreadable/incomplete fail-closed paths, malformed/stale state, persistence recovery, same-head maintenance and trusted reuse, immediate hard close, and default-card-token isolation.
 YAML-parse `.github/workflows/*.yml` plus `wheelhouse.config.yml` plus `.github/ISSUE_TEMPLATE/*.yml`.
-Run `actionlint` if available; fetch the binary via its `download-actionlint.bash` if not.
+Run `actionlint` if available.
 The live LLM paths (auto triage, deep-review, nl_decisions) can only be exercised end-to-end in CI with the token set and, for nl_decisions, the flag on.
-Secrets the maintainer must add: `FLEET_TOKEN` always, `CLAUDE_CODE_OAUTH_TOKEN` for auto triage/deep-review and/or nl_decisions, and optionally `READONLY_TOKEN` public-read only for auto triage, nl_decisions, and deep-review search.
+Secrets the maintainer must add for the current production selection: `FLEET_TOKEN` always, `CLAUDE_CODE_OAUTH_TOKEN` for auto triage/deep-review and/or nl_decisions, and optionally `READONLY_TOKEN` public-read only for auto triage, nl_decisions, and deep-review search.
+Do not add a Codex credential under the current Pro plus public-repository topology; `docs/AGENT_RUNTIME.md` owns the activation prerequisites.
 
 ## Maintaining this file
 

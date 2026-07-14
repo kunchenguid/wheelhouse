@@ -496,6 +496,7 @@ def test_cli_triage_apply_repair_end_to_end():
 def test_triage_yml_repair_wiring():
     doc = yaml.safe_load(read(".github", "workflows", "triage.yml"))
     steps = doc["jobs"]["triage"]["steps"]
+    model_steps = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
     ids = [s.get("id") for s in steps]
 
     def idx(pred):
@@ -506,12 +507,12 @@ def test_triage_yml_repair_wiring():
 
     tr_i = idx(lambda s: s.get("id") == "triage-result")
     prep_i = idx(lambda s: s.get("id") == "repair-prep")
-    rep_i = idx(lambda s: s.get("id") == "claude_repair")
+    rep_i = idx(lambda s: s.get("id") == "claude-repair-model")
     res_i = idx(lambda s: s.get("id") == "repair-result")
     upd_i = idx(lambda s: s.get("name") == "Update the decision card")
 
     check("yaml: repair-prep step exists", "repair-prep" in ids)
-    check("yaml: claude_repair step exists", "claude_repair" in ids)
+    check("yaml: Claude repair model boundary exists", "claude-repair-model" in ids)
     check("yaml: repair-result step exists", "repair-result" in ids)
     check(
         "yaml: repair runs AFTER triage-result and BEFORE the card update",
@@ -528,13 +529,14 @@ def test_triage_yml_repair_wiring():
         "cat target.txt" not in prun and "gh pr diff" not in prun,
     )
 
-    rep = steps[rep_i]
+    rep = next(s for s in model_steps if s.get("id") == "triage_repair")
     repw = rep.get("with", {})
     dumped = yaml.safe_dump(rep)
-    check("yaml: claude_repair gated on repair_needed", "steps.repair-prep.outputs.repair_needed == 'true'" in str(rep.get("if", "")))
+    boundary = steps[rep_i]
+    check("yaml: Claude repair boundary follows its immutable task", "steps.claude-repair-task.outcome == 'success'" in str(boundary.get("if", "")))
     check("yaml: claude_repair is fail-open (continue-on-error)", rep.get("continue-on-error") is True)
     check("yaml: claude_repair uses the pinned action", str(rep.get("uses", "")).endswith("fad22eb3fa582b7357fc0ea48af6645851b884fd"))
-    check("yaml: claude_repair prompt is the prepared repair prompt", repw.get("prompt") == "${{ steps.repair-prep.outputs.repair_prompt }}")
+    check("yaml: Claude repair prompt is hydrated from its AgentTask", repw.get("prompt") == "${{ steps.hydrate.outputs.prompt }}")
     check("yaml: claude_repair is exactly one turn", "--max-turns 1" in str(repw.get("claude_args", "")))
     check("yaml: claude_repair requests an empty allowlist", '--allowedTools ""' in str(repw.get("claude_args", "")))
     settings = str(repw.get("settings", ""))
@@ -545,12 +547,12 @@ def test_triage_yml_repair_wiring():
     check("yaml: claude_repair is tokenless (no FLEET_TOKEN)", "FLEET_TOKEN" not in dumped)
     check("yaml: claude_repair is tokenless (no READONLY_TOKEN)", "READONLY_TOKEN" not in dumped)
     check("yaml: claude_repair allowed_bots stays narrow", repw.get("allowed_bots") == "github-actions[bot]")
-    check("yaml: claude_repair uses sonnet", "--model sonnet" in str(repw.get("claude_args", "")))
+    check("yaml: claude_repair uses immutable model", "--model claude-sonnet-4-6" in str(repw.get("claude_args", "")))
 
     res = steps[res_i]
     rrun = str(res.get("run", ""))
     check("yaml: repair-result extracts via the trusted render_card.py", "extract-result" in rrun)
-    check("yaml: repair-result reads the repair execution file", res.get("env", {}).get("EXECUTION_FILE") == "${{ steps.claude_repair.outputs.execution_file }}")
+    check("yaml: repair-result reads normalized AgentResult", "steps.claude-repair-model.outputs.result" in str(res.get("env", {}).get("RUNTIME_RESULT")))
 
     upd = steps[upd_i]
     check(

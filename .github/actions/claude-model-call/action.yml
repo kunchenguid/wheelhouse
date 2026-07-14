@@ -1,0 +1,112 @@
+name: Claude read-only model call
+description: Transfers an immutable AgentTask to the read-only Claude workflow and normalizes its transcript.
+inputs:
+  task: {required: true}
+  bundle: {required: true}
+  invocation-id: {required: true}
+  allowed-repos: {required: false, default: "[]"}
+  delivered-file: {required: false, default: "false"}
+outputs:
+  result:
+    value: ${{ steps.result.outputs.result }}
+  status:
+    value: ${{ steps.result.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - id: names
+      shell: bash
+      env:
+        INVOCATION: ${{ inputs.invocation-id }}
+      run: |
+        set -euo pipefail
+        suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${INVOCATION}"
+        echo "input=wheelhouse-claude-input-${suffix}" >> "$GITHUB_OUTPUT"
+        echo "output=wheelhouse-claude-output-${suffix}" >> "$GITHUB_OUTPUT"
+        echo "handoff=${RUNNER_TEMP}/wheelhouse-claude-handoff-${INVOCATION}" >> "$GITHUB_OUTPUT"
+        echo "received=${RUNNER_TEMP}/wheelhouse-claude-received-${INVOCATION}" >> "$GITHUB_OUTPUT"
+
+    - id: pack
+      name: Pack bounded content-addressed handoff
+      shell: bash
+      env:
+        TASK: ${{ inputs.task }}
+        BUNDLE: ${{ inputs.bundle }}
+        HANDOFF: ${{ steps.names.outputs.handoff }}
+        ALLOWED_REPOS: ${{ inputs.allowed-repos }}
+      run: |
+        set -euo pipefail
+        python -m agent_runtime.claude_handoff pack \
+          --task "$TASK" --bundle "$BUNDLE" --out "$HANDOFF" \
+          --allowed-repos "$ALLOWED_REPOS"
+
+    - name: Upload immutable model handoff
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.names.outputs.input }}
+        path: ${{ steps.names.outputs.handoff }}
+        if-no-files-found: error
+        retention-days: 1
+
+    - id: dispatch
+      name: Run the separately permissioned model workflow
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TASK: ${{ inputs.task }}
+        BUNDLE: ${{ inputs.bundle }}
+        INPUT_ARTIFACT: ${{ steps.names.outputs.input }}
+        OUTPUT_ARTIFACT: ${{ steps.names.outputs.output }}
+        HANDOFF_SHA256: ${{ steps.pack.outputs.manifestSha256 }}
+        INVOCATION: ${{ inputs.invocation-id }}
+        RECEIVED: ${{ steps.names.outputs.received }}
+        DISPATCH_REF: ${{ github.ref_name }}
+        EXPECTED_SHA: ${{ github.sha }}
+      run: |
+        python scripts/claude_model_dispatch.py \
+          --task "$TASK" --bundle "$BUNDLE" \
+          --input-artifact "$INPUT_ARTIFACT" \
+          --output-artifact "$OUTPUT_ARTIFACT" --invocation-id "$INVOCATION" \
+          --handoff-sha256 "$HANDOFF_SHA256" --dispatch-ref "$DISPATCH_REF" \
+          --expected-sha "$EXPECTED_SHA" --out "$RECEIVED"
+
+    - id: bridge
+      name: Normalize the observed model transcript
+      if: ${{ always() && steps.dispatch.outputs.result_file == '' }}
+      shell: bash
+      env:
+        TASK: ${{ inputs.task }}
+        BUNDLE: ${{ inputs.bundle }}
+        EXECUTION_FILE: ${{ steps.dispatch.outputs.execution_file }}
+        ENFORCEMENT_FILE: ${{ steps.dispatch.outputs.enforcement_file }}
+        DELIVERED_FILE: ${{ steps.dispatch.outputs.delivered_file }}
+        WANT_DELIVERED: ${{ inputs.delivered-file }}
+      run: |
+        set -euo pipefail
+        delivered=()
+        if [ "$WANT_DELIVERED" = "true" ] && [ -n "${DELIVERED_FILE:-}" ]; then
+          delivered=(--delivered-file "$DELIVERED_FILE")
+        fi
+        python scripts/agent_runtime.py bridge-claude \
+          --task "$TASK" --bundle "$BUNDLE" \
+          --execution-file "${EXECUTION_FILE:-}" \
+          --enforcement-file "${ENFORCEMENT_FILE:-}" \
+          --handoff-sha256 "${{ steps.pack.outputs.manifestSha256 }}" \
+          "${delivered[@]}" --result "$BUNDLE/result.json" \
+          --events "$BUNDLE/events.ndjson"
+
+    - id: result
+      name: Select the trusted normalized result
+      if: ${{ always() }}
+      shell: bash
+      env:
+        PARENT_RESULT: ${{ steps.dispatch.outputs.result_file }}
+        BRIDGE_RESULT: ${{ steps.bridge.outputs.result }}
+      run: |
+        set -euo pipefail
+        result="${PARENT_RESULT:-${BRIDGE_RESULT:-}}"
+        test -n "$result"
+        python scripts/agent_runtime.py validate --path "$result" --kind AgentResult
+        status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
+        echo "result=$result" >> "$GITHUB_OUTPUT"
+        echo "status=$status" >> "$GITHUB_OUTPUT"

@@ -14,10 +14,15 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
+# Every primary and repair path resolves through the shared selection boundary
+# to the exact direct Claude Action production implementation.
+# Codex remains disabled non-target adapter evidence, and no runtime failure
+# automatically invokes another provider.
+#
 # Bounded schema repair (cards #551/#547 class): when the model DELIVERS a
 # result that fails parse/normalize schema validation, exactly ONE extra
-# tokenless, no-tool, single-turn Claude step reshapes that candidate to the
-# required schema (no diff re-read, no fresh analysis). The repaired result is
+# tokenless, no-tool, single-turn task reshapes that candidate to the required
+# schema (no diff re-read, no fresh analysis). The repaired result is
 # re-validated; if it is still invalid the card records the visible
 # triage-unavailable error carrying the structural validation reason. A missing
 # result (E2BIG / auth / rate-limit / infra - no extractable result) never
@@ -35,11 +40,11 @@ name: triage
 #   * FLEET_TOKEN is used only for read-only target checkout and target fetches.
 #   * The target checkout uses persist-credentials: false, so FLEET_TOKEN is not
 #     written to disk.
-#   * Claude never receives FLEET_TOKEN.
-#   * Optional search uses READONLY_TOKEN through the unchanged wheelhouse-search
-#     wrapper, and search output is untrusted evidence only.
-#   * The Claude action allows only github-actions[bot] because automatic
-#     dispatches are made with github.token.
+#   * No model process receives FLEET_TOKEN.
+#   * Codex search uses a typed host broker, so the worker receives neither
+#     READONLY_TOKEN nor a shell.
+#   * The Claude production path keeps the unchanged wheelhouse-search
+#     wrapper and the narrow github-actions[bot] actor allowance.
 
 on:
   workflow_dispatch:
@@ -64,6 +69,7 @@ on:
         required: false
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
@@ -118,14 +124,23 @@ jobs:
 
       - id: gate
         env:
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
+          INPUT_KIND: ${{ github.event.inputs.kind }}
+          INPUT_REPO: ${{ github.event.inputs.repo }}
         run: |
-          if [ "$HAS_TOKEN" = "true" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ "$INPUT_KIND" = "issue-triage" ]; then
+            action="triage.issue"
           else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "auto triage skipped because CLAUDE_CODE_OAUTH_TOKEN is absent"
+            action="triage.pr"
           fi
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then
+            action="${action}.search"
+          else
+            action="${action}.local"
+          fi
+          python scripts/agent_runtime.py auth-status --action "$action" --repo "$INPUT_REPO"
 
       - id: resolve
         if: steps.gate.outputs.enabled == 'true'
@@ -518,49 +533,148 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
-          WHEELHOUSE_SEARCH_TOOL_DIR: ${{ runner.temp }}/wheelhouse-tools
-        run: python scripts/nl_readonly_search.py install
+        run: echo "repos=$(python scripts/nl_readonly_search.py scope)" >> "$GITHUB_OUTPUT"
 
-      - id: claude_search
-        name: Claude auto triage (read-only search)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+      - id: claude-task
+        name: Build the immutable Claude triage AgentTask
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          SEARCH: ${{ steps.readonly.outputs.enabled }}
+          VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = "issue-triage" ]; then action="triage.issue"; else action="triage.pr"; fi
+          if [ "$SEARCH" = "true" ]; then action="${action}.search"; else action="${action}.local"; fi
+          repository_commit="$(git -C target-src rev-parse HEAD)"
+          vision_args=()
+          if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then vision_args=(--vision-file vision.md); fi
+          python scripts/agent_runtime.py build-task \
+            --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
+            --repository-dir target-src --repository-commit "$repository_commit" \
+            "${vision_args[@]}"
+
+      - id: claude-model
+        name: Run Claude triage in the read-only model workflow
+        if: ${{ always() && steps.claude-task.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.claude-task.outputs.task }}
+          bundle: ${{ steps.claude-task.outputs.bundle }}
+          invocation-id: triage
+          allowed-repos: ${{ steps.search-tool.outputs.repos || '[]' }}
+
+      - name: Prepare the pinned Codex sandboxed adapter worker
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          CODEX_PREFIX: ${{ runner.temp }}/wheelhouse-codex
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          case "$(uname -m)" in
+            x86_64) platform="linux-x64" ;;
+            aarch64|arm64) platform="linux-arm64" ;;
+            *) echo "::error::unsupported Codex runner architecture"; exit 1 ;;
+          esac
+          platform_package="@openai/codex@0.144.0-${platform}"
+          tarball_dir="${RUNNER_TEMP}/wheelhouse-codex-tarballs"
+          mkdir -p "$tarball_dir"
+          tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" @openai/codex@0.144.0)"
+          platform_tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" "$platform_package")"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --platform "$platform" --platform-package "$platform_package" --tarball "$tarball" --platform-tarball "$platform_tarball"
+          npm install --offline --ignore-scripts --omit=optional --no-audit --no-fund --prefix "$CODEX_PREFIX" "$tarball"
+          platform_dir="$CODEX_PREFIX/node_modules/@openai/codex-${platform}"
+          mkdir -p "$platform_dir"
+          tar -xzf "$platform_tarball" --strip-components=1 -C "$platform_dir"
+          echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
+          "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
+          python scripts/agent_runtime.py verify-pins
+
+      - id: agent-runtime-task
+        name: Build the immutable triage AgentTask
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          SEARCH: ${{ steps.readonly.outputs.enabled }}
+          VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = "issue-triage" ]; then
+            action="triage.issue"
+          else
+            action="triage.pr"
+          fi
+          if [ "$SEARCH" = "true" ]; then
+            action="${action}.search"
+          else
+            action="${action}.local"
+          fi
+          repository_commit="$(git -C target-src rev-parse HEAD)"
+          vision_args=()
+          if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then
+            vision_args=(--vision-file vision.md)
+          fi
+          python scripts/agent_runtime.py build-task \
+            --action "$action" \
+            --prompt prompt.txt \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind "$KIND" \
+            --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --target-file target.txt \
+            --repository-dir target-src \
+            --repository-commit "$repository_commit" \
+            "${vision_args[@]}"
+
+      - id: agent-runtime
+        name: Run triage through the Codex app-server contract
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.agent-runtime-task.outcome == 'success' }}
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.READONLY_TOKEN }}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.READONLY_TOKEN }}
-          allowed_bots: github-actions[bot]
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
-            --max-turns 32
-            --model sonnet
+          READONLY_TOKEN: ${{ steps.readonly.outputs.enabled == 'true' && secrets.READONLY_TOKEN || '' }}
+          BUNDLE: ${{ steps.agent-runtime-task.outputs.bundle }}
+          TASK: ${{ steps.agent-runtime-task.outputs.task }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py run \
+            --task "$TASK" \
+            --bundle "$BUNDLE" \
+            --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
 
-      - id: claude
-        name: Claude auto triage (read-only)
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled != 'true' }}
-        continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_bots: github-actions[bot]
-          prompt: ${{ steps.prepare.outputs.prompt }}
-          claude_args: |
-            --allowedTools Read,Grep,Glob
-            --max-turns 32
-            --model sonnet
+      - name: Record triage runtime provenance
+        if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
+        run: python scripts/agent_runtime.py summary --result '${{ steps.agent-runtime.outputs.result }}'
 
       - id: triage-result
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
         env:
-          EXECUTION_FILE: ${{ steps.claude_search.outputs.execution_file || steps.claude.outputs.execution_file }}
+          EXECUTION_FILE: ${{ steps.claude-model.outputs.result || steps.agent-runtime.outputs.result }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -634,36 +748,128 @@ jobs:
             --execution-file "$ORIG_RESULT" \
             --kind "$KIND"
 
-      - id: claude_repair
-        name: Claude schema repair (ONE bounded turn, tokenless, no tools)
+      - id: repair-gate
+        name: Resolve the schema-repair runtime selection
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.repair-prep.outputs.repair_needed == 'true' }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+        run: python scripts/agent_runtime.py auth-status --action triage.schema-repair --repo "$TARGET_REPO"
+
+      - id: claude-repair-task
+        name: Build the immutable Claude schema-repair AgentTask
+        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
+        env:
+          REPAIR_PROMPT: ${{ steps.repair-prep.outputs.repair_prompt }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
+        run: |
+          set -euo pipefail
+          printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
+          if [ "$KIND" = "issue-triage" ]; then repair_kind="issue"; else repair_kind="pr"; fi
+          python scripts/agent_runtime.py build-task \
+            --action triage.schema-repair --prompt repair-prompt.txt \
+            --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
+            --repo "$REPO" --number "$NUMBER" --kind schema-repair \
+            --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --repair-kind "$repair_kind"
+
+      - id: claude-repair-model
+        name: Run Claude schema repair in the read-only model workflow
+        if: ${{ always() && steps.claude-repair-task.outcome == 'success' }}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: ./.github/actions/claude-model-call
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ github.token }}
-          allowed_bots: github-actions[bot]
-          prompt: ${{ steps.repair-prep.outputs.repair_prompt }}
-          # Fail-closed tool isolation. The candidate is embedded in the prompt,
-          # so the repair turn needs NO tools and must NOT re-read the diff /
-          # re-analyze. An empty `--allowedTools` alone is not a reliable
-          # zero-tool guarantee in this action (upstream allowlist-parsing can
-          # let defaults leak, incl. Bash), so a Claude Code `permissions.deny`
-          # rule set - which takes precedence over any allow/allowlist - blocks
-          # every file/exec/network/subagent tool by name. Same tokenless
-          # side-job posture as triage itself: no FLEET_TOKEN, no READONLY_TOKEN.
-          settings: |
-            {"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}
-          claude_args: |
-            --allowedTools ""
-            --max-turns 1
-            --model sonnet
+          task: ${{ steps.claude-repair-task.outputs.task }}
+          bundle: ${{ steps.claude-repair-task.outputs.bundle }}
+          invocation-id: triage-repair
+
+      - name: Prepare the pinned Codex worker for schema repair
+        if: ${{ always() && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'codex' && steps.gate.outputs.mode != 'codex' }}
+        env:
+          CODEX_PREFIX: ${{ runner.temp }}/wheelhouse-codex
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          case "$(uname -m)" in
+            x86_64) platform="linux-x64" ;;
+            aarch64|arm64) platform="linux-arm64" ;;
+            *) echo "::error::unsupported Codex runner architecture"; exit 1 ;;
+          esac
+          platform_package="@openai/codex@0.144.0-${platform}"
+          tarball_dir="${RUNNER_TEMP}/wheelhouse-codex-tarballs"
+          mkdir -p "$tarball_dir"
+          tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" @openai/codex@0.144.0)"
+          platform_tarball="$tarball_dir/$(npm pack --silent --pack-destination "$tarball_dir" "$platform_package")"
+          python scripts/agent_runtime.py verify-package --package @openai/codex@0.144.0 --platform "$platform" --platform-package "$platform_package" --tarball "$tarball" --platform-tarball "$platform_tarball"
+          npm install --offline --ignore-scripts --omit=optional --no-audit --no-fund --prefix "$CODEX_PREFIX" "$tarball"
+          platform_dir="$CODEX_PREFIX/node_modules/@openai/codex-${platform}"
+          mkdir -p "$platform_dir"
+          tar -xzf "$platform_tarball" --strip-components=1 -C "$platform_dir"
+          echo "$CODEX_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
+          "$CODEX_PREFIX/node_modules/.bin/codex" --version | grep -Fx 'codex-cli 0.144.0'
+          python scripts/agent_runtime.py verify-pins
+
+      - id: agent-runtime-repair-task
+        name: Build the immutable schema-repair AgentTask
+        if: ${{ always() && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'codex' }}
+        env:
+          REPAIR_PROMPT: ${{ steps.repair-prep.outputs.repair_prompt }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
+        run: |
+          set -euo pipefail
+          printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
+          if [ "$KIND" = "issue-triage" ]; then
+            repair_kind="issue"
+          else
+            repair_kind="pr"
+          fi
+          python scripts/agent_runtime.py build-task \
+            --action triage.schema-repair \
+            --prompt repair-prompt.txt \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind schema-repair \
+            --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --repair-kind "$repair_kind"
+
+      - id: agent-runtime-repair
+        name: Run bounded schema repair through the Codex app-server contract
+        if: ${{ always() && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'codex' && steps.agent-runtime-repair-task.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          BUNDLE: ${{ steps.agent-runtime-repair-task.outputs.bundle }}
+          TASK: ${{ steps.agent-runtime-repair-task.outputs.task }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py run \
+            --task "$TASK" \
+            --bundle "$BUNDLE" \
+            --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
 
       - id: repair-result
         name: Extract the repaired result
         if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.repair-prep.outputs.repair_needed == 'true' }}
         env:
-          EXECUTION_FILE: ${{ steps.claude_repair.outputs.execution_file }}
+          EXECUTION_FILE: ""
+          RUNTIME_RESULT: ${{ steps.claude-repair-model.outputs.result || steps.agent-runtime-repair.outputs.result }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -678,6 +884,9 @@ jobs:
           rm -rf "$out_dir"
           mkdir -p "$out_dir"
           result_path=""
+          if [ -n "${RUNTIME_RESULT:-}" ]; then
+            EXECUTION_FILE="$RUNTIME_RESULT"
+          fi
           if [ -n "${EXECUTION_FILE:-}" ]; then
             if [ -L "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
               echo "::warning::auto triage schema repair produced no regular execution file"
@@ -782,6 +991,8 @@ jobs:
           HEAD_SHA: ${{ github.event.inputs.head_sha }}
           REVISION_INPUT: ${{ github.event.inputs.revision }}
           TRIAGE_GATE_ENABLED: ${{ steps.gate.outputs.enabled }}
+          TRIAGE_GATE_MODE: ${{ steps.gate.outputs.mode }}
+          TRIAGE_GATE_REASON: ${{ steps.gate.outputs.reason }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -809,7 +1020,11 @@ jobs:
           fi
           RECOVER_MESSAGE="Auto triage did not finish (the workflow run did not reach its update step)."
           if [ "${TRIAGE_GATE_ENABLED:-}" = "false" ]; then
-            RECOVER_MESSAGE="Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent."
+            if [ "${TRIAGE_GATE_MODE:-}" = "claude" ]; then
+              RECOVER_MESSAGE="Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent."
+            else
+              RECOVER_MESSAGE="Auto triage could not run because the selected agent-runtime auth profile is unavailable: ${TRIAGE_GATE_REASON:-credential not configured}."
+            fi
           fi
           export REVISION
           env -i \

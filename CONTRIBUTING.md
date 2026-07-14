@@ -30,7 +30,18 @@ There is no build step.
 Before pushing, validate locally:
 
 ```
-python -m py_compile scripts/*.py tests/*.py
+python -m py_compile agent_runtime/*.py agent_runtime/adapters/*.py scripts/*.py tests/*.py
+python scripts/agent_runtime.py verify-pins
+python tests/test_agent_runtime_contract.py
+python tests/test_agent_runtime_capabilities.py
+python tests/test_agent_runtime_security.py
+python tests/test_agent_runtime_lifecycle.py
+python tests/test_agent_runtime_consumers.py
+python tests/test_agent_runtime_dispatch.py
+python tests/test_agent_runtime_claude_handoff.py
+python tests/test_agent_runtime_claude_bridge.py
+python tests/test_agent_runtime_workflows.py
+python tests/test_claude_model_dispatch.py
 python tests/test_decision.py
 python tests/test_qualify_refs.py
 python tests/test_card_refresh.py
@@ -68,4 +79,4 @@ actionlint .github/workflows/*.yml
 ## Setting up the repository itself
 
 If you are forking Wheelhouse to run your own queue rather than changing this codebase, follow the numbered checklist in the [README](README.md#setup---a-numbered-checklist) instead.
-That covers the fleet config, the `FLEET_TOKEN` secret, and the Claude-powered features.
+That covers the fleet config, the `FLEET_TOKEN` secret, and the agent-assisted features.

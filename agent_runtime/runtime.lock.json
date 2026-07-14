@@ -1,0 +1,46 @@
+{
+  "runtimeVersion": "1.0.0",
+  "contract": "wheelhouse.agent-runtime/v1alpha1",
+  "codex": {
+    "adapterVersion": "1.0.0",
+    "harness": "codex-cli",
+    "binaryVersion": "0.144.0",
+    "sourceCommit": "767822446c7a594caa19609ca435281a9ec67e0d",
+    "npmPackage": "@openai/codex@0.144.0",
+    "npmPackageIntegrity": "sha512-QFh6f+v5QUx/Vg0HjIl9HB94p7aDLBDkZjc4IXX5RXUcXHPVCZNb6Hl2R49Og/fqW7orgZkeDcgWfRANUa1WoQ==",
+    "linuxX64BinaryPackage": "@openai/codex@0.144.0-linux-x64",
+    "linuxX64BinaryPackageIntegrity": "sha512-GmKtQeX+cO9lN7mQD1FEVcXYEMLMgMByHwZdvlluH0bj/+c2ind3hwbRtE3eECFDekNhEiB80Ez0FfbkyFQqoA==",
+    "linuxArm64BinaryPackage": "@openai/codex@0.144.0-linux-arm64",
+    "linuxArm64BinaryPackageIntegrity": "sha512-k++xhZrn9P3laO00Q92APG6mdOFDD66nUBo+8ExCa1NXi2pjLEMLC4+UNJTUUtUT1PEflOZ5pDKxPXgzaiFFFg==",
+    "protocol": "app-server-v2-experimental",
+    "protocolSchemas": {
+      "DynamicToolCallParams.json": "e36242b331ca665c74993e55abbea381b1c8a961b29a42579029cff1ad26b20d",
+      "DynamicToolCallResponse.json": "50410ccaaefc9871a42fa25ee0c0d4f488a6f0e08c35856842e12d3103410fd1",
+      "ErrorNotification.json": "1ec871b02771300a26a34e41a7cfaf7484330a8c37c197d1ac133e753b083a09",
+      "GetAccountParams.json": "d0dc3c0d428d37b1ec7887fa6b044244e6474578e1ff397c0872b2a6292073db",
+      "GetAccountRateLimitsResponse.json": "26bed5356b0b7abd8f3f5bdd2f55d16123e340b038afee26a35d5470f4c17f5b",
+      "GetAccountResponse.json": "f681035a67d7779fa90a43c38b2deffaa230a32cfe10de87729b67ed97555621",
+      "InitializeParams.json": "4f576f99e285beb28f71f48a72b887c1f517dada86fee348fe2af0a35511de23",
+      "InitializeResponse.json": "86dcd236d0576a82c85b933586dc45731260eab1b6edb3447b03f790277322b1",
+      "ModelListParams.json": "10ac5c0cb8ddbe840527c8eb8053dc4ced32ea3efdfb200283cadc43447f9073",
+      "ModelListResponse.json": "59039842824f56f4fbdf0379b54a940986fca63e1f4577493d2498005dcbafe9",
+      "ModelProviderCapabilitiesReadParams.json": "9db732188a15476cabb42cf05e495ae0803a1ada993fca7348c21c30a998388d",
+      "ModelProviderCapabilitiesReadResponse.json": "e5e93e7d50e0f7c2c640ffe4d53107b97e36943680504184932fcfab4c132e71",
+      "ThreadStartParams.json": "4f30cb90cae47ff01adba8d863228b2aa198232df895dbfc996d594270326744",
+      "ThreadStartResponse.json": "eb5135241a7806db436100493c91214ef3516c4a9bd9aae700abc418c71be132",
+      "ThreadTokenUsageUpdatedNotification.json": "fe70a73653ae9e3fffb0db84d1312f47ac47d92526c2d44461492cd864ada3ad",
+      "TurnCompletedNotification.json": "900bc6e40f0aeb5aa498ec874f026a2a077356ac1dc740c1928cfdca29630345",
+      "TurnStartParams.json": "a28f74287e18b8a18c7aa6966ee7552a8ed2ae13c03f4ba12e9af48f7370f19d",
+      "TurnStartResponse.json": "7cfae42a4652fe38119d6a0a625910357c869c448c985513a4cd5966031e18bc"
+    }
+  },
+  "claudeProduction": {
+    "adapter": "claude-action-compat",
+    "actionCommit": "fad22eb3fa582b7357fc0ea48af6645851b884fd",
+    "actionRelease": "v1.0.161",
+    "claudeCodeVersion": "2.1.197",
+    "agentSdkVersion": "0.3.197",
+    "model": "claude-sonnet-4-6",
+    "allowModelAlias": false
+  }
+}

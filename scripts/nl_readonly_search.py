@@ -367,6 +367,15 @@ def cmd_install():
     print("installed wheelhouse-search for %s" % ", ".join(repos))
 
 
+def cmd_scope():
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    target_repo = os.environ.get("TARGET_REPO", "").strip()
+    repos = allowed_repos(owner, target_repo)
+    if not repos:
+        sys.exit("no allowed repositories for read-only search")
+    print(json.dumps(repos, separators=(",", ":")))
+
+
 def cmd_run():
     try:
         output = handle_request(_read_request(), _env_allowed_repos())
@@ -382,10 +391,13 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "install":
         cmd_install()
         return
+    if len(sys.argv) == 2 and sys.argv[1] == "scope":
+        cmd_scope()
+        return
     if len(sys.argv) == 1:
         cmd_run()
         return
-    sys.exit("usage: nl_readonly_search.py [install]")
+    sys.exit("usage: nl_readonly_search.py [install|scope]")
 
 
 if __name__ == "__main__":
