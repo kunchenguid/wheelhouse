@@ -4,11 +4,15 @@ Invocation invariant (load-bearing for signed-tree integrity):
 
   Every process that imports the *packaged* runtime from a signed handoff
   directory (``PYTHONPATH=$HANDOFF/runtime python -m agent_runtime.claude_handoff``)
-  MUST start with bytecode writes disabled via ``python -B`` and/or
-  ``PYTHONDONTWRITEBYTECODE=1`` *before* import. A fresh interpreter that
-  writes ``__pycache__`` into the signed tree will fail closed at ``verify()``
-  because complete file-set and digest verification rejects any post-signing
-  file. Do not weaken ``verify()`` to ignore arbitrary unmanifested files.
+  MUST set ``PYTHONPYCACHEPREFIX`` to a directory that is path-disjoint from
+  the signed handoff tree (production uses ``$RUNNER_TEMP/wheelhouse-pycache``)
+  *before* import, with bytecode writing left enabled. Do not use ``-B`` /
+  ``PYTHONDONTWRITEBYTECODE`` as the production mechanism: the robust fix is
+  a redirected external cache, not suppressed bytecode. A fresh interpreter
+  that writes ``__pycache__`` into the signed tree will fail closed at
+  ``verify()`` because complete file-set and digest verification rejects any
+  post-signing file. Do not weaken ``verify()`` to ignore arbitrary
+  unmanifested files.
 """
 
 from __future__ import annotations

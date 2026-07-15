@@ -66,28 +66,34 @@ def main():
     packaged_invocations = [
         step
         for step in model_steps
-        if "PYTHONPATH=\"$HANDOFF/runtime\"" in str(step.get("run", ""))
+        if 'PYTHONPATH="$HANDOFF/runtime"' in str(step.get("run", ""))
         or "PYTHONPATH=$HANDOFF/runtime" in str(step.get("run", ""))
     ]
     check(
-        "production: every packaged handoff invocation disables bytecode before import",
+        "production: every packaged handoff invocation redirects bytecode via disjoint PYTHONPYCACHEPREFIX",
         len(packaged_invocations) >= 3
         and all(
-            "python -B" in str(step.get("run", ""))
-            and ((step.get("env") or {}).get("PYTHONDONTWRITEBYTECODE") == "1" or "PYTHONDONTWRITEBYTECODE" in str(step.get("run", "")))
+            (step.get("env") or {}).get("PYTHONPYCACHEPREFIX") == "${{ runner.temp }}/wheelhouse-pycache"
+            and "mkdir -p" in str(step.get("run", ""))
+            and "PYTHONPYCACHEPREFIX collides with signed handoff" in str(step.get("run", ""))
+            and "unset PYTHONDONTWRITEBYTECODE" in str(step.get("run", ""))
+            and "python -B" not in str(step.get("run", ""))
+            and (step.get("env") or {}).get("PYTHONDONTWRITEBYTECODE") is None
             for step in packaged_invocations
         ),
     )
     check(
-        "production: packaged hydrate uses -B before agent_runtime import",
-        "python -B -m agent_runtime.claude_handoff hydrate" in hydrate_run
-        and hydrate_env.get("PYTHONDONTWRITEBYTECODE") == "1"
-        and hydrate_run.index("python -B -m agent_runtime.claude_handoff hydrate")
+        "production: packaged hydrate uses external pycache prefix before agent_runtime import",
+        'python -m agent_runtime.claude_handoff hydrate' in hydrate_run
+        and hydrate_env.get("PYTHONPYCACHEPREFIX") == "${{ runner.temp }}/wheelhouse-pycache"
+        and "python -B" not in hydrate_run
+        and hydrate_run.index('python -m agent_runtime.claude_handoff hydrate')
         > hydrate_run.index("handoff manifest mismatch"),
     )
     check(
         "production: complete signed file-set verification is not weakened for pycache",
         "manifest verification failed" in Path("agent_runtime/claude_handoff.py").read_text()
+        and "PYTHONPYCACHEPREFIX" in Path("agent_runtime/claude_handoff.py").read_text()
         and "__pycache__" not in Path("agent_runtime/claude_handoff.py").read_text().split("def verify", 1)[-1].split("def hydrate", 1)[0]
         and ".pyc" not in Path("agent_runtime/claude_handoff.py").read_text().split("def verify", 1)[-1].split("def hydrate", 1)[0],
     )
