@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 import sys
@@ -16,6 +17,25 @@ from agent_runtime.events import EventError, EventWriter, read_events
 from agent_runtime.supervisor import RuntimeFailure, _verify_artifacts
 from agent_runtime.task_builder import ACTION_SCHEMAS, build_task
 from agent_runtime_testlib import WHEELHOUSE_REVISION, codex_selection, make_task
+
+
+def _git_commit_repo(repository: Path) -> str:
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "wheelhouse-test@example.com"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Wheelhouse Test"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=repository, check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip().lower()
+    # task_builder requires detached HEAD so git.detached remains a truthful const.
+    subprocess.run(["git", "checkout", "--detach", sha], cwd=repository, check=True, capture_output=True)
+    return sha
 
 FAILURES = []
 
@@ -78,6 +98,7 @@ def main():
         repository = root / "repository"
         repository.mkdir()
         (repository / "safe.py").write_text("safe = True\n", encoding="utf-8")
+        repo_commit = _git_commit_repo(repository)
         prompt = root / "repo-prompt.txt"
         prompt.write_text("Inspect the bounded repository.\n", encoding="utf-8")
         target = root / "repo-target.txt"
@@ -93,11 +114,11 @@ def main():
             repo="repo",
             number=1,
             target_kind="pr-review",
-            revision="abcdef1",
+            revision=repo_commit,
             wheelhouse_revision=WHEELHOUSE_REVISION,
             target_file=str(target),
             repository_dir=str(repository),
-            repository_commit="abcdef1",
+            repository_commit=repo_commit,
         )
         _verify_artifacts(repo_task, repo_bundle)
         check("artifacts: directory tree digest verifies", True)

@@ -115,6 +115,20 @@ def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path,
     target.write_text("bounded target\n", encoding="utf-8")
     repository.mkdir()
     (repository / "source.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "wheelhouse-test@example.com"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Wheelhouse Test"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=repository, check=True, capture_output=True)
+    repo_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip().lower()
+    subprocess.run(["git", "checkout", "--detach", repo_commit], cwd=repository, check=True, capture_output=True)
     bundle = root / "bundle"
     task = build_task(
         action=action,
@@ -126,11 +140,11 @@ def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path,
         repo="repo",
         number=9,
         target_kind="pr-review",
-        revision="abcdef1",
+        revision=repo_commit,
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
         target_file=str(target),
         repository_dir=str(repository),
-        repository_commit="abcdef1",
+        repository_commit=repo_commit,
     )
     handoff = root / "handoff"
     metadata = pack(str(bundle / "task.json"), str(bundle), str(handoff), '["owner/repo"]')
