@@ -53,6 +53,7 @@ def make_bundle(root: Path, action: str = "deep-review.local"):
         target_kind="pr-review",
         revision="abcdef1",
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
+        event_key="a" * 64,
         target_file=str(target),
     )
     return task, bundle

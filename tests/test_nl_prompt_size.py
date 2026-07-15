@@ -349,8 +349,9 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
     cond = str(note.get("if", ""))
     check("nl: note runs even on a failed run (always)", "always()" in cond)
     check(
-        "nl: note fires only when NL was entered and the prompt built",
-        "steps.nl-gate.outputs.proceed == 'true'" in cond
+        "nl: note fires only for an admitted fresh event whose prompt built",
+        "steps.nl-claim.outputs.admitted == 'true'" in cond
+        and "steps.nl-post-model-freshness.outputs.fresh == 'true'" in cond
         and "steps.nl-prompt.outcome == 'success'" in cond,
     )
     check(
@@ -368,13 +369,14 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
         "FLEET_TOKEN" not in dumped and "READONLY_TOKEN" not in dumped,
     )
     check(
-        "nl: note keys idempotency on the triggering comment id, not content",
-        env.get("TRIGGER_COMMENT_ID") == "${{ github.event.comment.id }}",
+        "nl: note binds the durable exact-event claim, not comment content",
+        env.get("CLAIM_ID") == "${{ steps.nl-claim.outputs.comment_id }}"
+        and env.get("CLAIM_MARKER") == "${{ steps.nl-claim.outputs.marker }}",
     )
     run = str(note.get("run", ""))
     check(
-        "nl: note is fire-once (checks for an existing marker before posting)",
-        "wheelhouse-nl-error:" in run and "grep -qF" in run,
+        "nl: note is fire-once by editing the pre-spend claim",
+        "--method PATCH" in run and "issues/comments/$CLAIM_ID" in run,
     )
     check(
         "nl: note body carries NO prompt/comment content (no interpolation of either)",

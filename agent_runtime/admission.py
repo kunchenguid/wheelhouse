@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
 from typing import Any
 
-from .contract import ContractError, canonical_json_bytes
+from .contract import ContractError, canonical_json_bytes, load_json_regular, validate_contract
 
 ACTION = re.compile(r"^(?:triage\.(?:pr|issue)\.(?:local|search)|triage\.schema-repair|deep-review\.(?:local|search)|nl-decision\.(?:local|search))$")
 REVISION = re.compile(r"^[A-Za-z0-9:._+-]{1,160}$")
@@ -124,3 +125,50 @@ def stage_record(
 
 def stage_line(record: dict[str, Any]) -> str:
     return "wheelhouse-agent-stage " + json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def stage_from_task(
+    task: dict[str, Any],
+    *,
+    stage: str,
+    status: str,
+    code: str,
+    deadline_ms: int | None = None,
+) -> dict[str, Any]:
+    validate_contract(task, "AgentTask")
+    return stage_record(
+        action=task["metadata"]["action"],
+        source_sha=task["metadata"]["wheelhouseRevision"],
+        event_key=task["metadata"]["idempotencyKey"],
+        execution_id=task["metadata"]["executionId"],
+        stage=stage,
+        status=status,
+        code=code,
+        deadline_ms=deadline_ms,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--stage", required=True)
+    parser.add_argument("--status", required=True)
+    parser.add_argument("--code", required=True)
+    parser.add_argument("--deadline-ms", type=int)
+    args = parser.parse_args()
+    task = load_json_regular(args.task)
+    print(
+        stage_line(
+            stage_from_task(
+                task,
+                stage=args.stage,
+                status=args.status,
+                code=args.code,
+                deadline_ms=args.deadline_ms,
+            )
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

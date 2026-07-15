@@ -428,6 +428,7 @@ def cmd_parse():
         set_output("target_number", state.get("number", ""))
         set_output("kind", kind)
         set_output("head_sha", state.get("head_sha", ""))
+        set_output("target_revision", state.get("head_sha") or state.get("updated_at", ""))
         return
 
     set_output("decision", decision)
@@ -436,6 +437,7 @@ def cmd_parse():
     set_output("target_number", state.get("number", ""))
     set_output("kind", kind)
     set_output("head_sha", state.get("head_sha", ""))
+    set_output("target_revision", state.get("head_sha") or state.get("updated_at", ""))
 
 
 # --------------------------------------------------------------------------- #

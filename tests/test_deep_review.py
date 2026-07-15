@@ -526,8 +526,11 @@ def test_code_grounded_checkout_and_tool_isolation():
             and "sys.exit(1)" in run,
         )
         check(
-            "workflow: trusted post step comments via gh, not Claude",
-            '["gh", "issue", "comment"' in run,
+            "workflow: trusted post step updates its durable claim via gh, not Claude",
+            '"gh"' in run
+            and '"api"' in run
+            and '"PATCH"' in run
+            and "CLAIM_MARKER" in run,
         )
         check(
             "workflow: post step carries the deterministic target slug for ref qualification",
@@ -548,7 +551,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         )
         label_idx = run.find("cards.label_automated_status_lines(verdict)")
         qualify_idx = run.find("core.qualify_issue_refs(")
-        post_idx = run.find('["gh", "issue", "comment"')
+        post_idx = run.find('"PATCH"')
         check(
             "workflow: automated status labels are applied before ref qualification",
             label_idx != -1 and qualify_idx != -1 and label_idx < qualify_idx,

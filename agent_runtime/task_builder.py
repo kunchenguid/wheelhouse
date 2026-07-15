@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import API_VERSION
+from .admission import DIGEST
 from .contract import (
     ArtifactError,
     atomic_write_json,
@@ -28,7 +29,10 @@ ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
 MAX_REPOSITORY_BYTES = 200_000_000
 MAX_REPOSITORY_FILES = 30_000
+MAX_REPOSITORY_SOURCE_ENTRIES = 30_000
 MAX_SYMLINK_HOPS = 32
+MAX_REPOSITORY_SYMLINKS = 4_096
+MAX_OBJECT_MATERIALIZATIONS = 256
 GIT_MODE_FILE = "100644"
 GIT_MODE_EXEC = "100755"
 GIT_MODE_SYMLINK = "120000"
@@ -189,6 +193,8 @@ def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]
     payload = _git(repo, "ls-tree", "-r", "-z", commit)
     index: dict[str, tuple[str, str]] = {}
     for mode, objtype, object_id, path in _parse_ls_tree(payload):
+        if len(index) >= MAX_REPOSITORY_SOURCE_ENTRIES:
+            raise ArtifactError("repository snapshot exceeds its source-entry bound")
         if mode == GIT_MODE_GITLINK or objtype == "commit":
             raise ArtifactError("repository snapshot rejects gitlinks/submodules")
         if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
@@ -329,7 +335,15 @@ def _materialize_file(
     output_path: str,
     object_id: str,
     total: list[int],
+    object_materializations: dict[str, int],
+    *,
+    count_alias: bool,
 ) -> None:
+    if count_alias:
+        count = object_materializations.get(object_id, 0) + 1
+        if count > MAX_OBJECT_MATERIALIZATIONS:
+            raise ArtifactError("repository snapshot exceeds its per-object alias bound")
+        object_materializations[object_id] = count
     data = _blob_bytes(repo, object_id)
     total[0] += len(data)
     if total[0] > MAX_REPOSITORY_BYTES:
@@ -391,6 +405,7 @@ def _materialize_tree_alias(
     total: list[int],
     outer_chain: set[str],
     hops_used: int,
+    object_materializations: dict[str, int],
 ) -> tuple[list[str], int, int]:
     """Materialize committed descendants of tree_path under alias_prefix.
 
@@ -409,7 +424,7 @@ def _materialize_tree_alias(
         mode, object_id = index[source_path]
         if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
             before = total[0]
-            _materialize_file(repo, entries, blob_by_path, output_path, object_id, total)
+            _materialize_file(repo, entries, blob_by_path, output_path, object_id, total, object_materializations, count_alias=True)
             outputs.append(output_path)
             added_files += 1
             added_bytes += total[0] - before
@@ -427,7 +442,7 @@ def _materialize_tree_alias(
             )
             if resolved_kind == "file":
                 before = total[0]
-                _materialize_file(repo, entries, blob_by_path, output_path, resolved_object, total)
+                _materialize_file(repo, entries, blob_by_path, output_path, resolved_object, total, object_materializations, count_alias=True)
                 outputs.append(output_path)
                 added_files += 1
                 added_bytes += total[0] - before
@@ -444,6 +459,7 @@ def _materialize_tree_alias(
                 total,
                 nested_chain,
                 nested_hops,
+                object_materializations,
             )
             outputs.extend(sub_outputs)
             added_files += sub_files
@@ -451,6 +467,23 @@ def _materialize_tree_alias(
             continue
         raise ArtifactError("repository snapshot contains an unsupported git mode")
     return outputs, added_files, added_bytes
+
+
+def _manifest_path_order(paths: set[str], prefix: str = "") -> list[str]:
+    """Match the verifier's sorted os.walk order without reading live files."""
+
+    relative = {
+        path[len(prefix) + 1 :] if prefix else path
+        for path in paths
+        if not prefix or path.startswith(prefix + "/")
+    }
+    files = sorted(path for path in relative if "/" not in path)
+    directories = sorted({path.split("/", 1)[0] for path in relative if "/" in path})
+    ordered = ["%s/%s" % (prefix, name) if prefix else name for name in files]
+    for directory in directories:
+        child = "%s/%s" % (prefix, directory) if prefix else directory
+        ordered.extend(_manifest_path_order(paths, child))
+    return ordered
 
 
 def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
@@ -464,10 +497,13 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
 
     bound = _require_bound_clean_repository(source, commit)
     index = _load_committed_index(source, bound)
+    if sum(1 for mode, _object_id in index.values() if mode == GIT_MODE_SYMLINK) > MAX_REPOSITORY_SYMLINKS:
+        raise ArtifactError("repository snapshot exceeds its symlink-count bound")
     entries: dict[str, dict[str, Any]] = {}
     blob_by_path: dict[str, bytes] = {}
     links: list[MaterializedLinkRecord] = []
     total = [0]
+    object_materializations: dict[str, int] = {}
 
     for path in sorted(index):
         mode, object_id = index[path]
@@ -475,7 +511,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
             if path in entries:
                 # A prior directory-link materialization already claimed this path.
                 raise ArtifactError("repository snapshot path collision")
-            _materialize_file(source, entries, blob_by_path, path, object_id, total)
+            _materialize_file(source, entries, blob_by_path, path, object_id, total, object_materializations, count_alias=False)
             continue
         if mode != GIT_MODE_SYMLINK:
             raise ArtifactError("repository snapshot contains an unsupported git mode")
@@ -496,7 +532,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
             if path in entries:
                 raise ArtifactError("repository snapshot path collision")
             before = total[0]
-            _materialize_file(source, entries, blob_by_path, path, resolved_object, total)
+            _materialize_file(source, entries, blob_by_path, path, resolved_object, total, object_materializations, count_alias=True)
             links.append(
                 MaterializedLinkRecord(
                     commit=bound,
@@ -526,6 +562,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
                 total,
                 resolve_chain,
                 hops_used,
+                object_materializations,
             )
             if file_count == 0 and before_files == len(entries):
                 # Empty tree alias contributes no regular files; still record the bind.
@@ -552,7 +589,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
     # rejected so callers never mistake a concurrently changing checkout for a
     # clean source binding.
     _require_bound_clean_repository(source, bound)
-    ordered = [entries[path] for path in sorted(entries)]
+    ordered = [entries[path] for path in _manifest_path_order(set(entries))]
     return RepositorySnapshot(
         commit=bound,
         entries=ordered,
@@ -789,6 +826,7 @@ def build_task(
     target_kind: str,
     revision: str,
     wheelhouse_revision: str,
+    event_key: str,
     target_file: str = "",
     repository_dir: str = "",
     repository_commit: str = "",
@@ -797,6 +835,8 @@ def build_task(
 ) -> dict[str, Any]:
     if action not in ACTION_LIMITS:
         raise ArtifactError("unsupported agent runtime action")
+    if not DIGEST.fullmatch(event_key):
+        raise ArtifactError("agent event key binding is invalid")
     adapter = (selection.get("profile") or {}).get("adapter")
     if (selection.get("mode"), adapter) not in (("claude", "claude-action-compat"), ("codex", "codex-app-server")):
         raise ArtifactError("the selected adapter is not supported by the task compiler")
@@ -879,7 +919,7 @@ def build_task(
         "metadata": {
             "executionId": execution_id,
             "action": action,
-            "idempotencyKey": "%s:%s:%s:%s" % (action, repo, number, revision),
+            "idempotencyKey": event_key,
             "wheelhouseRevision": wheelhouse_revision,
             "target": {"owner": owner, "repo": repo, "number": int(number), "kind": target_kind, "revision": revision},
         },

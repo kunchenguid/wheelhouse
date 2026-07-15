@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_runtime.admission import stage_from_task, stage_line
 from agent_runtime.claude_bridge import write_controller_failure_result, write_revision_mismatch_result
 
 COMMAND_TIMEOUT_SECONDS = 20
@@ -41,6 +42,20 @@ class RunMetadataError(ValueError):
 def run(*args: str, capture: bool = False, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS) -> str:
     result = subprocess.run(args, check=True, text=True, capture_output=capture, timeout=max(0.1, min(COMMAND_TIMEOUT_SECONDS, timeout_seconds)))
     return result.stdout if capture else ""
+
+
+def emit_stage(task: dict, stage: str, status: str, code: str, deadline_ms: int | None = None) -> None:
+    print(
+        stage_line(
+            stage_from_task(
+                task,
+                stage=stage,
+                status=status,
+                code=code,
+                deadline_ms=deadline_ms,
+            )
+        )
+    )
 
 
 def output(name: str, value: str) -> None:
@@ -339,6 +354,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
             "-f", "child_timeout_minutes=%d" % (child_timeout_ms // 60000),
             timeout_seconds=dispatch_deadline - time.monotonic(),
         )
+        emit_stage(task, "child-dispatched", "ok", "child.dispatched", dispatch_ms)
         conclusion = ""
         match = None
         while time.monotonic() < dispatch_deadline:
@@ -361,6 +377,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                 metadata_failure = False
                 run_id = str(match["id"])
                 STATE["observed_sha"] = match.get("head_sha")
+                emit_stage(task, "child-correlated", "ok", "child.correlated", dispatch_ms)
                 break
             time.sleep(POLL_SECONDS)
         if metadata_failure:
@@ -415,6 +432,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                         run_id = str(match["id"]) if match else ""
                         if match:
                             STATE["observed_sha"] = match.get("head_sha")
+                            emit_stage(task, "child-correlated", "ok", "child.correlated", dispatch_ms)
                             if STATE["observed_sha"] != args.expected_sha:
                                 recovery_conclusion = "failure"
                                 termination_reason = "revision-mismatch"
@@ -446,6 +464,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                 natural_conclusion = str(cancellation.get("terminalConclusion") or "")
                 if (
                     termination_reason != "revision-mismatch"
+                    and not metadata_failure
                     and STATE.get("observed_sha") == args.expected_sha
                     and natural_conclusion
                     and natural_conclusion != "cancelled"

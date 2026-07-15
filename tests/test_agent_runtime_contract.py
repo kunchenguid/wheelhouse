@@ -116,6 +116,7 @@ def main():
             target_kind="pr-review",
             revision=repo_commit,
             wheelhouse_revision=WHEELHOUSE_REVISION,
+            event_key="a" * 64,
             target_file=str(target),
             repository_dir=str(repository),
             repository_commit=repo_commit,

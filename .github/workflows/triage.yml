@@ -140,7 +140,30 @@ jobs:
           else
             action="${action}.local"
           fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
           python scripts/agent_runtime.py auth-status --action "$action" --repo "$INPUT_REPO"
+
+      - name: Record denied triage admission
+        if: ${{ steps.gate.outputs.enabled != 'true' && (github.event.inputs.kind == 'pr-review' || github.event.inputs.kind == 'issue-triage') }}
+        env:
+          ACTION: ${{ steps.gate.outputs.action }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.inputs.repo }}
+          NUMBER: ${{ github.event.inputs.number }}
+          ISSUE: ${{ github.event.inputs.issue }}
+          KIND: ${{ github.event.inputs.kind }}
+          HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          ISSUE_REVISION: ${{ github.event.inputs.revision }}
+        run: |
+          revision="$HEAD_SHA"
+          if [ "$KIND" = "issue-triage" ]; then revision="$ISSUE_REVISION"; fi
+          event_key="$(python scripts/agent_runtime.py event-key \
+            --action "$ACTION" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$revision")"
+          python scripts/agent_runtime.py stage \
+            --action "$ACTION" --source-sha "${{ github.sha }}" \
+            --event-key "$event_key" --stage denied --status skipped \
+            --code admission.auth_unavailable
 
       - id: resolve
         if: steps.gate.outputs.enabled == 'true'
@@ -248,6 +271,28 @@ jobs:
         run: |
           echo "auto triage skipped: ${{ steps.resolve.outputs.reason }}"
 
+      - name: Record skipped triage admission stage
+        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip == 'true'
+        env:
+          ACTION: ${{ steps.gate.outputs.action }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.inputs.repo }}
+          NUMBER: ${{ github.event.inputs.number }}
+          ISSUE: ${{ github.event.inputs.issue }}
+          KIND: ${{ github.event.inputs.kind }}
+          HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          ISSUE_REVISION: ${{ github.event.inputs.revision }}
+        run: |
+          revision="$HEAD_SHA"
+          if [ "$KIND" = "issue-triage" ]; then revision="$ISSUE_REVISION"; fi
+          event_key="$(python scripts/agent_runtime.py event-key \
+            --action "$ACTION" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$revision")"
+          python scripts/agent_runtime.py stage \
+            --action "$ACTION" --source-sha "${{ github.sha }}" \
+            --event-key "$event_key" --stage stale --status skipped \
+            --code admission.card_stale
+
       - name: Check out the target code (read-only, FLEET_TOKEN, no creds persisted)
         if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true'
         uses: actions/checkout@v4
@@ -288,8 +333,77 @@ jobs:
             echo "auto triage readonly search disabled (READONLY_TOKEN absent)"
           fi
 
+      - id: event-claim
+        name: Claim the exact triage revision before spend
+        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = "issue-triage" ]; then action="triage.issue"; else action="triage.pr"; fi
+          if [ "$HAS_READONLY_TOKEN" = "true" ]; then action="${action}.search"; else action="${action}.local"; fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          python scripts/agent_claim.py \
+            --action "$action" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$REVISION" \
+            --repo-slug "$REPO_SLUG"
+
+      - id: event-freshness
+        name: Verify target revision before triage task build
+        if: steps.event-claim.outputs.admitted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          CARD_TOKEN: ${{ github.token }}
+          SLUG: ${{ steps.resolve.outputs.slug }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          EXPECTED_REVISION: ${{ steps.resolve.outputs.revision }}
+          CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
+          CLAIM_MARKER: ${{ steps.event-claim.outputs.marker }}
+          CARD_REPO: ${{ github.repository }}
+        run: |
+          observed=""
+          if [ "$KIND" = "issue-triage" ]; then
+            observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
+          else
+            observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
+          fi
+          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "message=Auto triage did not run because the target revision moved or could not be verified." >> "$GITHUB_OUTPUT"
+            body="Auto triage was rejected before task construction because the target revision changed or could not be verified. The card remains available for deterministic controls. ${CLAIM_MARKER}"
+            GH_TOKEN="$CARD_TOKEN" gh api --method PATCH \
+              "repos/$CARD_REPO/issues/comments/$CLAIM_ID" -f "body=$body" >/dev/null
+            python scripts/agent_runtime.py stage \
+              --action "${{ steps.event-claim.outputs.action }}" \
+              --source-sha "${{ github.sha }}" \
+              --event-key "${{ steps.event-claim.outputs.event_key }}" \
+              --stage stale --status failed --code target.stale
+          fi
+
+      - name: Record triage admission stage
+        if: always() && steps.event-claim.outputs.event_key != ''
+        run: |
+          status="skipped"; code="admission.duplicate"
+          if [ "${{ steps.event-claim.outputs.admitted }}" = "true" ]; then status="ok"; code="admission.admitted"; fi
+          python scripts/agent_runtime.py stage \
+            --action "${{ steps.event-claim.outputs.action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --stage admitted --status "$status" --code "$code"
+
       - id: prepare
-        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false'
+        if: steps.event-freshness.outputs.fresh == 'true'
         env:
           FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
           NUMBER: ${{ steps.resolve.outputs.number }}
@@ -533,7 +647,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' && steps.readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.event-freshness.outputs.fresh == 'true' && steps.gate.outputs.mode == 'claude' && steps.readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.resolve.outputs.slug }}
@@ -541,7 +655,7 @@ jobs:
 
       - id: claude-task
         name: Build the immutable Claude triage AgentTask
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'claude' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        if: ${{ steps.event-freshness.outputs.fresh == 'true' && steps.gate.outputs.mode == 'claude' }}
         env:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ steps.resolve.outputs.repo }}
@@ -552,6 +666,7 @@ jobs:
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage
+          EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           if [ "$KIND" = "issue-triage" ]; then action="triage.issue"; else action="triage.pr"; fi
@@ -565,7 +680,16 @@ jobs:
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit" \
-            "${vision_args[@]}"
+            --event-key "$EVENT_KEY" "${vision_args[@]}"
+
+      - name: Record triage task-build failure stage
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.gate.outputs.mode == 'claude' && steps.claude-task.outcome == 'failure' }}
+        run: |
+          python scripts/agent_runtime.py stage \
+            --action "${{ steps.event-claim.outputs.action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --stage task-failed --status failed --code task.build_failed
 
       - id: claude-model
         name: Run Claude triage in the read-only model workflow
@@ -579,7 +703,7 @@ jobs:
           allowed-repos: ${{ steps.search-tool.outputs.repos || '[]' }}
 
       - name: Prepare the pinned Codex sandboxed adapter worker
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        if: ${{ steps.event-freshness.outputs.fresh == 'true' && steps.gate.outputs.mode == 'codex' }}
         env:
           CODEX_PREFIX: ${{ runner.temp }}/wheelhouse-codex
         run: |
@@ -607,7 +731,7 @@ jobs:
 
       - id: agent-runtime-task
         name: Build the immutable triage AgentTask
-        if: ${{ steps.gate.outputs.enabled == 'true' && steps.gate.outputs.mode == 'codex' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        if: ${{ steps.event-freshness.outputs.fresh == 'true' && steps.gate.outputs.mode == 'codex' }}
         env:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ steps.resolve.outputs.repo }}
@@ -618,6 +742,7 @@ jobs:
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage
+          EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           if [ "$KIND" = "issue-triage" ]; then
@@ -649,6 +774,7 @@ jobs:
             --target-file target.txt \
             --repository-dir target-src \
             --repository-commit "$repository_commit" \
+            --event-key "$EVENT_KEY" \
             "${vision_args[@]}"
 
       - id: agent-runtime
@@ -672,7 +798,7 @@ jobs:
         run: python scripts/agent_runtime.py summary --result '${{ steps.agent-runtime.outputs.result }}'
 
       - id: triage-result
-        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
         env:
           EXECUTION_FILE: ${{ steps.claude-model.outputs.result || steps.agent-runtime.outputs.result }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -723,7 +849,7 @@ jobs:
       # path is unchanged). See "Bounded schema repair" in AGENTS.md.
       - id: repair-prep
         name: Detect a schema-miss and prepare the bounded repair turn
-        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false' }}
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
         env:
           ORIG_RESULT: ${{ steps.triage-result.outputs.path }}
           KIND: ${{ steps.resolve.outputs.kind }}
@@ -756,9 +882,26 @@ jobs:
           TARGET_REPO: ${{ steps.resolve.outputs.repo }}
         run: python scripts/agent_runtime.py auth-status --action triage.schema-repair --repo "$TARGET_REPO"
 
+      - id: repair-claim
+        name: Claim the exact schema-repair revision before spend
+        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          python scripts/agent_claim.py \
+            --action triage.schema-repair --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$REVISION" \
+            --repo-slug "$REPO_SLUG"
+
       - id: claude-repair-task
         name: Build the immutable Claude schema-repair AgentTask
-        if: ${{ always() && steps.repair-prep.outputs.repair_needed == 'true' && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
+        if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
         env:
           REPAIR_PROMPT: ${{ steps.repair-prep.outputs.repair_prompt }}
           OWNER: ${{ github.repository_owner }}
@@ -768,6 +911,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
+          EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
@@ -777,7 +921,15 @@ jobs:
             --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
             --repo "$REPO" --number "$NUMBER" --kind schema-repair \
             --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind"
+            --repair-kind "$repair_kind" --event-key "$EVENT_KEY"
+
+      - name: Record schema-repair task-build failure stage
+        if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.repair-gate.outputs.mode == 'claude' && steps.claude-repair-task.outcome == 'failure' }}
+        run: |
+          python scripts/agent_runtime.py stage \
+            --action triage.schema-repair --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.repair-claim.outputs.event_key }}" \
+            --stage task-failed --status failed --code task.build_failed
 
       - id: claude-repair-model
         name: Run Claude schema repair in the read-only model workflow
@@ -818,7 +970,7 @@ jobs:
 
       - id: agent-runtime-repair-task
         name: Build the immutable schema-repair AgentTask
-        if: ${{ always() && steps.repair-gate.outputs.enabled == 'true' && steps.repair-gate.outputs.mode == 'codex' }}
+        if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.repair-gate.outputs.mode == 'codex' }}
         env:
           REPAIR_PROMPT: ${{ steps.repair-prep.outputs.repair_prompt }}
           OWNER: ${{ github.repository_owner }}
@@ -828,6 +980,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
+          EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
@@ -847,7 +1000,8 @@ jobs:
             --kind schema-repair \
             --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind"
+            --repair-kind "$repair_kind" \
+            --event-key "$EVENT_KEY"
 
       - id: agent-runtime-repair
         name: Run bounded schema repair through the Codex app-server contract
@@ -901,15 +1055,16 @@ jobs:
           fi
           echo "path=$result_path" >> "$GITHUB_OUTPUT"
 
-      - name: Update the decision card
-        if: ${{ always() && steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' }}
+      - id: card-consumer
+        name: Update the decision card
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.resolve.outputs.issue }}
           REVISION: ${{ steps.resolve.outputs.revision }}
-          HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
-          HEAD_MESSAGE: ${{ steps.verify_head.outputs.message }}
+          HEAD_OK: ${{ steps.event-freshness.outputs.fresh == 'false' && 'false' || steps.verify_head.outputs.head_ok }}
+          HEAD_MESSAGE: ${{ steps.event-freshness.outputs.message || steps.verify_head.outputs.message }}
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
           # Compact result of the ONE bounded schema-repair turn (empty unless a
           # delivered result was a schema-miss and the repair step ran).
@@ -971,6 +1126,35 @@ jobs:
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}"
           fi
+
+      - name: Finalize triage event claims and stage evidence
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          PRIMARY_CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
+          PRIMARY_MARKER: ${{ steps.event-claim.outputs.marker }}
+          REPAIR_CLAIM_ID: ${{ steps.repair-claim.outputs.comment_id }}
+          REPAIR_MARKER: ${{ steps.repair-claim.outputs.marker }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
+          if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          if [ -n "$REPAIR_CLAIM_ID" ]; then
+            repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+            gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+              -f "body=$repair_body" >/dev/null
+          fi
+          python scripts/agent_runtime.py stage \
+            --action "${{ steps.event-claim.outputs.action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
 
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
       # failed before writing its outputs (e.g. a transient `gh issue view`

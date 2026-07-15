@@ -103,6 +103,9 @@ def main():
         and '"spendStarted": False' in capture["run"]
         and "pre-hydration" in capture["run"]
         and "pre-checkpoint" in capture["run"]
+        and 'os.environ["HANDOFF_SHA256"]' in capture["run"]
+        and 'os.environ["HANDOFF"]' in capture["run"]
+        and "handoffInputPathSha256" in capture["run"]
         and all(token not in capture["run"].split('if [ ! -f "$ATTEMPT" ]', 1)[1].split("fi", 1)[0] for token in ("CLAUDE_CODE", "FLEET_TOKEN", "prompt", "target.txt")),
     )
     check(
@@ -150,7 +153,7 @@ def main():
     check("runtime: child lookup is recent, branch-scoped, and page-bounded", "LOOKUP_WINDOW_SECONDS" in dispatch and "MAX_LOOKUP_PAGES" in dispatch and "urlencode" in dispatch and "--paginate" not in dispatch)
     check("runtime: correlated child polling uses its run ID", "def run_status" in dispatch and "run_status(run_id, child_deadline)" in dispatch)
     check("runtime: parent discovery, cancellation, and commands are bounded", "dispatch_deadline" in dispatch and "CANCEL_WAIT_SECONDS" in dispatch and "COMMAND_TIMEOUT_SECONDS" in dispatch and "while not run_id" not in dispatch and "def cancel_and_wait" in dispatch)
-    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason)" in dispatch)
+    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason, cancellation)" in dispatch)
     check("runtime: undiscovered delayed child has its own job timeout", "child_timeout_minutes" in WORKFLOWS["model"].read_text() and "timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}" in WORKFLOWS["model"].read_text() and "child_timeout_minutes=%d" in dispatch)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))

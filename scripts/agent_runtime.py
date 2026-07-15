@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
-from agent_runtime.admission import stage_line, stage_record
+from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_line, stage_record
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
@@ -32,6 +32,23 @@ def output(name: str, value: object) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write("%s=%s\n" % (name, text.replace("\n", " ")))
+
+
+def cmd_event_key(args: argparse.Namespace) -> int:
+    event_key = event_key_sha256(
+        normalized_event_identity(
+            action=args.action,
+            owner=args.owner,
+            repo=args.repo,
+            number=args.number,
+            card_issue=args.issue,
+            revision=args.revision,
+            event_id=args.event_id,
+        )
+    )
+    output("event_key", event_key)
+    print(event_key)
+    return 0
 
 
 def cmd_stage(args: argparse.Namespace) -> int:
@@ -98,6 +115,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         target_kind=args.kind,
         revision=args.revision,
         wheelhouse_revision=args.wheelhouse_revision,
+        event_key=args.event_key,
         target_file=args.target_file,
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
@@ -255,6 +273,15 @@ def cmd_summary(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
+    event_key = commands.add_parser("event-key")
+    event_key.add_argument("--action", required=True)
+    event_key.add_argument("--owner", required=True)
+    event_key.add_argument("--repo", required=True)
+    event_key.add_argument("--number", type=int, required=True)
+    event_key.add_argument("--issue", type=int, required=True)
+    event_key.add_argument("--revision", required=True)
+    event_key.add_argument("--event-id", default="")
+    event_key.set_defaults(func=cmd_event_key)
     stage = commands.add_parser("stage")
     stage.add_argument("--action", required=True)
     stage.add_argument("--source-sha", required=True)
@@ -285,6 +312,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--kind", required=True)
     build.add_argument("--revision", required=True)
     build.add_argument("--wheelhouse-revision", required=True)
+    build.add_argument("--event-key", required=True)
     build.add_argument("--target-file", default="")
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")

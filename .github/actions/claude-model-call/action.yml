@@ -26,6 +26,13 @@ runs:
         echo "handoff=${RUNNER_TEMP}/wheelhouse-claude-handoff-${INVOCATION}" >> "$GITHUB_OUTPUT"
         echo "received=${RUNNER_TEMP}/wheelhouse-claude-received-${INVOCATION}" >> "$GITHUB_OUTPUT"
 
+    - name: Record task-built stage
+      shell: bash
+      run: |
+        python -m agent_runtime.admission \
+          --task '${{ inputs.task }}' --stage task-built --status ok \
+          --code task.built
+
     - id: pack
       name: Pack bounded content-addressed handoff
       shell: bash
@@ -39,6 +46,13 @@ runs:
         python -m agent_runtime.claude_handoff pack \
           --task "$TASK" --bundle "$BUNDLE" --out "$HANDOFF" \
           --allowed-repos "$ALLOWED_REPOS"
+
+    - name: Record handoff-packed stage
+      shell: bash
+      run: |
+        python -m agent_runtime.admission \
+          --task '${{ inputs.task }}' --stage handoff-packed --status ok \
+          --code handoff.packed
 
     - name: Upload immutable model handoff
       uses: actions/upload-artifact@v4
@@ -113,6 +127,9 @@ runs:
         test -n "$events"
         python scripts/agent_runtime.py verify-result \
           --task "$TASK" --result "$result" --events "$events"
+        python -m agent_runtime.admission \
+          --task "$TASK" --stage result-normalized --status ok \
+          --code result.normalized
         status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
         echo "result=$result" >> "$GITHUB_OUTPUT"
         echo "status=$status" >> "$GITHUB_OUTPUT"

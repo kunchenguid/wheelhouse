@@ -401,6 +401,30 @@ def main() -> None:
         write_file(dirty, "tracked.txt", "dirty\n")
         check("deny: dirty worktree", rejects(lambda: snapshot_repository(dirty, dirty_commit), "dirty"))
 
+        # --- denial: source changes during object compilation ---
+        race = root / "postcondition-race"
+        init_repo(race)
+        write_file(race, "one.txt", "one\n")
+        write_file(race, "two.txt", "two\n")
+        race_commit = commit_all(race)
+        import agent_runtime.task_builder as race_tb
+        original_blob_bytes = race_tb._blob_bytes
+        blob_reads = [0]
+
+        def mutate_after_first_blob(repo, object_id):
+            data = original_blob_bytes(repo, object_id)
+            blob_reads[0] += 1
+            if blob_reads[0] == 1:
+                write_file(race, "one.txt", "changed while compiling\n")
+            return data
+
+        race_tb._blob_bytes = mutate_after_first_blob
+        try:
+            raced_rejected = rejects(lambda: snapshot_repository(race, race_commit), "dirty")
+        finally:
+            race_tb._blob_bytes = original_blob_bytes
+        check("deny: post-compilation dirty source rejected", raced_rejected)
+
         # --- denial: untracked ---
         untracked = root / "untracked"
         init_repo(untracked)
@@ -471,6 +495,9 @@ def main() -> None:
 
         original_files = tb.MAX_REPOSITORY_FILES
         original_bytes = tb.MAX_REPOSITORY_BYTES
+        original_source_entries = tb.MAX_REPOSITORY_SOURCE_ENTRIES
+        original_links = tb.MAX_REPOSITORY_SYMLINKS
+        original_aliases = tb.MAX_OBJECT_MATERIALIZATIONS
         try:
             bound_repo = root / "bounds"
             init_repo(bound_repo)
@@ -508,9 +535,47 @@ def main() -> None:
             check("bounds: exact one-byte file accepted", snapshot_repository(small, small_commit).total_bytes == 1)
             tb.MAX_REPOSITORY_BYTES = 0
             check("bounds: zero byte bound rejects one-byte file", rejects(lambda: snapshot_repository(small, small_commit), "byte bound"))
+
+            alias_bound = root / "alias-bound"
+            init_repo(alias_bound)
+            write_file(alias_bound, "base.txt", "same\n")
+            write_link(alias_bound, "one.txt", "base.txt")
+            write_link(alias_bound, "two.txt", "base.txt")
+            alias_commit = commit_all(alias_bound)
+            tb.MAX_REPOSITORY_BYTES = original_bytes
+            tb.MAX_REPOSITORY_SOURCE_ENTRIES = 3
+            tb.MAX_REPOSITORY_SYMLINKS = 2
+            tb.MAX_OBJECT_MATERIALIZATIONS = 2
+            check("bounds: exact source, symlink, and per-object alias limits accepted", snapshot_repository(alias_bound, alias_commit).file_count == 3)
+            tb.MAX_REPOSITORY_SOURCE_ENTRIES = 2
+            check("bounds: source-entry limit +1 denied", rejects(lambda: snapshot_repository(alias_bound, alias_commit), "source-entry"))
+            tb.MAX_REPOSITORY_SOURCE_ENTRIES = 3
+            tb.MAX_REPOSITORY_SYMLINKS = 1
+            check("bounds: symlink-count limit +1 denied", rejects(lambda: snapshot_repository(alias_bound, alias_commit), "symlink-count"))
+            tb.MAX_REPOSITORY_SYMLINKS = 2
+            tb.MAX_OBJECT_MATERIALIZATIONS = 1
+            check("bounds: per-object alias limit +1 denied", rejects(lambda: snapshot_repository(alias_bound, alias_commit), "per-object alias"))
         finally:
             tb.MAX_REPOSITORY_FILES = original_files
             tb.MAX_REPOSITORY_BYTES = original_bytes
+            tb.MAX_REPOSITORY_SOURCE_ENTRIES = original_source_entries
+            tb.MAX_REPOSITORY_SYMLINKS = original_links
+            tb.MAX_OBJECT_MATERIALIZATIONS = original_aliases
+
+        repeated_blobs = root / "repeated-blobs"
+        init_repo(repeated_blobs)
+        for index in range(4):
+            write_file(repeated_blobs, "same-%d.txt" % index, "same\n")
+        repeated_commit = commit_all(repeated_blobs)
+        original_aliases = tb.MAX_OBJECT_MATERIALIZATIONS
+        tb.MAX_OBJECT_MATERIALIZATIONS = 2
+        try:
+            check(
+                "bounds: ordinary committed duplicate blobs are not aliases",
+                snapshot_repository(repeated_blobs, repeated_commit).file_count == 4,
+            )
+        finally:
+            tb.MAX_OBJECT_MATERIALIZATIONS = original_aliases
 
         # --- deterministic ordering across creation order ---
         order_a = root / "order-a"
@@ -554,6 +619,7 @@ def main() -> None:
             target_kind="pr-review",
             revision=fm_commit,
             wheelhouse_revision=WHEELHOUSE_REVISION,
+            event_key="a" * 64,
             target_file=str(target),
             repository_dir=str(firstmate),
             repository_commit=fm_commit,

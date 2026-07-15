@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_line, stage_record
 from agent_runtime.contract import ContractError
 from scripts import agent_claim
+from agent_runtime_testlib import make_task
 
 FAILURES = []
 
@@ -87,6 +88,10 @@ def main():
         check("stages: invalid blanket deadline rejected", True)
     else:
         check("stages: invalid blanket deadline rejected", False)
+
+    with tempfile.TemporaryDirectory() as task_directory:
+        task, _, _ = make_task(Path(task_directory), "nl-decision.local", event_key=nl_one)
+        check("identity: AgentTask binds the normalized event key", task["metadata"]["idempotencyKey"] == nl_one)
 
     comments = []
     next_id = 1
