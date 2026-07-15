@@ -1,4 +1,15 @@
-"""Bounded content-addressed handoff for the read-only Claude model workflow."""
+"""Bounded content-addressed handoff for the read-only Claude model workflow.
+
+Invocation invariant (load-bearing for signed-tree integrity):
+
+  Every process that imports the *packaged* runtime from a signed handoff
+  directory (``PYTHONPATH=$HANDOFF/runtime python -m agent_runtime.claude_handoff``)
+  MUST start with bytecode writes disabled via ``python -B`` and/or
+  ``PYTHONDONTWRITEBYTECODE=1`` *before* import. A fresh interpreter that
+  writes ``__pycache__`` into the signed tree will fail closed at ``verify()``
+  because complete file-set and digest verification rejects any post-signing
+  file. Do not weaken ``verify()`` to ignore arbitrary unmanifested files.
+"""
 
 from __future__ import annotations
 

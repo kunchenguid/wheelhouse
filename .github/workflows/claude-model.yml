@@ -43,9 +43,12 @@ jobs:
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          # Packaged verifier runs inside the signed handoff tree. Never write bytecode
+          # or any other runtime file there before complete digest verification.
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python -B - <<'PY'
           import hashlib, json, os
           from pathlib import Path
           root = Path(os.environ["HANDOFF"])
@@ -70,7 +73,9 @@ jobs:
           if observed != expected:
               raise SystemExit("handoff manifest mismatch")
           PY
-          PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.claude_handoff hydrate \
+          # -B / PYTHONDONTWRITEBYTECODE: packaged import must not create __pycache__
+          # inside the signed tree before agent_runtime.claude_handoff.verify runs.
+          PYTHONPATH="$HANDOFF/runtime" python -B -m agent_runtime.claude_handoff hydrate \
             --handoff "$HANDOFF" --workspace "$GITHUB_WORKSPACE"
 
       - name: Initialize bounded local repository
@@ -107,10 +112,11 @@ jobs:
           ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
           RUNNER_WORKSPACE: ${{ runner.workspace }}
           CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           mkdir -p "$ATTEMPT"
-          PYTHONPATH="$HANDOFF/runtime" python - <<'PY'
+          PYTHONPATH="$HANDOFF/runtime" python -B - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
           from agent_runtime.claude_handoff import declared_output_paths, workspace_input_observation
@@ -262,13 +268,39 @@ jobs:
           EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file }}
           OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT"
-          if [[ "$ACTION" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
+          if [[ "${ACTION:-}" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
             cp decision.json "$OUTPUT/decision.json"
           fi
-          PYTHONPATH="$HANDOFF/runtime" python - <<'PY'
+          # Pre-hydration / pre-checkpoint failures never reach the durable spend
+          # checkpoint. Write one bounded content-free stage record so the parent
+          # receives a trusted no-spend result instead of a missing-file cascade.
+          if [ ! -f "$ATTEMPT" ]; then
+            python -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          output = Path(os.environ["OUTPUT"])
+          stage = os.environ.get("ACTION") and "pre-checkpoint" or "pre-hydration"
+          if not (Path(os.environ.get("HANDOFF", "")) / "manifest.json").is_file():
+              stage = "pre-hydration"
+          proof = {
+              "version": 1,
+              "stage": stage,
+              "stageStatus": "failed",
+              "spendStarted": False,
+              "transcriptSha256": None,
+              "postActionInputObservationSha256": None,
+              "targetInputsReadOnly": False,
+              "handoffManifestSha256": os.environ.get("HANDOFF_SHA256") or None,
+          }
+          (output / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          PY
+            exit 0
+          fi
+          PYTHONPATH="$HANDOFF/runtime" python -B - <<'PY'
           import hashlib, json, os
           from pathlib import Path
           from agent_runtime.claude_handoff import workspace_input_observation
