@@ -174,6 +174,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > The CI-approval security lane remains out of scope except for a cross-repo `needs-ci-approval` ci-noop PR with both a provable rebase nudge and an authoritative current `CONFLICTING` mergeability result.
 > The scan re-checks that exception's mergeability immediately before a reminder or close, so a non-conflicting, `UNKNOWN`, or unreadable PR is skipped rather than acted on.
 > It posts one reminder at `pending_contributor_reminder_days` and closes at `pending_contributor_cleanup_days` only if the reminder already exists.
+> A rebase-specific repeat reminder uses the same visible `Automated reminder:` label as the initial conflict nudge; request-changes reminders retain their distinct wording.
 > It skips instead of closing if any required target timeline or PR edit-history read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if the target has the `wheelhouse:keep-open` label.
 > Maintainer and bot activity never reset the clock.
 > A missing review timestamp is re-read by review ID when possible; a failed re-read or a genuinely unexplained target update still skips cleanup.

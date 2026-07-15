@@ -1218,7 +1218,8 @@ Messages Wheelhouse posts onto **target repos** (e.g. a rebase nudge on a contri
 They must not name the product ("Wheelhouse") or use internal-state jargon ("maintainer queue", "resurface", bucket/kind names).
 This includes pending-contributor cleanup reminders and close comments.
 For a rebase nudge and its rebase-specific pending-contributor repeat reminder, lead with a visible automation disclosure (`Automated reminder:`) - `FLEET_TOKEN` posts as a human login, so without that label the message reads as a personal maintainer ping.
-Then explain that the branch has a merge conflict with the base branch, ask the contributor to rebase onto or merge the latest base branch and push the resolved conflict, and say that checks will re-run and the PR will get looked at again.
+The initial nudge explains that the branch has a merge conflict with the base branch, asks the contributor to rebase onto or merge the latest base branch and push the resolved conflict, and says that checks will re-run and the PR will get looked at again.
+The repeat reminder says the PR is still blocked, repeats the rebase and push guidance, and retains its inactivity warning.
 Templates live in `wheelhouse_core._rebase_nudge_body` and the `needs-rebase` branch of `_pending_reminder_body`; both the standard conflict path and the CI-approval-noop conflict path share the nudge template.
 
 Owner-facing decision cards and comments on **this repo's** issues are the private queue; those may keep the Wheelhouse name and internal vocabulary.
