@@ -463,7 +463,7 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                 # describe the run as cancelled.
                 natural_conclusion = str(cancellation.get("terminalConclusion") or "")
                 if (
-                    termination_reason != "revision-mismatch"
+                    termination_reason == "controller-failure"
                     and not metadata_failure
                     and STATE.get("observed_sha") == args.expected_sha
                     and natural_conclusion

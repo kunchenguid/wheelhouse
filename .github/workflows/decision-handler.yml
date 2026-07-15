@@ -752,7 +752,7 @@ jobs:
       # --- Finalize the card (this repo, default token; never re-triggers) ----
       - id: nl-action-consumer
         name: Comment result on card
-        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
+        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.success == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
@@ -771,9 +771,9 @@ jobs:
           if [ -n "${CLAIM_ID:-}" ]; then
             body="${body}"$'\n\n'"${CLAIM_MARKER}"
             gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
-              -f "body=$body" >/dev/null || true
+              -f "body=$body" >/dev/null
           else
-            gh issue comment "$ISSUE" --body "$body" || true
+            gh issue comment "$ISSUE" --body "$body"
           fi
 
       - name: Clear processing label
@@ -849,7 +849,7 @@ jobs:
         run: |
           body="${REPLY}"$'\n\n'"${CLAIM_MARKER}"
           gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
-            -f "body=$body" >/dev/null || true
+            -f "body=$body" >/dev/null
 
       # --- NL failure visibility (bounded, fire-once) ------------------------
       # If NL was entered and the prompt was built, but the intent-mapping LLM
@@ -880,7 +880,7 @@ jobs:
           set -uo pipefail
           body="The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code. ${CLAIM_MARKER}"
           gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
-            -f "body=$body" >/dev/null || true
+            -f "body=$body" >/dev/null
 
       - name: Record natural-language consumer stage
         if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' }}

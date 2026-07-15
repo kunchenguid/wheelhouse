@@ -50,6 +50,10 @@ def main():
     check("dispatch: end-to-end hard deadline is not claimed", '"hardDeadlineMs": None' in source)
     check("dispatch: correlation and child timeout limits are separate", '"dispatchDeadlineMs"' in source and '"childExecutionTimeoutMs"' in source)
     check("dispatch: command and final discovery operations are bounded", "COMMAND_TIMEOUT_SECONDS" in source and "dispatch_deadline" in source and "while not run_id" not in source)
+    check(
+        "dispatch: only controller failures may accept natural late completion",
+        'termination_reason == "controller-failure"' in source,
+    )
 
     if FAILURES:
         raise SystemExit("%d Claude dispatch checks failed" % len(FAILURES))

@@ -33,6 +33,7 @@ MAX_REPOSITORY_SOURCE_ENTRIES = 30_000
 MAX_SYMLINK_HOPS = 32
 MAX_REPOSITORY_SYMLINKS = 4_096
 MAX_OBJECT_MATERIALIZATIONS = 256
+MAX_SYMLINK_TARGET_BYTES = 4_096
 GIT_MODE_FILE = "100644"
 GIT_MODE_EXEC = "100755"
 GIT_MODE_SYMLINK = "120000"
@@ -211,8 +212,38 @@ def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]
     return index
 
 
-def _blob_bytes(repo: Path, object_id: str) -> bytes:
-    return _git(repo, "cat-file", "blob", object_id)
+def _blob_bytes(repo: Path, object_id: str, max_bytes: int) -> bytes:
+    if max_bytes < 0:
+        raise ArtifactError("repository snapshot exceeds its byte bound")
+    try:
+        size_text = _git_text(repo, "cat-file", "-s", object_id).strip()
+        size = int(size_text)
+    except (ArtifactError, ValueError) as error:
+        raise ArtifactError("repository blob size is invalid") from error
+    if size < 0 or size > max_bytes:
+        raise ArtifactError("repository snapshot exceeds its byte bound")
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "cat-file", "blob", object_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ArtifactError("repository snapshot cannot invoke git") from error
+    assert process.stdout is not None
+    assert process.stderr is not None
+    payload = process.stdout.read(size + 1)
+    oversized = len(payload) > size
+    if oversized:
+        process.kill()
+    stderr = process.stderr.read()
+    returncode = process.wait()
+    if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise ArtifactError("repository snapshot git command failed: %s" % (detail or "cat-file"))
+    if oversized or len(payload) != size:
+        raise ArtifactError("repository blob size changed while reading")
+    return payload
 
 
 def _is_git_path_safe(path: str) -> bool:
@@ -344,7 +375,7 @@ def _materialize_file(
         if count > MAX_OBJECT_MATERIALIZATIONS:
             raise ArtifactError("repository snapshot exceeds its per-object alias bound")
         object_materializations[object_id] = count
-    data = _blob_bytes(repo, object_id)
+    data = _blob_bytes(repo, object_id, MAX_REPOSITORY_BYTES - total[0])
     total[0] += len(data)
     if total[0] > MAX_REPOSITORY_BYTES:
         raise ArtifactError("repository snapshot exceeds its byte bound")
@@ -386,7 +417,7 @@ def _resolve_terminal(
         if kind != "symlink":
             raise ArtifactError("repository symlink target is unsupported")
         chain.add(path)
-        raw = _blob_bytes(repo, object_id)
+        raw = _blob_bytes(repo, object_id, MAX_SYMLINK_TARGET_BYTES)
         text = _decode_link_target(raw)
         if not first_raw:
             first_raw = text
@@ -515,7 +546,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
             continue
         if mode != GIT_MODE_SYMLINK:
             raise ArtifactError("repository snapshot contains an unsupported git mode")
-        raw = _blob_bytes(source, object_id)
+        raw = _blob_bytes(source, object_id, MAX_SYMLINK_TARGET_BYTES)
         raw_text = _decode_link_target(raw)
         # Validate the first hop explicitly so absolute/traversal fail before deeper resolution.
         _resolve_link_path(path, raw_text)

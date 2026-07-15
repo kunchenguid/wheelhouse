@@ -392,6 +392,37 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
     )
 
 
+def test_nl_consumer_evidence_requires_execution_and_durable_projection():
+    steps = handle_steps()
+    action = step_by_id(steps, "nl-action-consumer")
+    reply = step_by_id(steps, "nl-reply-consumer")
+    terminal = step_by_name(steps, "Record natural-language consumer stage")
+    check("nl: action consumer exists", action is not None)
+    check("nl: reply consumer exists", reply is not None)
+    check("nl: terminal consumer stage exists", terminal is not None)
+    if action:
+        check(
+            "nl: action projection requires successful target execution",
+            "steps.execute.outputs.success == 'true'" in str(action.get("if", "")),
+        )
+        check(
+            "nl: action projection propagates write failure",
+            "|| true" not in str(action.get("run", "")),
+        )
+    if reply:
+        check(
+            "nl: reply projection propagates write failure",
+            "|| true" not in str(reply.get("run", "")),
+        )
+    if terminal:
+        run = str(terminal.get("run", ""))
+        check(
+            "nl: committed evidence requires a successful consumer",
+            "steps.nl-action-consumer.outcome" in run
+            and "steps.nl-reply-consumer.outcome" in run,
+        )
+
+
 def test_nl_prompt_step_is_pass_by_reference_not_inline():
     """The nl-prompt step still exports TARGET_FILE (so the file is named) but
     the deterministic builder no longer reads its contents into the prompt -
@@ -418,6 +449,7 @@ def main():
     test_nl_fetch_bounds_target_on_disk_with_explicit_truncation()
     test_both_nl_claude_steps_can_read_the_on_disk_file()
     test_nl_failure_visibility_is_bounded_and_fire_once()
+    test_nl_consumer_evidence_requires_execution_and_durable_projection()
     test_nl_prompt_step_is_pass_by_reference_not_inline()
     print()
     if _failures:

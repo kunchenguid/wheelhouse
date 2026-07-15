@@ -11,6 +11,7 @@ import os
 import stat
 import subprocess
 import tempfile
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -411,8 +412,8 @@ def main() -> None:
         original_blob_bytes = race_tb._blob_bytes
         blob_reads = [0]
 
-        def mutate_after_first_blob(repo, object_id):
-            data = original_blob_bytes(repo, object_id)
+        def mutate_after_first_blob(repo, object_id, max_bytes):
+            data = original_blob_bytes(repo, object_id, max_bytes)
             blob_reads[0] += 1
             if blob_reads[0] == 1:
                 write_file(race, "one.txt", "changed while compiling\n")
@@ -505,6 +506,12 @@ def main() -> None:
             write_file(bound_repo, "base/two.txt", "bbbb\n")
             write_link(bound_repo, "alias", "base")
             bounds_commit = commit_all(bound_repo)
+            with mock.patch.object(tb, "_git_text", return_value="200000001"), mock.patch.object(tb.subprocess, "Popen") as popen:
+                check(
+                    "bounds: oversized blob is rejected before content capture",
+                    rejects(lambda: tb._blob_bytes(bound_repo, "a" * 40, tb.MAX_REPOSITORY_BYTES), "byte bound"),
+                )
+                check("bounds: oversized blob content is never opened", not popen.called)
             # Paths: base/one, base/two, alias/one, alias/two = 4 files.
             tb.MAX_REPOSITORY_FILES = 4
             ok = snapshot_repository(bound_repo, bounds_commit)
