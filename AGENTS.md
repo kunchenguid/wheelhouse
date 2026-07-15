@@ -89,6 +89,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   Definitive target closure remains an immediate hard close and clears any uniquely parsed absence record first so hard-close cards cannot later satisfy reuse provenance, while `ok:false`, truncated, unresolved-mergeability, CI-wait, audit-protected, and owner/handler-raced cards remain frozen.
   Every reconcile mutation and close re-reads the live card and requires it to match the scan snapshot.
   `ingest`, `decision-handler`, and `scan-backstop` share the queued `wheelhouse-backstop` concurrency group, and create/reopen still performs a post-write uniqueness check, so the event and global paths cannot mint two actionable cards for one target.
+  **Post-create admission treats the create response number plus issue-by-number reads as source of truth** (`render_card.verify_unique_open_card` / `_create_and_verify_card`): a valid create must never be closed or labeled `resolved` solely because GitHub's eventually consistent open-list/search index has not yet surfaced the new issue.
+  List lag emits structured `wheelhouse card-admission list_index_lag` telemetry and still admits/queues by number; a genuinely observed alternate open card or a malformed direct object fails closed with rollback; an incomplete list probe retains the open card deferred without destructive rollback.
+  Destructive admission rollbacks must fail the reconcile pass (`admission rollback(s)` counter) so a scan cannot look healthy after admission loss.
+  Covered by `tests/test_card_reuse.py` delayed-index fixtures.
   `render_card.py` writes state markers, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
@@ -405,7 +409,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   read-after-write consistent immediately after `gh issue create`, so reading
   it back milliseconds later can silently miss the card and skip queuing its
   first auto-triage attempt (only a later scan's pre-existing-card backfill
-  path would then catch it). `_create_card`/`upsert_card` therefore always
+  path would then catch it). The same eventual-consistency gap used to drive
+  destructive post-create rollback when uniqueness polled only the open-list
+  index; admission now verifies the direct issue first (see state-block
+  uniqueness note above) and only uses the list to detect alternate open cards.
+  `_create_card`/`upsert_card` therefore always
   return an int issue number (never a URL), and `reconcile.py`'s new-card
   branch reads the fresh card via `current_card({"number": n})` -> `get_card`,
   which IS consistent. The ingest fast path mirrors this: the `upsert` CLI

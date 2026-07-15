@@ -302,6 +302,8 @@ def main():
     refreshed = 0
     activity_reflected = 0
     triage_queued = 0
+    admission_rollbacks = 0
+    admission_deferred = 0
     has_triage_token = auto_triage_has_token()
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     for item in items:
@@ -319,16 +321,34 @@ def main():
                 # `has_token` also decides whether an eligible new card is
                 # created HELD (see AGENTS.md "Held cards") - the same signal
                 # that gates whether triage below actually gets queued.
+                # Post-create admission uses issue-by-number as source of truth;
+                # temporary open-list index lag alone must not roll back a valid
+                # create (see render_card.verify_unique_open_card).
                 number = render_card.upsert_card(item, has_token=has_triage_token)
                 created += 1
                 current_for_triage = (
                     current_card({"number": number}) if number else None
                 )
             except Exception as e:  # one bad item must not abort the whole pass
-                print(
-                    "::warning::failed to create card for %s#%s: %s"
-                    % (item["repo"], item["number"], str(e)[:160])
-                )
+                outcome = getattr(e, "outcome", "") or ""
+                should_rollback = bool(getattr(e, "should_rollback", False))
+                if should_rollback or outcome == render_card.CARD_ADMISSION_ROLLBACK:
+                    admission_rollbacks += 1
+                    print(
+                        "::error::failed to create card for %s#%s (admission rollback): %s"
+                        % (item["repo"], item["number"], str(e)[:160])
+                    )
+                elif outcome == render_card.CARD_ADMISSION_RETAINED_DEFERRED:
+                    admission_deferred += 1
+                    print(
+                        "::warning::deferred card admission for %s#%s (retained open): %s"
+                        % (item["repo"], item["number"], str(e)[:160])
+                    )
+                else:
+                    print(
+                        "::warning::failed to create card for %s#%s: %s"
+                        % (item["repo"], item["number"], str(e)[:160])
+                    )
             if maybe_queue_auto_triage(
                 item, current_for_triage, has_triage_token, owner=owner
             ):
@@ -776,7 +796,8 @@ def main():
 
     print(
         "reconcile: %d card(s) created, %d refreshed, %d anti-masquerade "
-        "refreshed, %d activity reflected, %d auto-triage queued, %d card(s) closed"
+        "refreshed, %d activity reflected, %d auto-triage queued, %d card(s) closed, "
+        "%d admission rollback(s), %d admission deferred"
         % (
             created,
             refreshed,
@@ -784,8 +805,18 @@ def main():
             activity_reflected,
             triage_queued,
             closed,
+            admission_rollbacks,
+            admission_deferred,
         )
     )
+    # Destructive admission loss must not leave the scheduled scan looking
+    # healthy. Deferred retains (list probe incomplete, card kept open) are
+    # recoverable and do not fail the pass by themselves.
+    if admission_rollbacks:
+        sys.exit(
+            "reconcile: %d destructive card-admission rollback(s); "
+            "scan is not healthy" % admission_rollbacks
+        )
 
 
 if __name__ == "__main__":
