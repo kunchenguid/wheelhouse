@@ -77,13 +77,26 @@ def item(head="a" * 40, kind="pr-review", **overrides):
 
 
 def scan_payload(items, open_target=True):
+    pr_numbers = []
+    issue_numbers = []
+    if open_target:
+        for entry in items or []:
+            number = int(entry.get("number") or 0)
+            if not number:
+                continue
+            if entry.get("kind") == "issue-triage":
+                issue_numbers.append(number)
+            else:
+                pr_numbers.append(number)
+        if not pr_numbers and not issue_numbers:
+            pr_numbers = [42]
     return {
         "repos": {
             "wheelhouse": {
                 "ok": True,
                 "truncated": False,
-                "open_pr_numbers": [42] if open_target else [],
-                "open_issue_numbers": [],
+                "open_pr_numbers": pr_numbers,
+                "open_issue_numbers": issue_numbers,
                 "indeterminate_pr_numbers": [],
                 "ci_wait_pr_numbers": [],
                 "ci_wait_refresh_items": [],
@@ -111,24 +124,40 @@ def valid_triage():
 
 
 class LifecycleGitHub:
-    """Stateful GitHub boundary used by actual reconcile and render modules."""
+    """Stateful GitHub boundary used by actual reconcile and render modules.
 
-    def __init__(self, initial_item=None):
+    Issue-by-number reads are immediately consistent. Open-list and label-search
+    visibility can lag independently via `list_index_lag_seconds` and
+    `search_index_lag_seconds` (fake time advanced by `_lifecycle_sleep`).
+    """
+
+    def __init__(self, initial_item=None, start_empty=False):
         self.issues = {}
         self.next_number = 8
         self.clock = 0
+        self.fake_time = 0.0
+        self.list_index_lag_seconds = 0.0
+        self.search_index_lag_seconds = 0.0
+        self.list_visible_at = {}
+        self.search_visible_at = {}
         self.create_calls = 0
+        self.close_calls = 0
         self.fail_list_state = ""
         self.fail_prepare = ""
         self.inject_duplicate_on_reopen = False
+        self.inject_open_duplicate_after_create = False
         self.fail_post_reopen_view_once = False
         self.fail_open_list_after_reopen = False
+        self.fail_open_list_after_create = False
+        self.just_created = False
         self.fail_reopen_after_mutation = False
+        self.direct_issue_overrides = {}
         self.labels_on_reopen = []
         self.just_reopened = False
         self.run_number = 0
         self.workflow_calls = []
-        self.add_card(initial_item or item(), number=7)
+        if not start_empty:
+            self.add_card(initial_item or item(), number=7)
 
     def _timestamp(self):
         self.clock += 1
@@ -138,8 +167,40 @@ class LifecycleGitHub:
     def _touch(self, issue):
         issue["updated_at"] = self._timestamp()
 
-    def add_card(self, current_item, number, state="OPEN", author=rc.CARD_AUTOMATION_AUTHOR):
-        card = rc.render(current_item)
+    def _mark_index_visibility(self, number, *, list_lag=None, search_lag=None):
+        list_delay = (
+            self.list_index_lag_seconds if list_lag is None else float(list_lag)
+        )
+        search_delay = (
+            self.search_index_lag_seconds if search_lag is None else float(search_lag)
+        )
+        self.list_visible_at[number] = self.fake_time + max(0.0, list_delay)
+        self.search_visible_at[number] = self.fake_time + max(0.0, search_delay)
+
+    def advance_time(self, seconds):
+        self.fake_time += float(seconds)
+
+    def _list_visible(self, number):
+        return self.fake_time >= self.list_visible_at.get(number, 0.0)
+
+    def _search_visible(self, number):
+        # REST label list is the production open-list path; search lag is tracked
+        # independently so tests can prove both indexes lag without affecting
+        # authoritative issue-by-number reads.
+        return self.fake_time >= self.search_visible_at.get(number, 0.0)
+
+    def add_card(
+        self,
+        current_item,
+        number,
+        state="OPEN",
+        author=rc.CARD_AUTOMATION_AUTHOR,
+        list_lag=0.0,
+        search_lag=0.0,
+        held=False,
+        has_token=False,
+    ):
+        card = rc.render(current_item, held=held or rc.should_hold(current_item, has_token))
         self.issues[number] = {
             "number": number,
             "body": card["body"],
@@ -152,6 +213,7 @@ class LifecycleGitHub:
             "closed_by": "",
             "comments": [],
         }
+        self._mark_index_visibility(number, list_lag=list_lag, search_lag=search_lag)
         self.next_number = max(self.next_number, number + 1)
         return self.issues[number]
 
@@ -237,13 +299,26 @@ class LifecycleGitHub:
             and requested_state == "OPEN"
         ):
             raise RuntimeError("simulated persistent post-reopen list failure")
+        if (
+            self.just_created
+            and self.fail_open_list_after_create
+            and requested_state == "OPEN"
+        ):
+            raise RuntimeError("simulated persistent post-create list failure")
         if self.fail_list_state == requested_state:
             raise RuntimeError("simulated incomplete %s pagination" % requested_state)
-        rows = [
-            self._rest(issue)
-            for issue in self.issues.values()
-            if issue["state"] == requested_state and marker in label_names(issue)
-        ]
+        rows = []
+        for issue in self.issues.values():
+            if issue["state"] != requested_state:
+                continue
+            if marker not in label_names(issue):
+                continue
+            # Open-list and search indexes lag independently of issue-by-number.
+            if requested_state == "OPEN" and not (
+                self._list_visible(issue["number"]) and self._search_visible(issue["number"])
+            ):
+                continue
+            rows.append(self._rest(issue))
         return SimpleNamespace(returncode=0, stdout=json.dumps([rows]), stderr="")
 
     def gh(self, args, check=True):
@@ -270,9 +345,19 @@ class LifecycleGitHub:
                 self.fail_post_reopen_view_once = False
                 raise RuntimeError("simulated post-reopen read failure")
             number = int(args[1].rsplit("/", 1)[-1])
+            if number in self.direct_issue_overrides:
+                override = self.direct_issue_overrides[number]
+                if override is None:
+                    raise RuntimeError("issue not found")
+                if isinstance(override, Exception):
+                    raise override
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(override), stderr=""
+                )
             issue = self.issues.get(number)
             if not issue:
                 raise RuntimeError("issue not found")
+            # Direct issue-by-number is immediately consistent even while list lags.
             return SimpleNamespace(
                 returncode=0, stdout=json.dumps(self._rest(issue)), stderr=""
             )
@@ -309,6 +394,19 @@ class LifecycleGitHub:
                 "closed_by": "",
                 "comments": [],
             }
+            self._mark_index_visibility(number)
+            self.just_created = True
+            if self.inject_open_duplicate_after_create:
+                self.inject_open_duplicate_after_create = False
+                peer_number = self.next_number
+                self.next_number += 1
+                peer = copy.deepcopy(self.issues[number])
+                peer["number"] = peer_number
+                peer["updated_at"] = self._timestamp()
+                self.issues[peer_number] = peer
+                # Peer is already list-visible so uniqueness can observe it.
+                self.list_visible_at[peer_number] = self.fake_time
+                self.search_visible_at[peer_number] = self.fake_time
             return SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/kunchenguid/wheelhouse/issues/%s\n" % number,
@@ -344,6 +442,7 @@ class LifecycleGitHub:
             self._touch(issue)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "close"]:
+            self.close_calls += 1
             self._close(self.issues[int(args[2])])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "reopen"]:
@@ -354,12 +453,17 @@ class LifecycleGitHub:
             issue["closed_by"] = ""
             self._touch(issue)
             self.just_reopened = True
+            # Reopen is immediately list-visible by default (pre-existing identity).
+            self.list_visible_at[issue["number"]] = self.fake_time
+            self.search_visible_at[issue["number"]] = self.fake_time
             if self.inject_duplicate_on_reopen:
                 self.inject_duplicate_on_reopen = False
                 duplicate = copy.deepcopy(issue)
                 duplicate["number"] = self.next_number
                 duplicate["updated_at"] = self._timestamp()
                 self.issues[self.next_number] = duplicate
+                self.list_visible_at[self.next_number] = self.fake_time
+                self.search_visible_at[self.next_number] = self.fake_time
                 self.next_number += 1
             if self.fail_reopen_after_mutation:
                 self.fail_reopen_after_mutation = False
@@ -367,12 +471,15 @@ class LifecycleGitHub:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError("unexpected gh call: %r" % (args,))
 
+    def _sleep(self, seconds):
+        self.advance_time(seconds)
+
     def _with_boundary(self, callback):
         old_gh = rc._gh
         old_sleep = rc._lifecycle_sleep
         old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
         rc._gh = self.gh
-        rc._lifecycle_sleep = lambda _seconds: None
+        rc._lifecycle_sleep = self._sleep
         os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
         try:
             return callback()
@@ -1000,6 +1107,437 @@ def test_full_lifecycle_wait_then_new_head():
     )
 
 
+def test_list_lag_create_is_retained_and_queued_once():
+    """Production shape: create response + direct read OK, open-list lag 0..30s+."""
+    # Probe sleeps advance fake time by up to ~(ATTEMPTS-1)*DELAY (~0.5s).
+    probe_budget = (rc.LIFECYCLE_VERIFY_ATTEMPTS - 1) * rc.LIFECYCLE_VERIFY_DELAY_SECONDS
+    for lag in (0.0, 0.5, 5.0, 30.0, 45.0):
+        github = LifecycleGitHub(start_empty=True)
+        github.list_index_lag_seconds = lag
+        github.search_index_lag_seconds = lag
+        current = item(head=("a" if lag == 0 else "b") * 40)
+        # Isolate each lag case on a distinct target so markers never collide.
+        current["number"] = 100 + int(lag * 10)
+        current["url"] = "https://github.com/kunchenguid/wheelhouse/pull/%s" % (
+            current["number"],
+        )
+        closes_before = github.close_calls
+        creates_before = github.create_calls
+        with io.StringIO() as buf, redirect_stdout(buf):
+            number = github.event_upsert(current, has_token=True)
+            admission_out = buf.getvalue()
+        issue = github.issues[number]
+        state = core.parse_state_block(issue["body"])
+        check(
+            "list-lag %.1fs: create retained open without rollback" % lag,
+            number is not None
+            and issue["state"] == "OPEN"
+            and github.close_calls == closes_before
+            and github.create_calls == creates_before + 1
+            and "resolved" not in label_names(issue)
+            and "card-admission rollback" not in admission_out,
+        )
+        expect_lag_notice = lag > probe_budget
+        check(
+            "list-lag %.1fs: direct-read admission succeeds for held agent card" % lag,
+            state.get("held") is True
+            and rc.HOLD_LABEL in label_names(issue)
+            and "needs-decision" in label_names(issue)
+            and "card-admission direct_ok" in admission_out
+            and (
+                ("list_index_lag" in admission_out)
+                if expect_lag_notice
+                else (
+                    "card-admission unique" in admission_out
+                    or "list_index_lag" in admission_out
+                )
+            ),
+        )
+
+        # After index convergence, same target is stable: no mint/close churn.
+        github.advance_time(lag + 1.0)
+        closes_mid = github.close_calls
+        creates_mid = github.create_calls
+        again = github.event_upsert(current, has_token=True)
+        check(
+            "list-lag %.1fs: repeated upsert after convergence does not mint or close"
+            % lag,
+            again == number
+            and github.create_calls == creates_mid
+            and github.close_calls == closes_mid
+            and github.issues[number]["state"] == "OPEN",
+        )
+
+        out = github.run_reconcile(scan_payload([current]), token=True)
+        open_numbers = [
+            n for n, iss in github.issues.items() if iss["state"] == "OPEN"
+        ]
+        check(
+            "list-lag %.1fs: eventually one open card and no create churn" % lag,
+            open_numbers == [number]
+            and github.create_calls == creates_mid
+            and "0 admission rollback(s)" in out
+            and "destructive card-admission rollback" not in out,
+        )
+
+
+def test_list_lag_never_rolls_back_valid_create():
+    github = LifecycleGitHub(start_empty=True)
+    github.list_index_lag_seconds = 30.0
+    github.search_index_lag_seconds = 60.0
+    current = item()
+    with io.StringIO() as buf, redirect_stdout(buf):
+        number = github.event_upsert(current, has_token=False)
+        out = buf.getvalue()
+    issue = github.issues[number]
+    check(
+        "list lag alone never labels resolved or closes",
+        issue["state"] == "OPEN"
+        and "resolved" not in label_names(issue)
+        and github.close_calls == 0
+        and "list_index_lag" in out
+        and "card-admission rollback" not in out,
+    )
+    check(
+        "deterministic CI path also survives list lag",
+        github.event_upsert(item(kind="ci-approval", number=99, head="c" * 40))
+        and all(
+            iss["state"] == "OPEN" and "resolved" not in label_names(iss)
+            for iss in github.issues.values()
+        ),
+    )
+
+
+def test_trusted_open_duplicate_before_or_after_create_fails_closed():
+    # Existing trusted open card before create: lookup finds it, no create.
+    existing = item(head="d" * 40)
+    github = LifecycleGitHub(existing)
+    number = github.event_upsert(existing, has_token=True)
+    check(
+        "pre-existing open card is reused without a second create",
+        number == 7 and github.create_calls == 0 and github.issues[7]["state"] == "OPEN",
+    )
+
+    # Peer becomes list-visible after create while new card is still lagging.
+    racing = LifecycleGitHub(start_empty=True)
+    racing.list_index_lag_seconds = 30.0
+    racing.inject_open_duplicate_after_create = True
+    failed = False
+    outcome = None
+    try:
+        racing.event_upsert(item(head="e" * 40), has_token=True)
+    except rc.CardAdmissionError as error:
+        failed = True
+        outcome = error.outcome
+        should_rollback = error.should_rollback
+    created = [
+        n for n, iss in racing.issues.items() if iss.get("body")
+    ]
+    closed_resolved = [
+        n
+        for n, iss in racing.issues.items()
+        if iss["state"] == "CLOSED" and "resolved" in label_names(iss)
+    ]
+    check(
+        "post-create observed duplicate fails closed with rollback of new card",
+        failed
+        and outcome == rc.CARD_ADMISSION_DUPLICATE
+        and should_rollback is True
+        and closed_resolved
+        and racing.close_calls >= 1,
+    )
+    # Exactly one peer may remain open (the injected duplicate).
+    open_after = [n for n, iss in racing.issues.items() if iss["state"] == "OPEN"]
+    check(
+        "post-create duplicate leaves only the alternate open peer",
+        len(open_after) == 1 and open_after[0] not in closed_resolved,
+    )
+    del created  # silence unused in strict linters
+
+
+def test_malformed_direct_objects_fail_closed():
+    cases = []
+
+    def run_case(name, mutate_issue, expect_resolved=True):
+        github = LifecycleGitHub(start_empty=True)
+        current = item(head="f" * 40)
+        card = rc.render(current, held=False)
+        created = {}
+        original_create = rc._create_card
+
+        def create_then_poison(rendered):
+            number = original_create(rendered)
+            created["number"] = number
+            mutate_issue(github, number)
+            return number
+
+        failed = False
+        outcome = None
+        should_rollback = None
+        try:
+
+            def attempt():
+                nonlocal failed, outcome, should_rollback
+                rc._create_card = create_then_poison
+                try:
+                    return rc._create_and_verify_card(current, card)
+                except rc.CardAdmissionError as error:
+                    failed = True
+                    outcome = error.outcome
+                    should_rollback = error.should_rollback
+                    raise
+                finally:
+                    rc._create_card = original_create
+
+            github._with_boundary(attempt)
+        except rc.CardAdmissionError:
+            pass
+        except Exception:
+            rc._create_card = original_create
+            raise
+        finally:
+            rc._create_card = original_create
+        number = created.get("number")
+        issue = github.issues.get(number) if number else None
+        ok = (
+            failed
+            and outcome == rc.CARD_ADMISSION_MALFORMED
+            and should_rollback is True
+            and issue is not None
+            and issue["state"] == "CLOSED"
+            and (not expect_resolved or "resolved" in label_names(issue))
+        )
+        cases.append((name, ok))
+
+    def close_direct(github, number):
+        # Already closed before rollback runs - fail closed on direct read.
+        github.issues[number]["state"] = "CLOSED"
+        github.issues[number]["closed_at"] = "2026-07-13T14:00:00Z"
+        github.issues[number]["closed_by"] = rc.CARD_AUTOMATION_AUTHOR
+
+    def wrong_author(github, number):
+        github.issues[number]["author"] = "human-contributor"
+
+    def wrong_target(github, number):
+        state = core.parse_state_block(github.issues[number]["body"])
+        state["repo"] = "other-repo"
+        github.issues[number]["body"] = rc._replace_state_block(
+            github.issues[number]["body"], state
+        )
+        names = label_names(github.issues[number])
+        names.discard("repo:wheelhouse")
+        names.discard("target:wheelhouse-42")
+        names.add("repo:other-repo")
+        names.add("target:other-repo-42")
+        github.issues[number]["labels"] = label_objects(names)
+
+    def wrong_kind(github, number):
+        state = core.parse_state_block(github.issues[number]["body"])
+        state["kind"] = "ci-approval"
+        github.issues[number]["body"] = rc._replace_state_block(
+            github.issues[number]["body"], state
+        )
+        names = label_names(github.issues[number])
+        names.discard("kind:pr-review")
+        names.add("kind:ci-approval")
+        github.issues[number]["labels"] = label_objects(names)
+
+    def body_mismatch(github, number):
+        github.issues[number]["body"] = (
+            github.issues[number]["body"] + "\n<!-- tampered -->\n"
+        )
+
+    run_case("closed", close_direct, expect_resolved=False)
+    run_case("untrusted author", wrong_author)
+    run_case("wrong target", wrong_target)
+    run_case("wrong kind", wrong_kind)
+    run_case("body mismatch", body_mismatch)
+    check(
+        "malformed/wrong-target/wrong-kind/closed/untrusted direct objects fail closed",
+        all(ok for _name, ok in cases),
+    )
+    if not all(ok for _name, ok in cases):
+        for name, ok in cases:
+            if not ok:
+                print("  detail FAIL malformed case: %s" % name)
+
+
+def test_thirty_sequential_and_burst_creates_under_list_lag():
+    github = LifecycleGitHub(start_empty=True)
+    github.list_index_lag_seconds = 30.0
+    github.search_index_lag_seconds = 30.0
+    created_numbers = []
+    for index in range(30):
+        current = item(
+            head=("%x" % (index % 16)) * 40,
+            number=200 + index,
+            title="PR %s" % (200 + index),
+        )
+        current["url"] = "https://github.com/kunchenguid/wheelhouse/pull/%s" % (
+            current["number"],
+        )
+        number = github.event_upsert(current, has_token=(index % 2 == 0))
+        created_numbers.append(number)
+        check(
+            "sequential create %s retained open under 30s lag" % (index + 1),
+            number is not None
+            and github.issues[number]["state"] == "OPEN"
+            and "resolved" not in label_names(github.issues[number]),
+        )
+    check(
+        "30 sequential creates: no close/rollback churn",
+        github.create_calls == 30
+        and github.close_calls == 0
+        and len(set(created_numbers)) == 30,
+    )
+
+    # Burst/concurrent-shaped: three waves of 10 distinct targets, lag still on.
+    burst_numbers = []
+    for wave in range(3):
+        wave_items = []
+        for offset in range(10):
+            n = 500 + wave * 10 + offset
+            wave_items.append(
+                item(
+                    head=("%x" % ((wave + offset) % 16)) * 40,
+                    number=n,
+                    title="burst %s" % n,
+                    url="https://github.com/kunchenguid/wheelhouse/pull/%s" % n,
+                )
+            )
+        for current in wave_items:
+            burst_numbers.append(github.event_upsert(current, has_token=True))
+    check(
+        "burst creates under lag: all retained, no mint/close churn pair",
+        github.create_calls == 60
+        and github.close_calls == 0
+        and all(
+            github.issues[n]["state"] == "OPEN" and "resolved" not in label_names(github.issues[n])
+            for n in burst_numbers
+        ),
+    )
+
+    # Index converges; repeated scheduled scans do not re-mint.
+    github.advance_time(31.0)
+    creates_after = github.create_calls
+    scan_items = [
+        item(
+            head="1" * 40,
+            number=200 + index,
+            url="https://github.com/kunchenguid/wheelhouse/pull/%s" % (200 + index),
+        )
+        for index in range(30)
+    ]
+    github.run_reconcile(
+        {
+            "repos": {
+                "wheelhouse": {
+                    "ok": True,
+                    "truncated": False,
+                    "open_pr_numbers": [it["number"] for it in scan_items],
+                    "open_issue_numbers": [],
+                    "indeterminate_pr_numbers": [],
+                    "ci_wait_pr_numbers": [],
+                    "ci_wait_refresh_items": [],
+                }
+            },
+            "items": scan_items,
+        },
+        token=True,
+    )
+    github.run_reconcile(
+        {
+            "repos": {
+                "wheelhouse": {
+                    "ok": True,
+                    "truncated": False,
+                    "open_pr_numbers": [it["number"] for it in scan_items],
+                    "open_issue_numbers": [],
+                    "indeterminate_pr_numbers": [],
+                    "ci_wait_pr_numbers": [],
+                    "ci_wait_refresh_items": [],
+                }
+            },
+            "items": scan_items,
+        },
+        token=True,
+    )
+    check(
+        "repeated scans after lag: no additional creates for the same 30 targets",
+        github.create_calls == creates_after,
+    )
+
+
+def test_list_error_defers_without_destructive_rollback():
+    github = LifecycleGitHub(start_empty=True)
+    # Lookup must succeed (empty open list); only the post-create list probe fails.
+    github.fail_open_list_after_create = True
+    current = item(head="9" * 40)
+    failed = False
+    outcome = None
+    should_rollback = None
+    number = None
+    try:
+        github.event_upsert(current, has_token=True)
+    except rc.CardAdmissionError as error:
+        failed = True
+        outcome = error.outcome
+        should_rollback = error.should_rollback
+        number = error.number
+    check(
+        "incomplete open-list probe defers without rollback",
+        failed
+        and outcome == rc.CARD_ADMISSION_RETAINED_DEFERRED
+        and should_rollback is False
+        and number is not None
+        and github.close_calls == 0
+        and github.issues[number]["state"] == "OPEN"
+        and "resolved" not in label_names(github.issues[number]),
+    )
+
+
+def test_ci_and_held_agent_cards_under_list_lag():
+    github = LifecycleGitHub(start_empty=True)
+    github.list_index_lag_seconds = 30.0
+    pr_item = item(kind="pr-review", number=701, head="1" * 40)
+    pr_item["url"] = "https://github.com/kunchenguid/wheelhouse/pull/701"
+    issue_item = item(
+        kind="issue-triage",
+        number=702,
+        head="",
+        updated_at="2026-07-13T15:00:00Z",
+        bucket="needs-triage",
+        comp="none",
+        tests="none",
+        url="https://github.com/kunchenguid/wheelhouse/issues/702",
+    )
+    ci_item = item(kind="ci-approval", number=703, head="2" * 40, priority="high")
+    ci_item["url"] = "https://github.com/kunchenguid/wheelhouse/pull/703"
+
+    pr_number = github.event_upsert(pr_item, has_token=True)
+    issue_number = github.event_upsert(issue_item, has_token=True)
+    ci_number = github.event_upsert(ci_item, has_token=False)
+
+    pr_state = core.parse_state_block(github.issues[pr_number]["body"])
+    issue_state = core.parse_state_block(github.issues[issue_number]["body"])
+    ci_state = core.parse_state_block(github.issues[ci_number]["body"])
+    check(
+        "held agent pr/issue cards survive list lag",
+        pr_state.get("held") is True
+        and issue_state.get("held") is True
+        and rc.HOLD_LABEL in label_names(github.issues[pr_number])
+        and rc.HOLD_LABEL in label_names(github.issues[issue_number])
+        and github.close_calls == 0,
+    )
+    check(
+        "deterministic ci-approval card survives list lag without held state",
+        ci_state.get("held") is not True
+        and rc.HOLD_LABEL not in label_names(github.issues[ci_number])
+        and github.issues[ci_number]["state"] == "OPEN"
+        and github.close_calls == 0,
+    )
+
+
 def main():
     test_same_head_reopens_same_issue()
     test_new_head_reopens_and_drops_stale_analysis()
@@ -1019,6 +1557,13 @@ def main():
     test_ambiguous_reopen_response_forces_inert_card_closed()
     test_auto_merge_duplicate_and_authorization_gates_unchanged()
     test_full_lifecycle_wait_then_new_head()
+    test_list_lag_create_is_retained_and_queued_once()
+    test_list_lag_never_rolls_back_valid_create()
+    test_trusted_open_duplicate_before_or_after_create_fails_closed()
+    test_malformed_direct_objects_fail_closed()
+    test_thirty_sequential_and_burst_creates_under_list_lag()
+    test_list_error_defers_without_destructive_rollback()
+    test_ci_and_held_agent_cards_under_list_lag()
     if _failures:
         print("\n%d failure(s): %s" % (len(_failures), ", ".join(_failures)))
         sys.exit(1)
