@@ -402,8 +402,9 @@ def test_nl_consumer_evidence_requires_execution_and_durable_projection():
     check("nl: terminal consumer stage exists", terminal is not None)
     if action:
         check(
-            "nl: action projection requires successful target execution",
-            "steps.execute.outputs.success == 'true'" in str(action.get("if", "")),
+            "nl: action projection requires completed target execution",
+            "steps.execute.outcome == 'success'" in str(action.get("if", ""))
+            and "steps.execute.outputs.success" not in str(action.get("if", "")),
         )
         check(
             "nl: action projection propagates write failure",

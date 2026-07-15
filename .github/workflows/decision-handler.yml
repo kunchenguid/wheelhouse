@@ -752,7 +752,7 @@ jobs:
       # --- Finalize the card (this repo, default token; never re-triggers) ----
       - id: nl-action-consumer
         name: Comment result on card
-        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.success == 'true' }}
+        if: ${{ always() && (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' && steps.execute.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}

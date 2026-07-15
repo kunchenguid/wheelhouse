@@ -34,6 +34,7 @@ MAX_SYMLINK_HOPS = 32
 MAX_REPOSITORY_SYMLINKS = 4_096
 MAX_OBJECT_MATERIALIZATIONS = 256
 MAX_SYMLINK_TARGET_BYTES = 4_096
+MAX_REPOSITORY_TREE_ROW_BYTES = 65_536
 GIT_MODE_FILE = "100644"
 GIT_MODE_EXEC = "100755"
 GIT_MODE_SYMLINK = "120000"
@@ -168,47 +169,88 @@ def _parse_ls_tree(payload: bytes) -> list[tuple[str, str, str, str]]:
     for item in payload.split(b"\0"):
         if not item:
             continue
-        try:
-            meta, path_bytes = item.split(b"\t", 1)
-        except ValueError as error:
-            raise ArtifactError("repository tree listing is malformed") from error
-        parts = meta.split(b" ")
-        if len(parts) != 3:
-            raise ArtifactError("repository tree listing is malformed")
+        rows.append(_parse_ls_tree_item(item))
+    return rows
+
+
+def _parse_ls_tree_item(item: bytes) -> tuple[str, str, str, str]:
+    try:
+        meta, path_bytes = item.split(b"\t", 1)
+    except ValueError as error:
+        raise ArtifactError("repository tree listing is malformed") from error
+    parts = meta.split(b" ")
+    if len(parts) != 3:
+        raise ArtifactError("repository tree listing is malformed")
+    try:
         mode = parts[0].decode("ascii", errors="strict")
         objtype = parts[1].decode("ascii", errors="strict")
         object_id = parts[2].decode("ascii", errors="strict").lower()
-        try:
-            path = path_bytes.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ArtifactError("repository path is not valid UTF-8") from error
-        if not path or path == ".git" or path.startswith(".git/") or "\0" in path:
-            raise ArtifactError("repository tree contains a forbidden path")
-        rows.append((mode, objtype, object_id, path))
-    return rows
+        path = path_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ArtifactError("repository tree listing is not valid UTF-8") from error
+    if not path or path == ".git" or path.startswith(".git/") or "\0" in path:
+        raise ArtifactError("repository tree contains a forbidden path")
+    return mode, objtype, object_id, path
 
 
 def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]:
     """Map committed paths to (mode, object_id) using the object database only."""
 
-    payload = _git(repo, "ls-tree", "-r", "-z", commit)
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "ls-tree", "-r", "-z", commit],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ArtifactError("repository snapshot cannot invoke git") from error
+    assert process.stdout is not None
+    assert process.stderr is not None
     index: dict[str, tuple[str, str]] = {}
-    for mode, objtype, object_id, path in _parse_ls_tree(payload):
-        if len(index) >= MAX_REPOSITORY_SOURCE_ENTRIES:
-            raise ArtifactError("repository snapshot exceeds its source-entry bound")
-        if mode == GIT_MODE_GITLINK or objtype == "commit":
-            raise ArtifactError("repository snapshot rejects gitlinks/submodules")
-        if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
-            if objtype != "blob":
-                raise ArtifactError("repository snapshot contains a non-blob regular entry")
-            index[path] = (mode, object_id)
-            continue
-        if mode == GIT_MODE_SYMLINK:
-            if objtype != "blob":
-                raise ArtifactError("repository snapshot contains a non-blob symlink entry")
-            index[path] = (mode, object_id)
-            continue
-        raise ArtifactError("repository snapshot contains an unsupported git mode")
+    buffer = bytearray()
+    source_entries = 0
+    try:
+        while True:
+            chunk = process.stdout.read(65_536)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            while True:
+                separator = buffer.find(0)
+                if separator < 0:
+                    break
+                item = bytes(buffer[:separator])
+                del buffer[: separator + 1]
+                if not item:
+                    continue
+                if len(item) > MAX_REPOSITORY_TREE_ROW_BYTES:
+                    raise ArtifactError("repository tree listing row exceeds its bound")
+                source_entries += 1
+                if source_entries > MAX_REPOSITORY_SOURCE_ENTRIES:
+                    raise ArtifactError("repository snapshot exceeds its source-entry bound")
+                mode, objtype, object_id, path = _parse_ls_tree_item(item)
+                if mode == GIT_MODE_GITLINK or objtype == "commit":
+                    raise ArtifactError("repository snapshot rejects gitlinks/submodules")
+                if mode not in (GIT_MODE_FILE, GIT_MODE_EXEC, GIT_MODE_SYMLINK):
+                    raise ArtifactError("repository snapshot contains an unsupported git mode")
+                if objtype != "blob":
+                    raise ArtifactError("repository snapshot contains a non-blob entry")
+                if path in index:
+                    raise ArtifactError("repository tree contains a duplicate path")
+                index[path] = (mode, object_id)
+            if len(buffer) > MAX_REPOSITORY_TREE_ROW_BYTES:
+                raise ArtifactError("repository tree listing row exceeds its bound")
+        if buffer:
+            raise ArtifactError("repository tree listing is malformed")
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
+    stderr = process.stderr.read()
+    returncode = process.wait()
+    if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise ArtifactError("repository snapshot git command failed: %s" % (detail or "ls-tree"))
     return index
 
 
