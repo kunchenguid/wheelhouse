@@ -1423,11 +1423,13 @@ def _rebase_nudge_body(repo, number, head_sha):
     marker = _rebase_nudge_marker(head_sha)
     short = str(head_sha or "").strip()[:8] or "current head"
     # Contributor-facing only: plain language, no product name, no queue jargon.
+    # Visible automation disclosure is required - FLEET_TOKEN posts as a human
+    # login, so without it the nudge reads as a personal maintainer message.
     # See AGENTS.md "Contributor-facing copy". Mechanics (hidden marker below)
     # stay load-bearing for fire-once-per-head-SHA idempotence.
     return (
-        "Thanks for the PR! This branch currently has a merge conflict with "
-        "the base branch.\n\n"
+        "Automated reminder: thanks for the PR! This branch currently has a "
+        "merge conflict with the base branch.\n\n"
         "When you get a chance, please rebase onto (or merge) the latest base "
         "branch, resolve the conflict, and push. After that, checks will "
         "re-run and the PR will get looked at again.\n\n"
@@ -2134,8 +2136,10 @@ def _has_close_attempt(comments, record, maintainer_logins, asked_dt):
 def _pending_reminder_body(record, reminded_at):
     marker = _pending_contributor_reminder_marker(record["ask_id"], reminded_at)
     if record.get("ask_kind") == "needs-rebase":
+        # Same visible automation disclosure as the initial rebase nudge - this
+        # is an automated follow-up to that ask, not a personal maintainer ping.
         text = (
-            "Quick reminder: this PR still looks blocked on a rebase or merge conflict fix.\n\n"
+            "Automated reminder: this PR still looks blocked on a rebase or merge conflict fix.\n\n"
             "If you are still interested, please rebase onto the current base branch, "
             "resolve the conflict, and push.\n\n"
             "If I do not hear back, I may close this as inactive."

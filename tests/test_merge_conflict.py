@@ -29,6 +29,16 @@ def check(name, cond):
         _failures.append(name)
 
 
+def visible_text(body):
+    """Strip HTML comments so assertions check contributor-visible copy only."""
+    return re.sub(r"<!--.*?-->", "", body or "", flags=re.DOTALL)
+
+
+def has_visible_automation_disclosure(body):
+    visible = visible_text(body)
+    return "Automated reminder:" in visible and "automated" in visible.lower()
+
+
 def check_run(name, conclusion="SUCCESS", status="COMPLETED"):
     return {
         "__typename": "CheckRun",
@@ -508,6 +518,10 @@ def test_ci_noop_conflicting_fork_nudges_once_per_head():
         "rebase" in body and "resolve the conflict" in body,
     )
     check(
+        "ci-noop-conflict: visible automation disclosure outside HTML comments",
+        has_visible_automation_disclosure(body),
+    )
+    check(
         "ci-noop-conflict: reuses fire-once-per-head marker",
         core._rebase_nudge_marker("sha257") in body,
     )
@@ -561,10 +575,14 @@ def test_ci_noop_unknown_settles_conflicting_then_nudges():
     check(
         "ci-noop-settled: one nudge after settled CONFLICTING", len(calls["posts"]) == 1
     )
+    settled_body = calls["posts"][0]["body"] if calls["posts"] else ""
     check(
         "ci-noop-settled: marker is head-specific",
-        core._rebase_nudge_marker("sha329")
-        in (calls["posts"][0]["body"] if calls["posts"] else ""),
+        core._rebase_nudge_marker("sha329") in settled_body,
+    )
+    check(
+        "ci-noop-settled: visible automation disclosure outside HTML comments",
+        has_visible_automation_disclosure(settled_body),
     )
 
 
@@ -663,6 +681,10 @@ def test_conflicted_pr_suppresses_card_and_nudges_once_per_head():
         "rebase" in body and "resolve the conflict" in body,
     )
     check("nudge: body mentions checks re-run after fix", "checks will re-run" in body)
+    check(
+        "nudge: visible automation disclosure outside HTML comments",
+        has_visible_automation_disclosure(body),
+    )
     check("nudge: body has no internal product name", "Wheelhouse" not in body)
     check(
         "nudge: body has no internal-state jargon",
@@ -743,6 +765,7 @@ def test_rebase_nudge_body_is_contributor_plain_language():
     head = "abcdef0123456789deadbeef"
     body = core._rebase_nudge_body("demo", 42, head)
     marker = core._rebase_nudge_marker(head)
+    visible = visible_text(body)
     check(
         "nudge-body: explains the merge conflict",
         "merge conflict" in body and "base branch" in body,
@@ -754,6 +777,18 @@ def test_rebase_nudge_body_is_contributor_plain_language():
     check(
         "nudge-body: says checks re-run and PR is looked at again",
         "checks will re-run" in body and "looked at again" in body,
+    )
+    check(
+        "nudge-body: visible automation disclosure outside HTML comments",
+        has_visible_automation_disclosure(body),
+    )
+    check(
+        "nudge-body: automation disclosure is not only in the hidden marker",
+        "Automated reminder:" in visible and "automated" not in marker.lower(),
+    )
+    check(
+        "nudge-body: keeps repo/head note",
+        "Noted for demo#42" in body and "`abcdef01`" in body,
     )
     check("nudge-body: no product name", "Wheelhouse" not in body)
     check(
