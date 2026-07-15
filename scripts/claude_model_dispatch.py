@@ -119,19 +119,53 @@ def discover_run(repo: str, title: str, branch: str, created_after: str, deadlin
     return None
 
 
-def cancel_and_wait(run_id: str) -> None:
-    subprocess.run(("gh", "run", "cancel", run_id), check=False, timeout=COMMAND_TIMEOUT_SECONDS)
+def cancel_and_wait(run_id: str) -> dict[str, object]:
+    """Request cancellation and report what GitHub actually proves.
+
+    A completed child is not evidence that cancellation succeeded. The terminal
+    conclusion is authoritative, and a failed cancel request remains visible
+    even when the child later completes naturally.
+    """
+
+    request_status = "failed"
+    request_return_code: int | None = None
+    try:
+        requested = subprocess.run(
+            ("gh", "run", "cancel", run_id),
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+        request_return_code = requested.returncode
+        request_status = "accepted" if requested.returncode == 0 else "failed"
+    except (OSError, subprocess.TimeoutExpired):
+        request_status = "unavailable"
     deadline = time.monotonic() + CANCEL_WAIT_SECONDS
+    terminal_status = ""
+    terminal_conclusion = ""
     while time.monotonic() < deadline:
         try:
             value = json.loads(run("gh", "run", "view", run_id, "--json", "status,conclusion", capture=True))
-        except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            status = value.get("status") if isinstance(value, dict) else None
+            conclusion = value.get("conclusion") if isinstance(value, dict) else None
+            if not isinstance(status, str) or not status or (conclusion is not None and not isinstance(conclusion, str)):
+                raise ValueError("Claude model workflow terminal status was malformed")
+        except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
             time.sleep(2)
             continue
-        if value.get("status") == "completed":
-            return
+        if status == "completed":
+            terminal_status = status
+            terminal_conclusion = conclusion or ""
+            break
         time.sleep(2)
-    raise SystemExit("cancelled Claude model workflow did not terminate")
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": request_return_code,
+        "terminalStatus": terminal_status,
+        "terminalConclusion": terminal_conclusion,
+        "cancellationConfirmed": terminal_status == "completed" and terminal_conclusion == "cancelled",
+    }
 
 
 def run_status(run_id: str, deadline: float) -> dict:
@@ -150,7 +184,13 @@ def download_artifact(run_id: str, name: str, destination: Path) -> bool:
     return result.returncode == 0
 
 
-def finalize_proof(destination: Path, run_id: str, conclusion: str, termination_reason: str) -> Path:
+def finalize_proof(
+    destination: Path,
+    run_id: str,
+    conclusion: str,
+    termination_reason: str,
+    cancellation: dict[str, object] | None = None,
+) -> Path:
     proof = destination / "enforcement.json"
     if proof.is_file():
         value = json.loads(proof.read_text(encoding="utf-8"))
@@ -168,6 +208,7 @@ def finalize_proof(destination: Path, run_id: str, conclusion: str, termination_
             "expectedCommitSha": STATE["expected_sha"],
             "observedCommitSha": STATE.get("observed_sha"),
             "correlationId": STATE["correlation"],
+            "cancellation": cancellation,
         }
         temporary = proof.with_suffix(".tmp")
         temporary.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -179,12 +220,17 @@ def finalize_proof(destination: Path, run_id: str, conclusion: str, termination_
     return proof
 
 
-def recover_attempt(run_id: str, conclusion: str, termination_reason: str) -> None:
+def recover_attempt(
+    run_id: str,
+    conclusion: str,
+    termination_reason: str,
+    cancellation: dict[str, object] | None = None,
+) -> None:
     destination = Path(str(STATE["destination"]))
     shutil.rmtree(destination, ignore_errors=True)
     if not download_artifact(run_id, str(STATE["output_artifact"]) + "-attempt", destination):
         raise SystemExit("Claude model attempt checkpoint was unavailable")
-    finalize_proof(destination, run_id, conclusion, termination_reason)
+    finalize_proof(destination, run_id, conclusion, termination_reason, cancellation)
 
 
 def terminate_parent(_signum: int, _frame: object) -> None:
@@ -197,7 +243,7 @@ def emit_revision_mismatch(
     run_id: str,
     observed_sha: str,
     correlation: str,
-    cancellation_confirmed: bool,
+    cancellation: dict[str, object],
     destination: Path,
 ) -> None:
     result_path = destination / "result.json"
@@ -210,14 +256,23 @@ def emit_revision_mismatch(
         run_id,
         args.dispatch_ref,
         correlation,
-        cancellation_confirmed,
+        cancellation,
         str(result_path),
         str(events_path),
     )
     output("result_file", str(result_path))
+    output("events_file", str(events_path))
 
 
-def emit_controller_failure(args: argparse.Namespace, run_id: str, correlation: str, cancellation_status: str, destination: Path) -> None:
+def emit_controller_failure(
+    args: argparse.Namespace,
+    run_id: str,
+    correlation: str,
+    cancellation: dict[str, object],
+    destination: Path,
+    *,
+    reason: str = "malformed-run-metadata",
+) -> None:
     result_path = destination / "result.json"
     events_path = destination / "events.ndjson"
     write_controller_failure_result(
@@ -226,11 +281,13 @@ def emit_controller_failure(args: argparse.Namespace, run_id: str, correlation: 
         run_id,
         args.dispatch_ref,
         correlation,
-        cancellation_status,
+        cancellation,
         str(result_path),
         str(events_path),
+        reason=reason,
     )
     output("result_file", str(result_path))
+    output("events_file", str(events_path))
 
 
 def supervise(args: argparse.Namespace, task: dict) -> None:
@@ -260,7 +317,13 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
     recovery_conclusion = "failure"
     termination_reason = "controller-failure"
     metadata_failure = False
-    cancellation_status = "run-id-unavailable"
+    cancellation: dict[str, object] = {
+        "requestStatus": "not-requested",
+        "requestReturnCode": None,
+        "terminalStatus": "",
+        "terminalConclusion": "",
+        "cancellationConfirmed": False,
+    }
     try:
         STATE["dispatched"] = True
         run(
@@ -366,32 +429,61 @@ def supervise(args: argparse.Namespace, task: dict) -> None:
                     except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
                         cleanup_failure = "Claude model run correlation failed: %s" % type(error).__name__
             if run_id:
-                cancellation_confirmed = False
-                try:
-                    if not completed:
-                        cancel_and_wait(run_id)
-                    cancellation_confirmed = True
-                    cancellation_status = "cancelled-and-waited"
-                except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
-                    cleanup_failure = "Claude model cancellation failed: %s" % type(error).__name__
-                finally:
-                    if termination_reason == "revision-mismatch":
-                        try:
-                            emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, cancellation_confirmed, destination)
-                        except (json.JSONDecodeError, OSError, ValueError) as error:
-                            cleanup_failure = cleanup_failure or "Claude mismatch result was unavailable: %s" % type(error).__name__
-                if termination_reason != "revision-mismatch":
+                if completed:
+                    cancellation = {
+                        "requestStatus": "not-requested",
+                        "requestReturnCode": None,
+                        "terminalStatus": "completed",
+                        "terminalConclusion": conclusion,
+                        "cancellationConfirmed": False,
+                    }
+                else:
+                    cancellation = cancel_and_wait(run_id)
+
+                # A cancel request can lose a race with natural completion. In
+                # that case prefer the child's trusted final artifact and never
+                # describe the run as cancelled.
+                natural_conclusion = str(cancellation.get("terminalConclusion") or "")
+                if (
+                    termination_reason != "revision-mismatch"
+                    and STATE.get("observed_sha") == args.expected_sha
+                    and natural_conclusion
+                    and natural_conclusion != "cancelled"
+                    and download_artifact(run_id, args.output_artifact, destination)
+                ):
+                    normalized = "success" if natural_conclusion == "success" else "failure"
+                    finalize_proof(destination, run_id, normalized, "completed", cancellation)
+                    final_delivered = True
+
+                if termination_reason == "revision-mismatch":
                     try:
-                        recover_attempt(run_id, recovery_conclusion, termination_reason)
-                    except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
-                        cleanup_failure = "Claude model attempt checkpoint recovery failed: %s" % type(error).__name__
+                        emit_revision_mismatch(args, run_id, str(STATE["observed_sha"]), correlation, cancellation, destination)
+                    except (json.JSONDecodeError, OSError, ValueError) as error:
+                        cleanup_failure = "Claude mismatch result was unavailable: %s" % type(error).__name__
+                elif not final_delivered and metadata_failure:
+                    try:
+                        emit_controller_failure(args, run_id, correlation, cancellation, destination)
+                    except (json.JSONDecodeError, OSError, ValueError) as error:
+                        cleanup_failure = "Claude protocol failure result was unavailable: %s" % type(error).__name__
+                elif not final_delivered:
+                    try:
+                        recover_attempt(run_id, recovery_conclusion, termination_reason, cancellation)
+                    except (json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit):
+                        # No trusted child artifact means checkpoint passage is
+                        # unknowable. Emit one task-bound possible-spend result.
+                        try:
+                            emit_controller_failure(
+                                args,
+                                run_id,
+                                correlation,
+                                cancellation,
+                                destination,
+                                reason="child-artifact-unavailable",
+                            )
+                        except (json.JSONDecodeError, OSError, ValueError) as error:
+                            cleanup_failure = "Claude recovery result was unavailable: %s" % type(error).__name__
             elif not cleanup_failure:
                 cleanup_failure = "Claude model run correlation was unavailable"
-    if metadata_failure and termination_reason != "revision-mismatch":
-        try:
-            emit_controller_failure(args, run_id, correlation, cancellation_status, destination)
-        except (json.JSONDecodeError, OSError, ValueError) as error:
-            cleanup_failure = cleanup_failure or "Claude model protocol failure result was unavailable: %s" % type(error).__name__
     if cleanup_failure:
         raise SystemExit(cleanup_failure)
     if failure:

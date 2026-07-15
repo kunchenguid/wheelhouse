@@ -100,13 +100,19 @@ runs:
       if: ${{ always() }}
       shell: bash
       env:
+        TASK: ${{ inputs.task }}
         PARENT_RESULT: ${{ steps.dispatch.outputs.result_file }}
+        PARENT_EVENTS: ${{ steps.dispatch.outputs.events_file }}
         BRIDGE_RESULT: ${{ steps.bridge.outputs.result }}
+        BRIDGE_EVENTS: ${{ steps.bridge.outputs.events }}
       run: |
         set -euo pipefail
         result="${PARENT_RESULT:-${BRIDGE_RESULT:-}}"
+        events="${PARENT_EVENTS:-${BRIDGE_EVENTS:-}}"
         test -n "$result"
-        python scripts/agent_runtime.py validate --path "$result" --kind AgentResult
+        test -n "$events"
+        python scripts/agent_runtime.py verify-result \
+          --task "$TASK" --result "$result" --events "$events"
         status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
         echo "result=$result" >> "$GITHUB_OUTPUT"
         echo "status=$status" >> "$GITHUB_OUTPUT"

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import API_VERSION
-from .contract import canonical_json_bytes, validate_contract
+from .contract import canonical_json_bytes, result_projection_sha256, validate_contract
 from .redaction import sanitize_message
 
 
@@ -88,3 +88,20 @@ def read_events(path: str) -> list[dict[str, Any]]:
     if terminal > 1:
         raise EventError("event stream has duplicate terminal events")
     return events
+
+
+def verify_result_event_binding(result: dict[str, Any], path: str) -> None:
+    """Require one terminal event to project the selected AgentResult exactly."""
+
+    events = read_events(path)
+    if not events or events[-1]["type"] != "execution.completed":
+        raise EventError("event stream is missing its terminal projection")
+    if any(event["executionId"] != result["executionId"] for event in events):
+        raise EventError("event stream execution id does not match its result")
+    terminal = events[-1]
+    if (
+        terminal["data"].get("projection") != "agent-result-without-artifacts/v1"
+        or terminal["data"].get("resultSha256") != result_projection_sha256(result)
+        or terminal["data"].get("status") != result["status"]
+    ):
+        raise EventError("terminal event projection does not match its result")

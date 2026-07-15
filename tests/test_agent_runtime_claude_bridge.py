@@ -24,6 +24,16 @@ def check(name, condition):
         FAILURES.append(name)
 
 
+def cancellation(conclusion="cancelled", request_status="accepted", return_code=0):
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": return_code,
+        "terminalStatus": "completed" if conclusion else "",
+        "terminalConclusion": conclusion,
+        "cancellationConfirmed": conclusion == "cancelled",
+    }
+
+
 def make_bundle(root: Path, action: str = "deep-review.local"):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
@@ -106,6 +116,7 @@ def main():
         task["spec"]["limits"]["enforcement"]["maxToolCalls"] = "unavailable"
         check("bridge: harness executable provenance remains unavailable", result["selection"]["harnessVersion"] is None and result["selection"]["harnessDigest"] is None and result["selection"]["harnessProvenanceQuality"] == "pinned-action-reference" and result["selection"]["harnessSourceCommit"] == ACTION_COMMIT)
         check("bridge: observed model accepted", result["status"] == "succeeded" and result["selection"]["actualModel"] == IMMUTABLE_MODEL)
+        check("bridge: provider and effort are not falsely labeled observed", result["selection"]["provider"] == "anthropic" and result["selection"]["actualProvider"] == "" and result["selection"]["actualEffort"] == "")
         check("bridge: usage remains unavailable when action omits tokens", result["usage"]["inputTokens"] is None and result["usage"]["providerRequests"] is None)
         check("bridge: timing comes from the terminal action event", result["usage"]["durationMs"] == 2500 and result["startedAt"] < result["completedAt"])
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
@@ -122,7 +133,7 @@ def main():
             "42",
             "main",
             "d" * 32,
-            True,
+            cancellation(),
             str(mismatch_result_path),
             str(mismatch_events_path),
         )
@@ -139,7 +150,7 @@ def main():
             "43",
             "main",
             "f" * 32,
-            False,
+            cancellation("success", "failed", 1),
             str(bundle / "unconfirmed-mismatch-result.json"),
             str(bundle / "unconfirmed-mismatch-events.ndjson"),
         )
@@ -151,7 +162,7 @@ def main():
             "42",
             "main",
             "e" * 32,
-            "cancelled-and-waited",
+            cancellation(),
             str(bundle / "controller-failure-result.json"),
             str(bundle / "controller-failure-events.ndjson"),
         )

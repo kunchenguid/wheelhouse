@@ -23,6 +23,16 @@ def check(name, condition):
         FAILURES.append(name)
 
 
+def cancellation(conclusion="cancelled", request_status="accepted", return_code=0):
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": return_code,
+        "terminalStatus": "completed" if conclusion else "",
+        "terminalConclusion": conclusion,
+        "cancellationConfirmed": conclusion == "cancelled",
+    }
+
+
 def arguments():
     return argparse.Namespace(
         task="bundle/task.json",
@@ -47,8 +57,8 @@ def exercise(initial_error):
     try:
         dispatch.run = lambda *args, **kwargs: (_ for _ in ()).throw(initial_error)
         dispatch.discover_run = lambda *args, **kwargs: {"id": 42, "head_sha": "b" * 40, "head_branch": "main"}
-        dispatch.cancel_and_wait = lambda run_id: calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: calls.append(("recover", run_id, conclusion, reason))
+        dispatch.cancel_and_wait = lambda run_id: (calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: calls.append(("recover", run_id, conclusion, reason))
         try:
             dispatch.supervise(arguments(), task())
         except SystemExit:
@@ -101,8 +111,8 @@ def main():
     try:
         dispatch.run = lambda *args, **kwargs: ""
         dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
-        dispatch.cancel_and_wait = lambda run_id: mismatch_calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: mismatch_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.cancel_and_wait = lambda run_id: (mismatch_calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: mismatch_calls.append(("recover", run_id, conclusion, reason))
         dispatch.write_revision_mismatch_result = lambda *args: mismatch_calls.append(("result",) + args[2:8])
         dispatch.output = lambda name, value: mismatch_calls.append(("output", name, value))
         try:
@@ -114,7 +124,7 @@ def main():
             setattr(dispatch, name, value)
     check("dispatch: branch advance remains correlated by title", ("cancel", "8") in mismatch_calls)
     check("dispatch: SHA mismatch result follows bounded cancellation", mismatch_calls.index(("cancel", "8")) < next(index for index, row in enumerate(mismatch_calls) if row[0] == "result"))
-    check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"], True) in mismatch_calls)
+    check("dispatch: SHA mismatch result uses trusted parent metadata", any(row[:6] == ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"]) and row[6]["cancellationConfirmed"] is True for row in mismatch_calls))
     check("dispatch: SHA mismatch exposes the parent result", any(row[:2] == ("output", "result_file") for row in mismatch_calls))
     check("dispatch: SHA mismatch skips impossible checkpoint recovery", not any(row[0] == "recover" for row in mismatch_calls))
 
@@ -124,9 +134,10 @@ def main():
         try:
             dispatch.run = lambda *args, **kwargs: ""
             dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
-            dispatch.cancel_and_wait = lambda _run_id: (_ for _ in ()).throw(error)
+            outcome = cancellation("success", "failed", 1) if isinstance(error, subprocess.CalledProcessError) else cancellation("", "unavailable", None)
+            dispatch.cancel_and_wait = lambda _run_id: outcome
             dispatch.recover_attempt = lambda *_args: calls.append(("recover",))
-            dispatch.write_revision_mismatch_result = lambda *args: calls.append(("result", args[7]))
+            dispatch.write_revision_mismatch_result = lambda *args: calls.append(("result", args[7]["cancellationConfirmed"]))
             dispatch.output = lambda name, value: calls.append(("output", name, value))
             try:
                 dispatch.supervise(arguments(), task())
@@ -148,9 +159,9 @@ def main():
     try:
         dispatch.run = lambda *args, **kwargs: ""
         dispatch.matching_run = lambda *_args: (_ for _ in ()).throw(dispatch.RunMetadataError("malformed", "11"))
-        dispatch.cancel_and_wait = lambda run_id: malformed_calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: malformed_calls.append(("recover", run_id, conclusion, reason))
-        dispatch.write_controller_failure_result = lambda *args: malformed_calls.append(("result", args[2], args[5]))
+        dispatch.cancel_and_wait = lambda run_id: (malformed_calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: malformed_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.write_controller_failure_result = lambda *args, **kwargs: malformed_calls.append(("result", args[2], args[5]["cancellationConfirmed"]))
         dispatch.output = lambda name, value: malformed_calls.append(("output", name, value))
         try:
             dispatch.supervise(arguments(), task())
@@ -160,8 +171,8 @@ def main():
         for name, value in saved.items():
             setattr(dispatch, name, value)
     check("dispatch: malformed correlated metadata cancels identified run", ("cancel", "11") in malformed_calls)
-    check("dispatch: malformed correlated metadata attempts checkpoint recovery", ("recover", "11", "failure", "controller-failure") in malformed_calls)
-    check("dispatch: malformed metadata emits stable parent protocol result", ("result", "11", "cancelled-and-waited") in malformed_calls)
+    check("dispatch: malformed correlated metadata skips untrusted checkpoint recovery", not any(row[0] == "recover" for row in malformed_calls))
+    check("dispatch: malformed metadata emits stable parent protocol result", ("result", "11", True) in malformed_calls)
 
     saved_run = dispatch.run
     lookup_calls = []

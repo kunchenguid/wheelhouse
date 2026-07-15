@@ -19,7 +19,8 @@ from agent_runtime.adapters.codex import _load_lock, _protocol_digest
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
-from agent_runtime.contract import ContractError, canonical_sha256, load_json_regular, validate_contract
+from agent_runtime.contract import ContractError, canonical_sha256, load_json_regular, validate_contract, verify_result_binding
+from agent_runtime.events import EventError, verify_result_event_binding
 from agent_runtime.supervisor import RuntimeFailure, run
 from agent_runtime.task_builder import build_task
 
@@ -108,6 +109,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify_result(args: argparse.Namespace) -> int:
+    task = load_json_regular(args.task)
+    result = load_json_regular(args.result)
+    verify_result_binding(task, result)
+    verify_result_event_binding(result, args.events)
+    print("result and terminal event bind to AgentTask")
+    return 0
+
+
 def cmd_bridge_claude(args: argparse.Namespace) -> int:
     result = bridge(args.task, args.bundle, args.execution_file, args.delivered_file, args.enforcement_file, args.handoff_sha256, args.result, args.events)
     output("result", str(Path(args.result).resolve()))
@@ -193,15 +203,21 @@ def cmd_summary(args: argparse.Namespace) -> int:
     if result is None:
         return 1
     selection = result["selection"]
+    if selection["actualProvider"]:
+        provider_fact = "directly observed `%s`" % selection["actualProvider"]
+    elif selection["actualModel"] and selection["adapter"] == "claude-action-compat":
+        provider_fact = "inferred `%s` from the pinned Claude action and auth profile" % selection["provider"]
+    else:
+        provider_fact = "not independently observed"
     lines = [
         "### Wheelhouse agent runtime",
         "",
         "- Status: `%s`" % result["status"],
         "- Adapter: `%s` `%s`" % (selection["adapter"], selection["adapterVersion"]),
         "- Harness: `%s` `%s` (%s)" % (selection["harness"], selection["harnessVersion"] or "unavailable", selection["harnessProvenanceQuality"]),
-        "- Provider: requested `%s`, observed `%s` via auth profile `%s`" % (selection["provider"], selection["actualProvider"] or "unavailable", selection["authProfile"]),
-        "- Model: requested `%s`, observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
-        "- Effort: requested `%s`, observed `%s`" % (selection["requestedEffort"], selection["actualEffort"] or "unavailable"),
+        "- Provider: selected `%s`; %s (`%s`)" % (selection["provider"], provider_fact, selection["authProfile"]),
+        "- Model: selected `%s`, directly observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
+        "- Effort: selected `%s`, directly observed `unavailable`" % selection["requestedEffort"],
         "- Fallback: `disabled`",
         "- Request: `%s`" % result["requestSha256"],
     ]
@@ -256,6 +272,11 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--path", required=True)
     validate.add_argument("--kind", choices=("AgentTask", "AgentEvent", "AgentResult"), default="")
     validate.set_defaults(func=cmd_validate)
+    verify_result = commands.add_parser("verify-result")
+    verify_result.add_argument("--task", required=True)
+    verify_result.add_argument("--result", required=True)
+    verify_result.add_argument("--events", required=True)
+    verify_result.set_defaults(func=cmd_verify_result)
     claude = commands.add_parser("bridge-claude")
     claude.add_argument("--task", required=True)
     claude.add_argument("--bundle", required=True)
@@ -294,7 +315,7 @@ def main() -> None:
     try:
         code = parser().parse_args()
         status = code.func(code)
-    except (ConfigError, ContractError, RuntimeFailure, ValueError) as error:
+    except (ConfigError, ContractError, EventError, RuntimeFailure, ValueError) as error:
         print("agent runtime error: %s" % error, file=sys.stderr)
         status = 1
     raise SystemExit(status)
