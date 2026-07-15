@@ -167,6 +167,7 @@ jobs:
           {
             echo "proceed=$proceed"
             echo "runtime_mode=$mode"
+            echo "action=$runtime_action"
             echo "repo=$repo"
             echo "number=$(python scripts/wheelhouse_core.py state number)"
             echo "kind=$(python scripts/wheelhouse_core.py state kind)"
@@ -176,11 +177,46 @@ jobs:
             echo "nl path inert (nl_decisions=$nl, auth_ready=$auth_ready, eligible=$eligible)"
           fi
 
+      - id: nl-claim
+        name: Claim the exact natural-language event before spend
+        if: steps.nl-gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.nl-gate.outputs.action }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.nl-gate.outputs.repo }}
+          NUMBER: ${{ steps.nl-gate.outputs.number }}
+          ISSUE: ${{ github.event.issue.number }}
+          REVISION: ${{ steps.nl-gate.outputs.revision }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_claim.py \
+            --action "$ACTION" --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$REVISION" \
+            --event-id "comment:$COMMENT_ID" --repo-slug "$REPO_SLUG"
+          status="skipped"; code="admission.duplicate"
+          if [ "${{ steps.nl-claim.outputs.admitted }}" = "true" ]; then
+            status="ok"; code="admission.admitted"
+          fi
+          python scripts/agent_runtime.py stage \
+            --action "$ACTION" --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.nl-claim.outputs.event_key }}" \
+            --stage admitted --status "$status" --code "$code"
+
+      - name: Capture the post-claim live-card baseline
+        if: steps.nl-claim.outputs.admitted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments > nl-card-baseline.json
+
       # Read-only fetch of the target with FLEET_TOKEN so Claude can answer
       # questions well. It is passed as UNTRUSTED DATA in the prompt - the LLM
       # itself never receives FLEET_TOKEN.
       - id: nl-fetch
-        if: steps.nl-gate.outputs.proceed == 'true'
+        if: steps.nl-claim.outputs.admitted == 'true'
         env:
           FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -239,7 +275,7 @@ jobs:
       # everyone else, so no unauthorized comment can reach the prompt. The thread
       # already contains the triggering comment; it is excluded there by id.
       - id: nl-comments
-        if: steps.nl-gate.outputs.proceed == 'true'
+        if: steps.nl-claim.outputs.admitted == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_SLUG: ${{ github.repository }}
@@ -256,7 +292,7 @@ jobs:
       # is absent, the prompt and Claude tool list stay in the production no-search
       # mode.
       - id: nl-readonly
-        if: steps.nl-gate.outputs.proceed == 'true'
+        if: steps.nl-claim.outputs.admitted == 'true'
         env:
           HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
         run: |
@@ -268,7 +304,7 @@ jobs:
           fi
 
       - id: nl-prompt
-        if: steps.nl-gate.outputs.proceed == 'true'
+        if: steps.nl-claim.outputs.admitted == 'true'
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           ISSUE_BODY: ${{ github.event.issue.body }}
@@ -281,7 +317,7 @@ jobs:
         run: python scripts/apply_decision.py nl-prompt
 
       - id: nl-search-tool
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled == 'true' }}
+        if: ${{ steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' && steps.nl-readonly.outputs.enabled == 'true' }}
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
@@ -289,7 +325,7 @@ jobs:
 
       - id: nl-claude-task
         name: Build the immutable Claude natural-language AgentTask
-        if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
+        if: ${{ steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
         env:
           NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}
           OWNER: ${{ github.repository_owner }}
@@ -300,6 +336,7 @@ jobs:
           SEARCH: ${{ steps.nl-readonly.outputs.enabled }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-nl-decision
+          EVENT_KEY: ${{ steps.nl-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           printf '%s' "$NL_PROMPT" > prompt.txt
@@ -309,7 +346,8 @@ jobs:
             --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
-            --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
+            --event-key "$EVENT_KEY"
 
       - id: nl-claude-model
         name: Run Claude intent mapping in the read-only model workflow

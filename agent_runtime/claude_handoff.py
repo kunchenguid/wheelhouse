@@ -61,7 +61,7 @@ def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]
 def _copy_runtime(destination: Path) -> None:
     package = destination / "runtime" / "agent_runtime"
     package.mkdir(parents=True)
-    for name in ("__init__.py", "contract.py", "claude_handoff.py"):
+    for name in ("__init__.py", "admission.py", "contract.py", "claude_handoff.py"):
         shutil.copyfile(ROOT / name, package / name)
     shutil.copytree(ROOT / "schemas", package / "schemas")
     shutil.copyfile(ROOT.parent / "scripts" / "nl_readonly_search.py", destination / "runtime" / "nl_readonly_search.py")

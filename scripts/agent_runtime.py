@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
+from agent_runtime.admission import stage_line, stage_record
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
@@ -31,6 +32,24 @@ def output(name: str, value: object) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write("%s=%s\n" % (name, text.replace("\n", " ")))
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    print(
+        stage_line(
+            stage_record(
+                action=args.action,
+                source_sha=args.source_sha,
+                event_key=args.event_key,
+                stage=args.stage,
+                status=args.status,
+                code=args.code,
+                execution_id=args.execution_id,
+                deadline_ms=args.deadline_ms,
+            )
+        )
+    )
+    return 0
 
 
 def cmd_select(args: argparse.Namespace) -> int:
@@ -236,6 +255,16 @@ def cmd_summary(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
+    stage = commands.add_parser("stage")
+    stage.add_argument("--action", required=True)
+    stage.add_argument("--source-sha", required=True)
+    stage.add_argument("--event-key", required=True)
+    stage.add_argument("--stage", required=True)
+    stage.add_argument("--status", required=True)
+    stage.add_argument("--code", required=True)
+    stage.add_argument("--execution-id", default="")
+    stage.add_argument("--deadline-ms", type=int)
+    stage.set_defaults(func=cmd_stage)
     select = commands.add_parser("select")
     select.add_argument("--action", required=True)
     select.add_argument("--repo", default="")
