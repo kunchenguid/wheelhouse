@@ -22,6 +22,16 @@ def check(name, cond):
         _failures.append(name)
 
 
+def visible_text(body):
+    """Strip HTML comments so assertions check contributor-visible copy only."""
+    return re.sub(r"<!--.*?-->", "", body or "", flags=re.DOTALL)
+
+
+def has_visible_automation_disclosure(body):
+    visible = visible_text(body)
+    return "Automated reminder:" in visible and "automated" in visible.lower()
+
+
 OWNER = {"login": "owner", "__typename": "User"}
 MAINTAINER = {"login": "co-maintainer", "__typename": "User"}
 CONTRIBUTOR = {"login": "contributor", "__typename": "User"}
@@ -727,6 +737,51 @@ def test_unknown_author_fails_open():
     check("fail-open: ambiguous post-ask author skips cleanup", closed == set())
 
 
+def test_rebase_reminder_body_discloses_automation():
+    """Direct pin: rebase repeat-reminder visible copy must say it is automated."""
+    record = rebase_record()
+    body = core._pending_reminder_body(record, ts(10))
+    marker = core._pending_contributor_reminder_marker(record["ask_id"], ts(10))
+    visible = visible_text(body)
+    check(
+        "rebase-reminder-body: visible automation disclosure outside HTML comments",
+        has_visible_automation_disclosure(body),
+    )
+    check(
+        "rebase-reminder-body: automation disclosure is not only in the hidden marker",
+        "Automated reminder:" in visible and "automated" not in marker.lower(),
+    )
+    check(
+        "rebase-reminder-body: keeps rebase/conflict guidance",
+        "rebase" in visible and "merge conflict" in visible and "push" in visible,
+    )
+    check(
+        "rebase-reminder-body: no product name",
+        "Wheelhouse" not in body,
+    )
+    check(
+        "rebase-reminder-body: no internal queue jargon",
+        "maintainer queue" not in body
+        and "resurface" not in body
+        and "triage" not in body.lower(),
+    )
+    check(
+        "rebase-reminder-body: hidden reminder marker survives",
+        marker in body and body.rstrip().endswith(marker),
+    )
+    # request-changes repeat reminder stays out of this disclosure scope.
+    other = core._pending_reminder_body(
+        core._pending_record(
+            "demo", 7, "request-changes", ts(), "sha1", "contributor", "owner", 99
+        ),
+        ts(10),
+    )
+    check(
+        "request-changes-reminder-body: out of scope for rebase automation wording",
+        "Automated reminder:" not in other and "Quick reminder:" in other,
+    )
+
+
 def test_legacy_rebase_marker_reminds_then_closes_when_provable():
     marker = core._rebase_nudge_marker("sha1")
     fake = FakeGitHub(
@@ -738,6 +793,26 @@ def test_legacy_rebase_marker_reminds_then_closes_when_provable():
     check("retro: legacy rebase marker gets reminder first", closed == set())
     check("retro: reminder added pending label for future scans",
           any(item["name"] == core.PENDING_CONTRIBUTOR_LABEL for item in fake.issue["labels"]))
+    reminder_posts = [
+        c for c in fake.calls
+        if c["method"] == "POST" and c["path"].endswith("/comments")
+        and core.PENDING_CONTRIBUTOR_REMINDER_PREFIX in c["fields"]["body"]
+    ]
+    check("retro: posts one rebase repeat reminder", len(reminder_posts) == 1)
+    if reminder_posts:
+        rem_body = reminder_posts[0]["fields"]["body"]
+        check(
+            "retro: rebase repeat reminder has visible automation disclosure",
+            has_visible_automation_disclosure(rem_body),
+        )
+        check(
+            "retro: rebase repeat reminder keeps conflict guidance",
+            "rebase" in rem_body and "resolve the conflict" in rem_body,
+        )
+        check(
+            "retro: rebase repeat reminder has no product name",
+            "Wheelhouse" not in rem_body,
+        )
 
     legacy_record = rebase_record(source_id=201)
     fake = FakeGitHub(
@@ -1292,6 +1367,7 @@ def main():
     test_head_change_blocks_and_clears_pending_label()
     test_keep_open_and_unknown_timeline_fail_open()
     test_unknown_author_fails_open()
+    test_rebase_reminder_body_discloses_automation()
     test_legacy_rebase_marker_reminds_then_closes_when_provable()
     test_legacy_rebase_skip_when_timestamp_missing()
     test_legacy_rebase_requires_trusted_marker_author()
