@@ -237,6 +237,13 @@ PRIORITY = {
     "issue-triage": "low",
 }
 
+TRIAGE_ATTEMPT_CAP_DEFAULT = 2
+TRIAGE_ATTEMPT_CAP_MIN = 1
+TRIAGE_ATTEMPT_CAP_MAX = 5
+TRIAGE_DAILY_CEILING_DEFAULT = 100
+TRIAGE_DAILY_CEILING_MIN = 1
+TRIAGE_DAILY_CEILING_MAX = 2000
+
 
 # --------------------------------------------------------------------------- #
 # config + owner
@@ -248,15 +255,106 @@ def config_path():
     sys.exit("no wheelhouse.config.yml found (looked in repo root and .github/)")
 
 
+def _invalid_bounded_int(key, fallback, scope="global"):
+    print(
+        "::error::wheelhouse config: %s %s is invalid; failing closed to %s"
+        % (scope, key, fallback),
+        file=sys.stderr,
+    )
+    return fallback
+
+
+def _bounded_config_int(value, key, minimum, maximum, fallback, scope="global"):
+    """Validate one spend-relevant integer without bool/int coercion.
+
+    YAML booleans are Python integers, so the explicit bool rejection is
+    load-bearing. Invalid values always return the caller's fail-closed value
+    and emit a GitHub Actions error annotation on stderr.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or value > maximum
+    ):
+        return _invalid_bounded_int(key, fallback, scope)
+    return value
+
+
+def _triage_attempt_cap(repo_cfg, global_default):
+    """Effective queued-attempt cap for one repository.
+
+    The global and per-repository values both use the approved [1, 5] range.
+    A malformed override fails closed to one rather than falling back to a
+    potentially larger global value.
+    """
+    if "triage_attempt_cap_per_revision" not in (repo_cfg or {}):
+        return _bounded_config_int(
+            global_default,
+            "triage_attempt_cap_per_revision",
+            TRIAGE_ATTEMPT_CAP_MIN,
+            TRIAGE_ATTEMPT_CAP_MAX,
+            1,
+        )
+    name = str((repo_cfg or {}).get("name") or "?")
+    return _bounded_config_int(
+        repo_cfg.get("triage_attempt_cap_per_revision"),
+        "triage_attempt_cap_per_revision",
+        TRIAGE_ATTEMPT_CAP_MIN,
+        TRIAGE_ATTEMPT_CAP_MAX,
+        1,
+        scope="repo %s" % name,
+    )
+
+
 def load_config():
     if yaml is None:
         sys.exit("PyYAML is required (pip install pyyaml)")
     with open(config_path()) as f:
         cfg = yaml.safe_load(f) or {}
     repos = cfg.get("repos") or []
+    global_attempt_cap = (
+        TRIAGE_ATTEMPT_CAP_DEFAULT
+        if "triage_attempt_cap_per_revision" not in cfg
+        else _bounded_config_int(
+            cfg.get("triage_attempt_cap_per_revision"),
+            "triage_attempt_cap_per_revision",
+            TRIAGE_ATTEMPT_CAP_MIN,
+            TRIAGE_ATTEMPT_CAP_MAX,
+            1,
+        )
+    )
+    daily_ceiling = (
+        TRIAGE_DAILY_CEILING_DEFAULT
+        if "triage_daily_ceiling" not in cfg
+        else _bounded_config_int(
+            cfg.get("triage_daily_ceiling"),
+            "triage_daily_ceiling",
+            TRIAGE_DAILY_CEILING_MIN,
+            TRIAGE_DAILY_CEILING_MAX,
+            0,
+        )
+    )
     by_name = {}
+    triage_attempt_caps = {}
     for r in repos:
         if isinstance(r, dict) and r.get("name"):
+            triage_attempt_caps[r["name"]] = _triage_attempt_cap(
+                r, global_attempt_cap
+            )
+            if "triage_daily_ceiling" in r:
+                # The daily budget is one fleet-wide ledger. A repository-level
+                # value would falsely imply an independent budget and is
+                # therefore an invalid ceiling configuration, not an override.
+                daily_ceiling = _invalid_bounded_int(
+                    "triage_daily_ceiling",
+                    0,
+                    scope="repo %s (per-repo overrides are not supported)"
+                    % r.get("name"),
+                )
+            # Preserve the repository entry byte-for-byte in the public config
+            # mapping. Effective typed caps live in the parallel map so callers
+            # that depend on raw repo policy still see exactly what was loaded.
             by_name[r["name"]] = r
     return {
         "repos": by_name,
@@ -278,6 +376,12 @@ def load_config():
         # Same idea, but for issue-triage cards. Independent of `auto_triage`:
         # either can be toggled off without affecting the other.
         "auto_triage_issues": bool(cfg.get("auto_triage_issues", True)),
+        # Spend guards apply to every automatic triage queueing path. The cap
+        # is per card-kind source revision and may be lowered/raised per repo;
+        # the daily ceiling is one global UTC budget with no repo override.
+        "triage_attempt_cap_per_revision": global_attempt_cap,
+        "triage_attempt_caps": triage_attempt_caps,
+        "triage_daily_ceiling": daily_ceiling,
         # Contributor-etiquette DEFAULT ON: a successful merge posts a short,
         # friendly @-mention thank-you on the contributor's PR. Set false (globally
         # or per-repo) to restore silent merges.
@@ -2623,6 +2727,7 @@ def build_repo(
     pending_contributor_cleanup_targets=_PENDING_CONTRIBUTOR_TARGETS_UNSET,
     ci_security_summary_cache=None,
     auto_merge=False,
+    triage_attempt_cap_per_revision=TRIAGE_ATTEMPT_CAP_DEFAULT,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -2857,6 +2962,9 @@ def build_repo(
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
     triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
+    triage_attempt_cap = _triage_attempt_cap(
+        repo_cfg, triage_attempt_cap_per_revision
+    )
     auto_merge_vision_sha = ""
     if _auto_merge_enabled(repo_cfg, auto_merge) and any(
         pr.get("bucket") == "merge-ready" for pr in enriched
@@ -2905,6 +3013,7 @@ def build_repo(
         }
         if kind == "pr-review":
             item["auto_triage"] = triage_enabled
+            item["triage_attempt_cap_per_revision"] = triage_attempt_cap
             item["base_sha"] = pr.get("base_sha") or ""
             item["automerge_vision_sha"] = auto_merge_vision_sha
 
@@ -3045,6 +3154,7 @@ def build_repo(
                         "recommendation": _recommendation("issue-triage"),
                         "priority": PRIORITY["issue-triage"],
                         "auto_triage_issues": triage_issues_enabled,
+                        "triage_attempt_cap_per_revision": triage_attempt_cap,
                     }
                 )
 
@@ -5376,6 +5486,7 @@ def cmd_scan(only_repo=None, cards_path=None):
             cfg["pending_contributor_cleanup_targets"],
             summary_cache,
             cfg["auto_merge"],
+            cfg["triage_attempt_cap_per_revision"],
         )
         out_repos[name] = result
         items.extend(repo_items)
@@ -5397,6 +5508,10 @@ def cmd_scan(only_repo=None, cards_path=None):
         "auto_merge": cfg["auto_merge"],
         "auto_triage": cfg["auto_triage"],
         "auto_triage_issues": cfg["auto_triage_issues"],
+        "triage_attempt_cap_per_revision": cfg[
+            "triage_attempt_cap_per_revision"
+        ],
+        "triage_daily_ceiling": cfg["triage_daily_ceiling"],
         "pending_contributor_cleanup": cfg["pending_contributor_cleanup"],
         "repos": out_repos,
         "items": items,

@@ -27,6 +27,11 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
+Automatic triage also reserves from the closed UTC daily budget ledger before its verified queued-card checkpoint.
+The default `triage_daily_ceiling` is 100 reservations per UTC day, and each reservation can reach at most one primary call plus one bounded schema-repair call, for a 200-model-call daily worst case.
+The per-card `triage_attempt_cap_per_revision` defaults to two queued attempts for one card-kind source revision.
+Malformed cap configuration fails closed to one, while malformed ceiling or ledger state fails closed to zero new reservations.
+Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 It revalidates the signed target inputs after the action and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.

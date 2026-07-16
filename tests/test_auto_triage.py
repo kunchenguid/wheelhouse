@@ -197,10 +197,10 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
             {"number": number, "item": it, "body": body, "body_after": new_body}
         )
         current["body"] = new_body
-        return True
+        return {"number": number, "item": it}
 
-    def fake_dispatch(number, it):
-        calls["dispatch"].append({"number": number, "item": it})
+    def fake_dispatch(permit):
+        calls["dispatch"].append(permit)
 
     def fake_reflect(number, it, body, card_updated_at=""):
         new_body = rc.body_with_activity_reflected(
@@ -1220,12 +1220,12 @@ def test_queue_triage_cli_uses_known_issue_number_without_find_card():
 
     def fake_mark(number, queued_item, body):
         current["body"] = rc.body_with_triage_queued(body, queued_item)
-        return True
+        return {"number": number, "item": queued_item}
 
     dispatched = []
 
-    def fake_dispatch(number, queued_item):
-        dispatched.append(number)
+    def fake_dispatch(permit):
+        dispatched.append(permit["number"])
 
     old = (
         sys.argv[:],
@@ -1292,9 +1292,9 @@ def test_queue_triage_command_warns_on_dispatch_failure():
 
     def fake_mark(number, queued_item, body):
         current["body"] = rc.body_with_triage_queued(body, queued_item)
-        return True
+        return {"number": number, "item": queued_item}
 
-    def fake_dispatch(number, queued_item):
+    def fake_dispatch(permit):
         raise RuntimeError("workflow dispatch unavailable")
 
     # `update_card_triage`'s fail-open publish writes via `_write_body` (a
@@ -1386,9 +1386,9 @@ def test_queue_triage_command_clears_cache_when_publish_fails():
 
     def fake_mark(number, queued_item, body):
         current["body"] = rc.body_with_triage_queued(body, queued_item)
-        return True
+        return {"number": number, "item": queued_item}
 
-    def fake_dispatch(number, queued_item):
+    def fake_dispatch(permit):
         raise RuntimeError("workflow dispatch unavailable")
 
     def fake_update(number, revision, triage=None, error=None, owner=""):
@@ -1474,9 +1474,9 @@ def test_reconcile_dispatch_failure_publish_failure_clears_cache():
 
     def fake_mark(number, queued_item, body):
         row["body"] = rc.body_with_triage_queued(body, queued_item)
-        return True
+        return {"number": number, "item": queued_item}
 
-    def fake_dispatch(number, queued_item):
+    def fake_dispatch(permit):
         raise RuntimeError("workflow dispatch unavailable")
 
     def fake_update(number, revision, triage=None, error=None, owner=""):

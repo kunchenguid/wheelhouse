@@ -45,6 +45,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from types import MappingProxyType
 from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -634,6 +635,9 @@ AUTO_TRIAGE_FLAG_BY_KIND = {
     "pr-review": "auto_triage",
     "issue-triage": "auto_triage_issues",
 }
+TRIAGE_ATTEMPTS_FIELD = "triage_attempts"
+TRIAGE_ATTEMPTS_VERSION = 1
+TRIAGE_ATTEMPTS_MAX_COUNT = core.TRIAGE_ATTEMPT_CAP_MAX
 
 
 def triage_revision(item):
@@ -756,6 +760,109 @@ def triage_queued_for_head(state, revision):
     )
 
 
+def triage_attempt_cap(item):
+    """Return the typed attempt cap carried by a trusted normalized item.
+
+    Queue writers re-read the repository configuration before acting, so this
+    item value is only the cheap preflight gate. Invalid internal item data
+    still fails closed to one and is loud.
+    """
+    value = (item or {}).get(
+        "triage_attempt_cap_per_revision", core.TRIAGE_ATTEMPT_CAP_DEFAULT
+    )
+    return core._bounded_config_int(
+        value,
+        "triage_attempt_cap_per_revision",
+        core.TRIAGE_ATTEMPT_CAP_MIN,
+        core.TRIAGE_ATTEMPT_CAP_MAX,
+        1,
+        scope="normalized triage item",
+    )
+
+
+def triage_attempt_count(state, kind, revision, cap):
+    """Read the queued-attempt count for one card-kind source revision.
+
+    Legacy cards derive one attempt from a current `triaged_sha` cache and zero
+    otherwise. A malformed record blocks at the supplied cap. A valid record
+    for the card's prior stored issue revision resets only when the incoming
+    issue revision is provably newer/different; an internally mismatched record
+    blocks rather than granting capacity.
+    """
+    state = state if isinstance(state, dict) else {}
+    cap = core._bounded_config_int(
+        cap,
+        "triage_attempt_cap_per_revision",
+        core.TRIAGE_ATTEMPT_CAP_MIN,
+        core.TRIAGE_ATTEMPT_CAP_MAX,
+        1,
+        scope="triage attempt state",
+    )
+    if kind not in AUTO_TRIAGE_FLAG_BY_KIND:
+        return cap
+    if TRIAGE_ATTEMPTS_FIELD not in state:
+        return 1 if revision and state.get("triaged_sha") == revision else 0
+    record = state.get(TRIAGE_ATTEMPTS_FIELD)
+    if not isinstance(record, dict) or set(record) != {
+        "version",
+        "kind",
+        "revision",
+        "count",
+    }:
+        return cap
+    version = record.get("version")
+    count = record.get("count")
+    record_kind = record.get("kind")
+    record_revision = record.get("revision")
+    if (
+        isinstance(version, bool)
+        or version != TRIAGE_ATTEMPTS_VERSION
+        or record_kind not in AUTO_TRIAGE_FLAG_BY_KIND
+        or record_kind != kind
+        or not isinstance(record_revision, str)
+        or not record_revision
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        or count > TRIAGE_ATTEMPTS_MAX_COUNT
+    ):
+        return cap
+    stored_revision = state_revision(state, kind)
+    if record_revision == revision:
+        if stored_revision != revision:
+            return cap
+        # A current legacy checkpoint proves at least one queued attempt even
+        # if a forged or partially migrated record claims zero. Records may
+        # deny capacity, but must never erase already-proven spend.
+        legacy_floor = 1 if revision and state.get("triaged_sha") == revision else 0
+        return max(count, legacy_floor)
+    # Issue `updatedAt` moves without a material card refresh. A valid record
+    # matching the card's prior stored revision is therefore trusted history,
+    # and the incoming revision starts a new per-revision count. Any other
+    # mismatch is malformed and denial-only.
+    if record_revision == stored_revision and revision != stored_revision:
+        return 0
+    return cap
+
+
+def triage_attempts_exhausted(item, state, cap=None):
+    kind = (item or {}).get("kind", "pr-review")
+    revision = triage_revision(item or {})
+    effective_cap = (
+        triage_attempt_cap(item)
+        if cap is None
+        else core._bounded_config_int(
+            cap,
+            "triage_attempt_cap_per_revision",
+            core.TRIAGE_ATTEMPT_CAP_MIN,
+            core.TRIAGE_ATTEMPT_CAP_MAX,
+            1,
+            scope="triage attempt gate",
+        )
+    )
+    return triage_attempt_count(state, kind, revision, effective_cap) >= effective_cap
+
+
 def should_hold(item, has_token):
     """Whether a BRAND-NEW card for this item should be created HELD - a
     placeholder body with no decision checkboxes, pending its first auto-
@@ -790,7 +897,24 @@ def should_auto_triage(item, state, labels, has_token=True):
     revision = triage_revision(item)
     if kind == "issue-triage" and _issue_revision_is_older(revision, state):
         return False
-    return not triage_fresh(item, state)
+    if triage_fresh(item, state):
+        return False
+    if triage_attempts_exhausted(item, state):
+        return False
+    return True
+
+
+def triage_attempt_deferral_needed(item, state, labels, has_token=True):
+    """Whether cap exhaustion is the reason an otherwise eligible queue waits."""
+    if not should_hold(item, has_token) or not is_refreshable(labels):
+        return False
+    kind = item.get("kind", "pr-review")
+    revision = triage_revision(item)
+    if kind == "issue-triage" and _issue_revision_is_older(revision, state):
+        return False
+    if triage_fresh(item, state):
+        return False
+    return triage_attempts_exhausted(item, state)
 
 
 def auto_triage_has_token():
@@ -1478,6 +1602,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_repair_reason",
         "triage_repair_candidate",
         "automerge_verdict",
+        TRIAGE_ATTEMPTS_FIELD,
     ):
         if key in (old_state or {}):
             state[key] = old_state[key]
@@ -1557,13 +1682,30 @@ def _state_with_triage(
     return new_state
 
 
-def body_with_triage_queued(body, item):
-    state = parse_state_block(body)
+def body_with_triage_queued(body, item, attempt_cap=None):
+    # Spend authorization uses the strict state reader so duplicate markers or
+    # duplicate JSON keys can only deny queueing.
+    state = _unique_state_block(body)
     kind = item.get("kind", "pr-review")
     revision = triage_revision(item)
     if not state or kind not in AUTO_TRIAGE_FLAG_BY_KIND or state.get("kind") != kind:
         return body
     if not revision:
+        return body
+    cap = (
+        triage_attempt_cap(item)
+        if attempt_cap is None
+        else core._bounded_config_int(
+            attempt_cap,
+            "triage_attempt_cap_per_revision",
+            core.TRIAGE_ATTEMPT_CAP_MIN,
+            core.TRIAGE_ATTEMPT_CAP_MAX,
+            1,
+            scope="triage queued write",
+        )
+    )
+    attempt_count = triage_attempt_count(state, kind, revision, cap)
+    if attempt_count >= cap:
         return body
     if kind == "issue-triage":
         if _issue_revision_is_older(revision, state):
@@ -1580,6 +1722,12 @@ def body_with_triage_queued(body, item):
         base_sha=item.get("base_sha", ""),
         vision_sha=item.get("automerge_vision_sha", ""),
     )
+    new_state[TRIAGE_ATTEMPTS_FIELD] = {
+        "version": TRIAGE_ATTEMPTS_VERSION,
+        "kind": kind,
+        "revision": revision,
+        "count": attempt_count + 1,
+    }
     # This queued write already proves the target returned to the worklist, so
     # clear stale absence state here instead of issuing a second body edit.
     new_state.pop(RECONCILE_ABSENCE_FIELD, None)
@@ -2025,6 +2173,20 @@ def render(item, held=False, workflow_hold=None):
 # --------------------------------------------------------------------------- #
 # gh card operations (ambient GH_TOKEN = default GITHUB_TOKEN)
 # --------------------------------------------------------------------------- #
+TRIAGE_BUDGET_MARKER = "wheelhouse-triage-budget"
+TRIAGE_BUDGET_LABEL = "wheelhouse:triage-budget"
+TRIAGE_BUDGET_TITLE = "Wheelhouse daily triage budget (automated)"
+TRIAGE_BUDGET_VERSION = 1
+_TRIAGE_BUDGET_RE = re.compile(
+    r"<!--\s*%s:\s*(\{.*?\})\s*-->" % re.escape(TRIAGE_BUDGET_MARKER), re.S
+)
+_TRIAGE_BUDGET_PREFIX_RE = re.compile(
+    r"<!--\s*%s\s*:" % re.escape(TRIAGE_BUDGET_MARKER)
+)
+_TRIAGE_BUDGET_LEDGER_NUMBER = None
+_TRIAGE_BUDGET_PASS_HALTED = False
+
+
 def _gh(args, check=True):
     r = subprocess.run(["gh"] + args, capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -2957,6 +3119,365 @@ def _edit_issue_body(number, body, remove_labels=None):
         os.unlink(body_path)
 
 
+def render_triage_budget_body(day, reserved):
+    record = {
+        "version": TRIAGE_BUDGET_VERSION,
+        "day": day,
+        "reserved": reserved,
+    }
+    return "\n".join(
+        [
+            "Automated UTC daily reservation ledger for Wheelhouse auto triage - "
+            "do not edit by hand.",
+            "",
+            "One reservation authorizes at most one queued triage workflow.",
+            "",
+            "<!-- %s: %s -->"
+            % (TRIAGE_BUDGET_MARKER, json.dumps(record, separators=(",", ":"))),
+        ]
+    )
+
+
+def parse_triage_budget(body):
+    if len(_TRIAGE_BUDGET_PREFIX_RE.findall(body or "")) != 1:
+        return None
+    matches = list(_TRIAGE_BUDGET_RE.finditer(body or ""))
+    if len(matches) != 1:
+        return None
+    def no_duplicate_keys(pairs):
+        record = {}
+        for key, value in pairs:
+            if key in record:
+                raise ValueError("duplicate triage budget key")
+            record[key] = value
+        return record
+
+    try:
+        record = json.loads(
+            matches[0].group(1), object_pairs_hook=no_duplicate_keys
+        )
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(record, dict) or set(record) != {"version", "day", "reserved"}:
+        return None
+    version = record.get("version")
+    reserved = record.get("reserved")
+    day = record.get("day")
+    if (
+        isinstance(version, bool)
+        or version != TRIAGE_BUDGET_VERSION
+        or isinstance(reserved, bool)
+        or not isinstance(reserved, int)
+        or reserved < 0
+        or reserved > core.TRIAGE_DAILY_CEILING_MAX
+        or not isinstance(day, str)
+        or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day)
+    ):
+        return None
+    try:
+        parsed_day = datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+    return record if parsed_day == day else None
+
+
+def _triage_budget_label_names(issue):
+    names = set()
+    for label in (issue or {}).get("labels") or []:
+        name = label if isinstance(label, str) else (label or {}).get("name")
+        if not isinstance(name, str) or not name:
+            return set()
+        names.add(name)
+    return names
+
+
+def _triage_budget_author(issue):
+    author = (issue or {}).get("user") or (issue or {}).get("author") or {}
+    return author.get("login", "") if isinstance(author, dict) else ""
+
+
+def _trusted_triage_budget_issue(issue, expected_body=None):
+    if not isinstance(issue, dict) or "pull_request" in issue:
+        return False, "ledger object is not an issue"
+    number = issue.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        return False, "ledger issue number is invalid"
+    if str(issue.get("state") or "").upper() != "CLOSED":
+        return False, "ledger issue is not closed"
+    if issue.get("title") != TRIAGE_BUDGET_TITLE:
+        return False, "ledger issue title is not trusted"
+    if _triage_budget_label_names(issue) != {TRIAGE_BUDGET_LABEL}:
+        return False, "ledger issue labels are not exact"
+    if not _trusted_automation_login(_triage_budget_author(issue)):
+        return False, "ledger issue author is not trusted automation"
+    body = issue.get("body") or ""
+    if expected_body is not None and body != expected_body:
+        return False, "ledger body did not verify after write"
+    record = parse_triage_budget(body)
+    if record is None:
+        return False, "ledger marker is malformed"
+    if body != render_triage_budget_body(record["day"], record["reserved"]):
+        return False, "ledger body is not canonical"
+    return True, "trusted triage budget ledger"
+
+
+def _list_triage_budget_issues():
+    endpoint = (
+        "repos/{owner}/{repo}/issues?state=all&labels=%s&per_page=100"
+        % url_quote(TRIAGE_BUDGET_LABEL, safe="")
+    )
+    result = _gh(["api", "--paginate", "--slurp", endpoint])
+    pages = json.loads(result.stdout or "null")
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise RuntimeError("triage budget ledger listing was incomplete or malformed")
+    issues = []
+    seen = set()
+    for page in pages:
+        for issue in page:
+            number = issue.get("number") if isinstance(issue, dict) else None
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise RuntimeError("triage budget ledger listing contained invalid data")
+            if number in seen:
+                raise RuntimeError("triage budget ledger listing returned a duplicate issue")
+            seen.add(number)
+            issues.append(issue)
+    return issues
+
+
+def _get_triage_budget_issue(number):
+    result = _gh(["api", "repos/{owner}/{repo}/issues/%s" % int(number)])
+    issue = json.loads(result.stdout or "null")
+    if not isinstance(issue, dict):
+        raise RuntimeError("triage budget ledger by-number read was malformed")
+    return issue
+
+
+def _patch_triage_budget_issue(number, body):
+    _gh(
+        [
+            "api",
+            "--method",
+            "PATCH",
+            "repos/{owner}/{repo}/issues/%s" % int(number),
+            "-f",
+            "body=" + body,
+            "-f",
+            "state=closed",
+        ]
+    )
+
+
+def _create_triage_budget_issue(day):
+    body = render_triage_budget_body(day, 0)
+    ensure_labels([TRIAGE_BUDGET_LABEL])
+    result = _gh(
+        [
+            "api",
+            "--method",
+            "POST",
+            "repos/{owner}/{repo}/issues",
+            "-f",
+            "title=" + TRIAGE_BUDGET_TITLE,
+            "-f",
+            "body=" + body,
+            "-f",
+            "labels[]=" + TRIAGE_BUDGET_LABEL,
+        ]
+    )
+    created = json.loads(result.stdout or "null")
+    number = created.get("number") if isinstance(created, dict) else None
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise RuntimeError("triage budget ledger create returned no issue number")
+    # The create response number is authoritative. Close and verify that exact
+    # issue by number; never consult the eventually-consistent list index here.
+    _patch_triage_budget_issue(number, body)
+    verified = _get_triage_budget_issue(number)
+    trusted, reason = _trusted_triage_budget_issue(verified, expected_body=body)
+    if not trusted:
+        raise RuntimeError("created triage budget ledger did not verify: %s" % reason)
+    return verified
+
+
+def _triage_budget_event(event, number, item, code, reserved=None, ceiling=None):
+    record = {
+        "version": 1,
+        "event": event,
+        "code": code,
+        "card": int(number),
+        "kind": str((item or {}).get("kind") or ""),
+        "revision": triage_revision(item or {}),
+    }
+    if reserved is not None:
+        record["reserved"] = reserved
+    if ceiling is not None:
+        record["ceiling"] = ceiling
+    print(
+        "wheelhouse-triage-budget-event "
+        + json.dumps(record, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def report_triage_attempt_exhaustion(number, item, ceiling=None):
+    print(
+        "::warning::triage-attempt-cap exhausted for card #%s kind %s rev %s; "
+        "automatic triage deferred"
+        % (number, item.get("kind", ""), triage_revision(item)[:160])
+    )
+    _triage_budget_event(
+        "attempts.exhausted",
+        number,
+        item,
+        "attempt-cap-exhausted",
+        ceiling=ceiling,
+    )
+
+
+def _defer_triage_budget(number, item, code, message, error=False, ceiling=None):
+    level = "error" if error else "warning"
+    print("::%s::triage-budget %s: %s" % (level, code, message))
+    _triage_budget_event(
+        "budget.deferred", number, item, code, ceiling=ceiling
+    )
+    return False
+
+
+def reserve_triage_budget(number, item, ceiling, today=None):
+    """Atomically reserve one UTC daily auto-triage unit, failing closed.
+
+    Every read, create, write, and verification failure denies queueing. A
+    write that landed but could not be verified may leak one unit for the day,
+    which is the safe direction: it can never undercount spend.
+    """
+    global _TRIAGE_BUDGET_LEDGER_NUMBER, _TRIAGE_BUDGET_PASS_HALTED
+    if _TRIAGE_BUDGET_PASS_HALTED:
+        return _defer_triage_budget(
+            number,
+            item,
+            "pass-halted",
+            "an earlier ledger failure halted reservations for this pass",
+            error=True,
+            ceiling=ceiling if isinstance(ceiling, int) else 0,
+        )
+    if ceiling == 0:
+        return _defer_triage_budget(
+            number,
+            item,
+            "invalid-config",
+            "daily ceiling is fail-closed at zero; automatic triage deferred",
+            error=True,
+            ceiling=0,
+        )
+    if (
+        isinstance(ceiling, bool)
+        or not isinstance(ceiling, int)
+        or ceiling < core.TRIAGE_DAILY_CEILING_MIN
+        or ceiling > core.TRIAGE_DAILY_CEILING_MAX
+    ):
+        return _defer_triage_budget(
+            number,
+            item,
+            "invalid-config",
+            "daily ceiling is invalid; automatic triage deferred",
+            error=True,
+            ceiling=0,
+        )
+    day = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        parsed_day = datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        parsed_day = ""
+    if parsed_day != day:
+        return _defer_triage_budget(
+            number,
+            item,
+            "invalid-clock",
+            "UTC reservation day is invalid; automatic triage deferred",
+            error=True,
+            ceiling=ceiling,
+        )
+    try:
+        if _TRIAGE_BUDGET_LEDGER_NUMBER is not None:
+            issue = _get_triage_budget_issue(_TRIAGE_BUDGET_LEDGER_NUMBER)
+        else:
+            issues = _list_triage_budget_issues()
+            if len(issues) > 1:
+                raise RuntimeError("multiple triage budget ledger issues exist")
+            if not issues:
+                issue = _create_triage_budget_issue(day)
+            else:
+                listed = issues[0]
+                number_value = (
+                    listed.get("number") if isinstance(listed, dict) else None
+                )
+                if (
+                    isinstance(number_value, bool)
+                    or not isinstance(number_value, int)
+                    or number_value < 1
+                ):
+                    raise RuntimeError("triage budget ledger listing is untrusted")
+                issue = _get_triage_budget_issue(number_value)
+        trusted, reason = _trusted_triage_budget_issue(issue)
+        if not trusted:
+            raise RuntimeError(reason)
+        _TRIAGE_BUDGET_LEDGER_NUMBER = issue["number"]
+        previous = parse_triage_budget(issue.get("body") or "")
+        if previous is None:
+            raise RuntimeError("triage budget ledger marker is malformed")
+        reserved = previous["reserved"] if previous["day"] == day else 0
+        if reserved >= ceiling:
+            print(
+                "::warning::triage-budget exhausted: %s/%s reservations used; "
+                "card #%s deferred until the next UTC day"
+                % (reserved, ceiling, number)
+            )
+            _triage_budget_event(
+                "budget.exhausted",
+                number,
+                item,
+                "ceiling-exhausted",
+                reserved=reserved,
+                ceiling=ceiling,
+            )
+            return False
+        expected_reserved = reserved + 1
+        expected_body = render_triage_budget_body(day, expected_reserved)
+        _patch_triage_budget_issue(issue["number"], expected_body)
+        verified = _get_triage_budget_issue(issue["number"])
+        trusted, reason = _trusted_triage_budget_issue(
+            verified, expected_body=expected_body
+        )
+        if not trusted:
+            raise RuntimeError(reason)
+        print(
+            "::notice::triage-budget: %s/%s reserved for card #%s rev %s"
+            % (
+                expected_reserved,
+                ceiling,
+                number,
+                triage_revision(item)[:160],
+            )
+        )
+        _triage_budget_event(
+            "budget.reserved",
+            number,
+            item,
+            "reservation-verified",
+            reserved=expected_reserved,
+            ceiling=ceiling,
+        )
+        return True
+    except Exception as error:
+        _TRIAGE_BUDGET_PASS_HALTED = True
+        return _defer_triage_budget(
+            number,
+            item,
+            "malformed-ledger",
+            "reservation failed closed (%s)" % str(error)[:180],
+            error=True,
+            ceiling=ceiling,
+        )
+
+
 def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
     new_body = body_with_reconcile_absence(
         body, count, run_number=run_number, closed_at=closed_at
@@ -2975,17 +3496,142 @@ def clear_reconcile_absence(number, body):
     return True
 
 
+_TRIAGE_DISPATCH_SEAL = object()
+
+
+class _TriageDispatchPermit:
+    """Unforgeable-in-normal-use proof that reservation and queueing verified."""
+
+    __slots__ = ("_number", "_item", "_seal")
+
+    def __init__(self, number, item, seal):
+        if seal is not _TRIAGE_DISPATCH_SEAL:
+            raise RuntimeError("triage dispatch permit may only be issued by queueing")
+        self._number = int(number)
+        self._item = MappingProxyType(dict(item))
+        self._seal = seal
+
+    @property
+    def number(self):
+        return self._number
+
+    @property
+    def item(self):
+        return dict(self._item)
+
+
+def _configured_triage_spend_limits(item):
+    try:
+        cfg = core.load_config()
+    except SystemExit as error:
+        print(
+            "::error::wheelhouse config: could not load triage spend limits; "
+            "failing closed (%s)" % str(error)[:160]
+        )
+        return 1, 0
+    repo_cfg = cfg.get("repos", {}).get((item or {}).get("repo"), {})
+    repo = (item or {}).get("repo")
+    cap_map = cfg.get("triage_attempt_caps", {})
+    cap = (
+        cap_map[repo]
+        if repo in cap_map
+        else core._triage_attempt_cap(
+            repo_cfg, cfg.get("triage_attempt_cap_per_revision", 1)
+        )
+    )
+    return cap, cfg.get("triage_daily_ceiling", 0)
+
+
+def _queue_card_snapshot_matches(card, number, item, body):
+    card_number = card.get("number") if isinstance(card, dict) else None
+    expected_number = number
+    target_number = (item or {}).get("number")
+    if (
+        not isinstance(card, dict)
+        or isinstance(card_number, bool)
+        or not isinstance(card_number, int)
+        or isinstance(expected_number, bool)
+        or not isinstance(expected_number, int)
+        or card_number != expected_number
+        or isinstance(target_number, bool)
+        or not isinstance(target_number, int)
+        or target_number < 1
+        or not issue_is_open(card)
+        or not is_refreshable(card.get("labels"))
+        or card.get("body", "") != body
+    ):
+        return False
+    author = card.get("author") or {}
+    login = author.get("login", "") if isinstance(author, dict) else ""
+    if not _trusted_automation_login(login):
+        return False
+    state = parse_state_block(body)
+    state_target_number = (state or {}).get("number")
+    return bool(
+        state
+        and state.get("repo") == item.get("repo")
+        and not isinstance(state_target_number, bool)
+        and isinstance(state_target_number, int)
+        and state_target_number == target_number
+        and state.get("kind") == item.get("kind", "pr-review")
+    )
+
+
 def mark_triage_queued(number, item, body):
     """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
-    This is intentionally a hidden state update only. It bounds spend even if
-    the asynchronous workflow fails before it can write a visible result.
+    The global daily reservation lands first. The per-revision attempt count and
+    queued cache then land in one card-body write, which is re-read and verified
+    before this function returns a dispatch permit. Any uncertainty defers.
     """
-    new_body = body_with_triage_queued(body, item)
+    cap, ceiling = _configured_triage_spend_limits(item)
+    state = parse_state_block(body)
+    if triage_attempts_exhausted(item, state, cap=cap):
+        report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
+        return None
+    new_body = body_with_triage_queued(body, item, attempt_cap=cap)
     if new_body == body:
-        return False
+        return None
+    before = get_card(number)
+    if not _queue_card_snapshot_matches(before, number, item, body):
+        _defer_triage_budget(
+            number,
+            item,
+            "card-snapshot-untrusted",
+            "card changed or could not be verified before reservation",
+            error=True,
+            ceiling=ceiling,
+        )
+        return None
+    if not reserve_triage_budget(number, item, ceiling):
+        return None
+    # A triage consumer is the only body writer outside the shared workflow
+    # group. Re-read after reservation so an interleaving result can only leak
+    # daily capacity, never be overwritten or dispatched twice.
+    current = get_card(number)
+    if not _queue_card_snapshot_matches(current, number, item, body):
+        _defer_triage_budget(
+            number,
+            item,
+            "post-reservation-card-race",
+            "card changed after reservation; reserved capacity was safely leaked",
+            error=True,
+            ceiling=ceiling,
+        )
+        return None
     _edit_issue_body(number, new_body)
-    return True
+    verified = get_card(number)
+    if not _queue_card_snapshot_matches(verified, number, item, new_body):
+        _defer_triage_budget(
+            number,
+            item,
+            "queued-write-unverified",
+            "queued card write did not verify; dispatch denied",
+            error=True,
+            ceiling=ceiling,
+        )
+        return None
+    return _TriageDispatchPermit(number, item, _TRIAGE_DISPATCH_SEAL)
 
 
 def reflect_activity(number, item, body, card_updated_at=""):
@@ -3023,7 +3669,16 @@ def clear_triage_queued(number, revision):
     return True
 
 
-def dispatch_triage_workflow(number, item):
+def dispatch_triage_workflow(permit):
+    if (
+        not isinstance(permit, _TriageDispatchPermit)
+        or permit._seal is not _TRIAGE_DISPATCH_SEAL
+    ):
+        raise RuntimeError(
+            "triage workflow dispatch requires a verified queue reservation"
+        )
+    number = permit.number
+    item = permit.item
     kind = item.get("kind", "pr-review")
     args = [
         "workflow",
@@ -4061,9 +4716,16 @@ def main():
             if not should_auto_triage(
                 item, state, current.get("labels"), has_token=True
             ):
+                if triage_attempt_deferral_needed(
+                    item, state, current.get("labels"), has_token=True
+                ):
+                    report_triage_attempt_exhaustion(current["number"], item)
                 print("auto triage skipped for card #%s" % current["number"])
                 return
-            if not mark_triage_queued(current["number"], item, current.get("body", "")):
+            permit = mark_triage_queued(
+                current["number"], item, current.get("body", "")
+            )
+            if not permit:
                 return
         except Exception as e:
             item = locals().get("item") or {}
@@ -4073,7 +4735,7 @@ def main():
             )
             return
         try:
-            dispatch_triage_workflow(current["number"], item)
+            dispatch_triage_workflow(permit)
         except Exception as e:
             # The queued-cache write above already landed, so a later scan
             # would never retry this revision. If the card is HELD, publish

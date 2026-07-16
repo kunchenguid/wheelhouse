@@ -80,6 +80,7 @@ repos:
     # auto_merge: true                    # optional scan-time merge opt-in (also needs VISION.md)
     # auto_triage: false                  # optional per-repo LLM spend opt-out (pr-review)
     # auto_triage_issues: false           # optional per-repo LLM spend opt-out (issue-triage)
+    # triage_attempt_cap_per_revision: 2  # optional per-repo queued-attempt cap (1..5)
     # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
     # pending_contributor_cleanup_days: 14
     # pending_contributor_reminder_days: 10
@@ -93,6 +94,8 @@ repos:
 maintainer: ""            # optional extra login allowed to drive decisions and treated as your work
 auto_triage: true         # LLM side-job: quick advisory PR-card triage (DEFAULT ON)
 auto_triage_issues: true  # LLM side-job: quick advisory issue-card triage (DEFAULT ON, independent of auto_triage)
+triage_attempt_cap_per_revision: 2  # queued attempts per card-kind source revision (1..5)
+triage_daily_ceiling: 100            # fleet-wide auto-triage reservations per UTC day (1..2000)
 nl_decisions: false       # LLM side-job: reply to a card in plain English (off by default)
 card_issues: true         # also scan un-addressed issues, not just PRs; owner/maintainer/bot authors are skipped
 auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON; see Security notes)
@@ -127,6 +130,17 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > A successful structured issue recommendation can also add the same deterministic *Accept recommendation* checkbox, limited to issue-safe actions.
 > Set it to `false` to opt out globally, or add `auto_triage_issues: false` to a single `repos:` entry.
 > It checks out the repo's default branch read-only for a little code context (there is no diff to review) and is advisory only, exactly like PR auto triage.
+
+> **Automatic-triage spend bounds.**
+> `triage_attempt_cap_per_revision` counts queued attempts for one card kind and source revision, defaults to 2, accepts integers from 1 through 5, and may be overridden per repository.
+> An invalid cap fails closed to 1 and logs an error.
+> `triage_daily_ceiling` is one global reservation budget per UTC calendar day, defaults to 100, accepts integers from 1 through 2000, and has no per-repository override.
+> An invalid daily ceiling fails closed to 0, so no automatic triage is queued until the configuration is corrected.
+> Its closed maintenance-ledger issue stores only a version, UTC day, and reserved count; a day rollover resets the count in the same by-number verified write that reserves the new day's first unit.
+> Each verified reservation authorizes at most one existing triage dispatch, and that dispatch can make at most two model calls because schema repair is bounded to one additional call.
+> The default worst case is therefore 100 automatic-triage reservations and 200 model calls per UTC day across scans and ingest runs.
+> Reservations happen before the card is marked queued, so a crash can waste daily capacity but cannot undercount or authorize extra spend.
+> Owner-triggered deep review and natural-language decisions are outside this ceiling because they require deliberate owner actions and separate durable claims.
 
 > **Heads-up - `auto_approve_ci` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork auto-approves fork-CI runs that the security gate proves safe (no CI-file changes, the PR targets the repo default branch, no `pull_request_target` workflow, and all safety reads succeed) and only raises a card for risky or uncertain contributor-authored runs.
@@ -282,7 +296,7 @@ If nothing appears, see [Troubleshooting](#troubleshooting).
 You drive the queue three ways - whichever fits the decision:
 
 - **Read the automatic triage.** PR-review and issue-triage cards can both include a `Triage` section with a quick Summary, Product implications, and Recommended next step.
-  For PR-review this is automatic when `auto_triage` is on and `CLAUDE_CODE_OAUTH_TOKEN` exists, cached once per PR head SHA; for issue-triage it's the same, gated by the INDEPENDENT `auto_triage_issues` and cached once per issue `updatedAt` revision instead (issues have no head SHA).
+  For PR-review this is automatic when `auto_triage` is on and `CLAUDE_CODE_OAUTH_TOKEN` exists, with the cache keyed by PR head SHA; for issue-triage it is gated by the INDEPENDENT `auto_triage_issues` and keyed by issue `updatedAt` instead (issues have no head SHA).
   A newly created eligible card may first show `pending-triage` and a placeholder instead of decision boxes; decide after the `Triage` section or unavailable note appears and the boxes publish.
   A fresh successful structured recommendation can prepend *Accept recommendation* to the decision boxes; ticking it maps the recommendation to the same deterministic action that a checkbox or slash-command would have used.
   Auto triage itself is still advisory: it gives you context before deciding and never acts without your tick.
