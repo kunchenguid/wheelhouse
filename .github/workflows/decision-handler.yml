@@ -723,6 +723,7 @@ jobs:
           TARGET_NUMBER: ${{ steps.decide.outputs.target_number || steps.route.outputs.target_number }}
           KIND: ${{ steps.decide.outputs.kind || steps.route.outputs.kind }}
           HEAD_SHA: ${{ steps.decide.outputs.head_sha || steps.route.outputs.head_sha }}
+          TARGET_REVISION: ${{ steps.decide.outputs.target_revision || steps.route.outputs.target_revision }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -747,6 +748,7 @@ jobs:
             TARGET_NUMBER="$TARGET_NUMBER" \
             KIND="$KIND" \
             HEAD_SHA="$HEAD_SHA" \
+            TARGET_REVISION="$TARGET_REVISION" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py execute
 
       # --- Finalize the card (this repo, default token; never re-triggers) ----

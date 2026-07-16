@@ -1258,7 +1258,7 @@ def test_trusted_open_duplicate_before_or_after_create_fails_closed():
 def test_malformed_direct_objects_fail_closed():
     cases = []
 
-    def run_case(name, mutate_issue, expect_resolved=True):
+    def run_case(name, mutate_issue, expect_resolved=True, expected_state="CLOSED"):
         github = LifecycleGitHub(start_empty=True)
         current = item(head="f" * 40)
         card = rc.render(current, held=False)
@@ -1304,7 +1304,7 @@ def test_malformed_direct_objects_fail_closed():
             and outcome == rc.CARD_ADMISSION_MALFORMED
             and should_rollback is True
             and issue is not None
-            and issue["state"] == "CLOSED"
+            and issue["state"] == expected_state
             and (not expect_resolved or "resolved" in label_names(issue))
         )
         cases.append((name, ok))
@@ -1349,11 +1349,11 @@ def test_malformed_direct_objects_fail_closed():
 
     run_case("closed", close_direct, expect_resolved=False)
     run_case("untrusted author", wrong_author)
-    run_case("wrong target", wrong_target)
-    run_case("wrong kind", wrong_kind)
-    run_case("body mismatch", body_mismatch)
+    run_case("wrong target", wrong_target, expect_resolved=False, expected_state="OPEN")
+    run_case("wrong kind", wrong_kind, expect_resolved=False, expected_state="OPEN")
+    run_case("body mismatch", body_mismatch, expect_resolved=False, expected_state="OPEN")
     check(
-        "malformed/wrong-target/wrong-kind/closed/untrusted direct objects fail closed",
+        "malformed direct objects preserve changed bodies and close unchanged creates",
         all(ok for _name, ok in cases),
     )
     if not all(ok for _name, ok in cases):

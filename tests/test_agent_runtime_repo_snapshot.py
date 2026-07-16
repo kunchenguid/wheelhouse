@@ -8,6 +8,7 @@ clean worktree shape cannot bless uncommitted symlink or content data.
 from __future__ import annotations
 
 import os
+import json
 import stat
 import subprocess
 import tempfile
@@ -179,7 +180,7 @@ def main() -> None:
         check("firstmate: duplicated alias bytes counted", fm_snap.total_bytes >= source_skill_bytes * 2)
         bundle = root / "fm-bundle"
         bundle.mkdir()
-        digest, total, count, artifact, bound = _copy_directory(firstmate, bundle, fm_commit)
+        digest, total, count, artifact, bound, copied_links = _copy_directory(firstmate, bundle, fm_commit)
         stored = bundle / artifact
         check("firstmate: bound commit returned", bound == fm_commit)
         check("firstmate: stored tree has no live symlink", assert_no_symlinks(stored))
@@ -187,6 +188,7 @@ def main() -> None:
         check("firstmate: stored skills alias is regular tree", (stored / ".claude/skills/demo/SKILL.md").is_file())
         check("firstmate: stored content matches agents", (stored / "CLAUDE.md").read_bytes() == (stored / "AGENTS.md").read_bytes())
         check("firstmate: digest matches snapshot", digest == fm_snap.tree_sha256 and total == fm_snap.total_bytes and count == fm_snap.file_count)
+        check("firstmate: copied provenance retains every materialized link", copied_links == fm_snap.links)
 
         # --- safe internal chain ---
         chain = root / "chain"
@@ -636,6 +638,26 @@ def main() -> None:
         check("task: repository commit is full bound sha", repo_input["git"]["commit"] == fm_commit)
         check("task: fileCount includes materialized aliases", repo_input["git"]["fileCount"] == fm_snap.file_count)
         check("task: treeSha256 matches oracle digest", repo_input["git"]["treeSha256"] == fm_snap.tree_sha256)
+        provenance_input = next(row for row in task["spec"]["inputs"] if row["id"] == "repository-provenance")
+        provenance = json.loads((task_bundle / provenance_input["artifact"]).read_text(encoding="utf-8"))
+        check(
+            "task: repository input binds content-free symlink provenance",
+            repo_input["git"]["symlinkCount"] == len(fm_snap.links)
+            and repo_input["git"]["symlinkProvenanceArtifact"] == provenance_input["artifact"]
+            and repo_input["git"]["symlinkProvenanceSha256"] == provenance_input["sha256"]
+            and provenance["commit"] == fm_commit
+            and len(provenance["links"]) == len(fm_snap.links),
+        )
+        check(
+            "task: provenance identifies committed links, targets, and aliases",
+            all(
+                row["commit"] == fm_commit
+                and row["linkPath"]
+                and row["resolvedObject"]
+                and isinstance(row["outputPaths"], list)
+                for row in provenance["links"]
+            ),
+        )
         check("task: artifact has no symlinks", assert_no_symlinks(artifact_root))
         check("task: CLAUDE.md is regular with agents content", (artifact_root / "CLAUDE.md").read_text(encoding="utf-8") == (artifact_root / "AGENTS.md").read_text(encoding="utf-8"))
         check(

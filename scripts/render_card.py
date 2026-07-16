@@ -2840,25 +2840,20 @@ def _create_and_verify_card(item, card):
 
 
 def _rollback_created_card(number, expected_body):
-    """Best-effort destroy a just-created card that failed admission.
-
-    Prefer the body-matched close so an intervening owner edit is not clobbered.
-    If the live body no longer matches (or the card is already half-closed), force
-    the issue closed and inert so a malformed create cannot remain actionable.
-    """
+    """Best-effort snapshot-matched rollback for a failed new-card admission."""
     try:
         _rollback_open_lifecycle_card(number, expected_body)
         return
     except Exception as rollback_error:
         try:
-            _force_close_reused_card(number)
-        except Exception as force_error:
+            _rollback_open_lifecycle_card(number, expected_body)
+        except Exception as retry_error:
             print(
-                "::error::failed to roll back ambiguous new card #%s: %s; force-close: %s"
+                "::error::failed to roll back ambiguous new card #%s: %s; retry: %s"
                 % (
                     number,
                     str(rollback_error)[:120],
-                    str(force_error)[:120],
+                    str(retry_error)[:120],
                 )
             )
 

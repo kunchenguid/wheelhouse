@@ -509,6 +509,7 @@ def test_triage_yml_repair_wiring():
     prep_i = idx(lambda s: s.get("id") == "repair-prep")
     rep_i = idx(lambda s: s.get("id") == "claude-repair-model")
     res_i = idx(lambda s: s.get("id") == "repair-result")
+    fresh_i = idx(lambda s: s.get("id") == "post-model-freshness")
     upd_i = idx(lambda s: s.get("name") == "Update the decision card")
 
     check("yaml: repair-prep step exists", "repair-prep" in ids)
@@ -516,8 +517,8 @@ def test_triage_yml_repair_wiring():
     check("yaml: repair-result step exists", "repair-result" in ids)
     check(
         "yaml: repair runs AFTER triage-result and BEFORE the card update",
-        None not in (tr_i, prep_i, rep_i, res_i, upd_i)
-        and tr_i < prep_i < rep_i < res_i < upd_i,
+        None not in (tr_i, prep_i, rep_i, res_i, fresh_i, upd_i)
+        and tr_i < prep_i < rep_i < res_i < fresh_i < upd_i,
     )
 
     prep = steps[prep_i]
@@ -559,6 +560,26 @@ def test_triage_yml_repair_wiring():
         "yaml: card update wires the repaired result file into triage-apply",
         upd.get("env", {}).get("REPAIR_EXECUTION_FILE") == "${{ steps.repair-result.outputs.path }}"
         and "--repair-execution-file" in str(upd.get("run", "")),
+    )
+    fresh = steps[fresh_i]
+    check(
+        "yaml: final freshness re-reads the exact target revision fail closed",
+        fresh.get("env", {}).get("EXPECTED_REVISION") == "${{ steps.resolve.outputs.revision }}"
+        and "issues/$NUMBER" in str(fresh.get("run", ""))
+        and "pulls/$NUMBER" in str(fresh.get("run", ""))
+        and "target.stale" in str(fresh.get("run", "")),
+    )
+    check(
+        "yaml: card projection rejects post-model freshness loss",
+        "steps.post-model-freshness.outputs.fresh == 'false'" in str(upd.get("env", {}).get("HEAD_OK", "")),
+    )
+    finalize = next(s for s in steps if s.get("name") == "Finalize triage event claims and stage evidence")
+    finalize_run = str(finalize.get("run", ""))
+    check(
+        "yaml: admitted schema repair emits event-bound terminal evidence",
+        finalize.get("env", {}).get("REPAIR_EVENT_KEY") == "${{ steps.repair-claim.outputs.event_key }}"
+        and "--action triage.schema-repair" in finalize_run
+        and '--event-key "$REPAIR_EVENT_KEY"' in finalize_run,
     )
 
 

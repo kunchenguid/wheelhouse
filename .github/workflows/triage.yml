@@ -1055,6 +1055,37 @@ jobs:
           fi
           echo "path=$result_path" >> "$GITHUB_OUTPUT"
 
+      - id: post-model-freshness
+        name: Re-read target revision before triage projection
+        if: ${{ always() && steps.event-freshness.outputs.fresh == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          SLUG: ${{ steps.resolve.outputs.slug }}
+          NUMBER: ${{ steps.resolve.outputs.number }}
+          KIND: ${{ steps.resolve.outputs.kind }}
+          EXPECTED_REVISION: ${{ steps.resolve.outputs.revision }}
+        run: |
+          set -euo pipefail
+          observed=""
+          if [ "$KIND" = "issue-triage" ]; then
+            observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
+          else
+            observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
+          fi
+          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "fresh=false"
+              echo "message=Auto triage output was rejected because the target revision moved or could not be verified."
+            } >> "$GITHUB_OUTPUT"
+            python scripts/agent_runtime.py stage \
+              --action "${{ steps.event-claim.outputs.action }}" \
+              --source-sha "${{ github.sha }}" \
+              --event-key "${{ steps.event-claim.outputs.event_key }}" \
+              --stage stale --status failed --code target.stale
+          fi
+
       - id: card-consumer
         name: Update the decision card
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
@@ -1063,8 +1094,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ steps.resolve.outputs.issue }}
           REVISION: ${{ steps.resolve.outputs.revision }}
-          HEAD_OK: ${{ steps.event-freshness.outputs.fresh == 'false' && 'false' || steps.verify_head.outputs.head_ok }}
-          HEAD_MESSAGE: ${{ steps.event-freshness.outputs.message || steps.verify_head.outputs.message }}
+          HEAD_OK: ${{ steps.post-model-freshness.outputs.fresh == 'false' && 'false' || steps.event-freshness.outputs.fresh == 'false' && 'false' || steps.verify_head.outputs.head_ok }}
+          HEAD_MESSAGE: ${{ steps.post-model-freshness.outputs.message || steps.event-freshness.outputs.message || steps.verify_head.outputs.message }}
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
           # Compact result of the ONE bounded schema-repair turn (empty unless a
           # delivered result was a schema-miss and the repair step ran).
@@ -1136,25 +1167,34 @@ jobs:
           PRIMARY_MARKER: ${{ steps.event-claim.outputs.marker }}
           REPAIR_CLAIM_ID: ${{ steps.repair-claim.outputs.comment_id }}
           REPAIR_MARKER: ${{ steps.repair-claim.outputs.marker }}
+          REPAIR_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
+          REPAIR_EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
         run: |
           set -euo pipefail
           status="failed"; stage="consumer-rejected"; code="consumer.rejected"
           if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           fi
-          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
-          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
-            -f "body=$body" >/dev/null
-          if [ -n "$REPAIR_CLAIM_ID" ]; then
-            repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
-            gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
-              -f "body=$repair_body" >/dev/null
-          fi
           python scripts/agent_runtime.py stage \
             --action "${{ steps.event-claim.outputs.action }}" \
             --source-sha "${{ github.sha }}" \
             --event-key "${{ steps.event-claim.outputs.event_key }}" \
             --stage "$stage" --status "$status" --code "$code"
+          if [ "$REPAIR_ADMITTED" = "true" ] && [ -n "$REPAIR_EVENT_KEY" ]; then
+            python scripts/agent_runtime.py stage \
+              --action triage.schema-repair \
+              --source-sha "${{ github.sha }}" \
+              --event-key "$REPAIR_EVENT_KEY" \
+              --stage "$stage" --status "$status" --code "$code"
+          fi
+          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          if [ "$REPAIR_ADMITTED" = "true" ] && [ -n "$REPAIR_CLAIM_ID" ]; then
+            repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+            gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+              -f "body=$repair_body" >/dev/null
+          fi
 
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
       # failed before writing its outputs (e.g. a transient `gh issue view`

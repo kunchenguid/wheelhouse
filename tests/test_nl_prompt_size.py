@@ -401,6 +401,7 @@ def test_nl_consumer_evidence_requires_execution_and_durable_projection():
     check("nl: reply consumer exists", reply is not None)
     check("nl: terminal consumer stage exists", terminal is not None)
     if action:
+        execute = step_by_id(steps, "execute")
         check(
             "nl: action projection requires completed target execution",
             "steps.execute.outcome == 'success'" in str(action.get("if", ""))
@@ -409,6 +410,13 @@ def test_nl_consumer_evidence_requires_execution_and_durable_projection():
         check(
             "nl: action projection propagates write failure",
             "|| true" not in str(action.get("run", "")),
+        )
+        check(
+            "nl: execute boundary receives the admitted exact revision",
+            execute is not None
+            and (execute.get("env") or {}).get("TARGET_REVISION")
+            == "${{ steps.decide.outputs.target_revision || steps.route.outputs.target_revision }}"
+            and 'TARGET_REVISION="$TARGET_REVISION"' in str(execute.get("run", "")),
         )
     if reply:
         check(

@@ -35,6 +35,7 @@ MAX_REPOSITORY_SYMLINKS = 4_096
 MAX_OBJECT_MATERIALIZATIONS = 256
 MAX_SYMLINK_TARGET_BYTES = 4_096
 MAX_REPOSITORY_TREE_ROW_BYTES = 65_536
+MAX_REPOSITORY_PROVENANCE_BYTES = 8 * 1024 * 1024
 GIT_MODE_FILE = "100644"
 GIT_MODE_EXEC = "100755"
 GIT_MODE_SYMLINK = "120000"
@@ -672,7 +673,7 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
     )
 
 
-def _copy_directory(source: Path, bundle: Path, commit: str) -> tuple[str, int, int, str, str]:
+def _copy_directory(source: Path, bundle: Path, commit: str) -> tuple[str, int, int, str, str, list[MaterializedLinkRecord]]:
     snapshot = snapshot_repository(source, commit)
     digest = snapshot.tree_sha256
     destination = _artifact_path(bundle, digest)
@@ -698,7 +699,29 @@ def _copy_directory(source: Path, bundle: Path, commit: str) -> tuple[str, int, 
                     raise ArtifactError("repository snapshot materialization produced a symlink")
                 os.chmod(child, 0o500)
         os.chmod(destination, 0o500)
-    return digest, snapshot.total_bytes, snapshot.file_count, "artifacts/sha256/%s" % digest, snapshot.commit
+    return digest, snapshot.total_bytes, snapshot.file_count, "artifacts/sha256/%s" % digest, snapshot.commit, snapshot.links
+
+
+def _link_provenance_value(commit: str, links: list[MaterializedLinkRecord]) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "commit": commit,
+        "links": [
+            {
+                "commit": row.commit,
+                "linkPath": row.link_path,
+                "linkMode": row.link_mode,
+                "rawLink": row.raw_link,
+                "resolvedPath": row.resolved_path,
+                "resolvedMode": row.resolved_mode,
+                "resolvedObject": row.resolved_object,
+                "outputPaths": list(row.output_paths),
+                "fileCount": row.file_count,
+                "byteCount": row.byte_count,
+            }
+            for row in links
+        ],
+    }
 
 
 def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
@@ -952,8 +975,19 @@ def build_task(
     if repository_dir:
         if not repository_commit:
             raise ArtifactError("repository commit binding is required")
-        digest, size, count, artifact, bound_commit = _copy_directory(Path(repository_dir), bundle, repository_commit)
-        inputs.append({"id": "repository", "artifact": artifact, "logicalPath": "target-src", "sha256": digest, "mediaType": "application/vnd.wheelhouse.repo-snapshot", "trust": "untrusted", "mount": "read-only", "maxBytes": MAX_REPOSITORY_BYTES, "bytes": size, "git": {"commit": bound_commit, "detached": True, "fileCount": count, "treeSha256": digest}})
+        digest, size, count, artifact, bound_commit, links = _copy_directory(Path(repository_dir), bundle, repository_commit)
+        provenance_source = bundle / ".repository-symlink-provenance.json"
+        atomic_write_json(provenance_source, _link_provenance_value(bound_commit, links))
+        try:
+            provenance_digest, provenance_size, provenance_artifact = _copy_file(
+                provenance_source,
+                bundle,
+                MAX_REPOSITORY_PROVENANCE_BYTES,
+            )
+        finally:
+            provenance_source.unlink(missing_ok=True)
+        inputs.append({"id": "repository", "artifact": artifact, "logicalPath": "target-src", "sha256": digest, "mediaType": "application/vnd.wheelhouse.repo-snapshot", "trust": "untrusted", "mount": "read-only", "maxBytes": MAX_REPOSITORY_BYTES, "bytes": size, "git": {"commit": bound_commit, "detached": True, "fileCount": count, "treeSha256": digest, "symlinkCount": len(links), "symlinkProvenanceArtifact": provenance_artifact, "symlinkProvenanceSha256": provenance_digest}})
+        inputs.append({"id": "repository-provenance", "artifact": provenance_artifact, "logicalPath": "repository-provenance.json", "sha256": provenance_digest, "mediaType": "application/vnd.wheelhouse.repo-symlink-provenance+json", "trust": "untrusted", "mount": "read-only", "maxBytes": MAX_REPOSITORY_PROVENANCE_BYTES, "bytes": provenance_size})
     if vision_file:
         digest, size, artifact = _copy_file(Path(vision_file), bundle, 40000)
         inputs.append({"id": "vision", "artifact": artifact, "logicalPath": "vision.md", "sha256": digest, "mediaType": "text/markdown; charset=utf-8", "trust": "trusted", "mount": "read-only", "maxBytes": 40000, "bytes": size})

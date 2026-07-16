@@ -124,6 +124,18 @@ def main():
         _verify_artifacts(repo_task, repo_bundle)
         check("artifacts: directory tree digest verifies", True)
         repo_input = next(row for row in repo_task["spec"]["inputs"] if row["id"] == "repository")
+        provenance_input = next(row for row in repo_task["spec"]["inputs"] if row["id"] == "repository-provenance")
+        check(
+            "task: repository provenance is separately content-addressed",
+            repo_input["git"]["symlinkProvenanceArtifact"] == provenance_input["artifact"]
+            and repo_input["git"]["symlinkProvenanceSha256"] == provenance_input["sha256"],
+        )
+        changed = copy.deepcopy(repo_task)
+        next(row for row in changed["spec"]["inputs"] if row["id"] == "repository")["git"]["symlinkProvenanceSha256"] = "0" * 64
+        check(
+            "task: repository provenance binding mismatch is rejected",
+            rejects(changed, "provenance binding"),
+        )
         stored_file = repo_bundle / repo_input["artifact"] / "safe.py"
         stored_file.chmod(0o600)
         stored_file.write_text("evil = True\n", encoding="utf-8")
