@@ -33,6 +33,7 @@ repos:
     # auto_approve_ci: false       # optional override of the global setting
     # auto_triage: false           # optional per-repo opt-out for Claude spend (pr-review)
     # auto_triage_issues: false    # optional per-repo opt-out for Claude spend (issue-triage)
+    # triage_attempt_cap_per_revision: 2  # optional override, integer 1..5
     # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
     # pending_contributor_cleanup_days: 14
     # pending_contributor_reminder_days: 10
@@ -239,7 +240,7 @@ agent_runtime:
 
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
-# card gets one quick advisory triage per PR head SHA.
+# card can queue bounded advisory triage attempts keyed by PR head SHA.
 # The card gains a Summary, Product implications, and Recommended next step.
 # A fresh successful structured recommendation may add an Accept recommendation
 # checkbox, but it still never acts unless the owner/maintainer ticks it.
@@ -255,8 +256,9 @@ auto_triage: true
 # Automatic lightweight issue triage. DEFAULT ON when this key is absent, and
 # INDEPENDENT of `auto_triage` above - toggling one never affects the other.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision issue-triage
-# card gets one quick advisory triage per issue `updatedAt` revision (issues have
-# no head SHA, so a new comment or edit is what makes it eligible again).
+# card can queue bounded advisory triage attempts keyed by issue `updatedAt`
+# revision (issues have no head SHA, so a new comment or edit is what makes it
+# eligible again).
 # A brand-new eligible issue card is first labeled pending-triage and shows no
 # decision checkboxes until that attempt completes or fails open.
 # It checks out the repo's default branch read-only for a little code context;
@@ -269,6 +271,21 @@ auto_triage: true
 # Set false to opt out for token-spend control, or override per repo above with
 # `auto_triage_issues: false`.
 auto_triage_issues: true
+
+# Automatic-triage spend guards.
+# `triage_attempt_cap_per_revision` counts queued attempts for one card kind and
+# source revision (PR head SHA or issue updatedAt).
+# It defaults to 2 and accepts integers from 1 through 5, with an optional
+# per-repository override above.
+# Invalid values fail closed to 1.
+# `triage_daily_ceiling` is one fleet-wide count of reservations per UTC day.
+# It defaults to 100 and accepts integers from 1 through 2000.
+# It has no per-repository override; any invalid configuration fails closed to
+# zero automatic triage reservations until corrected.
+# One reservation permits at most one triage dispatch, whose bounded schema
+# repair can make at most two model calls total.
+triage_attempt_cap_per_revision: 2
+triage_daily_ceiling: 100
 
 # Code-grounded deep review is ALWAYS available (there is no enable flag). Tick
 # the "Investigate" box, or have the repo owner apply the `needs-deep-review`

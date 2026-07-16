@@ -477,15 +477,21 @@ class LifecycleGitHub:
     def _with_boundary(self, callback):
         old_gh = rc._gh
         old_sleep = rc._lifecycle_sleep
+        old_reserve = rc.reserve_triage_budget
         old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
         rc._gh = self.gh
         rc._lifecycle_sleep = self._sleep
+        # Daily-ledger behavior has its own exhaustive offline boundary suite in
+        # test_triage_budget.py. This lifecycle fixture focuses on the card side
+        # of the verified queue checkpoint while preserving the real permit API.
+        rc.reserve_triage_budget = lambda number, queued_item, ceiling: True
         os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
         try:
             return callback()
         finally:
             rc._gh = old_gh
             rc._lifecycle_sleep = old_sleep
+            rc.reserve_triage_budget = old_reserve
             if old_owner is None:
                 os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
             else:

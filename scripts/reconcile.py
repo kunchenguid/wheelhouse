@@ -172,8 +172,8 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
     """Queue lightweight advisory triage when this card revision lacks a cache.
 
     The card is marked queued before dispatch so a failed workflow still counts
-    as this revision's one attempt. Only pure needs-decision pr-review and
-    issue-triage cards qualify.
+    as one bounded attempt for this revision. Only pure needs-decision
+    pr-review and issue-triage cards qualify.
 
     If the workflow dispatch itself fails (the queued-cache write already
     landed, so a later scan would never retry this revision - see
@@ -187,10 +187,17 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
     if not render_card.should_auto_triage(
         item, row.get("state"), row.get("labels"), has_token
     ):
+        if render_card.triage_attempt_deferral_needed(
+            item, row.get("state"), row.get("labels"), has_token
+        ):
+            render_card.report_triage_attempt_exhaustion(row["number"], item)
         return False
     revision = render_card.triage_revision(item)
     try:
-        if not render_card.mark_triage_queued(row["number"], item, row.get("body", "")):
+        permit = render_card.mark_triage_queued(
+            row["number"], item, row.get("body", "")
+        )
+        if not permit:
             return False
     except Exception as e:
         print(
@@ -199,7 +206,7 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
         )
         return False
     try:
-        render_card.dispatch_triage_workflow(row["number"], item)
+        render_card.dispatch_triage_workflow(permit)
     except Exception as e:
         print(
             "::warning::failed to dispatch auto triage for card #%s (%s#%s): %s "

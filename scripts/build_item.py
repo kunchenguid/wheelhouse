@@ -46,7 +46,9 @@ from render_card import CHECKBOX_OPTIONS, checkbox_options  # noqa: E402
 from wheelhouse_core import (  # noqa: E402
     _auto_triage_enabled,
     _auto_triage_issues_enabled,
+    _triage_attempt_cap,
     load_config,
+    TRIAGE_ATTEMPT_CAP_DEFAULT,
 )
 
 VALID_KINDS = {"pr-review", "ci-approval", "issue-triage"}
@@ -118,9 +120,21 @@ def normalize(d):
         auto_triage_issues = _auto_triage_issues_enabled(
             repo_cfg, cfg["auto_triage_issues"]
         )
+        cap_map = cfg.get("triage_attempt_caps", {})
+        triage_attempt_cap = (
+            cap_map[repo]
+            if repo in cap_map
+            else _triage_attempt_cap(
+                repo_cfg,
+                cfg.get(
+                    "triage_attempt_cap_per_revision", TRIAGE_ATTEMPT_CAP_DEFAULT
+                ),
+            )
+        )
     except SystemExit:
         auto_triage = True
         auto_triage_issues = True
+        triage_attempt_cap = 1
     if "auto_triage" in d and not boolish(d.get("auto_triage")):
         auto_triage = boolish(d.get("auto_triage"))
     if "auto_triage_issues" in d and not boolish(d.get("auto_triage_issues")):
@@ -144,6 +158,7 @@ def normalize(d):
         "options": options,
         "auto_triage": auto_triage,
         "auto_triage_issues": auto_triage_issues,
+        "triage_attempt_cap_per_revision": triage_attempt_cap,
     }
 
 
