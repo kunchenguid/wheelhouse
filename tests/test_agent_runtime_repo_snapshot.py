@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import json
-import stat
 import subprocess
 import tempfile
 from unittest import mock
@@ -18,13 +17,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.contract import ArtifactError, canonical_sha256, sha256_bytes
+from agent_runtime.contract import ArtifactError, canonical_sha256
 from agent_runtime.task_builder import (
     GIT_MODE_EXEC,
     GIT_MODE_FILE,
     GIT_MODE_SYMLINK,
-    MAX_REPOSITORY_BYTES,
-    MAX_REPOSITORY_FILES,
     MAX_SYMLINK_HOPS,
     _copy_directory,
     build_task,
@@ -483,7 +480,7 @@ def main() -> None:
         write_file(mismatch, "a.txt", "1\n")
         c1 = commit_all(mismatch, "one")
         write_file(mismatch, "a.txt", "2\n")
-        c2 = commit_all(mismatch, "two")
+        commit_all(mismatch, "two")
         check("deny: HEAD/commit mismatch", rejects(lambda: snapshot_repository(mismatch, c1), "HEAD"))
 
         # --- denial: non-git directory ---

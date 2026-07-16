@@ -283,7 +283,6 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
     The write/acting boundary is unchanged: the search step keeps Bash limited to
     wheelhouse-search, and the legacy step keeps Write (for decision.json) with no
     shell and no GH_TOKEN."""
-    steps = handle_steps()
     search = nl_model_step("nl_search")
     legacy = nl_model_step("nl_local")
     check("nl: read-only search Claude step exists", search is not None)

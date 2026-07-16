@@ -16,14 +16,13 @@ from .admission import DIGEST
 from .contract import (
     ArtifactError,
     atomic_write_json,
-    canonical_json_bytes,
     canonical_sha256,
     file_sha256,
     load_json_regular,
     sha256_bytes,
     validate_contract,
 )
-from .tools import TOOL_SCHEMAS, tool_schema_sha256
+from .tools import tool_schema_sha256
 
 ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
@@ -993,7 +992,7 @@ def build_task(
         inputs.append({"id": "vision", "artifact": artifact, "logicalPath": "vision.md", "sha256": digest, "mediaType": "text/markdown; charset=utf-8", "trust": "trusted", "mount": "read-only", "maxBytes": 40000, "bytes": size})
 
     schema_path, schema_id = _schema_for(action, repair_kind)
-    schema = load_json_regular(schema_path, max_bytes=65536)
+    load_json_regular(schema_path, max_bytes=65536)
     schema_digest, _, schema_artifact = _copy_file(schema_path, bundle, 65536)
     soft, hard, turns, tool_calls, final_bytes = ACTION_LIMITS[action]
     profile = selection["profile"]

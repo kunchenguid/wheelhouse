@@ -25,6 +25,8 @@ The current selection cannot target Codex or reach its workflow installation bra
 The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
 Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff, and dispatch the selected action to `claude-model.yml`.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
+Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
+Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 It revalidates every hydrated input digest, file type, and permission after the action and accepts success only when the immutable input observation is unchanged and every new workspace path is a declared output.
 The trusted parent bounds dispatch and correlation, validates the correlated child revision separately, supervises known child runs, and atomically emits `AgentResult` plus content-free events.
@@ -138,6 +140,12 @@ Filesystem result bounds apply to the complete canonical serialized response, in
 Read and search payloads truncate deterministically to fit that complete envelope.
 Search keeps the existing repository allowlist and operation semantics but no longer needs model-facing Write or Bash on Codex.
 
+Repository inputs are derived from the exact bound Git commit after exact-HEAD and clean index/worktree checks, rather than copied from the live filesystem shape.
+Committed regular and executable blobs are packaged from the Git object database.
+Safe committed relative symlinks are materialized as regular files or bounded alias trees with content-free provenance, while absolute, escaping, broken, cyclic, dirty, changing, or over-limit links and gitlinks fail closed.
+The source checkout may remain branch-attached, as it is for an external default-branch `actions/checkout@v4` checkout, because AgentTask `git.detached` describes the emitted content-addressed snapshot rather than the source checkout.
+No symlink may reach the signed handoff or hydrated model workspace.
+
 Final-result delivery is independent of transcript retention.
 A bounded Claude transcript is transferred once from the read-only model workflow to its trusted parent with one-day artifact retention, then discarded after normalization.
 A schema-invalid but delivered triage candidate remains available to the existing one-turn repair policy.
@@ -232,7 +240,7 @@ The provider-neutral adapter contract should be extended only after a new captai
 This is a plan only and does not authorize a provider call, deployment, replay, fallback, secret change, or workflow change.
 Execution requires the captain to approve the exact canary task and its evidence location in a separate decision made after provider-free validation passes.
 
-The canary uses one naturally admitted, low-risk `triage.issue.local` event whose target revision and trigger identity are frozen in its AgentTask before invocation.
+The canary uses one naturally admitted, low-risk `triage.issue.local` event whose exact event identity and target revision are cryptographically bound to its AgentTask before invocation.
 Immediately before invocation, the operator must verify the durable claim is unique, the target revision is still current, the selected provider and immutable model match policy, and fallback remains `none`.
 The canary permits exactly one provider request and one turn, with provider retries, schema repair, continuation, replay, and alternate-provider routing disabled.
 If freshness is lost before projection, the worker must cancel when possible, publish the bound terminal stale-target result, and make no target mutation.
@@ -270,6 +278,10 @@ python tests/test_agent_runtime_claude_handoff.py
 python tests/test_agent_runtime_claude_bridge.py
 python tests/test_agent_runtime_workflows.py
 python tests/test_claude_model_dispatch.py
+python tests/test_agent_runtime_repo_snapshot.py
+python tests/test_agent_runtime_admission.py
+python tests/test_agent_runtime_result_binding.py
+python tests/test_agent_outage_recovery_gate.py
 ```
 
 The fake adapter exercises all action profiles without network or credentials.

@@ -20,7 +20,7 @@ from agent_runtime.admission import event_key_sha256, normalized_event_identity,
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
-from agent_runtime.contract import ContractError, canonical_sha256, load_json_regular, validate_contract, verify_result_binding
+from agent_runtime.contract import ContractError, load_json_regular, validate_contract, verify_result_binding
 from agent_runtime.events import EventError, verify_result_event_binding
 from agent_runtime.supervisor import RuntimeFailure, run
 from agent_runtime.task_builder import build_task
