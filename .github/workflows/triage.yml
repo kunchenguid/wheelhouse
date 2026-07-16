@@ -1160,51 +1160,6 @@ jobs:
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}"
           fi
 
-      - name: Finalize primary triage claim and stage evidence
-        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO_SLUG: ${{ github.repository }}
-          PRIMARY_CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
-          PRIMARY_MARKER: ${{ steps.event-claim.outputs.marker }}
-        run: |
-          set -euo pipefail
-          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
-          if [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; then
-            status="ok"; stage="consumer-committed"; code="consumer.committed"
-          fi
-          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
-          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
-            -f "body=$body" >/dev/null
-          python scripts/agent_runtime.py stage \
-            --action "${{ steps.event-claim.outputs.action }}" \
-            --source-sha "${{ github.sha }}" \
-            --event-key "${{ steps.event-claim.outputs.event_key }}" \
-            --stage "$stage" --status "$status" --code "$code"
-
-      - name: Finalize schema-repair claim and stage evidence
-        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.repair-claim.outputs.admitted == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO_SLUG: ${{ github.repository }}
-          REPAIR_CLAIM_ID: ${{ steps.repair-claim.outputs.comment_id }}
-          REPAIR_MARKER: ${{ steps.repair-claim.outputs.marker }}
-          REPAIR_EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
-        run: |
-          set -euo pipefail
-          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
-          if [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; then
-            status="ok"; stage="consumer-committed"; code="consumer.committed"
-          fi
-          repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
-          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
-            -f "body=$repair_body" >/dev/null
-          python scripts/agent_runtime.py stage \
-            --action triage.schema-repair \
-            --source-sha "${{ github.sha }}" \
-            --event-key "$REPAIR_EVENT_KEY" \
-            --stage "$stage" --status "$status" --code "$code"
-
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
       # failed before writing its outputs (e.g. a transient `gh issue view`
       # error), the step above ran with an EMPTY issue/revision and silently
@@ -1214,7 +1169,8 @@ jobs:
       # outputs) and grounds against the card's actual current state, so it
       # is a no-op unless the card is genuinely still held and queued for
       # exactly this revision.
-      - name: Recover a held card if this run never reached the update step
+      - id: card-recovery
+        name: Recover a held card if this run never reached the update step
         if: always() && steps.trusted-src.outputs.path != ''
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
@@ -1269,6 +1225,7 @@ jobs:
             GH_REPO="$GH_REPO" \
             GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
             "$TRUSTED_PYTHON" scripts/render_card.py triage-recover \
               --issue "$ISSUE" \
               --kind "$KIND" \
@@ -1374,3 +1331,48 @@ jobs:
           else
             echo "recover: queued triage cache is not stale for these inputs"
           fi
+
+      - name: Finalize primary triage claim and stage evidence
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          PRIMARY_CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
+          PRIMARY_MARKER: ${{ steps.event-claim.outputs.marker }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
+          if { [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; } || { [ "${{ steps.card-recovery.outcome }}" = "success" ] && [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; }; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          python scripts/agent_runtime.py stage \
+            --action "${{ steps.event-claim.outputs.action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
+
+      - name: Finalize schema-repair claim and stage evidence
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.repair-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          REPAIR_CLAIM_ID: ${{ steps.repair-claim.outputs.comment_id }}
+          REPAIR_MARKER: ${{ steps.repair-claim.outputs.marker }}
+          REPAIR_EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
+          if { [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; } || { [ "${{ steps.card-recovery.outcome }}" = "success" ] && [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; }; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+            -f "body=$repair_body" >/dev/null
+          python scripts/agent_runtime.py stage \
+            --action triage.schema-repair \
+            --source-sha "${{ github.sha }}" \
+            --event-key "$REPAIR_EVENT_KEY" \
+            --stage "$stage" --status "$status" --code "$code"

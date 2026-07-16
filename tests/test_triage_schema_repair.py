@@ -624,6 +624,9 @@ def test_triage_yml_repair_wiring():
     )
     primary_finalize = next(s for s in steps if s.get("name") == "Finalize primary triage claim and stage evidence")
     repair_finalize = next(s for s in steps if s.get("name") == "Finalize schema-repair claim and stage evidence")
+    recovery_i = idx(lambda s: s.get("id") == "card-recovery")
+    primary_finalize_i = idx(lambda s: s.get("name") == "Finalize primary triage claim and stage evidence")
+    repair_finalize_i = idx(lambda s: s.get("name") == "Finalize schema-repair claim and stage evidence")
     primary_run = str(primary_finalize.get("run", ""))
     repair_run = str(repair_finalize.get("run", ""))
     check(
@@ -643,8 +646,16 @@ def test_triage_yml_repair_wiring():
         "yaml: committed evidence requires explicit applied output",
         "steps.card-consumer.outputs.applied" in primary_run
         and "steps.card-consumer.outputs.applied" in repair_run
+        and "steps.card-recovery.outputs.applied" in primary_run
+        and "steps.card-recovery.outputs.applied" in repair_run
         and primary_run.count('= "true"') >= 1
         and repair_run.count('= "true"') >= 1,
+    )
+    check(
+        "yaml: terminal evidence follows fail-open recovery",
+        None not in (recovery_i, primary_finalize_i, repair_finalize_i)
+        and recovery_i < primary_finalize_i
+        and recovery_i < repair_finalize_i,
     )
 
 

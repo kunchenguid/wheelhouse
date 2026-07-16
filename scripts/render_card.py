@@ -4003,6 +4003,7 @@ def main():
         # leave a held card hidden forever, since its `triaged_sha` cache
         # already blocks every future scan from requeuing that revision.
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        applied = False
         card = get_card(args.issue)
         if not card or not issue_is_open(card):
             print("recover: card no longer open, nothing to recover")
@@ -4023,12 +4024,13 @@ def main():
                     "::warning::auto triage run did not reach its update step "
                     "for card #%s - recovering by publishing it" % args.issue
                 )
-                update_card_triage(
+                applied = update_card_triage(
                     args.issue,
                     args.revision,
                     error=args.message,
                     owner=owner,
                 )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)
