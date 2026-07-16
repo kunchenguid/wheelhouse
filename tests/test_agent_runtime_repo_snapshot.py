@@ -411,8 +411,8 @@ def main() -> None:
         original_blob_bytes = race_tb._blob_bytes
         blob_reads = [0]
 
-        def mutate_after_first_blob(repo, object_id, max_bytes):
-            data = original_blob_bytes(repo, object_id, max_bytes)
+        def mutate_after_first_blob(blobs, object_id, max_bytes):
+            data = original_blob_bytes(blobs, object_id, max_bytes)
             blob_reads[0] += 1
             if blob_reads[0] == 1:
                 write_file(race, "one.txt", "changed while compiling\n")
@@ -505,12 +505,12 @@ def main() -> None:
             write_file(bound_repo, "base/two.txt", "bbbb\n")
             write_link(bound_repo, "alias", "base")
             bounds_commit = commit_all(bound_repo)
-            with mock.patch.object(tb, "_git_text", return_value="200000001"), mock.patch.object(tb.subprocess, "Popen") as popen:
+            oversized_id = run_git(bound_repo, "rev-parse", "%s:base/one.txt" % bounds_commit).stdout.decode("ascii").strip()
+            with tb._BlobBatch(bound_repo) as blobs:
                 check(
                     "bounds: oversized blob is rejected before content capture",
-                    rejects(lambda: tb._blob_bytes(bound_repo, "a" * 40, tb.MAX_REPOSITORY_BYTES), "byte bound"),
+                    rejects(lambda: tb._blob_bytes(blobs, oversized_id, 4), "byte bound"),
                 )
-                check("bounds: oversized blob content is never opened", not popen.called)
             # Paths: base/one, base/two, alias/one, alias/two = 4 files.
             tb.MAX_REPOSITORY_FILES = 4
             ok = snapshot_repository(bound_repo, bounds_commit)
@@ -576,9 +576,19 @@ def main() -> None:
         original_aliases = tb.MAX_OBJECT_MATERIALIZATIONS
         tb.MAX_OBJECT_MATERIALIZATIONS = 2
         try:
+            real_popen = tb.subprocess.Popen
+            batch_invocations = []
+
+            def track_popen(args, *popen_args, **popen_kwargs):
+                if args[-2:] == ["cat-file", "--batch"]:
+                    batch_invocations.append(args)
+                return real_popen(args, *popen_args, **popen_kwargs)
+
+            with mock.patch.object(tb.subprocess, "Popen", side_effect=track_popen):
+                repeated_snapshot = snapshot_repository(repeated_blobs, repeated_commit)
             check(
-                "bounds: ordinary committed duplicate blobs are not aliases",
-                snapshot_repository(repeated_blobs, repeated_commit).file_count == 4,
+                "bounds: ordinary duplicate blobs use one cached batch reader",
+                repeated_snapshot.file_count == 4 and len(batch_invocations) == 1,
             )
         finally:
             tb.MAX_OBJECT_MATERIALIZATIONS = original_aliases

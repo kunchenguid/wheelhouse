@@ -69,6 +69,10 @@ def list_claims(repo_slug: str, issue: int, marker: str) -> list[dict]:
         for value in page:
             body = value.get("body") if isinstance(value, dict) else None
             if isinstance(body, str) and marker in body:
+                user = value.get("user") if isinstance(value, dict) else None
+                login = user.get("login") if isinstance(user, dict) else None
+                if login != "github-actions[bot]":
+                    continue
                 trusted = trusted_claim_comment(value, marker)
                 if trusted is None:
                     raise ContractError("agent claim marker was not trusted")

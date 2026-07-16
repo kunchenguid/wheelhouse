@@ -254,38 +254,77 @@ def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]
     return index
 
 
-def _blob_bytes(repo: Path, object_id: str, max_bytes: int) -> bytes:
-    if max_bytes < 0:
-        raise ArtifactError("repository snapshot exceeds its byte bound")
-    try:
-        size_text = _git_text(repo, "cat-file", "-s", object_id).strip()
-        size = int(size_text)
-    except (ArtifactError, ValueError) as error:
-        raise ArtifactError("repository blob size is invalid") from error
-    if size < 0 or size > max_bytes:
-        raise ArtifactError("repository snapshot exceeds its byte bound")
-    try:
-        process = subprocess.Popen(
-            ["git", "-C", str(repo), "cat-file", "blob", object_id],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as error:
-        raise ArtifactError("repository snapshot cannot invoke git") from error
-    assert process.stdout is not None
-    assert process.stderr is not None
-    payload = process.stdout.read(size + 1)
-    oversized = len(payload) > size
-    if oversized:
-        process.kill()
-    stderr = process.stderr.read()
-    returncode = process.wait()
-    if returncode != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip()
-        raise ArtifactError("repository snapshot git command failed: %s" % (detail or "cat-file"))
-    if oversized or len(payload) != size:
-        raise ArtifactError("repository blob size changed while reading")
-    return payload
+class _BlobBatch:
+    def __init__(self, repo: Path):
+        self.repo = repo
+        self.process: subprocess.Popen[bytes] | None = None
+        self.cache: dict[str, bytes] = {}
+
+    def __enter__(self) -> _BlobBatch:
+        try:
+            self.process = subprocess.Popen(
+                ["git", "-C", str(self.repo), "cat-file", "--batch"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise ArtifactError("repository snapshot cannot invoke git") from error
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        process = self.process
+        if process is None:
+            return
+        if exc_type is not None:
+            process.kill()
+        elif process.stdin is not None:
+            process.stdin.close()
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        returncode = process.wait()
+        if exc_type is None and returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise ArtifactError("repository snapshot git command failed: %s" % (detail or "cat-file"))
+
+    def read(self, object_id: str, max_bytes: int) -> bytes:
+        if max_bytes < 0:
+            raise ArtifactError("repository snapshot exceeds its byte bound")
+        cached = self.cache.get(object_id)
+        if cached is not None:
+            if len(cached) > max_bytes:
+                raise ArtifactError("repository snapshot exceeds its byte bound")
+            return cached
+        process = self.process
+        if process is None or process.stdin is None or process.stdout is None:
+            raise ArtifactError("repository blob reader is not active")
+        try:
+            process.stdin.write((object_id + "\n").encode("ascii"))
+            process.stdin.flush()
+            header = process.stdout.readline(1025)
+        except (BrokenPipeError, OSError, UnicodeEncodeError) as error:
+            raise ArtifactError("repository snapshot git command failed: cat-file") from error
+        if not header or len(header) > 1024 or not header.endswith(b"\n"):
+            raise ArtifactError("repository blob header is malformed")
+        try:
+            fields = header[:-1].decode("ascii").split(" ")
+            returned_id, object_type, size_text = fields
+            size = int(size_text)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ArtifactError("repository blob header is malformed") from error
+        if returned_id.lower() != object_id.lower() or object_type != "blob" or size < 0:
+            raise ArtifactError("repository blob header is invalid")
+        if size > max_bytes:
+            raise ArtifactError("repository snapshot exceeds its byte bound")
+        payload = process.stdout.read(size + 1)
+        if len(payload) != size + 1 or not payload.endswith(b"\n"):
+            raise ArtifactError("repository blob size changed while reading")
+        data = payload[:-1]
+        self.cache[object_id] = data
+        return data
+
+
+def _blob_bytes(blobs: _BlobBatch, object_id: str, max_bytes: int) -> bytes:
+    return blobs.read(object_id, max_bytes)
 
 
 def _is_git_path_safe(path: str) -> bool:
@@ -402,7 +441,7 @@ def _account(entries: dict[str, dict[str, Any]], path: str, data: bytes, blob_by
 
 
 def _materialize_file(
-    repo: Path,
+    blobs: _BlobBatch,
     entries: dict[str, dict[str, Any]],
     blob_by_path: dict[str, bytes],
     output_path: str,
@@ -417,7 +456,7 @@ def _materialize_file(
         if count > MAX_OBJECT_MATERIALIZATIONS:
             raise ArtifactError("repository snapshot exceeds its per-object alias bound")
         object_materializations[object_id] = count
-    data = _blob_bytes(repo, object_id, MAX_REPOSITORY_BYTES - total[0])
+    data = _blob_bytes(blobs, object_id, MAX_REPOSITORY_BYTES - total[0])
     total[0] += len(data)
     if total[0] > MAX_REPOSITORY_BYTES:
         raise ArtifactError("repository snapshot exceeds its byte bound")
@@ -426,6 +465,7 @@ def _materialize_file(
 
 def _resolve_terminal(
     repo: Path,
+    blobs: _BlobBatch,
     commit: str,
     index: dict[str, tuple[str, str]],
     start_path: str,
@@ -459,7 +499,7 @@ def _resolve_terminal(
         if kind != "symlink":
             raise ArtifactError("repository symlink target is unsupported")
         chain.add(path)
-        raw = _blob_bytes(repo, object_id, MAX_SYMLINK_TARGET_BYTES)
+        raw = _blob_bytes(blobs, object_id, MAX_SYMLINK_TARGET_BYTES)
         text = _decode_link_target(raw)
         if not first_raw:
             first_raw = text
@@ -469,6 +509,7 @@ def _resolve_terminal(
 
 def _materialize_tree_alias(
     repo: Path,
+    blobs: _BlobBatch,
     commit: str,
     index: dict[str, tuple[str, str]],
     entries: dict[str, dict[str, Any]],
@@ -497,7 +538,7 @@ def _materialize_tree_alias(
         mode, object_id = index[source_path]
         if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
             before = total[0]
-            _materialize_file(repo, entries, blob_by_path, output_path, object_id, total, object_materializations, count_alias=True)
+            _materialize_file(blobs, entries, blob_by_path, output_path, object_id, total, object_materializations, count_alias=True)
             outputs.append(output_path)
             added_files += 1
             added_bytes += total[0] - before
@@ -507,6 +548,7 @@ def _materialize_tree_alias(
             nested_chain = set(outer_chain)
             resolved_path, resolved_kind, resolved_mode, resolved_object, _, nested_hops = _resolve_terminal(
                 repo,
+                blobs,
                 commit,
                 index,
                 source_path,
@@ -515,7 +557,7 @@ def _materialize_tree_alias(
             )
             if resolved_kind == "file":
                 before = total[0]
-                _materialize_file(repo, entries, blob_by_path, output_path, resolved_object, total, object_materializations, count_alias=True)
+                _materialize_file(blobs, entries, blob_by_path, output_path, resolved_object, total, object_materializations, count_alias=True)
                 outputs.append(output_path)
                 added_files += 1
                 added_bytes += total[0] - before
@@ -523,6 +565,7 @@ def _materialize_tree_alias(
             # Nested directory link: expand with the same chain/hop continuity.
             sub_outputs, sub_files, sub_bytes = _materialize_tree_alias(
                 repo,
+                blobs,
                 commit,
                 index,
                 entries,
@@ -578,84 +621,87 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
     total = [0]
     object_materializations: dict[str, int] = {}
 
-    for path in sorted(index):
-        mode, object_id = index[path]
-        if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
-            if path in entries:
-                # A prior directory-link materialization already claimed this path.
-                raise ArtifactError("repository snapshot path collision")
-            _materialize_file(source, entries, blob_by_path, path, object_id, total, object_materializations, count_alias=False)
-            continue
-        if mode != GIT_MODE_SYMLINK:
-            raise ArtifactError("repository snapshot contains an unsupported git mode")
-        raw = _blob_bytes(source, object_id, MAX_SYMLINK_TARGET_BYTES)
-        raw_text = _decode_link_target(raw)
-        # Validate the first hop explicitly so absolute/traversal fail before deeper resolution.
-        _resolve_link_path(path, raw_text)
-        resolve_chain: set[str] = set()
-        resolved_path, resolved_kind, resolved_mode, resolved_object, _, hops_used = _resolve_terminal(
-            source,
-            bound,
-            index,
-            path,
-            hops=0,
-            chain=resolve_chain,
-        )
-        if resolved_kind == "file":
-            if path in entries:
-                raise ArtifactError("repository snapshot path collision")
-            before = total[0]
-            _materialize_file(source, entries, blob_by_path, path, resolved_object, total, object_materializations, count_alias=True)
-            links.append(
-                MaterializedLinkRecord(
-                    commit=bound,
-                    link_path=path,
-                    link_mode=GIT_MODE_SYMLINK,
-                    raw_link=raw_text,
-                    resolved_path=resolved_path,
-                    resolved_mode=resolved_mode,
-                    resolved_object=resolved_object,
-                    output_paths=(path,),
-                    file_count=1,
-                    byte_count=total[0] - before,
-                )
-            )
-            continue
-        if resolved_kind == "tree":
-            before_files = len(entries)
-            before_bytes = total[0]
-            outputs, file_count, byte_count = _materialize_tree_alias(
+    with _BlobBatch(source) as blobs:
+        for path in sorted(index):
+            mode, object_id = index[path]
+            if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
+                if path in entries:
+                    # A prior directory-link materialization already claimed this path.
+                    raise ArtifactError("repository snapshot path collision")
+                _materialize_file(blobs, entries, blob_by_path, path, object_id, total, object_materializations, count_alias=False)
+                continue
+            if mode != GIT_MODE_SYMLINK:
+                raise ArtifactError("repository snapshot contains an unsupported git mode")
+            raw = _blob_bytes(blobs, object_id, MAX_SYMLINK_TARGET_BYTES)
+            raw_text = _decode_link_target(raw)
+            # Validate the first hop explicitly so absolute/traversal fail before deeper resolution.
+            _resolve_link_path(path, raw_text)
+            resolve_chain: set[str] = set()
+            resolved_path, resolved_kind, resolved_mode, resolved_object, _, hops_used = _resolve_terminal(
                 source,
+                blobs,
                 bound,
                 index,
-                entries,
-                blob_by_path,
                 path,
-                resolved_path,
-                total,
-                resolve_chain,
-                hops_used,
-                object_materializations,
+                hops=0,
+                chain=resolve_chain,
             )
-            if file_count == 0 and before_files == len(entries):
-                # Empty tree alias contributes no regular files; still record the bind.
-                outputs = []
-            links.append(
-                MaterializedLinkRecord(
-                    commit=bound,
-                    link_path=path,
-                    link_mode=GIT_MODE_SYMLINK,
-                    raw_link=raw_text,
-                    resolved_path=resolved_path,
-                    resolved_mode=resolved_mode,
-                    resolved_object=resolved_object,
-                    output_paths=tuple(outputs),
-                    file_count=file_count,
-                    byte_count=byte_count if byte_count else total[0] - before_bytes,
+            if resolved_kind == "file":
+                if path in entries:
+                    raise ArtifactError("repository snapshot path collision")
+                before = total[0]
+                _materialize_file(blobs, entries, blob_by_path, path, resolved_object, total, object_materializations, count_alias=True)
+                links.append(
+                    MaterializedLinkRecord(
+                        commit=bound,
+                        link_path=path,
+                        link_mode=GIT_MODE_SYMLINK,
+                        raw_link=raw_text,
+                        resolved_path=resolved_path,
+                        resolved_mode=resolved_mode,
+                        resolved_object=resolved_object,
+                        output_paths=(path,),
+                        file_count=1,
+                        byte_count=total[0] - before,
+                    )
                 )
-            )
-            continue
-        raise ArtifactError("repository symlink target is unsupported")
+                continue
+            if resolved_kind == "tree":
+                before_files = len(entries)
+                before_bytes = total[0]
+                outputs, file_count, byte_count = _materialize_tree_alias(
+                    source,
+                    blobs,
+                    bound,
+                    index,
+                    entries,
+                    blob_by_path,
+                    path,
+                    resolved_path,
+                    total,
+                    resolve_chain,
+                    hops_used,
+                    object_materializations,
+                )
+                if file_count == 0 and before_files == len(entries):
+                    # Empty tree alias contributes no regular files; still record the bind.
+                    outputs = []
+                links.append(
+                    MaterializedLinkRecord(
+                        commit=bound,
+                        link_path=path,
+                        link_mode=GIT_MODE_SYMLINK,
+                        raw_link=raw_text,
+                        resolved_path=resolved_path,
+                        resolved_mode=resolved_mode,
+                        resolved_object=resolved_object,
+                        output_paths=tuple(outputs),
+                        file_count=file_count,
+                        byte_count=byte_count if byte_count else total[0] - before_bytes,
+                    )
+                )
+                continue
+            raise ArtifactError("repository symlink target is unsupported")
 
     # Detect worktree/index changes that raced object compilation. Materialized
     # bytes came only from exact objects either way, but a dirty postcondition is

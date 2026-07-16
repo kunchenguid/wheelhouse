@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_line, stage_record
+from agent_runtime.admission import event_claim_marker, event_key_sha256, normalized_event_identity, stage_line, stage_record
 from agent_runtime.contract import ContractError
 from scripts import agent_claim
 from agent_runtime_testlib import make_task
@@ -115,18 +115,25 @@ def main():
             output_path = Path(directory) / "output"
             os.environ["GITHUB_OUTPUT"] = str(output_path)
             args = argparse.Namespace(action="nl-decision.local", owner="owner", repo="repo", number=7, issue=42, revision="abcdef1", event_id="comment:100", repo_slug="owner/cards")
+            comments.append(
+                {
+                    "id": 999,
+                    "body": event_claim_marker(nl_one),
+                    "user": {"login": "untrusted-user"},
+                }
+            )
             first = agent_claim.claim(args)
             first_outputs = output_path.read_text(encoding="utf-8")
             output_path.write_text("", encoding="utf-8")
             second = agent_claim.claim(args)
             second_outputs = output_path.read_text(encoding="utf-8")
-            check("claim: first event admission creates one authoritative claim", first == 0 and "admitted=true" in first_outputs and len(comments) == 1)
-            check("claim: duplicate event exits before a second claim", second == 0 and "admitted=false" in second_outputs and len(comments) == 1)
+            check("claim: untrusted marker cannot block first admission", first == 0 and "admitted=true" in first_outputs and len(comments) == 2)
+            check("claim: duplicate event exits before a second trusted claim", second == 0 and "admitted=false" in second_outputs and len(comments) == 2)
 
             output_path.write_text("", encoding="utf-8")
             args.event_id = "comment:101"
             agent_claim.claim(args)
-            check("claim: distinct same-revision comment gets a distinct claim", "admitted=true" in output_path.read_text(encoding="utf-8") and len(comments) == 2)
+            check("claim: distinct same-revision comment gets a distinct claim", "admitted=true" in output_path.read_text(encoding="utf-8") and len(comments) == 3)
     finally:
         agent_claim.gh_json = saved
         os.environ.pop("GITHUB_OUTPUT", None)
