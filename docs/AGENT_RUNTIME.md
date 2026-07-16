@@ -30,6 +30,7 @@ Duplicate delivery exits before task construction, and the claim key becomes the
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 It revalidates every hydrated input digest, file type, and permission after the action and accepts success only when the immutable input observation is unchanged and every new workspace path is a declared output.
 The trusted parent bounds dispatch and correlation, validates the correlated child revision separately, supervises known child runs, and atomically emits `AgentResult` plus content-free events.
+Triage and schema-repair claims record `consumer-committed` only after the trusted card projection reports an actual exact-revision update or held-card recovery; a successful no-op or stale projection remains `consumer-rejected`.
 Every task limit carries provider-neutral enforcement evidence as `externally-enforced`, `adapter-enforced`, or `unavailable`, and an unavailable value is explicitly `null`.
 Claude records the exact end-to-end hard deadline as unavailable because GitHub can delay workflow discovery.
 Its separate dispatch deadline and child-job execution timeout are externally enforced, and its trusted artifact, transcript, event, and final-output bounds remain explicit.
