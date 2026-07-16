@@ -61,6 +61,7 @@ runs:
         path: ${{ steps.names.outputs.handoff }}
         if-no-files-found: error
         retention-days: 1
+        include-hidden-files: true
 
     - id: dispatch
       name: Run the separately permissioned model workflow
