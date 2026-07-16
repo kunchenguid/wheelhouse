@@ -1857,7 +1857,7 @@ def test_reconcile_queues_after_issue_updated_at_advance():
     )
 
 
-def test_reconcile_reflects_issue_updated_at_when_auto_triage_disabled():
+def test_reconcile_refreshes_issue_updated_at_when_auto_triage_disabled():
     old = item_issue(updated_at="2024-01-01T00:00:00Z", auto_triage_issues=False)
     old_card = card_row(old)
     new = item_issue(updated_at="2024-06-01T00:00:00Z", auto_triage_issues=False)
@@ -1869,13 +1869,21 @@ def test_reconcile_reflects_issue_updated_at_when_auto_triage_disabled():
         calls["mark"] == [] and calls["dispatch"] == [],
     )
     check(
-        "reconcile(issue): disabled triage still reflects target activity",
-        len(calls["reflect"]) == 1,
+        "reconcile(issue): disabled triage refreshes the newer issue revision",
+        len(calls["upsert"]) == 1,
     )
-    reflected_state = core.parse_state_block(calls["reflect"][0]["body_after"])
     check(
-        "reconcile(issue): reflected activity stamp uses new updated_at",
-        reflected_state.get("activity_reflected_at") == "2024-06-01T00:00:00Z",
+        "reconcile(issue): disabled triage does not do a separate activity stamp",
+        calls["reflect"] == [],
+    )
+    refreshed_state = core.parse_state_block(card_row(calls["upsert"][0]["item"])["body"])
+    check(
+        "reconcile(issue): refreshed item uses the new updated_at",
+        calls["upsert"][0]["item"].get("updated_at") == "2024-06-01T00:00:00Z",
+    )
+    check(
+        "reconcile(issue): refreshed activity stamp uses new updated_at",
+        refreshed_state.get("activity_reflected_at") == "2024-06-01T00:00:00Z",
     )
 
 
@@ -3473,7 +3481,7 @@ def main():
     test_reconcile_dispatch_failure_publish_failure_clears_cache()
     test_reconcile_queues_after_head_refresh()
     test_reconcile_queues_after_issue_updated_at_advance()
-    test_reconcile_reflects_issue_updated_at_when_auto_triage_disabled()
+    test_reconcile_refreshes_issue_updated_at_when_auto_triage_disabled()
     test_auto_triage_toggles_are_independent_end_to_end()
     test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()

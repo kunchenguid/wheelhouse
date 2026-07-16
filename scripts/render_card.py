@@ -181,7 +181,8 @@ AUTOMERGE_WORKFLOW_HOLD_END = "<!-- wheelhouse-automerge-workflow-hold:end -->"
 SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL, AUTOMERGE_WORKFLOW_HOLD_LABEL})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
-# Title / summary / recommendation re-render naturally; they are NOT triggers.
+# Exact rendered title drift is also a refresh trigger; summary/recommendation
+# updates ride along with another refresh but are not triggers.
 MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 
 # Non-material hidden timestamp used only to mirror target GitHub activity onto
