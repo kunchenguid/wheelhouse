@@ -16,10 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
+from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_line, stage_record
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
-from agent_runtime.contract import ContractError, canonical_sha256, load_json_regular, validate_contract
+from agent_runtime.contract import ContractError, load_json_regular, validate_contract, verify_result_binding
+from agent_runtime.events import EventError, verify_result_event_binding
 from agent_runtime.supervisor import RuntimeFailure, run
 from agent_runtime.task_builder import build_task
 
@@ -30,6 +32,41 @@ def output(name: str, value: object) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write("%s=%s\n" % (name, text.replace("\n", " ")))
+
+
+def cmd_event_key(args: argparse.Namespace) -> int:
+    event_key = event_key_sha256(
+        normalized_event_identity(
+            action=args.action,
+            owner=args.owner,
+            repo=args.repo,
+            number=args.number,
+            card_issue=args.issue,
+            revision=args.revision,
+            event_id=args.event_id,
+        )
+    )
+    output("event_key", event_key)
+    print(event_key)
+    return 0
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    print(
+        stage_line(
+            stage_record(
+                action=args.action,
+                source_sha=args.source_sha,
+                event_key=args.event_key,
+                stage=args.stage,
+                status=args.status,
+                code=args.code,
+                execution_id=args.execution_id,
+                deadline_ms=args.deadline_ms,
+            )
+        )
+    )
+    return 0
 
 
 def cmd_select(args: argparse.Namespace) -> int:
@@ -78,6 +115,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         target_kind=args.kind,
         revision=args.revision,
         wheelhouse_revision=args.wheelhouse_revision,
+        event_key=args.event_key,
         target_file=args.target_file,
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
@@ -105,6 +143,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
     value = load_json_regular(args.path)
     validate_contract(value, args.kind or None)
     print("valid %s" % (args.kind or value["kind"]))
+    return 0
+
+
+def cmd_verify_result(args: argparse.Namespace) -> int:
+    task = load_json_regular(args.task)
+    result = load_json_regular(args.result)
+    verify_result_binding(task, result)
+    verify_result_event_binding(result, args.events)
+    print("result and terminal event bind to AgentTask")
     return 0
 
 
@@ -193,15 +240,21 @@ def cmd_summary(args: argparse.Namespace) -> int:
     if result is None:
         return 1
     selection = result["selection"]
+    if selection["actualProvider"]:
+        provider_fact = "directly observed `%s`" % selection["actualProvider"]
+    elif selection["actualModel"] and selection["adapter"] == "claude-action-compat":
+        provider_fact = "inferred `%s` from the pinned Claude action and auth profile" % selection["provider"]
+    else:
+        provider_fact = "not independently observed"
     lines = [
         "### Wheelhouse agent runtime",
         "",
         "- Status: `%s`" % result["status"],
         "- Adapter: `%s` `%s`" % (selection["adapter"], selection["adapterVersion"]),
         "- Harness: `%s` `%s` (%s)" % (selection["harness"], selection["harnessVersion"] or "unavailable", selection["harnessProvenanceQuality"]),
-        "- Provider: requested `%s`, observed `%s` via auth profile `%s`" % (selection["provider"], selection["actualProvider"] or "unavailable", selection["authProfile"]),
-        "- Model: requested `%s`, observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
-        "- Effort: requested `%s`, observed `%s`" % (selection["requestedEffort"], selection["actualEffort"] or "unavailable"),
+        "- Provider: selected `%s`; %s (`%s`)" % (selection["provider"], provider_fact, selection["authProfile"]),
+        "- Model: selected `%s`, directly observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
+        "- Effort: selected `%s`, directly observed `unavailable`" % selection["requestedEffort"],
         "- Fallback: `disabled`",
         "- Request: `%s`" % result["requestSha256"],
     ]
@@ -220,6 +273,25 @@ def cmd_summary(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
+    event_key = commands.add_parser("event-key")
+    event_key.add_argument("--action", required=True)
+    event_key.add_argument("--owner", required=True)
+    event_key.add_argument("--repo", required=True)
+    event_key.add_argument("--number", type=int, required=True)
+    event_key.add_argument("--issue", type=int, required=True)
+    event_key.add_argument("--revision", required=True)
+    event_key.add_argument("--event-id", default="")
+    event_key.set_defaults(func=cmd_event_key)
+    stage = commands.add_parser("stage")
+    stage.add_argument("--action", required=True)
+    stage.add_argument("--source-sha", required=True)
+    stage.add_argument("--event-key", required=True)
+    stage.add_argument("--stage", required=True)
+    stage.add_argument("--status", required=True)
+    stage.add_argument("--code", required=True)
+    stage.add_argument("--execution-id", default="")
+    stage.add_argument("--deadline-ms", type=int)
+    stage.set_defaults(func=cmd_stage)
     select = commands.add_parser("select")
     select.add_argument("--action", required=True)
     select.add_argument("--repo", default="")
@@ -240,6 +312,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--kind", required=True)
     build.add_argument("--revision", required=True)
     build.add_argument("--wheelhouse-revision", required=True)
+    build.add_argument("--event-key", required=True)
     build.add_argument("--target-file", default="")
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")
@@ -256,6 +329,11 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--path", required=True)
     validate.add_argument("--kind", choices=("AgentTask", "AgentEvent", "AgentResult"), default="")
     validate.set_defaults(func=cmd_validate)
+    verify_result = commands.add_parser("verify-result")
+    verify_result.add_argument("--task", required=True)
+    verify_result.add_argument("--result", required=True)
+    verify_result.add_argument("--events", required=True)
+    verify_result.set_defaults(func=cmd_verify_result)
     claude = commands.add_parser("bridge-claude")
     claude.add_argument("--task", required=True)
     claude.add_argument("--bundle", required=True)
@@ -294,7 +372,7 @@ def main() -> None:
     try:
         code = parser().parse_args()
         status = code.func(code)
-    except (ConfigError, ContractError, RuntimeFailure, ValueError) as error:
+    except (ConfigError, ContractError, EventError, RuntimeFailure, ValueError) as error:
         print("agent runtime error: %s" % error, file=sys.stderr)
         status = 1
     raise SystemExit(status)

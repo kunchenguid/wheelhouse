@@ -1,4 +1,19 @@
-"""Bounded content-addressed handoff for the read-only Claude model workflow."""
+"""Bounded content-addressed handoff for the read-only Claude model workflow.
+
+Invocation invariant (load-bearing for signed-tree integrity):
+
+  Every process that imports the *packaged* runtime from a signed handoff
+  directory (``PYTHONPATH=$HANDOFF/runtime python -m agent_runtime.claude_handoff``)
+  MUST set ``PYTHONPYCACHEPREFIX`` to a directory that is path-disjoint from
+  the signed handoff tree (production uses ``$RUNNER_TEMP/wheelhouse-pycache``)
+  *before* import, with bytecode writing left enabled. Do not use ``-B`` /
+  ``PYTHONDONTWRITEBYTECODE`` as the production mechanism: the robust fix is
+  a redirected external cache, not suppressed bytecode. A fresh interpreter
+  that writes ``__pycache__`` into the signed tree will fail closed at
+  ``verify()`` because complete file-set and digest verification rejects any
+  post-signing file. Do not weaken ``verify()`` to ignore arbitrary
+  unmanifested files.
+"""
 
 from __future__ import annotations
 
@@ -46,7 +61,7 @@ def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]
 def _copy_runtime(destination: Path) -> None:
     package = destination / "runtime" / "agent_runtime"
     package.mkdir(parents=True)
-    for name in ("__init__.py", "contract.py", "claude_handoff.py"):
+    for name in ("__init__.py", "admission.py", "contract.py", "claude_handoff.py"):
         shutil.copyfile(ROOT / name, package / name)
     shutil.copytree(ROOT / "schemas", package / "schemas")
     shutil.copyfile(ROOT.parent / "scripts" / "nl_readonly_search.py", destination / "runtime" / "nl_readonly_search.py")

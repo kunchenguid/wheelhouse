@@ -23,6 +23,16 @@ def check(name, condition):
         FAILURES.append(name)
 
 
+def cancellation(conclusion="cancelled", request_status="accepted", return_code=0):
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": return_code,
+        "terminalStatus": "completed" if conclusion else "",
+        "terminalConclusion": conclusion,
+        "cancellationConfirmed": conclusion == "cancelled",
+    }
+
+
 def arguments():
     return argparse.Namespace(
         task="bundle/task.json",
@@ -43,12 +53,13 @@ def task():
 
 def exercise(initial_error):
     calls = []
-    saved = {name: getattr(dispatch, name) for name in ("run", "discover_run", "cancel_and_wait", "recover_attempt")}
+    saved = {name: getattr(dispatch, name) for name in ("run", "discover_run", "cancel_and_wait", "recover_attempt", "emit_stage")}
     try:
+        dispatch.emit_stage = lambda *_args, **_kwargs: None
         dispatch.run = lambda *args, **kwargs: (_ for _ in ()).throw(initial_error)
         dispatch.discover_run = lambda *args, **kwargs: {"id": 42, "head_sha": "b" * 40, "head_branch": "main"}
-        dispatch.cancel_and_wait = lambda run_id: calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: calls.append(("recover", run_id, conclusion, reason))
+        dispatch.cancel_and_wait = lambda run_id: (calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: calls.append(("recover", run_id, conclusion, reason))
         try:
             dispatch.supervise(arguments(), task())
         except SystemExit:
@@ -69,12 +80,13 @@ def main():
     check("dispatch: parent cancellation uses shared cleanup", ("cancel", "42") in cancelled)
     check("dispatch: parent cancellation preserves cancelled checkpoint", ("recover", "42", "cancelled", "parent-sigterm") in cancelled)
 
-    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "download_artifact", "finalize_proof", "cancel_and_wait", "recover_attempt")}
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "download_artifact", "finalize_proof", "cancel_and_wait", "recover_attempt", "emit_stage")}
     saved_sleep = dispatch.time.sleep
     finalized = []
     calls = 0
     try:
         dispatch.run = lambda *args, **kwargs: ""
+        dispatch.emit_stage = lambda *_args, **_kwargs: None
 
         def matching(*_args):
             nonlocal calls
@@ -96,13 +108,14 @@ def main():
         dispatch.time.sleep = saved_sleep
     check("dispatch: malformed transient poll is retried", calls == 2 and bool(finalized))
 
-    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output")}
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output", "emit_stage")}
     mismatch_calls = []
     try:
         dispatch.run = lambda *args, **kwargs: ""
+        dispatch.emit_stage = lambda *_args, **_kwargs: None
         dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
-        dispatch.cancel_and_wait = lambda run_id: mismatch_calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: mismatch_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.cancel_and_wait = lambda run_id: (mismatch_calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: mismatch_calls.append(("recover", run_id, conclusion, reason))
         dispatch.write_revision_mismatch_result = lambda *args: mismatch_calls.append(("result",) + args[2:8])
         dispatch.output = lambda name, value: mismatch_calls.append(("output", name, value))
         try:
@@ -114,19 +127,21 @@ def main():
             setattr(dispatch, name, value)
     check("dispatch: branch advance remains correlated by title", ("cancel", "8") in mismatch_calls)
     check("dispatch: SHA mismatch result follows bounded cancellation", mismatch_calls.index(("cancel", "8")) < next(index for index, row in enumerate(mismatch_calls) if row[0] == "result"))
-    check("dispatch: SHA mismatch result uses trusted parent metadata", ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"], True) in mismatch_calls)
+    check("dispatch: SHA mismatch result uses trusted parent metadata", any(row[:6] == ("result", "b" * 40, "c" * 40, "8", "main", dispatch.STATE["correlation"]) and row[6]["cancellationConfirmed"] is True for row in mismatch_calls))
     check("dispatch: SHA mismatch exposes the parent result", any(row[:2] == ("output", "result_file") for row in mismatch_calls))
     check("dispatch: SHA mismatch skips impossible checkpoint recovery", not any(row[0] == "recover" for row in mismatch_calls))
 
     def failed_mismatch_cancel(error):
         calls = []
-        saved_values = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output")}
+        saved_values = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_revision_mismatch_result", "output", "emit_stage")}
         try:
             dispatch.run = lambda *args, **kwargs: ""
+            dispatch.emit_stage = lambda *_args, **_kwargs: None
             dispatch.matching_run = lambda *_args: {"id": 8, "status": "queued", "conclusion": None, "head_sha": "c" * 40, "head_branch": "main"}
-            dispatch.cancel_and_wait = lambda _run_id: (_ for _ in ()).throw(error)
+            outcome = cancellation("success", "failed", 1) if isinstance(error, subprocess.CalledProcessError) else cancellation("", "unavailable", None)
+            dispatch.cancel_and_wait = lambda _run_id: outcome
             dispatch.recover_attempt = lambda *_args: calls.append(("recover",))
-            dispatch.write_revision_mismatch_result = lambda *args: calls.append(("result", args[7]))
+            dispatch.write_revision_mismatch_result = lambda *args: calls.append(("result", args[7]["cancellationConfirmed"]))
             dispatch.output = lambda name, value: calls.append(("output", name, value))
             try:
                 dispatch.supervise(arguments(), task())
@@ -143,14 +158,15 @@ def main():
     check("dispatch: mismatch cancellation timeout preserves spend result", ("result", False) in timeout_failure and any(row[:2] == ("output", "result_file") for row in timeout_failure))
     check("dispatch: failed mismatch cancellation still skips checkpoint recovery", not any(row[0] == "recover" for row in api_failure + timeout_failure))
 
-    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_controller_failure_result", "output")}
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "cancel_and_wait", "recover_attempt", "write_controller_failure_result", "output", "emit_stage")}
     malformed_calls = []
     try:
         dispatch.run = lambda *args, **kwargs: ""
+        dispatch.emit_stage = lambda *_args, **_kwargs: None
         dispatch.matching_run = lambda *_args: (_ for _ in ()).throw(dispatch.RunMetadataError("malformed", "11"))
-        dispatch.cancel_and_wait = lambda run_id: malformed_calls.append(("cancel", run_id))
-        dispatch.recover_attempt = lambda run_id, conclusion, reason: malformed_calls.append(("recover", run_id, conclusion, reason))
-        dispatch.write_controller_failure_result = lambda *args: malformed_calls.append(("result", args[2], args[5]))
+        dispatch.cancel_and_wait = lambda run_id: (malformed_calls.append(("cancel", run_id)), cancellation())[1]
+        dispatch.recover_attempt = lambda run_id, conclusion, reason, outcome=None: malformed_calls.append(("recover", run_id, conclusion, reason))
+        dispatch.write_controller_failure_result = lambda *args, **kwargs: malformed_calls.append(("result", args[2], args[5]["cancellationConfirmed"]))
         dispatch.output = lambda name, value: malformed_calls.append(("output", name, value))
         try:
             dispatch.supervise(arguments(), task())
@@ -160,8 +176,29 @@ def main():
         for name, value in saved.items():
             setattr(dispatch, name, value)
     check("dispatch: malformed correlated metadata cancels identified run", ("cancel", "11") in malformed_calls)
-    check("dispatch: malformed correlated metadata attempts checkpoint recovery", ("recover", "11", "failure", "controller-failure") in malformed_calls)
-    check("dispatch: malformed metadata emits stable parent protocol result", ("result", "11", "cancelled-and-waited") in malformed_calls)
+    check("dispatch: malformed correlated metadata skips untrusted checkpoint recovery", not any(row[0] == "recover" for row in malformed_calls))
+    check("dispatch: malformed metadata emits stable parent protocol result", ("result", "11", True) in malformed_calls)
+
+    saved = {name: getattr(dispatch, name) for name in ("run", "matching_run", "run_status", "download_artifact", "cancel_and_wait", "recover_attempt", "emit_controller_failure", "emit_stage", "output")}
+    missing_artifact_calls = []
+    try:
+        dispatch.run = lambda *args, **kwargs: ""
+        dispatch.emit_stage = lambda *_args, **_kwargs: None
+        dispatch.matching_run = lambda *_args: {"id": 12, "status": "queued", "conclusion": None, "head_sha": "b" * 40, "head_branch": "main"}
+        dispatch.run_status = lambda *_args: {"status": "completed", "conclusion": "success"}
+        dispatch.download_artifact = lambda *_args: False
+        dispatch.cancel_and_wait = lambda *_args: FAILURES.append("dispatch: naturally completed child was cancelled")
+        dispatch.recover_attempt = lambda *_args: (_ for _ in ()).throw(SystemExit("missing"))
+        dispatch.emit_controller_failure = lambda *args, **kwargs: missing_artifact_calls.append((args[1], args[3]["terminalConclusion"], kwargs.get("reason")))
+        dispatch.output = lambda *_args: None
+        try:
+            dispatch.supervise(arguments(), task())
+        except SystemExit:
+            pass
+    finally:
+        for name, value in saved.items():
+            setattr(dispatch, name, value)
+    check("dispatch: accepted child without final/checkpoint emits exactly one conservative result", missing_artifact_calls == [("12", "success", "child-artifact-unavailable")])
 
     saved_run = dispatch.run
     lookup_calls = []

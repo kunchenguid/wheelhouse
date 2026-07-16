@@ -226,10 +226,24 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
         raise ContractError("unsupported agent runtime contract version")
     validate_schema(document, load_schema(actual_kind))
     if actual_kind == "AgentTask":
+        input_ids = [item["id"] for item in document["spec"]["inputs"]]
+        if len(input_ids) != len(set(input_ids)):
+            raise ContractError("$.spec.inputs ids must be unique")
         for item in document["spec"]["inputs"]:
             logical = Path(item["logicalPath"])
             if logical.is_absolute() or any(part in ("", ".", "..") for part in logical.parts):
                 raise ContractError("$.spec.inputs logicalPath has an invalid format")
+            git = item.get("git")
+            if git is not None:
+                matches = [
+                    candidate
+                    for candidate in document["spec"]["inputs"]
+                    if candidate["id"] == "repository-provenance"
+                    and candidate["artifact"] == git["symlinkProvenanceArtifact"]
+                    and candidate["sha256"] == git["symlinkProvenanceSha256"]
+                ]
+                if len(matches) != 1:
+                    raise ContractError("repository symlink provenance binding is invalid")
         limits = document["spec"]["limits"]
         enforcement = limits["enforcement"]
         for name, quality in enforcement.items():

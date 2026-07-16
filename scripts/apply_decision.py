@@ -428,6 +428,7 @@ def cmd_parse():
         set_output("target_number", state.get("number", ""))
         set_output("kind", kind)
         set_output("head_sha", state.get("head_sha", ""))
+        set_output("target_revision", state.get("head_sha") or state.get("updated_at", ""))
         return
 
     set_output("decision", decision)
@@ -436,6 +437,7 @@ def cmd_parse():
     set_output("target_number", state.get("number", ""))
     set_output("kind", kind)
     set_output("head_sha", state.get("head_sha", ""))
+    set_output("target_revision", state.get("head_sha") or state.get("updated_at", ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -463,6 +465,17 @@ def _close_target(slug, number):
         method="PATCH",
         fields={"state": "closed"},
     )
+
+
+def _live_target_revision(owner, repo, number, kind):
+    if kind not in ("issue-triage", "pr-review", "ci-approval"):
+        return ""
+    slug = "%s/%s" % (owner, repo)
+    if kind == "issue-triage":
+        target = core.gh_rest("/repos/%s/issues/%s" % (slug, number))
+        return str((target or {}).get("updated_at") or "")
+    target = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
+    return str(((target or {}).get("head") or {}).get("sha") or "")
 
 
 # Contributor-facing (posted on the TARGET repo's PR, not a card) - no product
@@ -1142,6 +1155,8 @@ def cmd_execute():
     repo = os.environ.get("TARGET_REPO", "")
     number = os.environ.get("TARGET_NUMBER", "")
     head_sha = os.environ.get("HEAD_SHA", "")
+    kind = os.environ.get("KIND", "")
+    target_revision = os.environ.get("TARGET_REVISION", "")
 
     if not decision or not repo or not number:
         set_output("result_message", "No actionable decision.")
@@ -1157,6 +1172,28 @@ def cmd_execute():
         set_output("success", "false")
         return
 
+    try:
+        live_revision = _live_target_revision(owner, repo, number, kind)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        live_revision = ""
+    if not target_revision or not live_revision:
+        set_output(
+            "result_message",
+            "HOLD: could not verify the exact revision of %s#%s. No target action was taken."
+            % (repo, number),
+        )
+        set_output("terminal_state", "retryable")
+        set_output("success", "false")
+        return
+    if live_revision != target_revision:
+        set_output(
+            "result_message",
+            "HOLD: %s#%s moved since this decision (was %s, now %s). No target action was taken."
+            % (repo, number, target_revision[:12], live_revision[:12]),
+        )
+        set_output("terminal_state", "retryable")
+        set_output("success", "false")
+        return
     if decision == "merge":
         message, terminal = do_merge(owner, repo, number, head_sha)
     elif decision == "approve-ci":
@@ -1592,6 +1629,7 @@ def route_decision(result, kind, state, owner=""):
         "target_number": (state or {}).get("number", ""),
         "kind": kind,
         "head_sha": (state or {}).get("head_sha", ""),
+        "target_revision": (state or {}).get("head_sha") or (state or {}).get("updated_at", ""),
     }
 
     def finish():
@@ -1661,6 +1699,7 @@ def cmd_nl_route():
         "target_number",
         "kind",
         "head_sha",
+        "target_revision",
     ):
         set_output(name, out.get(name, ""))
 

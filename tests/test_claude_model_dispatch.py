@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from unittest import mock
+import json
+import subprocess
 from pathlib import Path
 import sys
 
@@ -32,10 +34,26 @@ def main():
         else:
             check("dispatch: SIGTERM enters shared bounded cleanup", False)
 
+    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "denied")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "success"})):
+        outcome = dispatch.cancel_and_wait("42")
+    check("dispatch: failed cancel plus natural success is not confirmed cancellation", outcome["requestStatus"] == "failed" and outcome["requestReturnCode"] == 1 and outcome["terminalConclusion"] == "success" and outcome["cancellationConfirmed"] is False)
+
+    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "failure"})):
+        outcome = dispatch.cancel_and_wait("43")
+    check("dispatch: accepted cancel plus natural failure is not confirmed cancellation", outcome["requestStatus"] == "accepted" and outcome["terminalConclusion"] == "failure" and outcome["cancellationConfirmed"] is False)
+
+    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "cancelled"})):
+        outcome = dispatch.cancel_and_wait("44")
+    check("dispatch: only terminal cancelled confirms cancellation", outcome["requestStatus"] == "accepted" and outcome["terminalConclusion"] == "cancelled" and outcome["cancellationConfirmed"] is True)
+
     source = Path("scripts/claude_model_dispatch.py").read_text(encoding="utf-8")
     check("dispatch: end-to-end hard deadline is not claimed", '"hardDeadlineMs": None' in source)
     check("dispatch: correlation and child timeout limits are separate", '"dispatchDeadlineMs"' in source and '"childExecutionTimeoutMs"' in source)
     check("dispatch: command and final discovery operations are bounded", "COMMAND_TIMEOUT_SECONDS" in source and "dispatch_deadline" in source and "while not run_id" not in source)
+    check(
+        "dispatch: only controller failures may accept natural late completion",
+        'termination_reason == "controller-failure"' in source,
+    )
 
     if FAILURES:
         raise SystemExit("%d Claude dispatch checks failed" % len(FAILURES))

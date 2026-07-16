@@ -283,7 +283,6 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
     The write/acting boundary is unchanged: the search step keeps Bash limited to
     wheelhouse-search, and the legacy step keeps Write (for decision.json) with no
     shell and no GH_TOKEN."""
-    steps = handle_steps()
     search = nl_model_step("nl_search")
     legacy = nl_model_step("nl_local")
     check("nl: read-only search Claude step exists", search is not None)
@@ -349,8 +348,9 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
     cond = str(note.get("if", ""))
     check("nl: note runs even on a failed run (always)", "always()" in cond)
     check(
-        "nl: note fires only when NL was entered and the prompt built",
-        "steps.nl-gate.outputs.proceed == 'true'" in cond
+        "nl: note fires only for an admitted fresh event whose prompt built",
+        "steps.nl-claim.outputs.admitted == 'true'" in cond
+        and "steps.nl-post-model-freshness.outputs.fresh == 'true'" in cond
         and "steps.nl-prompt.outcome == 'success'" in cond,
     )
     check(
@@ -368,13 +368,14 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
         "FLEET_TOKEN" not in dumped and "READONLY_TOKEN" not in dumped,
     )
     check(
-        "nl: note keys idempotency on the triggering comment id, not content",
-        env.get("TRIGGER_COMMENT_ID") == "${{ github.event.comment.id }}",
+        "nl: note binds the durable exact-event claim, not comment content",
+        env.get("CLAIM_ID") == "${{ steps.nl-claim.outputs.comment_id }}"
+        and env.get("CLAIM_MARKER") == "${{ steps.nl-claim.outputs.marker }}",
     )
     run = str(note.get("run", ""))
     check(
-        "nl: note is fire-once (checks for an existing marker before posting)",
-        "wheelhouse-nl-error:" in run and "grep -qF" in run,
+        "nl: note is fire-once by editing the pre-spend claim",
+        "--method PATCH" in run and "issues/comments/$CLAIM_ID" in run,
     )
     check(
         "nl: note body carries NO prompt/comment content (no interpolation of either)",
@@ -388,6 +389,46 @@ def test_nl_failure_visibility_is_bounded_and_fire_once():
         and "needs-decision" not in run
         and "gh issue close" not in run,
     )
+
+
+def test_nl_consumer_evidence_requires_execution_and_durable_projection():
+    steps = handle_steps()
+    action = step_by_id(steps, "nl-action-consumer")
+    reply = step_by_id(steps, "nl-reply-consumer")
+    terminal = step_by_name(steps, "Record natural-language consumer stage")
+    check("nl: action consumer exists", action is not None)
+    check("nl: reply consumer exists", reply is not None)
+    check("nl: terminal consumer stage exists", terminal is not None)
+    if action:
+        execute = step_by_id(steps, "execute")
+        check(
+            "nl: action projection requires completed target execution",
+            "steps.execute.outcome == 'success'" in str(action.get("if", ""))
+            and "steps.execute.outputs.success" not in str(action.get("if", "")),
+        )
+        check(
+            "nl: action projection propagates write failure",
+            "|| true" not in str(action.get("run", "")),
+        )
+        check(
+            "nl: execute boundary receives the admitted exact revision",
+            execute is not None
+            and (execute.get("env") or {}).get("TARGET_REVISION")
+            == "${{ steps.decide.outputs.target_revision || steps.route.outputs.target_revision }}"
+            and 'TARGET_REVISION="$TARGET_REVISION"' in str(execute.get("run", "")),
+        )
+    if reply:
+        check(
+            "nl: reply projection propagates write failure",
+            "|| true" not in str(reply.get("run", "")),
+        )
+    if terminal:
+        run = str(terminal.get("run", ""))
+        check(
+            "nl: committed evidence requires a successful consumer",
+            "steps.nl-action-consumer.outcome" in run
+            and "steps.nl-reply-consumer.outcome" in run,
+        )
 
 
 def test_nl_prompt_step_is_pass_by_reference_not_inline():
@@ -416,6 +457,7 @@ def main():
     test_nl_fetch_bounds_target_on_disk_with_explicit_truncation()
     test_both_nl_claude_steps_can_read_the_on_disk_file()
     test_nl_failure_visibility_is_bounded_and_fire_once()
+    test_nl_consumer_evidence_requires_execution_and_durable_projection()
     test_nl_prompt_step_is_pass_by_reference_not_inline()
     print()
     if _failures:

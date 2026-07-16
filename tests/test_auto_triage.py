@@ -2529,8 +2529,12 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
         old = (sys.argv[:], rc.get_card, rc._write_body, rc._gh, rc.os.unlink)
         rc.get_card = lambda number: existing
         rc._write_body, rc._gh = _mock_edit(calls)
+        output_fd, output_path = tempfile.mkstemp()
+        os.close(output_fd)
         rc.os.unlink = lambda path: None
+        original_output = os.environ.get("GITHUB_OUTPUT")
         try:
+            os.environ["GITHUB_OUTPUT"] = output_path
             sys.argv = [
                 "render_card.py",
                 "triage-recover",
@@ -2547,8 +2551,15 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
             with redirect_stdout(buf):
                 rc.main()
             out = buf.getvalue()
+            with open(output_path) as output_file:
+                applied_output = output_file.read()
         finally:
             sys.argv, rc.get_card, rc._write_body, rc._gh, rc.os.unlink = old
+            if original_output is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = original_output
+            os.unlink(output_path)
         check(
             "recover(%s): warns that the run never reached the update step" % kind,
             "::warning::auto triage run did not reach its update step" in out,
@@ -2567,6 +2578,7 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
             "recover(%s): hold label removed via gh edit" % kind,
             any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
         )
+        check("recover(%s): reports explicit applied output" % kind, applied_output == "applied=true\n")
 
 
 def test_triage_recover_cli_is_noop_when_not_stuck():
@@ -2652,9 +2664,13 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
     ):
         calls = {"gh_calls": []}
         old = (sys.argv[:], rc.get_card, rc._write_body, rc._gh)
+        original_output = os.environ.get("GITHUB_OUTPUT")
         rc.get_card = lambda number: existing
         rc._write_body, rc._gh = _mock_edit(calls)
+        output_fd, output_path = tempfile.mkstemp()
+        os.close(output_fd)
         try:
+            os.environ["GITHUB_OUTPUT"] = output_path
             sys.argv = [
                 "render_card.py",
                 "triage-recover",
@@ -2667,12 +2683,20 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
             ]
             with redirect_stdout(io.StringIO()):
                 rc.main()
+            with open(output_path) as output_file:
+                applied_output = output_file.read()
         finally:
             sys.argv, rc.get_card, rc._write_body, rc._gh = old
+            if original_output is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = original_output
+            os.unlink(output_path)
         check(
             "recover no-op (%s): no card write happened" % label,
             calls["gh_calls"] == [],
         )
+        check("recover no-op (%s): reports explicit rejected output" % label, applied_output == "applied=false\n")
 
 
 def test_scan_and_ingest_can_dispatch_with_default_token():

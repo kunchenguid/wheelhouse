@@ -209,11 +209,26 @@ RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
 # `gh issue view` returns `app/github-actions`. No other alias is accepted.
 CARD_AUTOMATION_AUTHOR = "github-actions[bot]"
 GET_CARD_AUTOMATION_AUTHOR = "app/github-actions"
+# Bounded retries for authoritative issue-by-number reads and best-effort
+# open-list uniqueness probes. List/search index lag MUST NOT alone drive a
+# destructive create rollback - see verify_unique_open_card / _create_and_verify_card.
 LIFECYCLE_VERIFY_ATTEMPTS = 3
 LIFECYCLE_VERIFY_DELAY_SECONDS = 0.25
 SOFT_CLOSE_TIMESTAMP_SKEW_SECONDS = 60
 SOFT_CLOSE_MAX_COMPLETION_SECONDS = 15 * 60
 _lifecycle_sleep = time.sleep
+
+# Card-admission telemetry outcomes (scan-visible, structured).
+# Direct issue-by-number is source of truth for a just-created object; the
+# open-list/search index is eventually consistent and is only used to detect
+# alternate open cards, never as the sole proof the create failed.
+CARD_ADMISSION_DIRECT_OK = "direct_ok"
+CARD_ADMISSION_UNIQUE = "unique"
+CARD_ADMISSION_LIST_LAG = "list_index_lag"
+CARD_ADMISSION_DUPLICATE = "duplicate"
+CARD_ADMISSION_MALFORMED = "malformed"
+CARD_ADMISSION_RETAINED_DEFERRED = "retained_deferred"
+CARD_ADMISSION_ROLLBACK = "rollback"
 
 # The version of the body `render()` currently produces. A card's stored
 # `render_version` behind this value is stale and gets exactly one re-render
@@ -2042,6 +2057,43 @@ class CardLifecycleError(RuntimeError):
     """A fail-closed card lookup, trust, mutation, or uniqueness failure."""
 
 
+class CardAdmissionError(CardLifecycleError):
+    """Post-create/reopen admission failure with an explicit rollback policy.
+
+    `should_rollback` is True only for malformed/mismatched direct objects or a
+    genuinely observed alternate trusted open card. Temporary open-list index
+    lag never sets should_rollback, and incomplete list probes that cannot prove
+    uniqueness retain the created card (deferred) rather than destroy it.
+    """
+
+    def __init__(self, message, *, outcome, should_rollback=True, number=None):
+        super().__init__(message)
+        self.outcome = outcome
+        self.should_rollback = bool(should_rollback)
+        self.number = number
+
+
+def log_card_admission(outcome, number, marker, detail=""):
+    """Emit structured scan-visible admission telemetry (never secret-bearing)."""
+    detail_text = (": %s" % detail) if detail else ""
+    line = "wheelhouse card-admission %s card #%s for %s%s" % (
+        outcome,
+        number if number is not None else "?",
+        marker,
+        detail_text,
+    )
+    if outcome in {
+        CARD_ADMISSION_DUPLICATE,
+        CARD_ADMISSION_MALFORMED,
+        CARD_ADMISSION_ROLLBACK,
+    }:
+        print("::error::%s" % line)
+    elif outcome == CARD_ADMISSION_RETAINED_DEFERRED:
+        print("::warning::%s" % line)
+    else:
+        print("::notice::%s" % line)
+
+
 def _strict_lifecycle_labels(value):
     if not isinstance(value, list):
         raise CardLifecycleError("issue labels are not a list")
@@ -2391,38 +2443,182 @@ def _prepared_lifecycle_matches(issue, body, labels, state):
     )
 
 
-def verify_unique_open_card(item, expected_number, expected_body, expected_labels):
-    """Verify exactly one trusted open identity after create or reopen."""
+def _verify_direct_open_card(item, expected_number, expected_body, expected_labels):
+    """Authoritative post-create/reopen check: issue-by-number is source of truth.
+
+    Bounded retries cover brief direct-read lag only. A matching open trusted
+    object is required; temporary open-list invisibility is handled separately.
+    """
     marker = marker_label(item)
-    last_reason = "card was not visible in the complete open lookup"
+    number = int(expected_number)
+    last_error = None
     for attempt in range(LIFECYCLE_VERIFY_ATTEMPTS):
-        rows = _list_target_issues(marker, "OPEN")
-        if len(rows) > 1:
-            raise CardLifecycleError(
-                "post-operation uniqueness failed for %s: open cards %s"
-                % (marker, ", ".join("#%s" % row["number"] for row in rows))
-            )
-        if rows:
-            row = rows[0]
-            _trusted_open_target_card(row, item)
-            if expected_number and row["number"] != int(expected_number):
-                raise CardLifecycleError(
-                    "post-operation uniqueness found card #%s instead of #%s"
-                    % (row["number"], expected_number)
+        try:
+            direct = _get_lifecycle_issue(number)
+            if direct.get("state") != "OPEN":
+                raise CardAdmissionError(
+                    "post-operation card #%s is not open" % number,
+                    outcome=CARD_ADMISSION_MALFORMED,
+                    should_rollback=True,
+                    number=number,
                 )
+            _trusted_open_target_card(direct, item)
             if not _prepared_lifecycle_matches(
-                row, expected_body, expected_labels, "OPEN"
+                direct, expected_body, expected_labels, "OPEN"
             ):
-                raise CardLifecycleError(
+                raise CardAdmissionError(
                     "post-operation card #%s does not match the prepared body/labels"
-                    % row["number"]
+                    % number,
+                    outcome=CARD_ADMISSION_MALFORMED,
+                    should_rollback=True,
+                    number=number,
                 )
-            return row
+            log_card_admission(
+                CARD_ADMISSION_DIRECT_OK,
+                number,
+                marker,
+                "issue-by-number matches prepared open identity",
+            )
+            return direct
+        except CardAdmissionError:
+            raise
+        except CardLifecycleError as error:
+            last_error = error
+            if attempt + 1 < LIFECYCLE_VERIFY_ATTEMPTS:
+                _lifecycle_sleep(LIFECYCLE_VERIFY_DELAY_SECONDS)
+                continue
+            raise CardAdmissionError(
+                "post-operation direct read failed for card #%s: %s"
+                % (number, str(error)[:180]),
+                outcome=CARD_ADMISSION_MALFORMED,
+                should_rollback=True,
+                number=number,
+            ) from error
+    raise CardAdmissionError(
+        "post-operation direct read failed for card #%s: %s"
+        % (number, str(last_error or "unknown")[:180]),
+        outcome=CARD_ADMISSION_MALFORMED,
+        should_rollback=True,
+        number=number,
+    )
+
+
+def _probe_open_list_peers(item, expected_number):
+    """Best-effort open-list uniqueness probe for one target marker.
+
+    Returns (outcome, rows, detail) where outcome is one of:
+      - unique: list shows only the expected card
+      - list_index_lag: list empty or does not yet include expected (no alternate)
+      - duplicate: list shows at least one other open card
+      - list_error: list/pagination could not be completed
+
+    A temporary miss of the expected card alone is list lag, never proof the
+    create failed. An alternate row is treated as a real peer (indexes do not
+    invent issues).
+    """
+    marker = marker_label(item)
+    expected = int(expected_number)
+    last_error = None
+    saw_empty = False
+    for attempt in range(LIFECYCLE_VERIFY_ATTEMPTS):
+        try:
+            rows = _list_target_issues(marker, "OPEN")
+        except CardLifecycleError as error:
+            last_error = error
+            if attempt + 1 < LIFECYCLE_VERIFY_ATTEMPTS:
+                _lifecycle_sleep(LIFECYCLE_VERIFY_DELAY_SECONDS)
+                continue
+            return (
+                "list_error",
+                [],
+                "open-list probe incomplete: %s" % str(error)[:160],
+            )
+        others = [row for row in rows if row["number"] != expected]
+        if others:
+            return (
+                "duplicate",
+                rows,
+                "open cards %s"
+                % ", ".join("#%s" % row["number"] for row in rows),
+            )
+        if any(row["number"] == expected for row in rows):
+            return ("unique", rows, "open-list shows only card #%s" % expected)
+        saw_empty = True
         if attempt + 1 < LIFECYCLE_VERIFY_ATTEMPTS:
             _lifecycle_sleep(LIFECYCLE_VERIFY_DELAY_SECONDS)
-    raise CardLifecycleError(
-        "post-operation uniqueness failed for %s: %s" % (marker, last_reason)
+    if saw_empty:
+        return (
+            "list_index_lag",
+            [],
+            "open-list/search index has not yet surfaced card #%s" % expected,
+        )
+    return (
+        "list_error",
+        [],
+        "open-list probe incomplete: %s" % str(last_error or "unknown")[:160],
     )
+
+
+def verify_unique_open_card(item, expected_number, expected_body, expected_labels):
+    """Verify a trusted open identity after create or reopen.
+
+    The create/reopen response number plus authoritative issue-by-number reads
+    are the source of truth for that object. The eventually consistent open-list
+    index is used only to detect a genuinely observed alternate open card.
+    Temporary list invisibility of a directly verified card is NOT a failure and
+    must never alone drive a destructive rollback.
+    """
+    marker = marker_label(item)
+    if expected_number is None:
+        raise CardAdmissionError(
+            "post-operation uniqueness requires the create/reopen issue number",
+            outcome=CARD_ADMISSION_MALFORMED,
+            should_rollback=False,
+        )
+    number = int(expected_number)
+    direct = _verify_direct_open_card(
+        item, number, expected_body, expected_labels
+    )
+    list_outcome, rows, detail = _probe_open_list_peers(item, number)
+    if list_outcome == "duplicate":
+        # Any alternate open row for this exact target marker is a real peer
+        # (list indexes do not invent issues). Trusted or not, fail closed.
+        for row in rows:
+            if row["number"] == number:
+                continue
+            try:
+                _trusted_open_target_card(row, item)
+            except CardLifecycleError as peer_error:
+                detail = "%s; peer #%s untrusted: %s" % (
+                    detail,
+                    row["number"],
+                    str(peer_error)[:120],
+                )
+        log_card_admission(CARD_ADMISSION_DUPLICATE, number, marker, detail)
+        raise CardAdmissionError(
+            "post-operation uniqueness failed for %s: %s" % (marker, detail),
+            outcome=CARD_ADMISSION_DUPLICATE,
+            should_rollback=True,
+            number=number,
+        )
+    if list_outcome == "list_error":
+        # Cannot prove uniqueness, but the direct object is valid. Callers that
+        # must not destroy a valid create (admission) retain it; reopen paths
+        # still force-close because they already mutated an existing card.
+        log_card_admission(
+            CARD_ADMISSION_RETAINED_DEFERRED, number, marker, detail
+        )
+        raise CardAdmissionError(
+            "post-operation uniqueness deferred for %s: %s" % (marker, detail),
+            outcome=CARD_ADMISSION_RETAINED_DEFERRED,
+            should_rollback=False,
+            number=number,
+        )
+    if list_outcome == "list_index_lag":
+        log_card_admission(CARD_ADMISSION_LIST_LAG, number, marker, detail)
+        return direct
+    log_card_admission(CARD_ADMISSION_UNIQUE, number, marker, detail)
+    return direct
 
 
 def _rollback_open_lifecycle_card(number, expected_body):
@@ -2587,23 +2783,79 @@ def reuse_closed_card(item, candidate, has_token=False):
 
 
 def _create_and_verify_card(item, card):
+    """Create a card and admit it from the create response + direct issue read.
+
+    Never closes or labels `resolved` solely because GitHub's open-list/search
+    index has not yet surfaced the new issue. A temporary list miss returns the
+    directly verified number so queueing can proceed exactly once by number.
+    Destructive rollback is reserved for malformed/mismatched direct objects and
+    a genuinely observed alternate trusted open card.
+    """
     ensure_labels(card["labels"])
     number = _create_card(card)
+    if not number:
+        raise CardAdmissionError(
+            "create response did not yield a readable issue number",
+            outcome=CARD_ADMISSION_MALFORMED,
+            should_rollback=False,
+        )
+    marker = card.get("marker") or marker_label(item)
     try:
         verified = verify_unique_open_card(
             item, number, card["body"], card["labels"]
         )
+    except CardAdmissionError as error:
+        if number and error.should_rollback:
+            log_card_admission(
+                CARD_ADMISSION_ROLLBACK,
+                number,
+                marker,
+                "outcome=%s; %s" % (error.outcome, str(error)[:120]),
+            )
+            _rollback_created_card(number, card["body"])
+        elif number and not error.should_rollback:
+            # Retain the machine-created card open and inert/recoverable.
+            # Do not queue from this raise path; a later scan or caller that
+            # holds the number can continue once uniqueness is provable.
+            log_card_admission(
+                CARD_ADMISSION_RETAINED_DEFERRED,
+                number,
+                marker,
+                "retained open without rollback; %s" % str(error)[:120],
+            )
+        raise
     except Exception:
+        # Unexpected errors still fail closed with rollback of our create so an
+        # untrusted half-admitted card does not linger unlabeled for acting.
         if number:
-            try:
-                _rollback_open_lifecycle_card(number, card["body"])
-            except Exception as rollback_error:
-                print(
-                    "::error::failed to roll back ambiguous new card #%s: %s"
-                    % (number, str(rollback_error)[:180])
-                )
+            log_card_admission(
+                CARD_ADMISSION_ROLLBACK,
+                number,
+                marker,
+                "unexpected verification failure",
+            )
+            _rollback_created_card(number, card["body"])
         raise
     return verified["number"]
+
+
+def _rollback_created_card(number, expected_body):
+    """Best-effort snapshot-matched rollback for a failed new-card admission."""
+    try:
+        _rollback_open_lifecycle_card(number, expected_body)
+        return
+    except Exception as rollback_error:
+        try:
+            _rollback_open_lifecycle_card(number, expected_body)
+        except Exception as retry_error:
+            print(
+                "::error::failed to roll back ambiguous new card #%s: %s; retry: %s"
+                % (
+                    number,
+                    str(rollback_error)[:120],
+                    str(retry_error)[:120],
+                )
+            )
 
 
 def find_card(marker):
@@ -3056,6 +3308,18 @@ def upsert_card(
         card = render(item, held=should_hold(item, has_token))
         try:
             return _create_and_verify_card(item, card)
+        except CardAdmissionError as error:
+            if error.should_rollback:
+                print(
+                    "::error::card creation failed closed for %s: %s"
+                    % (marker, str(error)[:240])
+                )
+            else:
+                print(
+                    "::warning::card creation deferred (retained open) for %s: %s"
+                    % (marker, str(error)[:240])
+                )
+            raise
         except CardLifecycleError as error:
             print(
                 "::error::card creation failed closed for %s: %s"
@@ -3501,6 +3765,13 @@ def _github_output_delimiter(text):
             return delimiter
 
 
+def _github_output(name, value):
+    path = os.environ.get("GITHUB_OUTPUT", "")
+    if path:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write("%s=%s\n" % (name, value))
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -3614,15 +3885,17 @@ def main():
         )
         decision = decide_triage_apply(result_text, repaired_text, args.target_file)
         outcome = decision["outcome"]
+        applied = False
         if outcome == "success":
-            if update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 triage=decision["triage"],
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
-            ):
+            )
+            if applied:
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
@@ -3631,7 +3904,7 @@ def main():
                 "::notice::auto triage schema repair succeeded for card #%s "
                 "(original failure: %s)" % (args.issue, decision["reason"])
             )
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 triage=decision["triage"],
@@ -3647,7 +3920,7 @@ def main():
                 "::warning::auto triage schema repair did not yield a valid "
                 "result for card #%s: %s" % (args.issue, decision["reason"])
             )
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 error="%s (%s)" % (TRIAGE_UNAVAILABLE, decision["reason"]),
@@ -3665,9 +3938,10 @@ def main():
                     "fetched target content"
                 )
             print("::warning::auto triage produced no valid structured result")
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
             )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "triage-repair-prep":
         # Decide whether the ORIGINAL delivered result is a schema-miss that
         # warrants ONE bounded repair turn, and if so publish that turn's prompt
@@ -3712,7 +3986,10 @@ def main():
     elif args.cmd == "triage-fail":
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
-        update_card_triage(args.issue, args.revision, error=args.message, owner=owner)
+        applied = update_card_triage(
+            args.issue, args.revision, error=args.message, owner=owner
+        )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "triage-recover":
         # Last-resort fail-open safety net, run `always()` at the end of
         # triage.yml using the RAW workflow_dispatch inputs (never a `resolve`
@@ -3726,6 +4003,7 @@ def main():
         # leave a held card hidden forever, since its `triaged_sha` cache
         # already blocks every future scan from requeuing that revision.
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        applied = False
         card = get_card(args.issue)
         if not card or not issue_is_open(card):
             print("recover: card no longer open, nothing to recover")
@@ -3746,12 +4024,13 @@ def main():
                     "::warning::auto triage run did not reach its update step "
                     "for card #%s - recovering by publishing it" % args.issue
                 )
-                update_card_triage(
+                applied = update_card_triage(
                     args.issue,
                     args.revision,
                     error=args.message,
                     owner=owner,
                 )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)

@@ -43,8 +43,18 @@ jobs:
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          # Packaged verifier imports from the signed handoff tree. Bytecode stays
+          # enabled, but PYTHONPYCACHEPREFIX is a disjoint RUNNER_TEMP directory so
+          # no runtime file is written into the signed inventory before verify().
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
         run: |
           set -euo pipefail
+          mkdir -p "$PYTHONPYCACHEPREFIX"
+          # Guard: cache prefix must never land inside the signed handoff tree.
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -70,8 +80,14 @@ jobs:
           if observed != expected:
               raise SystemExit("handoff manifest mismatch")
           PY
+          # Disjoint PYTHONPYCACHEPREFIX: bytecode may be written, but never into the
+          # signed handoff before agent_runtime.claude_handoff.verify runs.
           PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.claude_handoff hydrate \
             --handoff "$HANDOFF" --workspace "$GITHUB_WORKSPACE"
+          PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.admission \
+            --task "$HANDOFF/bundle/task.json" --stage hydrated --status ok \
+            --code handoff.hydrated \
+            --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - name: Initialize bounded local repository
         run: |
@@ -107,9 +123,14 @@ jobs:
           ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
           RUNNER_WORKSPACE: ${{ runner.workspace }}
           CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
         run: |
           set -euo pipefail
-          mkdir -p "$ATTEMPT"
+          mkdir -p "$ATTEMPT" "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
           PYTHONPATH="$HANDOFF/runtime" python - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
@@ -159,6 +180,22 @@ jobs:
           path: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Record durable checkpoint stage
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
+        run: |
+          set -euo pipefail
+          mkdir -p "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.admission \
+            --task "$HANDOFF/bundle/task.json" --stage checkpoint --status ok \
+            --code checkpoint.written \
+            --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - id: triage_search
         if: ${{ startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
@@ -262,11 +299,51 @@ jobs:
           EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file }}
           OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
         run: |
           set -euo pipefail
-          mkdir -p "$OUTPUT"
-          if [[ "$ACTION" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
+          mkdir -p "$OUTPUT" "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          if [[ "${ACTION:-}" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
             cp decision.json "$OUTPUT/decision.json"
+          fi
+          # Pre-hydration / pre-checkpoint failures never reach the durable spend
+          # checkpoint. Write one bounded content-free stage record so the parent
+          # receives a trusted no-spend result instead of a missing-file cascade.
+          if [ ! -f "$ATTEMPT" ]; then
+            python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          output = Path(os.environ["OUTPUT"])
+          stage = os.environ.get("ACTION") and "pre-checkpoint" or "pre-hydration"
+          if not (Path(os.environ.get("HANDOFF", "")) / "manifest.json").is_file():
+              stage = "pre-hydration"
+          expected_handoff = os.environ["HANDOFF_SHA256"]
+          if len(expected_handoff) != 64 or any(c not in "0123456789abcdef" for c in expected_handoff):
+              raise SystemExit("explicit handoff SHA input is invalid")
+          proof = {
+              "version": 1,
+              "stage": stage,
+              "stageStatus": "failed",
+              "spendStarted": False,
+              "transcriptSha256": None,
+              "postActionInputObservationSha256": None,
+              "targetInputsReadOnly": False,
+              "handoffManifestSha256": expected_handoff,
+              "handoffInputPathSha256": hashlib.sha256(os.environ["HANDOFF"].encode("utf-8")).hexdigest(),
+              "handoffInputBound": bool(os.environ["HANDOFF"]),
+          }
+          (output / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          PY
+            if [ -f "$HANDOFF/bundle/task.json" ]; then
+              PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.admission \
+                --task "$HANDOFF/bundle/task.json" --stage output-captured \
+                --status failed --code output.pre_checkpoint
+            fi
+            exit 0
           fi
           PYTHONPATH="$HANDOFF/runtime" python - <<'PY'
           import hashlib, json, os
@@ -282,6 +359,9 @@ jobs:
               try:
                   rows = json.loads(source.read_text(encoding="utf-8"))
                   if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows): raise ValueError
+                  observed_models = [row.get("model") for row in rows if row.get("type") == "system" and row.get("subtype") == "init" and isinstance(row.get("model"), str) and row.get("model")]
+                  if len(observed_models) == 1:
+                      (output / "provider-started").write_text("", encoding="utf-8")
                   bounded = []
                   for row in rows:
                       if row.get("type") == "system" and row.get("subtype") == "init":
@@ -309,6 +389,19 @@ jobs:
           proof["transcriptSha256"] = hashlib.sha256(execution.read_bytes()).hexdigest() if execution.is_file() else None
           (output / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
           PY
+          if [ -f "$OUTPUT/provider-started" ] && [ ! -L "$OUTPUT/provider-started" ]; then
+            PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.admission \
+              --task "$HANDOFF/bundle/task.json" --stage provider-started \
+              --status ok --code provider.started \
+              --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
+            capture_status=ok; capture_code=output.captured
+          else
+            capture_status=failed; capture_code=output.missing
+          fi
+          PYTHONPATH="$HANDOFF/runtime" python -m agent_runtime.admission \
+            --task "$HANDOFF/bundle/task.json" --stage output-captured \
+            --status "$capture_status" --code "$capture_code" \
+            --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - name: Upload bounded model transcript
         if: ${{ always() }}

@@ -24,6 +24,16 @@ def check(name, condition):
         FAILURES.append(name)
 
 
+def cancellation(conclusion="cancelled", request_status="accepted", return_code=0):
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": return_code,
+        "terminalStatus": "completed" if conclusion else "",
+        "terminalConclusion": conclusion,
+        "cancellationConfirmed": conclusion == "cancelled",
+    }
+
+
 def make_bundle(root: Path, action: str = "deep-review.local"):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
@@ -43,6 +53,7 @@ def make_bundle(root: Path, action: str = "deep-review.local"):
         target_kind="pr-review",
         revision="abcdef1",
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
+        event_key="a" * 64,
         target_file=str(target),
     )
     return task, bundle
@@ -106,6 +117,7 @@ def main():
         task["spec"]["limits"]["enforcement"]["maxToolCalls"] = "unavailable"
         check("bridge: harness executable provenance remains unavailable", result["selection"]["harnessVersion"] is None and result["selection"]["harnessDigest"] is None and result["selection"]["harnessProvenanceQuality"] == "pinned-action-reference" and result["selection"]["harnessSourceCommit"] == ACTION_COMMIT)
         check("bridge: observed model accepted", result["status"] == "succeeded" and result["selection"]["actualModel"] == IMMUTABLE_MODEL)
+        check("bridge: provider and effort are not falsely labeled observed", result["selection"]["provider"] == "anthropic" and result["selection"]["actualProvider"] == "" and result["selection"]["actualEffort"] == "")
         check("bridge: usage remains unavailable when action omits tokens", result["usage"]["inputTokens"] is None and result["usage"]["providerRequests"] is None)
         check("bridge: timing comes from the terminal action event", result["usage"]["durationMs"] == 2500 and result["startedAt"] < result["completedAt"])
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
@@ -122,7 +134,7 @@ def main():
             "42",
             "main",
             "d" * 32,
-            True,
+            cancellation(),
             str(mismatch_result_path),
             str(mismatch_events_path),
         )
@@ -139,7 +151,7 @@ def main():
             "43",
             "main",
             "f" * 32,
-            False,
+            cancellation("success", "failed", 1),
             str(bundle / "unconfirmed-mismatch-result.json"),
             str(bundle / "unconfirmed-mismatch-events.ndjson"),
         )
@@ -151,7 +163,7 @@ def main():
             "42",
             "main",
             "e" * 32,
-            "cancelled-and-waited",
+            cancellation(),
             str(bundle / "controller-failure-result.json"),
             str(bundle / "controller-failure-events.ndjson"),
         )
@@ -211,6 +223,82 @@ def main():
         empty_execution.write_text("[]", encoding="utf-8")
         empty, empty_events = run_bridge(empty_bundle, empty_execution, "empty")
         check("bridge: empty transcript preserves spend agreement", empty["error"]["spendStarted"] is True and '"spendStarted":true' in empty_events.read_text(encoding="utf-8"))
+
+        # Pre-hydration / pre-checkpoint / missing output fault injection: one bounded
+        # no-spend stage outcome, selection fields only, no fabricated provider/model.
+        _, pre_bundle = make_bundle(root / "pre-hydration")
+        missing_execution = root / "missing-execution.json"
+        stage = pre_bundle / "stage-enforcement.json"
+        stage.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "stage": "pre-hydration",
+                    "stageStatus": "failed",
+                    "spendStarted": False,
+                    "transcriptSha256": None,
+                    "postActionInputObservationSha256": None,
+                    "targetInputsReadOnly": False,
+                    "handoffManifestSha256": "a" * 64,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        pre = bridge(
+            str(pre_bundle / "task.json"),
+            str(pre_bundle),
+            str(missing_execution),
+            "",
+            str(stage),
+            "a" * 64,
+            str(pre_bundle / "pre-result.json"),
+            str(pre_bundle / "pre-events.ndjson"),
+        )
+        validate_contract(pre, "AgentResult")
+        check(
+            "bridge: pre-hydration stage failure is no-spend sandbox.violation",
+            pre["status"] == "failed"
+            and pre["error"]["code"] == "sandbox.violation"
+            and pre["error"]["spendStarted"] is False
+            and pre["selection"]["actualModel"] == ""
+            and pre["selection"]["actualProvider"] == ""
+            and pre["selection"]["fallbackUsed"] is False
+            and pre["usage"]["providerRequests"] is None
+            and pre["usage"]["inputTokens"] is None,
+        )
+        check(
+            "bridge: pre-hydration events stay content-free",
+            "fixture target" not in (pre_bundle / "pre-events.ndjson").read_text(encoding="utf-8")
+            and "Return the bounded result" not in (pre_bundle / "pre-events.ndjson").read_text(encoding="utf-8"),
+        )
+        check(
+            "bridge: selected provider/model remain selection-only when execution never starts",
+            pre["selection"]["provider"] == "anthropic"
+            and pre["selection"]["requestedModel"] == IMMUTABLE_MODEL
+            and not pre["selection"]["actualModel"]
+            and not pre["selection"]["actualProvider"],
+        )
+
+        missing_proof = bridge(
+            str(pre_bundle / "task.json"),
+            str(pre_bundle),
+            "",
+            "",
+            str(pre_bundle / "missing-enforcement.json"),
+            "a" * 64,
+            str(pre_bundle / "missing-result.json"),
+            str(pre_bundle / "missing-events.ndjson"),
+        )
+        check(
+            "bridge: missing checkpoint/output yields one bounded no-spend failure",
+            missing_proof["status"] == "failed"
+            and missing_proof["error"]["code"] == "sandbox.violation"
+            and missing_proof["error"]["spendStarted"] is False
+            and missing_proof["selection"]["actualModel"] == "",
+        )
 
         _, overflow_bundle = make_bundle(root / "overflow")
         overflow_execution = root / "overflow.json"

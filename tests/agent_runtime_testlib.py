@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -69,7 +68,7 @@ def default_final(action: str) -> Any:
     }
 
 
-def make_task(root: Path, action: str, final: Any | None = None, script: dict[str, Any] | None = None) -> tuple[dict[str, Any], Path, Path]:
+def make_task(root: Path, action: str, final: Any | None = None, script: dict[str, Any] | None = None, event_key: str = "a" * 64) -> tuple[dict[str, Any], Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
     prompt = root / "prompt.txt"
     target = root / "target.txt"
@@ -101,6 +100,7 @@ def make_task(root: Path, action: str, final: Any | None = None, script: dict[st
         target_kind=kind,
         revision="fixture-revision-1",
         wheelhouse_revision=WHEELHOUSE_REVISION,
+        event_key=event_key,
         target_file=target_file,
         repair_kind=repair_kind,
     )

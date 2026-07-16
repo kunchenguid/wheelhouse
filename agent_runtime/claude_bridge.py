@@ -149,6 +149,41 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _validated_cancellation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ContractError("controller cancellation evidence was invalid")
+    expected = {
+        "requestStatus",
+        "requestReturnCode",
+        "terminalStatus",
+        "terminalConclusion",
+        "cancellationConfirmed",
+    }
+    request_status = value.get("requestStatus")
+    return_code = value.get("requestReturnCode")
+    terminal_status = value.get("terminalStatus")
+    terminal_conclusion = value.get("terminalConclusion")
+    confirmed = value.get("cancellationConfirmed")
+    if (
+        set(value) != expected
+        or request_status not in ("not-requested", "accepted", "failed", "unavailable")
+        or (return_code is not None and (not isinstance(return_code, int) or isinstance(return_code, bool) or not 0 <= return_code <= 255))
+        or terminal_status not in ("", "completed")
+        or terminal_conclusion not in ("", "success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required", "startup_failure", "stale")
+        or not isinstance(confirmed, bool)
+        or confirmed != (terminal_status == "completed" and terminal_conclusion == "cancelled")
+        or (request_status == "not-requested" and return_code is not None)
+    ):
+        raise ContractError("controller cancellation evidence was invalid")
+    return {
+        "requestStatus": request_status,
+        "requestReturnCode": return_code,
+        "terminalStatus": terminal_status,
+        "terminalConclusion": terminal_conclusion,
+        "cancellationConfirmed": confirmed,
+    }
+
+
 def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_sha256: str) -> dict[str, Any] | None:
     try:
         proof = load_json_regular(path, max_bytes=65536)
@@ -176,6 +211,12 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         for name, quality in task["spec"]["limits"]["enforcement"].items()
         if quality == "externally-enforced"
     }
+    cancellation = controller.get("cancellation") if isinstance(controller, dict) else None
+    try:
+        if cancellation is not None:
+            _validated_cancellation(cancellation)
+    except ContractError:
+        return None
     if (
         not isinstance(handoff_sha256, str)
         or len(handoff_sha256) != 64
@@ -246,6 +287,7 @@ def _write_parent_failure_result(
     adapter_code: str,
     result_path: str,
     events_path: str,
+    cancellation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
@@ -326,6 +368,8 @@ def _write_parent_failure_result(
     with EventWriter(events_path, result["executionId"], task["spec"]["limits"]["maxEventBytes"]) as events:
         events.emit("execution.accepted", {"requestSha256": result["requestSha256"]})
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": candidate["adapter"], "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
+        if cancellation is not None:
+            events.emit("adapter.controller.lifecycle", _validated_cancellation(cancellation))
         events.emit("validation.completed", {"status": "failed", "errorCode": error_code, "spendStarted": True})
         events.emit("execution.completed", {"status": "failed", "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
     event_file = Path(events_path)
@@ -343,7 +387,7 @@ def write_revision_mismatch_result(
     run_id: str,
     dispatch_ref: str,
     correlation_id: str,
-    cancellation_confirmed: bool,
+    cancellation: dict[str, Any],
     result_path: str,
     events_path: str,
 ) -> dict[str, Any]:
@@ -359,12 +403,13 @@ def write_revision_mismatch_result(
         or any(character not in "0123456789abcdef" for character in correlation_id)
     ):
         raise ContractError("trusted revision mismatch metadata was invalid")
+    cancellation = _validated_cancellation(cancellation)
     binding = {
         "quality": "trusted-parent-run-metadata",
         "status": "mismatched",
         "spendEvidenceQuality": "conservative-possible-spend",
-        "cancellationConfirmed": cancellation_confirmed,
-        "cancellationError": None if cancellation_confirmed else "lifecycle.cancel_unconfirmed",
+        "cancellationConfirmed": cancellation["cancellationConfirmed"],
+        "cancellationError": None if cancellation["cancellationConfirmed"] else "lifecycle.cancel_unconfirmed",
         "expectedCommitSha": expected_sha,
         "observedCommitSha": observed_sha,
         "modelRunId": run_id,
@@ -381,6 +426,7 @@ def write_revision_mismatch_result(
         "revision-mismatch",
         result_path,
         events_path,
+        cancellation,
     )
 
 
@@ -390,15 +436,20 @@ def write_controller_failure_result(
     run_id: str,
     dispatch_ref: str,
     correlation_id: str,
-    cancellation_status: str,
+    cancellation: dict[str, Any],
     result_path: str,
     events_path: str,
+    *,
+    reason: str = "malformed-run-metadata",
 ) -> dict[str, Any]:
+    cancellation = _validated_cancellation(cancellation)
+    if reason not in ("malformed-run-metadata", "child-artifact-unavailable"):
+        raise ContractError("controller failure reason was invalid")
     evidence = {
         "quality": "trusted-parent-controller",
-        "reason": "malformed-run-metadata",
+        "reason": reason,
         "spendEvidenceQuality": "conservative-possible-spend",
-        "cancellationStatus": cancellation_status,
+        "cancellation": cancellation,
         "modelRunId": run_id or None,
         "dispatchRef": dispatch_ref,
         "correlationId": correlation_id,
@@ -409,10 +460,11 @@ def write_controller_failure_result(
         evidence,
         {},
         "harness.protocol",
-        "Claude model workflow returned malformed run metadata.",
-        "malformed-run-metadata",
+        "Claude model workflow returned malformed run metadata." if reason == "malformed-run-metadata" else "Claude model child ended without a trusted final or checkpoint artifact.",
+        reason,
         result_path,
         events_path,
+        cancellation,
     )
 
 
@@ -503,14 +555,16 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "protocol": PROTOCOL,
         "protocolSchemaSha256": canonical_sha256({"protocol": PROTOCOL, "systemInitModel": True}),
         "provider": candidate["provider"],
-        "actualProvider": candidate["provider"] if actual_model else "",
+        # The action transcript directly reports the model, not provider identity.
+        "actualProvider": "",
         "authProfile": candidate["authProfile"],
         "authMechanism": candidate["authMechanism"],
         "expectedWorkspaceIdSha256": canonical_sha256(candidate["expectedWorkspaceId"]) if candidate.get("expectedWorkspaceId") else None,
         "requestedModel": candidate["model"],
         "actualModel": actual_model,
         "requestedEffort": candidate["effort"],
-        "actualEffort": candidate["effort"] if actual_model else "",
+        # The action transcript does not directly report an effort setting.
+        "actualEffort": "",
         "costClass": candidate["costClass"],
         "dataBoundary": candidate["dataBoundary"],
         "fallbackUsed": False,

@@ -117,12 +117,15 @@
               "bytes": {"type": "integer", "minimum": 0, "maximum": 250000000},
               "git": {
                 "type": "object", "additionalProperties": false,
-                "required": ["commit", "detached", "fileCount", "treeSha256"],
+                "required": ["commit", "detached", "fileCount", "treeSha256", "symlinkCount", "symlinkProvenanceArtifact", "symlinkProvenanceSha256"],
                 "properties": {
                   "commit": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
                   "detached": {"const": true},
                   "fileCount": {"type": "integer", "minimum": 0},
-                  "treeSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  "treeSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "symlinkCount": {"type": "integer", "minimum": 0, "maximum": 4096},
+                  "symlinkProvenanceArtifact": {"type": "string", "pattern": "^artifacts/sha256/[0-9a-f]{64}$"},
+                  "symlinkProvenanceSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
                 }
               }
             }

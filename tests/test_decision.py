@@ -864,7 +864,9 @@ def test_request_changes_route_decision():
     )
     check(
         "route: request-changes target carried from state block",
-        r["target_repo"] == "lavish-axi" and str(r["target_number"]) == "42",
+        r["target_repo"] == "lavish-axi"
+        and str(r["target_number"]) == "42"
+        and r["target_revision"] == STATE["head_sha"],
     )
 
     r = route({"mode": "action", "action": "request-changes"})
@@ -1568,6 +1570,8 @@ def test_workflow_merge_gate_rechecks_head_after_scan():
                 "TARGET_REPO": "target-repo",
                 "TARGET_NUMBER": "5",
                 "HEAD_SHA": "oldhead01",
+                "KIND": "pr-review",
+                "TARGET_REVISION": "oldhead01",
             }
         )
     pr_reads = [
@@ -1634,7 +1638,7 @@ def test_workflow_merge_gate_reclassifies_merge_head_race():
         pr_files=["src/app.py"],
         pr_commits=["oldhead01"],
         commit_files={"oldhead01": ["src/app.py"]},
-        pr_sequence=[start, start, moved],
+        pr_sequence=[start, start, start, moved],
     )
     with patch_core(
         gh_rest=fake,
@@ -1648,6 +1652,8 @@ def test_workflow_merge_gate_reclassifies_merge_head_race():
                 "TARGET_REPO": "target-repo",
                 "TARGET_NUMBER": "5",
                 "HEAD_SHA": "oldhead01",
+                "KIND": "pr-review",
+                "TARGET_REVISION": "oldhead01",
             }
         )
     check(
@@ -1722,6 +1728,8 @@ def test_workflow_merge_gate_logs_blocked_result():
                     "TARGET_REPO": "target-repo",
                     "TARGET_NUMBER": "5",
                     "HEAD_SHA": "abc123",
+                    "KIND": "pr-review",
+                    "TARGET_REVISION": "abc123",
                 }
             )
     check(
@@ -2284,28 +2292,55 @@ def test_cmd_execute_request_changes_keeps_stale_head_refreshable():
                 "TARGET_REPO": "target-repo",
                 "TARGET_NUMBER": "5",
                 "HEAD_SHA": "oldsha",
+                "KIND": "pr-review",
+                "TARGET_REVISION": "oldsha",
             }
         )
     check(
-        "request-changes: stale head stays open for refresh through cmd_execute",
-        out["terminal_state"] == "none" and out["success"] == "true",
+        "request-changes: stale head stays retryable through cmd_execute",
+        out["terminal_state"] == "retryable" and out["success"] == "false",
     )
     check(
         "request-changes: stale head message names the moved head",
-        "head moved" in out["result_message"]
+        "moved since this decision" in out["result_message"]
         and "oldsha" in out["result_message"]
         and "newsha" in out["result_message"]
-        and "will refresh" in out["result_message"]
-        and "Re-scan" not in out["result_message"],
+        and "No target action was taken" in out["result_message"],
     )
     check("request-changes: stale head does not POST a review", posts(calls) == [])
+
+
+def test_cmd_execute_revalidates_revision_before_any_target_mutation():
+    fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
+    with patch_core(gh_rest=fake, get_owner=lambda: "owner-login"):
+        out = run_execute(
+            {
+                "DECISION": "comment",
+                "FREE_TEXT": "please recheck",
+                "TARGET_REPO": "target-repo",
+                "TARGET_NUMBER": "5",
+                "KIND": "pr-review",
+                "HEAD_SHA": "oldsha",
+                "TARGET_REVISION": "oldsha",
+            }
+        )
+    check(
+        "execute revision guard: stale target is retryable",
+        out["terminal_state"] == "retryable"
+        and out["success"] == "false"
+        and "No target action was taken" in out["result_message"],
+    )
+    check(
+        "execute revision guard: stale target receives no mutation",
+        not any(call["method"] in ("POST", "PATCH", "PUT") for call in calls),
+    )
 
 
 def test_accept_decline_execute_comments_then_closes_issue():
     parsed = run_parse(
         _tick_accept(accept_card(action="decline", reason="fixed by #9"))
     )
-    fake, calls = fake_gh_rest(open_pr())
+    fake, calls = fake_gh_rest({"updated_at": parsed["target_revision"]})
     with patch_core(gh_rest=fake, get_owner=lambda: "acme"):
         out = run_execute(
             {
@@ -2314,23 +2349,26 @@ def test_accept_decline_execute_comments_then_closes_issue():
                 "TARGET_REPO": parsed["target_repo"],
                 "TARGET_NUMBER": parsed["target_number"],
                 "HEAD_SHA": parsed.get("head_sha", ""),
+                "KIND": parsed["kind"],
+                "TARGET_REVISION": parsed["target_revision"],
             }
         )
     check(
         "accept execute(issue decline): closes with success",
         out["terminal_state"] == "resolved" and out["success"] == "true",
     )
+    mutations = [call for call in calls if call["method"] in ("POST", "PATCH", "PUT")]
     check(
         "accept execute(issue decline): posts the recommended reason",
-        calls[0]["method"] == "POST"
-        and calls[0]["path"] == "/repos/acme/lavish-axi/issues/42/comments"
-        and calls[0]["fields"]["body"] == "fixed by acme/lavish-axi#9",
+        mutations[0]["method"] == "POST"
+        and mutations[0]["path"] == "/repos/acme/lavish-axi/issues/42/comments"
+        and mutations[0]["fields"]["body"] == "fixed by acme/lavish-axi#9",
     )
     check(
         "accept execute(issue decline): then closes the target",
-        calls[1]["method"] == "PATCH"
-        and calls[1]["path"] == "/repos/acme/lavish-axi/issues/42"
-        and calls[1]["fields"]["state"] == "closed",
+        mutations[1]["method"] == "PATCH"
+        and mutations[1]["path"] == "/repos/acme/lavish-axi/issues/42"
+        and mutations[1]["fields"]["state"] == "closed",
     )
 
 
@@ -2365,13 +2403,15 @@ def test_accept_merge_execute_keeps_stale_head_retryable():
                 "TARGET_REPO": parsed["target_repo"],
                 "TARGET_NUMBER": parsed["target_number"],
                 "HEAD_SHA": parsed["head_sha"],
+                "KIND": parsed["kind"],
+                "TARGET_REVISION": parsed["target_revision"],
             }
         )
     check(
         "accept execute(pr merge): stale head keeps the card actionable",
         out["terminal_state"] == "retryable"
         and out["success"] == "false"
-        and "head moved" in out["result_message"],
+        and "moved since this decision" in out["result_message"],
     )
     check(
         "accept execute(pr merge): no merge PUT when stale",
@@ -2405,6 +2445,8 @@ def test_accept_request_changes_execute_posts_review():
                 "TARGET_REPO": parsed["target_repo"],
                 "TARGET_NUMBER": parsed["target_number"],
                 "HEAD_SHA": parsed["head_sha"],
+                "KIND": parsed["kind"],
+                "TARGET_REVISION": parsed["target_revision"],
             }
         )
     check(
@@ -2740,6 +2782,7 @@ def main():
     test_do_request_changes_requires_text()
     test_cmd_execute_request_changes_requires_text()
     test_cmd_execute_request_changes_keeps_stale_head_refreshable()
+    test_cmd_execute_revalidates_revision_before_any_target_mutation()
     test_accept_decline_execute_comments_then_closes_issue()
     test_accept_merge_execute_keeps_stale_head_retryable()
     test_accept_request_changes_execute_posts_review()

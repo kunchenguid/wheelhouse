@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml
@@ -60,6 +59,58 @@ def main():
     check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
     check("production: immutable inputs are revalidated after every action", "workspace_input_observation" in capture["run"] and "postActionInputObservationSha256" in capture["run"] and "targetInputsReadOnly" in capture["run"])
     check("production: workspace changes are limited to declared outputs", "declaredOutputPaths" in model_steps[checkpoint]["run"] and "declared_output_paths" in Path("agent_runtime/claude_handoff.py").read_text())
+    hydrate = next(step for step in model_steps if step.get("id") == "hydrate")
+    hydrate_run = hydrate["run"]
+    hydrate_env = hydrate.get("env") or {}
+    packaged_invocations = [
+        step
+        for step in model_steps
+        if 'PYTHONPATH="$HANDOFF/runtime"' in str(step.get("run", ""))
+        or "PYTHONPATH=$HANDOFF/runtime" in str(step.get("run", ""))
+    ]
+    check(
+        "production: every packaged handoff invocation redirects bytecode via disjoint PYTHONPYCACHEPREFIX",
+        len(packaged_invocations) >= 3
+        and all(
+            (step.get("env") or {}).get("PYTHONPYCACHEPREFIX") == "${{ runner.temp }}/wheelhouse-pycache"
+            and "mkdir -p" in str(step.get("run", ""))
+            and "PYTHONPYCACHEPREFIX collides with signed handoff" in str(step.get("run", ""))
+            and "unset PYTHONDONTWRITEBYTECODE" in str(step.get("run", ""))
+            and "python -B" not in str(step.get("run", ""))
+            and (step.get("env") or {}).get("PYTHONDONTWRITEBYTECODE") is None
+            for step in packaged_invocations
+        ),
+    )
+    check(
+        "production: packaged hydrate uses external pycache prefix before agent_runtime import",
+        'python -m agent_runtime.claude_handoff hydrate' in hydrate_run
+        and hydrate_env.get("PYTHONPYCACHEPREFIX") == "${{ runner.temp }}/wheelhouse-pycache"
+        and "python -B" not in hydrate_run
+        and hydrate_run.index('python -m agent_runtime.claude_handoff hydrate')
+        > hydrate_run.index("handoff manifest mismatch"),
+    )
+    check(
+        "production: complete signed file-set verification is not weakened for pycache",
+        "manifest verification failed" in Path("agent_runtime/claude_handoff.py").read_text()
+        and "PYTHONPYCACHEPREFIX" in Path("agent_runtime/claude_handoff.py").read_text()
+        and "__pycache__" not in Path("agent_runtime/claude_handoff.py").read_text().split("def verify", 1)[-1].split("def hydrate", 1)[0]
+        and ".pyc" not in Path("agent_runtime/claude_handoff.py").read_text().split("def verify", 1)[-1].split("def hydrate", 1)[0],
+    )
+    check(
+        "production: pre-checkpoint capture writes bounded no-spend stage result",
+        'if [ ! -f "$ATTEMPT" ]' in capture["run"]
+        and '"spendStarted": False' in capture["run"]
+        and "pre-hydration" in capture["run"]
+        and "pre-checkpoint" in capture["run"]
+        and 'os.environ["HANDOFF_SHA256"]' in capture["run"]
+        and 'os.environ["HANDOFF"]' in capture["run"]
+        and "handoffInputPathSha256" in capture["run"]
+        and all(token not in capture["run"].split('if [ ! -f "$ATTEMPT" ]', 1)[1].split("fi", 1)[0] for token in ("CLAUDE_CODE", "FLEET_TOKEN", "prompt", "target.txt")),
+    )
+    check(
+        "production: provider steps remain gated on successful hydrate outputs",
+        all("steps.hydrate.outputs.action" in str(step.get("if", "")) for index, step in enumerate(model_steps) if index in direct),
+    )
 
     component = Path(".github/actions/claude-model-call/action.yml").read_text()
     handoff = Path("agent_runtime/claude_handoff.py").read_text()
@@ -101,7 +152,7 @@ def main():
     check("runtime: child lookup is recent, branch-scoped, and page-bounded", "LOOKUP_WINDOW_SECONDS" in dispatch and "MAX_LOOKUP_PAGES" in dispatch and "urlencode" in dispatch and "--paginate" not in dispatch)
     check("runtime: correlated child polling uses its run ID", "def run_status" in dispatch and "run_status(run_id, child_deadline)" in dispatch)
     check("runtime: parent discovery, cancellation, and commands are bounded", "dispatch_deadline" in dispatch and "CANCEL_WAIT_SECONDS" in dispatch and "COMMAND_TIMEOUT_SECONDS" in dispatch and "while not run_id" not in dispatch and "def cancel_and_wait" in dispatch)
-    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason)" in dispatch)
+    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason, cancellation)" in dispatch)
     check("runtime: undiscovered delayed child has its own job timeout", "child_timeout_minutes" in WORKFLOWS["model"].read_text() and "timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}" in WORKFLOWS["model"].read_text() and "child_timeout_minutes=%d" in dispatch)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
