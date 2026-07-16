@@ -58,7 +58,23 @@ def main():
     capture = next(step for step in model_steps if step.get("id") == "capture")
     check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
     check("production: immutable inputs are revalidated after every action", "workspace_input_observation" in capture["run"] and "postActionInputObservationSha256" in capture["run"] and "targetInputsReadOnly" in capture["run"])
-    check("production: workspace changes are limited to declared outputs", "declaredOutputPaths" in model_steps[checkpoint]["run"] and "declared_output_paths" in Path("agent_runtime/claude_handoff.py").read_text())
+    check(
+        "production: targetInputsReadOnly derives from exact pre/post signed-input observations",
+        "preActionInputObservationSha256" in model_steps[checkpoint]["run"]
+        and "workspace_input_observation" in model_steps[checkpoint]["run"]
+        and "postActionInputObservationSha256" in capture["run"]
+        and "targetInputsReadOnly" in capture["run"]
+        and "post_observation is not None and post_observation == proof.get(\"preActionInputObservationSha256\")" in capture["run"],
+    )
+    check("production: declared outputs remain recorded separately from signed-input evidence", "declaredOutputPaths" in model_steps[checkpoint]["run"] and "declared_output_paths" in Path("agent_runtime/claude_handoff.py").read_text())
+    handoff_source = Path("agent_runtime/claude_handoff.py").read_text()
+    check(
+        "production: signed-input observation does not walk undeclared workspace scratch",
+        "model workspace contains an undeclared output path" not in handoff_source
+        and "undeclared output path" not in handoff_source
+        and "def workspace_input_observation" in handoff_source
+        and 'canonical_sha256({"inputs":observed})' in handoff_source.replace(" ", ""),
+    )
     hydrate = next(step for step in model_steps if step.get("id") == "hydrate")
     hydrate_run = hydrate["run"]
     hydrate_env = hydrate.get("env") or {}

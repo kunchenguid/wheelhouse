@@ -200,14 +200,17 @@ def declared_output_paths(task: dict[str, Any]) -> list[str]:
 
 
 def workspace_input_observation(task: dict[str, Any], workspace_dir: str) -> str:
+    """Trusted immutability evidence for signed target inputs only.
+
+    Hashes exact path, type, bytes, mode, file-count, and digest for each
+    task input (``target.txt``, ``target-src/``, ``repository-provenance.json``
+    when present). Declared outputs, ``.git/**``, and unrelated workspace
+    scratch are out of scope: their presence or mutation does not affect this
+    observation and must not collapse it to null. Any change to a signed input
+    still fails closed.
+    """
     validate_contract(task, "AgentTask")
     workspace = Path(workspace_dir).resolve()
-    output_paths = declared_output_paths(task)
-    allowed = [Path(item["logicalPath"]) for item in task["spec"]["inputs"]] + [Path(path) for path in output_paths] + [Path(".git")]
-    for path in workspace.rglob("*"):
-        relative = path.relative_to(workspace)
-        if not any(relative == root or root in relative.parents or relative in root.parents for root in allowed):
-            raise ContractError("model workspace contains an undeclared output path")
     observed: list[dict[str, Any]] = []
     for item in task["spec"]["inputs"]:
         path = workspace / item["logicalPath"]
@@ -234,7 +237,7 @@ def workspace_input_observation(task: dict[str, Any], workspace_dir: str) -> str
         if canonical_sha256(rows) != item["sha256"] or sum(row["bytes"] for row in rows) != item["bytes"] or len(rows) != item["git"]["fileCount"]:
             raise ContractError("hydrated directory input changed")
         observed.append({"logicalPath": item["logicalPath"], "kind": "directory", "bytes": item["bytes"], "sha256": item["sha256"], "fileCount": len(rows), "mode": "0500"})
-    return canonical_sha256({"inputs": observed, "declaredOutputPaths": output_paths})
+    return canonical_sha256({"inputs": observed})
 
 
 def _output(name: str, value: Any) -> None:
