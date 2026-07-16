@@ -23,7 +23,7 @@ Provider environment overrides are rejected.
 The current selection cannot target Codex or reach its workflow installation branches.
 
 The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
-Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff, and dispatch the selected action to `claude-model.yml`.
+Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff with signed hidden paths preserved, and dispatch the selected action to `claude-model.yml`.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
@@ -145,6 +145,7 @@ Repository inputs are derived from the exact bound Git commit after exact-HEAD a
 Committed regular and executable blobs are packaged from the Git object database.
 Safe committed relative symlinks are materialized as regular files or bounded alias trees with content-free provenance, while absolute, escaping, broken, cyclic, dirty, changing, or over-limit links and gitlinks fail closed.
 The source checkout may remain branch-attached, as it is for an external default-branch `actions/checkout@v4` checkout, because AgentTask `git.detached` describes the emitted content-addressed snapshot rather than the source checkout.
+Committed hidden roots such as `.agents`, `.claude`, `.github`, and `.gitignore` are ordinary signed inputs and must remain present through the hosted artifact transport.
 No symlink may reach the signed handoff or hydrated model workspace.
 
 Final-result delivery is independent of transcript retention.
