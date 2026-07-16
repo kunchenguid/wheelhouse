@@ -1134,6 +1134,7 @@ jobs:
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+              GITHUB_OUTPUT="$GITHUB_OUTPUT" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
@@ -1148,6 +1149,7 @@ jobs:
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+              GITHUB_OUTPUT="$GITHUB_OUTPUT" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
@@ -1168,7 +1170,7 @@ jobs:
         run: |
           set -euo pipefail
           status="failed"; stage="consumer-rejected"; code="consumer.rejected"
-          if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
+          if [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; then
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           fi
           body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
@@ -1191,7 +1193,7 @@ jobs:
         run: |
           set -euo pipefail
           status="failed"; stage="consumer-rejected"; code="consumer.rejected"
-          if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
+          if [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; then
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           fi
           repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"

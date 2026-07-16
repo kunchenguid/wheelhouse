@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -423,6 +424,7 @@ def _run_triage_apply(issue, revision, card_body, exec_file, repair_file, target
     """Drive the real triage-apply CLI branch with card reads/writes mocked."""
     captured = {}
     orig_get, orig_edit, orig_argv = rc.get_card, rc._edit_issue_body, sys.argv
+    original_output = os.environ.get("GITHUB_OUTPUT")
     rc.get_card = lambda n: {
         "number": int(n), "body": card_body,
         "labels": [{"name": "needs-decision"}], "state": "OPEN",
@@ -431,16 +433,53 @@ def _run_triage_apply(issue, revision, card_body, exec_file, repair_file, target
         {"body": body, "remove": remove_labels}
     )
     try:
-        sys.argv = [
-            "render_card.py", "triage-apply",
-            "--issue", str(issue), "--revision", revision,
-            "--execution-file", exec_file,
-            "--repair-execution-file", repair_file,
-            "--target-file", target_file,
-        ]
-        rc.main()
+        with tempfile.NamedTemporaryFile() as output:
+            os.environ["GITHUB_OUTPUT"] = output.name
+            sys.argv = [
+                "render_card.py", "triage-apply",
+                "--issue", str(issue), "--revision", revision,
+                "--execution-file", exec_file,
+                "--repair-execution-file", repair_file,
+                "--target-file", target_file,
+            ]
+            rc.main()
+            captured["outputs"] = Path(output.name).read_text(encoding="utf-8")
     finally:
         rc.get_card, rc._edit_issue_body, sys.argv = orig_get, orig_edit, orig_argv
+        if original_output is None:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        else:
+            os.environ["GITHUB_OUTPUT"] = original_output
+    return captured
+
+
+def _run_triage_fail(issue, revision, card_body):
+    captured = {}
+    orig_get, orig_edit, orig_argv = rc.get_card, rc._edit_issue_body, sys.argv
+    original_output = os.environ.get("GITHUB_OUTPUT")
+    rc.get_card = lambda n: {
+        "number": int(n), "body": card_body,
+        "labels": [{"name": "needs-decision"}], "state": "OPEN",
+    }
+    rc._edit_issue_body = lambda number, body, remove_labels=None: captured.update(
+        {"body": body, "remove": remove_labels}
+    )
+    try:
+        with tempfile.NamedTemporaryFile() as output:
+            os.environ["GITHUB_OUTPUT"] = output.name
+            sys.argv = [
+                "render_card.py", "triage-fail",
+                "--issue", str(issue), "--revision", revision,
+                "--message", "bounded failure",
+            ]
+            rc.main()
+            captured["outputs"] = Path(output.name).read_text(encoding="utf-8")
+    finally:
+        rc.get_card, rc._edit_issue_body, sys.argv = orig_get, orig_edit, orig_argv
+        if original_output is None:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        else:
+            os.environ["GITHUB_OUTPUT"] = original_output
     return captured
 
 
@@ -459,6 +498,7 @@ def test_cli_triage_apply_repair_end_to_end():
         check("e2e: repaired card records success", st.get("triage_status") == "succeeded")
         check("e2e: repaired card records repair telemetry", st.get("triage_repair_status") == "repaired")
         check("e2e: repaired card shows the model's summary", VALID["summary"] in cap.get("body", ""))
+        check("e2e: repaired card reports explicit applied output", cap.get("outputs") == "applied=true\n")
 
         # repair-failure cap: invalid original + still-invalid repair -> visible
         # error carrying the reason, exactly one repair attempt (the CLI consults
@@ -488,6 +528,13 @@ def test_cli_triage_apply_repair_end_to_end():
         st4 = core.parse_state_block(cap4.get("body", "")) or {}
         check("e2e: a valid original succeeds with no repair telemetry",
               st4.get("triage_status") == "succeeded" and st4.get("triage_repair_status") is None)
+
+        skipped = _run_triage_apply(469, "newer-revision", queued, valid, "", tf)
+        check("e2e: stale card reports explicit rejected output", skipped.get("outputs") == "applied=false\n" and "body" not in skipped)
+        failed = _run_triage_fail(469, "8b7547c1", queued)
+        check("e2e: triage-fail reports explicit applied output", failed.get("outputs") == "applied=true\n" and "body" in failed)
+        failed_stale = _run_triage_fail(469, "newer-revision", queued)
+        check("e2e: stale triage-fail reports explicit rejected output", failed_stale.get("outputs") == "applied=false\n" and "body" not in failed_stale)
 
 
 # --------------------------------------------------------------------------- #
@@ -556,11 +603,13 @@ def test_triage_yml_repair_wiring():
     check("yaml: repair-result reads normalized AgentResult", "steps.claude-repair-model.outputs.result" in str(res.get("env", {}).get("RUNTIME_RESULT")))
 
     upd = steps[upd_i]
+    update_run = str(upd.get("run", ""))
     check(
         "yaml: card update wires the repaired result file into triage-apply",
         upd.get("env", {}).get("REPAIR_EXECUTION_FILE") == "${{ steps.repair-result.outputs.path }}"
-        and "--repair-execution-file" in str(upd.get("run", "")),
+        and "--repair-execution-file" in update_run,
     )
+    check("yaml: scrubbed consumers preserve the output channel", update_run.count('GITHUB_OUTPUT="$GITHUB_OUTPUT"') == 2)
     fresh = steps[fresh_i]
     check(
         "yaml: final freshness re-reads the exact target revision fail closed",
@@ -589,6 +638,13 @@ def test_triage_yml_repair_wiring():
         primary_run.index("gh api --method PATCH") < primary_run.index("agent_runtime.py stage")
         and repair_run.index("gh api --method PATCH") < repair_run.index("agent_runtime.py stage")
         and "always()" in str(repair_finalize.get("if", "")),
+    )
+    check(
+        "yaml: committed evidence requires explicit applied output",
+        "steps.card-consumer.outputs.applied" in primary_run
+        and "steps.card-consumer.outputs.applied" in repair_run
+        and primary_run.count('= "true"') >= 1
+        and repair_run.count('= "true"') >= 1,
     )
 
 

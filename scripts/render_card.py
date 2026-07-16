@@ -3765,6 +3765,13 @@ def _github_output_delimiter(text):
             return delimiter
 
 
+def _github_output(name, value):
+    path = os.environ.get("GITHUB_OUTPUT", "")
+    if path:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write("%s=%s\n" % (name, value))
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -3878,15 +3885,17 @@ def main():
         )
         decision = decide_triage_apply(result_text, repaired_text, args.target_file)
         outcome = decision["outcome"]
+        applied = False
         if outcome == "success":
-            if update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 triage=decision["triage"],
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
-            ):
+            )
+            if applied:
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
@@ -3895,7 +3904,7 @@ def main():
                 "::notice::auto triage schema repair succeeded for card #%s "
                 "(original failure: %s)" % (args.issue, decision["reason"])
             )
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 triage=decision["triage"],
@@ -3911,7 +3920,7 @@ def main():
                 "::warning::auto triage schema repair did not yield a valid "
                 "result for card #%s: %s" % (args.issue, decision["reason"])
             )
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue,
                 args.revision,
                 error="%s (%s)" % (TRIAGE_UNAVAILABLE, decision["reason"]),
@@ -3929,9 +3938,10 @@ def main():
                     "fetched target content"
                 )
             print("::warning::auto triage produced no valid structured result")
-            update_card_triage(
+            applied = update_card_triage(
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
             )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "triage-repair-prep":
         # Decide whether the ORIGINAL delivered result is a schema-miss that
         # warrants ONE bounded repair turn, and if so publish that turn's prompt
@@ -3976,7 +3986,10 @@ def main():
     elif args.cmd == "triage-fail":
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
-        update_card_triage(args.issue, args.revision, error=args.message, owner=owner)
+        applied = update_card_triage(
+            args.issue, args.revision, error=args.message, owner=owner
+        )
+        _github_output("applied", "true" if applied else "false")
     elif args.cmd == "triage-recover":
         # Last-resort fail-open safety net, run `always()` at the end of
         # triage.yml using the RAW workflow_dispatch inputs (never a `resolve`
