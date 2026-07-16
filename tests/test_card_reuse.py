@@ -156,6 +156,9 @@ class LifecycleGitHub:
         self.just_reopened = False
         self.run_number = 0
         self.workflow_calls = []
+        self.issue_edit_calls = 0
+        self.timeline_failures = set()
+        self.budget_reservations = 0
         if not start_empty:
             self.add_card(initial_item or item(), number=7)
 
@@ -212,6 +215,7 @@ class LifecycleGitHub:
             "closed_at": "",
             "closed_by": "",
             "comments": [],
+            "timeline": [],
         }
         self._mark_index_visibility(number, list_lag=list_lag, search_lag=search_lag)
         self.next_number = max(self.next_number, number + 1)
@@ -287,6 +291,24 @@ class LifecycleGitHub:
         )
         issue["closed_by"] = rc.CARD_AUTOMATION_AUTHOR
         issue["updated_at"] = issue["closed_at"]
+        issue["timeline"].append(
+            {
+                "event": "closed",
+                "created_at": issue["closed_at"],
+                "actor": {"login": rc.CARD_AUTOMATION_AUTHOR},
+            }
+        )
+
+    def post_close_activity(self, number, actor=rc.CARD_AUTOMATION_AUTHOR):
+        issue = self.issues[number]
+        issue["updated_at"] = "2099-01-01T00:00:00Z"
+        issue["timeline"].append(
+            {
+                "event": "labeled",
+                "created_at": issue["updated_at"],
+                "actor": {"login": actor},
+            }
+        )
 
     def _api_list(self, endpoint):
         parsed = urlparse(endpoint)
@@ -344,6 +366,18 @@ class LifecycleGitHub:
                 self.just_reopened = False
                 self.fail_post_reopen_view_once = False
                 raise RuntimeError("simulated post-reopen read failure")
+            if "/timeline?" in args[1]:
+                number = int(args[1].split("/issues/", 1)[1].split("/", 1)[0])
+                if number in self.timeline_failures:
+                    raise RuntimeError("simulated unreadable timeline")
+                query = parse_qs(urlparse(args[1]).query)
+                page = int((query.get("page") or ["1"])[0])
+                per_page = int((query.get("per_page") or ["100"])[0])
+                start = (page - 1) * per_page
+                rows = self.issues[number]["timeline"][start : start + per_page]
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(rows), stderr=""
+                )
             number = int(args[1].rsplit("/", 1)[-1])
             if number in self.direct_issue_overrides:
                 override = self.direct_issue_overrides[number]
@@ -393,6 +427,7 @@ class LifecycleGitHub:
                 "closed_at": "",
                 "closed_by": "",
                 "comments": [],
+                "timeline": [],
             }
             self._mark_index_visibility(number)
             self.just_created = True
@@ -413,6 +448,7 @@ class LifecycleGitHub:
                 stderr="",
             )
         if args[:2] == ["issue", "edit"]:
+            self.issue_edit_calls += 1
             issue = self.issues[int(args[2])]
             is_closed_prepare = issue["state"] == "CLOSED" and "--body-file" in args
             if is_closed_prepare and self.fail_prepare == "before":
@@ -429,6 +465,8 @@ class LifecycleGitHub:
                     self._touch(issue)
                     raise RuntimeError("simulated body-only partial update")
             self._apply_label_args(issue, args)
+            if "--title" in args:
+                issue["title"] = args[args.index("--title") + 1]
             self._touch(issue)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:2] == ["issue", "comment"]:
@@ -484,7 +522,11 @@ class LifecycleGitHub:
         # Daily-ledger behavior has its own exhaustive offline boundary suite in
         # test_triage_budget.py. This lifecycle fixture focuses on the card side
         # of the verified queue checkpoint while preserving the real permit API.
-        rc.reserve_triage_budget = lambda number, queued_item, ceiling: True
+        def reserve(_number, _queued_item, _ceiling):
+            self.budget_reservations += 1
+            return True
+
+        rc.reserve_triage_budget = reserve
         os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
         try:
             return callback()
@@ -641,6 +683,32 @@ def test_new_head_reopens_and_drops_stale_analysis():
     )
 
 
+def test_census_head_mismatch_reuses_after_trusted_post_close_activity_once():
+    """F1 separates the head move trigger, the old updatedAt mask, and the
+    visible duplicate-card symptom from the proven same-head reuse path."""
+    old = item(head="c7c2e78a" + "0" * 32)
+    current = item(head="4d19b725" + "0" * 32)
+    github = LifecycleGitHub(old)
+    github.soft_close()
+    github.post_close_activity(7)
+
+    first = github.run_reconcile(scan_payload([current]))
+    writes_after_first = github.issue_edit_calls
+    github.run_reconcile(scan_payload([current]))
+    check(
+        "F1: trusted post-close automation no longer masks new-head reuse",
+        github.issues[7]["state"] == "OPEN"
+        and github.create_calls == 0
+        and core.parse_state_block(github.issues[7]["body"])["head_sha"]
+        == current["head_sha"]
+        and "reopened card #7" in first,
+    )
+    check(
+        "F1: repaired head-mismatch path converges on the second scan",
+        github.issue_edit_calls == writes_after_first,
+    )
+
+
 def test_ci_approval_to_pr_review_reuses_issue():
     old = item(kind="ci-approval")
     github = LifecycleGitHub(old)
@@ -661,6 +729,65 @@ def test_ci_approval_to_pr_review_reuses_issue():
         and "kind:ci-approval" not in names
         and len([name for name in names if name.startswith("target:")]) == 1
         and "opt:merge" in github.issues[7]["body"],
+    )
+
+
+def test_census_ci_approval_head_move_reuses_once():
+    """F6 proves the non-model CI kind uses the same widened lifecycle path."""
+    old = item(kind="ci-approval", head="339a3470" + "0" * 32)
+    current = item(kind="ci-approval", head="2d8cd317" + "0" * 32)
+    github = LifecycleGitHub(old)
+    github.soft_close()
+    github.post_close_activity(7)
+    github.run_reconcile(scan_payload([current]))
+    writes = github.issue_edit_calls
+    github.run_reconcile(scan_payload([current]))
+    check(
+        "F6: CI-approval card reopens at the current head without creation",
+        github.issues[7]["state"] == "OPEN"
+        and github.create_calls == 0
+        and core.parse_state_block(github.issues[7]["body"])["head_sha"]
+        == current["head_sha"],
+    )
+    check("F6: CI-approval reuse converges", github.issue_edit_calls == writes)
+
+
+def test_issue_updated_at_refresh_and_queue_write_ownership():
+    old = item(
+        kind="issue-triage",
+        head="",
+        updated_at="2026-07-15T14:05:50Z",
+        bucket="issue-triage",
+        comp="n/a",
+        tests="n/a",
+        priority="low",
+        url="https://github.com/kunchenguid/wheelhouse/issues/42",
+    )
+    current = dict(old, updated_at="2026-07-15T14:07:59Z")
+
+    ineligible = LifecycleGitHub(old)
+    ineligible.run_reconcile(scan_payload([current]), token=False)
+    ineligible_writes = ineligible.issue_edit_calls
+    ineligible.run_reconcile(scan_payload([current]), token=False)
+    ineligible_state = core.parse_state_block(ineligible.issues[7]["body"])
+    check(
+        "F4: ineligible issue advisory still gets one deterministic refresh",
+        ineligible_state["updated_at"] == current["updated_at"]
+        and ineligible.issue_edit_calls == ineligible_writes
+        and ineligible.budget_reservations == 0
+        and ineligible.workflow_calls == [],
+    )
+
+    eligible = LifecycleGitHub(old)
+    eligible.run_reconcile(scan_payload([current]), token=True)
+    eligible_state = core.parse_state_block(eligible.issues[7]["body"])
+    check(
+        "F4: eligible issue revision is owned by one queued write and dispatch",
+        eligible.issue_edit_calls == 1
+        and eligible_state["updated_at"] == current["updated_at"]
+        and eligible_state["triage_status"] == "queued"
+        and eligible.budget_reservations == 1
+        and len(eligible.workflow_calls) == 1,
     )
 
 
@@ -815,18 +942,14 @@ def test_legacy_card_is_not_guessed_reusable():
     )
 
 
-def test_duplicate_and_incomplete_lookup_fail_without_create():
+def test_multiple_candidates_select_highest_and_incomplete_lookup_fails():
     duplicate = LifecycleGitHub(item())
     duplicate.soft_close()
     clone = copy.deepcopy(duplicate.issues[7])
     clone["number"] = 8
     duplicate.issues[8] = clone
     duplicate.next_number = 9
-    duplicate_failed = False
-    try:
-        duplicate.event_upsert(item(head="2" * 40))
-    except rc.CardLifecycleError:
-        duplicate_failed = True
+    selected = duplicate.event_upsert(item(head="2" * 40))
 
     incomplete = LifecycleGitHub(item())
     incomplete.soft_close()
@@ -837,16 +960,62 @@ def test_duplicate_and_incomplete_lookup_fail_without_create():
     except rc.CardLifecycleError:
         incomplete_failed = True
     check(
-        "ambiguity: duplicate reusable candidates fail closed without creation",
-        duplicate_failed
+        "multiple trusted candidates: highest number is selected deterministically",
+        selected == 8
         and duplicate.create_calls == 0
-        and all(issue["state"] == "CLOSED" for issue in duplicate.issues.values()),
+        and duplicate.issues[8]["state"] == "OPEN"
+        and duplicate.issues[7]["state"] == "CLOSED",
     )
     check(
         "ambiguity: incomplete closed lookup fails closed without creation",
         incomplete_failed
         and incomplete.create_calls == 0
         and incomplete.issues[7]["state"] == "CLOSED",
+    )
+
+
+def test_post_close_timeline_refuses_human_unreadable_and_incomplete_history():
+    outcomes = []
+
+    human = LifecycleGitHub(item())
+    human.soft_close()
+    human.post_close_activity(7, actor="owner")
+    outcomes.append(
+        human._with_boundary(
+            lambda: rc.reusable_closed_card(human.normalized(7), item())[0]
+        )
+    )
+
+    unreadable = LifecycleGitHub(item())
+    unreadable.soft_close()
+    unreadable.post_close_activity(7)
+    unreadable.timeline_failures.add(7)
+    outcomes.append(
+        unreadable._with_boundary(
+            lambda: rc.reusable_closed_card(unreadable.normalized(7), item())[0]
+        )
+    )
+
+    incomplete = LifecycleGitHub(item())
+    incomplete.soft_close()
+    incomplete.post_close_activity(7)
+    incomplete.issues[7]["timeline"] = [
+        {
+            "event": "labeled",
+            "created_at": incomplete.issues[7]["updated_at"],
+            "actor": {"login": rc.CARD_AUTOMATION_AUTHOR},
+        }
+    ] * (
+        rc.POST_CLOSE_TIMELINE_PAGE_SIZE * rc.POST_CLOSE_TIMELINE_MAX_PAGES
+    )
+    outcomes.append(
+        incomplete._with_boundary(
+            lambda: rc.reusable_closed_card(incomplete.normalized(7), item())[0]
+        )
+    )
+    check(
+        "post-close trust: human, unreadable, and incomplete histories refuse reuse",
+        outcomes == [False, False, False],
     )
 
 
@@ -864,6 +1033,28 @@ def test_malformed_target_marker_fails_without_create():
     check(
         "malformed target identity fails closed without creating a card",
         failed and github.create_calls == 0 and github.issues[7]["state"] == "CLOSED",
+    )
+
+
+def test_candidate_identity_disagreement_remains_an_error():
+    github = LifecycleGitHub(item())
+    github.soft_close()
+    conflicting = copy.deepcopy(github.issues[7])
+    conflicting["number"] = 8
+    state = core.parse_state_block(conflicting["body"])
+    state["number"] = 99
+    conflicting["body"] = rc._replace_state_block(conflicting["body"], state)
+    github.issues[8] = conflicting
+    failed = False
+    try:
+        github.event_upsert(item(head="5" * 40))
+    except rc.CardLifecycleError:
+        failed = True
+    check(
+        "candidate identity disagreement fails closed without creation",
+        failed
+        and github.create_calls == 0
+        and all(issue["state"] == "CLOSED" for issue in github.issues.values()),
     )
 
 
@@ -1547,14 +1738,19 @@ def test_ci_and_held_agent_cards_under_list_lag():
 def main():
     test_same_head_reopens_same_issue()
     test_new_head_reopens_and_drops_stale_analysis()
+    test_census_head_mismatch_reuses_after_trusted_post_close_activity_once()
     test_ci_approval_to_pr_review_reuses_issue()
+    test_census_ci_approval_head_move_reuses_once()
+    test_issue_updated_at_refresh_and_queue_write_ownership()
     test_reconcile_and_ingest_share_reuse_operation()
     test_reopened_card_participates_in_normal_systems()
     test_forbidden_candidates_never_reopen()
     test_hard_close_clears_reuse_provenance()
     test_legacy_card_is_not_guessed_reusable()
-    test_duplicate_and_incomplete_lookup_fail_without_create()
+    test_multiple_candidates_select_highest_and_incomplete_lookup_fails()
+    test_post_close_timeline_refuses_human_unreadable_and_incomplete_history()
     test_malformed_target_marker_fails_without_create()
+    test_candidate_identity_disagreement_remains_an_error()
     test_live_races_stop_reuse_before_mutation()
     test_partial_prepare_failures_stay_closed_non_actionable()
     test_serialization_and_sequential_race_converge_to_one_card()

@@ -43,8 +43,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   but is normalized as a sorted set so checkbox reordering alone does not
   refresh the card. The state block also carries `updated_at` unconditionally
   (populated for issue-triage items, empty for pr-review) - it is NON-material,
-  existing purely as the issue-triage auto-triage cache key, mirroring how
-  `head_sha` doubles as the pr-review cache key. The state block also carries
+  existing as the issue-triage auto-triage cache key and strict newer-only
+  deterministic refresh stamp, mirroring how `head_sha` doubles as the
+  pr-review cache key. The state block also carries
   `activity_reflected_at`, a NON-material target-activity sort stamp. When a
   target's GitHub `updatedAt` advances past that stamp, Wheelhouse may make one
   hidden state-only card body edit so GitHub's `sort:updated-desc` issue view
@@ -81,7 +82,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   Reconcile may also add one bounded, versioned, NON-material `reconcile_absence` record to a pure pending card after a conclusive scheduled run finds its still-open target outside the worklist.
   The fixed threshold is two adjacent scheduled workflow run numbers.
   The threshold record includes exact trusted machine soft-close provenance before close; malformed, duplicate, wrong-version, boolean, negative, oversized, or otherwise untrusted state reads as count zero and can never accelerate close or qualify future reuse.
-  When no open card exists, `render_card.lookup_card_lifecycle` completely lists the exact target label and may reuse exactly one closed card only when its strict state identity, managed target/repo labels, issue author, latest close actor, close timing, terminal labels, and current-schema soft-close provenance are independently trustworthy.
+  When no open card exists, `render_card.lookup_card_lifecycle` completely lists the exact target label and may reuse a closed card only when its strict state identity, managed target/repo labels, issue author, latest close actor, close timing, terminal labels, and current-schema soft-close provenance are independently trustworthy.
+  A later `updatedAt` is reusable only when a bounded complete issue-timeline read proves every post-close event came from trusted Wheelhouse automation and fully explains the timestamp; unreadable, incomplete, ambiguous, or human-touched history refuses reuse.
+  If several trusted candidates share the exact identity, Wheelhouse selects the highest issue number deterministically and reports the lower candidates as superseded without changing them; any identity disagreement still fails closed.
   Legacy, owner/decision-resolved, blocked, held, hard-target-closed, auto-merged/audit-protected, manually authored, malformed, target-mismatched, and ambiguous closed cards are never reopened.
   A reusable card is rendered and relabeled while still closed, re-read before reopening, then checked through a complete trusted-open lookup; a partial failure stays closed, and post-open ambiguity rolls the local card back closed.
   New-head or incompatible-kind rendering naturally drops stale triage, recommendation, verdict, criteria, held, audit, and absence state; same-revision triage is preserved only through the normal `_preserve_same_revision_triage` path.
@@ -270,8 +273,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) keep a
   card current: when a target's MATERIAL state changes - `head_sha`, compliance
   (`comp`), tests (`tests`), `kind`, `priority`, or checkbox `options` - the
-  card is re-rendered in place; title/summary/recommendation re-render naturally
-  and are NOT change triggers. Option comparisons use set equality; display
+  card is re-rendered in place. Exact deterministic card-title drift is also a
+  trigger for every kind, using the renderer's same 70-character truncation,
+  while summary/recommendation remain non-triggers. A valid strictly newer
+  issue-triage `updated_at` is a full-refresh trigger when the advisory queued
+  write does not already own that revision advance. Option comparisons use set equality; display
   order remains the order provided in the card body/state. A refresh ALSO fires
   when the card's stored `render_version` is behind the current
   `CARD_RENDER_VERSION` - a non-material, one-time, self-terminating trigger
@@ -427,9 +433,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   the card and makes the fresh head eligible for a spend-guarded triage attempt
   in the same pass. For an issue-triage card, `updated_at` is NOT material (an issue's
   title/comp/tests/kind/priority/options rarely change on a new comment), so a
-  new comment/edit can make the card eligible for a spend-guarded triage attempt
-  WITHOUT any card refresh at all - `reconcile.py` checks triage eligibility
-  independently of the material-change branch for exactly this reason.
+  new comment/edit can make the card eligible for a spend-guarded triage attempt.
+  When eligible, the existing single queued write owns the revision advance;
+  when ineligible, the strictly newer timestamp triggers one deterministic full
+  refresh without reserving budget or dispatching an advisory.
   If config is off or the token is absent, no dispatch happens and cards render
   exactly as the deterministic card did before this feature.
   `triage.yml` itself checks out the PR head for a pr-review card (and

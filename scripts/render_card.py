@@ -217,6 +217,8 @@ LIFECYCLE_VERIFY_ATTEMPTS = 3
 LIFECYCLE_VERIFY_DELAY_SECONDS = 0.25
 SOFT_CLOSE_TIMESTAMP_SKEW_SECONDS = 60
 SOFT_CLOSE_MAX_COMPLETION_SECONDS = 15 * 60
+POST_CLOSE_TIMELINE_PAGE_SIZE = 100
+POST_CLOSE_TIMELINE_MAX_PAGES = 10
 _lifecycle_sleep = time.sleep
 
 # Card-admission telemetry outcomes (scan-visible, structured).
@@ -556,6 +558,25 @@ def material_changed(item, state):
     return material_signature(item) != _state_material(state)
 
 
+def rendered_card_title(item):
+    """Return the exact issue title used by ``render``."""
+    title = (item.get("title") or "").strip() or "(no title)"
+    short = title if len(title) <= 70 else title[:67] + "..."
+    return "[%s#%d] %s" % (item["repo"], int(item["number"]), short)
+
+
+def title_stale(item, card_title=None):
+    """Compare a supplied card title with the deterministic rendered title.
+
+    Missing source or card title data is not evidence of drift.
+    """
+    if not isinstance(item.get("title"), str):
+        return False
+    if not isinstance(card_title, str) or not card_title:
+        return False
+    return rendered_card_title(item) != card_title
+
+
 def render_stale(state):
     """True when the card's stored `render_version` is behind the current
     `CARD_RENDER_VERSION` - a non-material, one-time re-render trigger for
@@ -618,9 +639,26 @@ def automerge_criteria_stale(item, state):
     ) != expected
 
 
-def refresh_needed(item, state, has_token=False, labels=None):
+def issue_updated_at_stale(item, state):
+    """Whether an issue source has a valid strictly newer tracked revision."""
+    if item.get("kind") != "issue-triage":
+        return False
+    incoming = _parse_issue_revision(item.get("updated_at", ""))
+    stored = _parse_issue_revision(state_revision(state, "issue-triage"))
+    return bool(incoming and stored and incoming > stored)
+
+
+def refresh_needed(item, state, has_token=False, labels=None, card_title=None):
+    issue_revision_refresh = issue_updated_at_stale(item, state)
+    # The existing verified queued write owns the new issue revision whenever
+    # advisory generation is eligible. Budget deferral follows the same
+    # one-write path, so this trigger must not add a preliminary refresh.
+    if issue_revision_refresh and should_auto_triage(item, state, labels, has_token):
+        issue_revision_refresh = False
     return (
         material_changed(item, state)
+        or title_stale(item, card_title)
+        or issue_revision_refresh
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
         or security_summary_stale(item, state)
@@ -632,9 +670,10 @@ def refresh_needed(item, state, has_token=False, labels=None):
 # Auto-triage caches against a per-kind revision: a PR's `head_sha`, or an
 # issue's `updatedAt` (issues have no head SHA, and `updatedAt` advances on any
 # edit or new comment). For PRs, `head_sha` is also a material refresh field; for
-# issues, `updated_at` is deliberately non-material and gates only the triage side
-# job. Each kind is gated by its OWN independent config flag so turning one off
-# never affects the other.
+# issues, `updated_at` remains non-material but also drives a strict newer-only
+# deterministic refresh when no advisory queued write owns the revision advance.
+# Each kind is gated by its OWN independent config flag so turning one off never
+# affects the other.
 AUTO_TRIAGE_FLAG_BY_KIND = {
     "pr-review": "auto_triage",
     "issue-triage": "auto_triage_issues",
@@ -2112,8 +2151,9 @@ def render(item, held=False, workflow_hold=None):
 
     # The stored material set lets a refresh cheaply and deterministically decide
     # "did this materially change?". `updated_at` is non-material (never added to
-    # MATERIAL_FIELDS) - it exists purely as the issue-triage auto-triage cache key,
-    # mirroring how `head_sha` doubles as the pr-review cache key.
+    # MATERIAL_FIELDS) - it is the issue-triage auto-triage cache key and the
+    # strict newer-only deterministic refresh stamp, mirroring how `head_sha`
+    # doubles as the pr-review cache key.
     state = {
         "repo": repo,
         "number": number,
@@ -2156,8 +2196,7 @@ def render(item, held=False, workflow_hold=None):
     options = options_for_state(kind, base_options, state)
     state["options"] = options
 
-    short = title if len(title) <= 70 else title[:67] + "..."
-    issue_title = "[%s#%d] %s" % (repo, number, short)
+    issue_title = rendered_card_title(item)
 
     lines = []
     lines.append(
@@ -2447,6 +2486,61 @@ def _trusted_automation_login(login):
     return login in {CARD_AUTOMATION_AUTHOR, GET_CARD_AUTOMATION_AUTHOR}
 
 
+def _trusted_post_close_timeline(issue):
+    """Prove that every event after close came from Wheelhouse automation.
+
+    The read is deliberately bounded. A full final page, malformed row,
+    missing actor, unreadable page, or a timeline whose newest event cannot
+    account for ``updatedAt`` is incomplete evidence and refuses reuse.
+    """
+    number = issue.get("number")
+    closed_at = _parse_iso_timestamp(issue.get("closedAt"))
+    updated_at = _parse_iso_timestamp(issue.get("updatedAt"))
+    if not closed_at or not updated_at or updated_at <= closed_at:
+        return False, "post-close timing is unavailable"
+    events = []
+    complete = False
+    for page in range(1, POST_CLOSE_TIMELINE_MAX_PAGES + 1):
+        endpoint = (
+            "repos/{owner}/{repo}/issues/%s/timeline?per_page=%s&page=%s"
+            % (number, POST_CLOSE_TIMELINE_PAGE_SIZE, page)
+        )
+        try:
+            result = _gh(["api", endpoint])
+            rows = json.loads(result.stdout or "null")
+        except Exception as error:
+            return False, "post-close timeline is unreadable: %s" % str(error)[:120]
+        if not isinstance(rows, list) or len(rows) > POST_CLOSE_TIMELINE_PAGE_SIZE:
+            return False, "post-close timeline page is malformed"
+        events.extend(rows)
+        if len(rows) < POST_CLOSE_TIMELINE_PAGE_SIZE:
+            complete = True
+            break
+    if not complete:
+        return False, "post-close timeline exceeds the bounded complete read"
+
+    later_times = []
+    for event in events:
+        if not isinstance(event, dict):
+            return False, "post-close timeline contains a malformed event"
+        created_at = _parse_iso_timestamp(event.get("created_at"))
+        if not created_at:
+            return False, "post-close timeline event has no trustworthy timestamp"
+        if created_at <= closed_at:
+            continue
+        actor = event.get("actor")
+        if actor is None:
+            actor = event.get("user")
+        if not isinstance(actor, dict) or not isinstance(actor.get("login"), str):
+            return False, "post-close timeline event has no trustworthy actor"
+        if not _trusted_automation_login(actor.get("login", "")):
+            return False, "post-close timeline contains human or foreign activity"
+        later_times.append(created_at)
+    if not later_times or max(later_times) != updated_at:
+        return False, "post-close timeline does not completely explain updatedAt"
+    return True, "trusted automation-only post-close timeline"
+
+
 def _lifecycle_label_names(issue):
     return set(_strict_lifecycle_labels((issue or {}).get("labels")))
 
@@ -2541,7 +2635,9 @@ def reusable_closed_card(issue, item):
     if not provenance_at or not closed_at:
         return False, "soft-close timing is unavailable"
     if issue.get("updatedAt") != issue.get("closedAt"):
-        return False, "closed card was modified after its close"
+        trusted, timeline_reason = _trusted_post_close_timeline(issue)
+        if not trusted:
+            return False, timeline_reason
     elapsed = (closed_at - provenance_at).total_seconds()
     if (
         elapsed < -SOFT_CLOSE_TIMESTAMP_SKEW_SECONDS
@@ -2590,18 +2686,30 @@ def lookup_card_lifecycle(item):
                 "closed card #%s for %s is not reusable: %s"
                 % (candidate["number"], marker, reason)
             )
+    reusable.sort(key=lambda row: row["number"], reverse=True)
     if len(reusable) > 1:
-        raise CardLifecycleError(
-            "multiple reusable closed cards carry exact target identity %s: %s"
-            % (marker, ", ".join("#%s" % row["number"] for row in reusable))
+        selected = reusable[0]
+        superseded = reusable[1:]
+        print(
+            "::notice::selected highest trusted reusable card #%s for %s; "
+            "leaving superseded candidates unchanged: %s"
+            % (
+                selected["number"],
+                marker,
+                ", ".join("#%s" % row["number"] for row in superseded),
+            )
         )
     return {"open": None, "reusable": reusable[0] if reusable else None}
 
 
-def _edit_issue_body_and_labels(number, body, add_labels=None, remove_labels=None):
+def _edit_issue_body_and_labels(
+    number, body, title=None, add_labels=None, remove_labels=None
+):
     body_path = _write_body(body)
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
+        if isinstance(title, str) and title:
+            args += ["--title", title]
         for label in add_labels or []:
             args += ["--add-label", label]
         for label in remove_labels or []:
@@ -2641,19 +2749,22 @@ def _reused_card_render(item, candidate, has_token):
     return card, old_state
 
 
-def _prepared_lifecycle_matches(issue, body, labels, state):
+def _prepared_lifecycle_matches(issue, body, labels, state, title=None):
     return bool(
         issue
         and issue.get("body") == body
         and _lifecycle_label_names(issue) == set(labels)
         and issue.get("state") == state
+        and (title is None or issue.get("title") == title)
         and _trusted_automation_login(
             ((issue.get("author") or {}).get("login") or "")
         )
     )
 
 
-def _verify_direct_open_card(item, expected_number, expected_body, expected_labels):
+def _verify_direct_open_card(
+    item, expected_number, expected_body, expected_labels, expected_title=None
+):
     """Authoritative post-create/reopen check: issue-by-number is source of truth.
 
     Bounded retries cover brief direct-read lag only. A matching open trusted
@@ -2674,10 +2785,14 @@ def _verify_direct_open_card(item, expected_number, expected_body, expected_labe
                 )
             _trusted_open_target_card(direct, item)
             if not _prepared_lifecycle_matches(
-                direct, expected_body, expected_labels, "OPEN"
+                direct,
+                expected_body,
+                expected_labels,
+                "OPEN",
+                title=expected_title,
             ):
                 raise CardAdmissionError(
-                    "post-operation card #%s does not match the prepared body/labels"
+                    "post-operation card #%s does not match the prepared title/body/labels"
                     % number,
                     outcome=CARD_ADMISSION_MALFORMED,
                     should_rollback=True,
@@ -2769,7 +2884,9 @@ def _probe_open_list_peers(item, expected_number):
     )
 
 
-def verify_unique_open_card(item, expected_number, expected_body, expected_labels):
+def verify_unique_open_card(
+    item, expected_number, expected_body, expected_labels, expected_title=None
+):
     """Verify a trusted open identity after create or reopen.
 
     The create/reopen response number plus authoritative issue-by-number reads
@@ -2787,7 +2904,7 @@ def verify_unique_open_card(item, expected_number, expected_body, expected_label
         )
     number = int(expected_number)
     direct = _verify_direct_open_card(
-        item, number, expected_body, expected_labels
+        item, number, expected_body, expected_labels, expected_title=expected_title
     )
     list_outcome, rows, detail = _probe_open_list_peers(item, number)
     if list_outcome == "duplicate":
@@ -2918,12 +3035,20 @@ def reuse_closed_card(item, candidate, has_token=False):
     to_add, to_remove = plan_label_update(inert_labels, current.get("labels"))
     expected_inert_labels = (current_names | set(to_add)) - set(to_remove)
     _edit_issue_body_and_labels(
-        current["number"], card["body"], add_labels=to_add, remove_labels=to_remove
+        current["number"],
+        card["body"],
+        title=card["title"],
+        add_labels=to_add,
+        remove_labels=to_remove,
     )
 
     prepared = _get_lifecycle_issue(current["number"])
     if not _prepared_lifecycle_matches(
-        prepared, card["body"], expected_inert_labels, "CLOSED"
+        prepared,
+        card["body"],
+        expected_inert_labels,
+        "CLOSED",
+        title=card["title"],
     ):
         raise CardLifecycleError(
             "card #%s preparation did not land while closed" % current["number"]
@@ -2931,7 +3056,11 @@ def reuse_closed_card(item, candidate, has_token=False):
     try:
         _gh(["issue", "reopen", str(current["number"])])
         verified_inert = verify_unique_open_card(
-            item, current["number"], card["body"], expected_inert_labels
+            item,
+            current["number"],
+            card["body"],
+            expected_inert_labels,
+            expected_title=card["title"],
         )
     except Exception as error:
         try:
@@ -2961,7 +3090,11 @@ def reuse_closed_card(item, candidate, has_token=False):
             args += ["--remove-label", label]
         _gh(args)
         verify_unique_open_card(
-            item, current["number"], card["body"], expected_labels
+            item,
+            current["number"],
+            card["body"],
+            expected_labels,
+            expected_title=card["title"],
         )
     except Exception as error:
         _force_close_reused_card(current["number"])
@@ -3012,7 +3145,11 @@ def _create_and_verify_card(item, card):
     marker = card.get("marker") or marker_label(item)
     try:
         verified = verify_unique_open_card(
-            item, number, card["body"], card["labels"]
+            item,
+            number,
+            card["body"],
+            card["labels"],
+            expected_title=card["title"],
         )
     except CardAdmissionError as error:
         if number and error.should_rollback:
@@ -3101,7 +3238,7 @@ def get_card(number):
             "view",
             str(number),
             "--json",
-            "number,body,labels,state,updatedAt,author,comments",
+            "number,title,body,labels,state,updatedAt,author,comments",
         ],
         check=False,
     )
@@ -3143,6 +3280,10 @@ def _card_matches_expected(current, expected):
         current
         and expected
         and int(current.get("number") or 0) == int(expected.get("number") or 0)
+        and (
+            not expected.get("title")
+            or current.get("title", "") == expected.get("title", "")
+        )
         and current.get("body", "") == expected.get("body", "")
         and current_labels == expected_labels
         and card_updated_at(current) == card_updated_at(expected)
@@ -3924,6 +4065,7 @@ def _refresh_card(
     body_path = _write_body(card["body"])
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
+        args += ["--title", card["title"]]
         for label in to_add:
             args += ["--add-label", label]
         for label in to_remove:
@@ -3977,7 +4119,9 @@ def upsert_card(
       * Only a pure `needs-decision` card is refreshed; a card already
         `processing`/`resolved`/`blocked` is left untouched (never rewrite a
         decision in flight - re-rendering the body would reset its checkboxes).
-      * A refresh runs when a MATERIAL field changed, the card's stored
+      * A refresh runs when a MATERIAL field changed, the exact rendered title
+        drifted, an issue-triage timestamp advanced without an advisory queued
+        write to own it, the card's stored
         `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
         terminating re-render for display-only fixes and card-body repairs like
         cached triage ref qualification or automated-status labeling), or a
@@ -4076,7 +4220,11 @@ def upsert_card(
         )
         return None if expected_existing is not None else number
     if not refresh_needed(
-        item, old_state, has_token, labels=existing.get("labels")
+        item,
+        old_state,
+        has_token,
+        labels=existing.get("labels"),
+        card_title=existing.get("title"),
     ):
         if preserve_reconcile_absence:
             print("skip card #%s for %s: no material change" % (number, marker))

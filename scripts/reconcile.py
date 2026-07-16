@@ -92,6 +92,7 @@ def current_card(row):
         return None
     return {
         "number": card["number"],
+        "title": card.get("title", ""),
         "body": card.get("body", ""),
         "state": state,
         "labels": card.get("labels", []),
@@ -119,6 +120,10 @@ def _matches_snapshot(current, snapshot):
         current
         and snapshot
         and int(current.get("number") or 0) == int(snapshot.get("number") or 0)
+        and (
+            not snapshot.get("title")
+            or current.get("title", "") == snapshot.get("title", "")
+        )
         and current.get("body", "") == snapshot.get("body", "")
         and _label_names(current.get("labels")) == _label_names(snapshot.get("labels"))
         and current.get("updated_at", "") == snapshot.get("updated_at", "")
@@ -286,6 +291,7 @@ def main():
         key = (state.get("repo"), int(state.get("number", 0)))
         row = {
             "number": card["number"],
+            "title": card.get("title", ""),
             "body": card.get("body", ""),
             "state": state,
             "labels": card.get("labels", []),
@@ -370,7 +376,11 @@ def main():
         # completely untouched. `upsert_card` re-checks both guards before it edits.
         refreshable = render_card.is_refreshable(ex["labels"])
         needs_full_refresh = refreshable and render_card.refresh_needed(
-            item, ex["state"], has_triage_token, labels=ex["labels"]
+            item,
+            ex["state"],
+            has_triage_token,
+            labels=ex["labels"],
+            card_title=ex.get("title"),
         )
         if needs_full_refresh:
             try:
@@ -386,6 +396,7 @@ def main():
                         current["state"],
                         has_triage_token,
                         labels=current["labels"],
+                        card_title=current.get("title"),
                     )
                     if still_stale:
                         refresh_result = render_card.upsert_card(
@@ -422,6 +433,7 @@ def main():
                         current["state"],
                         has_triage_token,
                         labels=current["labels"],
+                        card_title=current.get("title"),
                     )
                     and not render_card.should_auto_triage(
                         item, current["state"], current["labels"], has_triage_token
