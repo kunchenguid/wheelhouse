@@ -227,6 +227,31 @@ OpenCode with Z.AI Coding Plan is deferred and disabled, with no adapter impleme
 Neither status authorizes a credential request, paid proof, workflow target, fallback, or production promise.
 The provider-neutral adapter contract should be extended only after a new captain decision and without embedding provider-specific policy in runtime core.
 
+## One-call canary and natural rollout draft
+
+This is a plan only and does not authorize a provider call, deployment, replay, fallback, secret change, or workflow change.
+Execution requires the captain to approve the exact canary task and its evidence location in a separate decision made after provider-free validation passes.
+
+The canary uses one naturally admitted, low-risk `triage.issue.local` event whose target revision and trigger identity are frozen in its AgentTask before invocation.
+Immediately before invocation, the operator must verify the durable claim is unique, the target revision is still current, the selected provider and immutable model match policy, and fallback remains `none`.
+The canary permits exactly one provider request and one turn, with provider retries, schema repair, continuation, replay, and alternate-provider routing disabled.
+If freshness is lost before projection, the worker must cancel when possible, publish the bound terminal stale-target result, and make no target mutation.
+
+Success requires one spend checkpoint, one immutable AgentResult bound to the approved AgentTask, one matching terminal event projection, exact provider and model provenance, a still-current target revision at projection, one expected card update, and no duplicate claim, request, result, or target mutation.
+Abort on any preflight, capability, authentication, quota, provenance, checkpoint, freshness, schema, lifecycle, cancellation, consumer, or binding discrepancy.
+An aborted or failed canary is not replayed, repaired, or routed to a fallback provider under this plan.
+
+Evidence must retain the approved action, target revision, trigger identity, AgentTask and AgentResult digests, claim and run identifiers, request and turn counts, spend checkpoint, observed provider and model provenance, bounded usage and timing, freshness checks, terminal projection digest, consumer outcome, and target mutation audit.
+Credentials, raw prompts, raw transcripts, target contents, and provider responses outside the bounded AgentResult are excluded from the evidence package.
+The captain must review this evidence and separately approve natural rollout before any further provider-backed event is admitted.
+
+Natural rollout uses only newly arriving eligible events and never synthesizes or replays an event.
+It admits one action family at a time in this order: issue triage, PR triage, schema repair when naturally triggered, deep review, then natural-language decisions.
+Local profiles precede search-enabled profiles within each applicable family.
+Each stage remains limited to its first naturally admitted event until its AgentTask, checkpoint, AgentResult, terminal projection, freshness behavior, consumer effect, and mutation audit satisfy the canary success criteria.
+Promotion to the next stage requires explicit captain approval of the accumulated evidence.
+Any abort criterion stops further admission, preserves existing terminal evidence, and leaves fallback and alternate providers disabled.
+
 ## Local verification
 
 No paid model call is required for local validation.

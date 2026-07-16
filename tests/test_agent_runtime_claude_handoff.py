@@ -226,9 +226,10 @@ def main():
         check("handoff: search scope is explicit and bounded", metadata["allowedRepos"] == ["owner/repo"])
         workspace = root / "workspace"
         hydrated = hydrate(str(handoff), str(workspace))
+        declared_inputs = sorted(item["logicalPath"] for item in task["spec"]["inputs"])
         check(
-            "handoff: fresh workspace receives only declared inputs",
-            sorted(path.name for path in workspace.iterdir()) == ["target-src", "target.txt"]
+            "handoff: fresh workspace receives all and only declared inputs",
+            sorted(path.name for path in workspace.iterdir()) == declared_inputs
             and hydrated["action"] == "deep-review.search",
         )
         before = workspace_input_observation(task, str(workspace))
