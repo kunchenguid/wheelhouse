@@ -27,7 +27,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
   A hidden HTML comment holds the machine-readable state.
   The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
-- **GitHub Actions are the handlers:** they create cards, refresh pending cards when material target state changes, reflect target activity for recently-updated sorting, execute your decisions, and reconcile the queue against live repo state.
+- **GitHub Actions are the handlers:** they create cards, refresh pending cards when tracked target state or the rendered card title changes, reflect target activity for recently-updated sorting, execute your decisions, and reconcile the queue against live repo state.
   The hourly scan retries transient GitHub query failures and records repeated unreadable-repo failures in a closed health-ledger issue, so a persistently-dark fleet repo eventually fails the run loudly instead of remaining invisible.
 
 ```
@@ -125,7 +125,8 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > **Heads-up - `auto_triage_issues` defaults ON, independently of `auto_triage`.**
 > Same idea as PR auto triage, but for issue-triage cards, gated by its own flag - toggling either one never affects the other.
 > Issues have no head SHA, so the cache is keyed by the issue's GraphQL `updatedAt`, which advances on any edit or new comment; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, while later unchanged scans follow the same spend-guarded recovery rule as PR auto triage.
-> Because an issue's `updatedAt` is not a material card field, a new comment can make a card eligible for a fresh spend-guarded triage attempt without a full card refresh.
+> Because an issue's `updatedAt` is not a material card field, a new comment can make a card eligible for a fresh spend-guarded triage attempt.
+> When that attempt is eligible, its single queued-card write owns the new revision; when it is not eligible, a strictly newer `updatedAt` triggers one deterministic card refresh instead.
 > A brand-new eligible issue-triage card uses the same `pending-triage` placeholder and publishes its checkboxes when the first attempt completes, success or failure alike.
 > A successful structured issue recommendation can also add the same deterministic *Accept recommendation* checkbox, limited to issue-safe actions.
 > Set it to `false` to opt out globally, or add `auto_triage_issues: false` to a single `repos:` entry.
@@ -359,12 +360,14 @@ That signal is target-level GitHub activity and may include owner, maintainer, o
 For refresh, auto-triage, and self-healing, a "pure pending" card means it has `needs-decision` and lacks `processing`, `resolved`, or `blocked`.
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
+It also refreshes when the exact rendered issue title drifts, or when an issue-triage `updatedAt` is strictly newer and no automatic-triage queued write is eligible to own that revision.
 The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an existing same-kind PR-review card to the observed head's pending state without creating a card, posting the usual target-updated comment, or queuing triage; terminal checks return the PR to normal classification and refresh handling.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
 The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch may queue a fresh spend-guarded triage attempt for that head.
-Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for a fresh spend-guarded triage attempt.
+Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change, but it does make the card eligible for a fresh spend-guarded triage attempt.
+If that attempt is not eligible, the strictly newer timestamp still refreshes the pure pending card once so its stored revision catches up.
 An eligible card created by scan-backstop or ingest is also queued in that same run, so it does not wait for a later backfill scan.
 If that newly created card is eligible for auto triage, it starts as `pending-triage`; `triage-apply`, `triage-fail`, dispatch-failure handling, or the recovery step publishes it and removes `pending-triage`.
 If auto-triage eligibility turns off while a held card is refreshed, the refresh publishes the normal checkboxes without adding a synthetic triage section.
@@ -377,9 +380,11 @@ Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive v
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
 If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled workflow run and is soft-closed only when the immediately following workflow run also observes a qualifying absence.
 The first absence is hidden card state bound to the trusted workflow run number, and a worklist return clears it while keeping the same card.
-If that still-open target returns after the soft close, Wheelhouse reuses the same issue only when exactly one closed card has the exact target identity, trusted automation authorship and close actor, and valid current-schema reconcile soft-close provenance.
+If that still-open target returns after the soft close, Wheelhouse reuses an existing closed issue only when it has the exact target identity, trusted automation authorship and close actor, and valid current-schema reconcile soft-close provenance.
+If the card was touched after close, reuse also requires a bounded complete timeline proving every post-close event came from trusted Wheelhouse automation and fully explains the issue's `updatedAt`.
+If several trusted candidates share the same exact identity, Wheelhouse deterministically reuses the highest issue number and leaves the lower closed candidates unchanged.
 The current body and managed labels are prepared while the issue remains closed, then the issue is reopened and uniqueness is verified before triage or any decision can proceed.
-Legacy, owner-resolved, blocked, hard-closed, audit-protected, malformed, untrusted, or ambiguous closed cards are never reopened; an incomplete or ambiguous lookup fails closed instead of creating another card.
+Legacy, owner-resolved, blocked, hard-closed, audit-protected, malformed, untrusted, identity-conflicting, or human-touched closed cards are never reopened; an incomplete or ambiguous lookup fails closed instead of creating another card.
 The scan, ingest, and decision workflows share one queued card-lifecycle concurrency group so create, reopen, close, and owner decisions cannot race each other.
 Any intervening present, manually dispatched, failed, truncated, unresolved-mergeability, or fork-CI-wait run breaks the streak without closing, even when that run cannot safely edit the stored absence record.
 An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a non-retryable action error stays visible.

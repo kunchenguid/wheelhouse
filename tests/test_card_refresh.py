@@ -223,6 +223,143 @@ def test_non_material_change_is_not_a_trigger():
     )
 
 
+def test_exact_title_drift_and_long_title_truncation():
+    current = item(title="Withdrawn by author")
+    check(
+        "F3: exact same-revision title drift triggers every card kind",
+        all(
+            rc.title_stale(
+                item(kind=kind, title="Withdrawn by author"),
+                "[lavish-axi#42] Add a thing",
+            )
+            for kind in ("pr-review", "issue-triage", "ci-approval")
+        ),
+    )
+    long_item = item(title="x" * 200)
+    check(
+        "F5: identical long titles use renderer truncation and do not drift",
+        not rc.title_stale(long_item, rc.render(long_item)["title"]),
+    )
+    check(
+        "title drift: missing source or card title data is a safe no-op",
+        not rc.title_stale(item(title=None), rc.render(item())["title"])
+        and not rc.title_stale(current, None),
+    )
+
+
+def test_issue_updated_at_trigger_is_strict_and_kind_scoped():
+    old = item(
+        kind="issue-triage",
+        head_sha="",
+        updated_at="2026-07-15T14:05:50Z",
+    )
+    state = state_of(old)
+    check(
+        "F4: strictly newer valid issue updated_at triggers full refresh",
+        rc.issue_updated_at_stale(
+            item(
+                kind="issue-triage",
+                head_sha="",
+                updated_at="2026-07-15T14:07:59Z",
+            ),
+            state,
+        ),
+    )
+    guarded = all(
+        not rc.issue_updated_at_stale(
+            item(kind="issue-triage", head_sha="", updated_at=value), state
+        )
+        for value in (
+            "2026-07-15T14:05:50Z",
+            "2026-07-15T14:00:00Z",
+            "",
+            "malformed",
+        )
+    )
+    check("issue updated_at: equal, older, missing, malformed are no-ops", guarded)
+    check(
+        "issue updated_at: unchanged-head PR activity never triggers full refresh",
+        not rc.issue_updated_at_stale(
+            item(updated_at="2026-07-15T14:07:59Z"), state_of(item())
+        ),
+    )
+
+
+def test_title_only_refresh_preserves_advisory_without_spend_or_comment():
+    old = item()
+    triaged = rc.body_with_triage_result(
+        rc.body_with_triage_queued(rc.render(old)["body"], old),
+        old["head_sha"],
+        triage={
+            "summary": "Trusted current advisory.",
+            "product_implications": "No product risk.",
+            "evidence": "target.txt: exact evidence",
+            "recommended_next_step": "merge - still current.",
+        },
+    )
+    current = item(title="Withdrawn by author")
+    existing = {
+        "number": 7,
+        "title": rc.render(old)["title"],
+        "body": triaged,
+        "labels": labels(
+            "needs-decision",
+            "repo:lavish-axi",
+            "kind:pr-review",
+            "priority:med",
+            "target:lavish-axi-42",
+        ),
+        "state": "OPEN",
+    }
+    calls = {"commands": [], "body": ""}
+    old_write = rc._write_body
+    old_gh = rc._gh
+    old_unlink = rc.os.unlink
+    old_get_card = rc.get_card
+    old_ensure = rc.ensure_labels
+    rc._write_body = lambda body: calls.update(body=body) or "/tmp/title-refresh"
+    rc._gh = lambda args, check=True: calls["commands"].append(args)
+    rc.os.unlink = lambda _path: None
+    rc.get_card = lambda _number: existing
+    rc.ensure_labels = lambda _labels: None
+    try:
+        rc.upsert_card(current, existing=existing)
+    finally:
+        rc._write_body = old_write
+        rc._gh = old_gh
+        rc.os.unlink = old_unlink
+        rc.get_card = old_get_card
+        rc.ensure_labels = old_ensure
+    state = core.parse_state_block(calls["body"])
+    edits = [
+        command
+        for command in calls["commands"]
+        if command[:2] == ["issue", "edit"]
+    ]
+    check(
+        "F3: title-only refresh performs one complete deterministic edit",
+        len(edits) == 1
+        and edits[0][edits[0].index("--title") + 1] == rc.render(current)["title"],
+    )
+    check(
+        "F3: title-only refresh preserves every current advisory cache",
+        "Trusted current advisory." in calls["body"]
+        and state.get("triaged_sha") == old["head_sha"]
+        and state.get("triage_status") == "succeeded"
+        and state.get(rc.TRIAGE_ATTEMPTS_FIELD)
+        == core.parse_state_block(triaged).get(rc.TRIAGE_ATTEMPTS_FIELD),
+    )
+    check(
+        "F3: title-only refresh posts no target-updated comment or dispatch",
+        not any(
+            command[:2] == ["issue", "comment"] for command in calls["commands"]
+        )
+        and not any(
+            command[:2] == ["workflow", "run"] for command in calls["commands"]
+        ),
+    )
+
+
 def test_legacy_card_missing_new_fields_refreshes_once():
     # A card written before the refresh feature carries only the old fields.
     legacy_body = (
@@ -1428,6 +1565,9 @@ def main():
     test_render_preserves_options_order_in_state_block()
     test_render_filters_non_checkbox_custom_options()
     test_non_material_change_is_not_a_trigger()
+    test_exact_title_drift_and_long_title_truncation()
+    test_issue_updated_at_trigger_is_strict_and_kind_scoped()
+    test_title_only_refresh_preserves_advisory_without_spend_or_comment()
     test_legacy_card_missing_new_fields_refreshes_once()
     test_legacy_triage_marker_still_parses_for_change_check()
     test_change_check_handles_missing_state()

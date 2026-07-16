@@ -63,15 +63,16 @@ Non-checkbox actions are not valid `options`: `/comment <text>` and the pr-revie
 A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
 The hub's `ingest` workflow dedupes open cards by target: a second dispatch for the same `repo`+`number` uses the existing open card instead of creating another one.
-If no open card exists, ingest shares the scheduled backstop's strict lifecycle lookup: it reuses the issue number only for one uniquely trusted automation-authored card carrying current-schema reconcile soft-close provenance, and otherwise creates a new card only after the complete lookup rules out ambiguity.
+If no open card exists, ingest shares the scheduled backstop's strict lifecycle lookup: it reuses an issue number only for a trusted automation-authored card carrying current-schema reconcile soft-close provenance, and otherwise creates a new card only after the complete lookup rules out ambiguity.
 See the [scheduled backstop lifecycle](../README.md#daily-use) for the full reuse and fail-closed trust contract.
-If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or source-provided checkbox `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
+If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or source-provided checkbox `options`), its exact rendered issue title drifted, a strictly newer issue-triage `updated_at` needs a deterministic non-advisory refresh, its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
 If no full refresh is needed but target `updated_at` is newer than the card's hidden `activity_reflected_at`, the hub edits only the hidden state block so GitHub's Recently updated sort can surface the target's activity.
 The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
 `pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
 A stale render version can also apply internal card-body repairs, such as qualifying bare target refs and labeling known automated harness status lines preserved in older cached `Triage` sections.
-Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
+Title updates use the same deterministic card-title rendering as the hub and refresh a pure pending card when they drift.
+Summary and recommendation updates ride along with another refresh, but do not rewrite an existing card by themselves.
 The activity-stamp edit is also hidden-state only, so it does not update visible title, summary, or recommendation text.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh or activity-stamp edit cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub reserves daily budget and writes `triaged_sha` plus `triage_attempts` for the current revision before dispatching `triage.yml`, so a failed or timed-out run does not retry every scan.
