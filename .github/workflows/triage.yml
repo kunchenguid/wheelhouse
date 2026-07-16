@@ -1158,16 +1158,35 @@ jobs:
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}"
           fi
 
-      - name: Finalize triage event claims and stage evidence
+      - name: Finalize primary triage claim and stage evidence
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_SLUG: ${{ github.repository }}
           PRIMARY_CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
           PRIMARY_MARKER: ${{ steps.event-claim.outputs.marker }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="consumer.rejected"
+          if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          python scripts/agent_runtime.py stage \
+            --action "${{ steps.event-claim.outputs.action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
+
+      - name: Finalize schema-repair claim and stage evidence
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.repair-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
           REPAIR_CLAIM_ID: ${{ steps.repair-claim.outputs.comment_id }}
           REPAIR_MARKER: ${{ steps.repair-claim.outputs.marker }}
-          REPAIR_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
           REPAIR_EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
         run: |
           set -euo pipefail
@@ -1175,26 +1194,14 @@ jobs:
           if [ "${{ steps.card-consumer.outcome }}" = "success" ]; then
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           fi
+          repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+            -f "body=$repair_body" >/dev/null
           python scripts/agent_runtime.py stage \
-            --action "${{ steps.event-claim.outputs.action }}" \
+            --action triage.schema-repair \
             --source-sha "${{ github.sha }}" \
-            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --event-key "$REPAIR_EVENT_KEY" \
             --stage "$stage" --status "$status" --code "$code"
-          if [ "$REPAIR_ADMITTED" = "true" ] && [ -n "$REPAIR_EVENT_KEY" ]; then
-            python scripts/agent_runtime.py stage \
-              --action triage.schema-repair \
-              --source-sha "${{ github.sha }}" \
-              --event-key "$REPAIR_EVENT_KEY" \
-              --stage "$stage" --status "$status" --code "$code"
-          fi
-          body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
-          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" \
-            -f "body=$body" >/dev/null
-          if [ "$REPAIR_ADMITTED" = "true" ] && [ -n "$REPAIR_CLAIM_ID" ]; then
-            repair_body="Agent schema-repair event finished with ${code}. ${REPAIR_MARKER}"
-            gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
-              -f "body=$repair_body" >/dev/null
-          fi
 
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
       # failed before writing its outputs (e.g. a transient `gh issue view`

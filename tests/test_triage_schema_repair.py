@@ -573,13 +573,22 @@ def test_triage_yml_repair_wiring():
         "yaml: card projection rejects post-model freshness loss",
         "steps.post-model-freshness.outputs.fresh == 'false'" in str(upd.get("env", {}).get("HEAD_OK", "")),
     )
-    finalize = next(s for s in steps if s.get("name") == "Finalize triage event claims and stage evidence")
-    finalize_run = str(finalize.get("run", ""))
+    primary_finalize = next(s for s in steps if s.get("name") == "Finalize primary triage claim and stage evidence")
+    repair_finalize = next(s for s in steps if s.get("name") == "Finalize schema-repair claim and stage evidence")
+    primary_run = str(primary_finalize.get("run", ""))
+    repair_run = str(repair_finalize.get("run", ""))
     check(
         "yaml: admitted schema repair emits event-bound terminal evidence",
-        finalize.get("env", {}).get("REPAIR_EVENT_KEY") == "${{ steps.repair-claim.outputs.event_key }}"
-        and "--action triage.schema-repair" in finalize_run
-        and '--event-key "$REPAIR_EVENT_KEY"' in finalize_run,
+        repair_finalize.get("env", {}).get("REPAIR_EVENT_KEY") == "${{ steps.repair-claim.outputs.event_key }}"
+        and "steps.repair-claim.outputs.admitted == 'true'" in str(repair_finalize.get("if", ""))
+        and "--action triage.schema-repair" in repair_run
+        and '--event-key "$REPAIR_EVENT_KEY"' in repair_run,
+    )
+    check(
+        "yaml: each durable claim is patched before its terminal stage",
+        primary_run.index("gh api --method PATCH") < primary_run.index("agent_runtime.py stage")
+        and repair_run.index("gh api --method PATCH") < repair_run.index("agent_runtime.py stage")
+        and "always()" in str(repair_finalize.get("if", "")),
     )
 
 
