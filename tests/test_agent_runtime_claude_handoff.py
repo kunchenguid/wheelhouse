@@ -107,12 +107,15 @@ def available_pythons() -> list[tuple[str, str]]:
     return ordered
 
 
-def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path, dict, dict]:
+def build_fixture(root: Path, action: str = "deep-review.search", include_vision: bool = False) -> tuple[Path, dict, dict]:
     prompt = root / "prompt.txt"
     target = root / "target.txt"
     repository = root / "repository"
     prompt.write_text("Inspect the immutable input.\n", encoding="utf-8")
     target.write_text("bounded target\n", encoding="utf-8")
+    vision = root / "vision.md"
+    if include_vision:
+        vision.write_text("Project vision.\n", encoding="utf-8")
     repository.mkdir()
     (repository / "source.py").write_text("value = 1\n", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
@@ -146,6 +149,7 @@ def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path,
         target_file=str(target),
         repository_dir=str(repository),
         repository_commit=repo_commit,
+        vision_file=str(vision) if include_vision else None,
     )
     handoff = root / "handoff"
     metadata = pack(str(bundle / "task.json"), str(bundle), str(handoff), '["owner/repo"]')
@@ -264,6 +268,21 @@ def main():
         check(
             "handoff: .git metadata does not change signed-input observation",
             after_scratch == before,
+        )
+
+        vision_root = root / "vision-case"
+        vision_root.mkdir()
+        vision_handoff, _, vision_task = build_fixture(vision_root, include_vision=True)
+        vision_workspace = vision_root / "workspace"
+        hydrate(str(vision_handoff), str(vision_workspace))
+        vision_before = workspace_input_observation(vision_task, str(vision_workspace))
+        vision_paths = {item["logicalPath"] for item in vision_task["spec"]["inputs"]}
+        (vision_workspace / "vision.md").chmod(0o600)
+        (vision_workspace / "vision.md").write_text("Changed vision scratch.\n", encoding="utf-8")
+        check(
+            "handoff: vision.md is hydrated but excluded from signed-input observation",
+            "vision.md" in vision_paths
+            and workspace_input_observation(vision_task, str(vision_workspace)) == vision_before,
         )
 
         def observation_fails(label: str, mutator) -> None:

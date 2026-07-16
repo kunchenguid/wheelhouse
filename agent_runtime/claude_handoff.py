@@ -32,6 +32,7 @@ MAX_HANDOFF_BYTES = 220_000_000
 MAX_HANDOFF_FILES = 32_000
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SIGNED_TARGET_INPUT_PATHS = {"repository-provenance.json", "target-src", "target.txt"}
 
 
 def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]:
@@ -202,17 +203,19 @@ def declared_output_paths(task: dict[str, Any]) -> list[str]:
 def workspace_input_observation(task: dict[str, Any], workspace_dir: str) -> str:
     """Trusted immutability evidence for signed target inputs only.
 
-    Hashes exact path, type, bytes, mode, file-count, and digest for each
-    task input (``target.txt``, ``target-src/``, ``repository-provenance.json``
-    when present). Declared outputs, ``.git/**``, and unrelated workspace
-    scratch are out of scope: their presence or mutation does not affect this
-    observation and must not collapse it to null. Any change to a signed input
-    still fails closed.
+    Hashes exact path, type, bytes, mode, file-count, and digest for
+    ``target.txt``, ``target-src/``, and ``repository-provenance.json`` when
+    present. Declared outputs, ``.git/**``, ``vision.md``, and unrelated
+    workspace scratch are out of scope: their presence or mutation does not
+    affect this observation and must not collapse it to null. Any change to a
+    signed input still fails closed.
     """
     validate_contract(task, "AgentTask")
     workspace = Path(workspace_dir).resolve()
     observed: list[dict[str, Any]] = []
     for item in task["spec"]["inputs"]:
+        if item["logicalPath"] not in SIGNED_TARGET_INPUT_PATHS:
+            continue
         path = workspace / item["logicalPath"]
         try:
             info = path.lstat()
