@@ -424,10 +424,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   `### Triage` section are non-material: they must never affect `classify`,
   `material_changed`, fork-CI approval, author filtering, or conflict routing.
   For a pr-review card, `head_sha` IS material, so a head move both refreshes
-  the card and makes the fresh head eligible for one new triage attempt in the
-  same pass. For an issue-triage card, `updated_at` is NOT material (an issue's
+  the card and makes the fresh head eligible for a spend-guarded triage attempt
+  in the same pass. For an issue-triage card, `updated_at` is NOT material (an issue's
   title/comp/tests/kind/priority/options rarely change on a new comment), so a
-  new comment/edit can make the card eligible for one new triage attempt
+  new comment/edit can make the card eligible for a spend-guarded triage attempt
   WITHOUT any card refresh at all - `reconcile.py` checks triage eligibility
   independently of the material-change branch for exactly this reason.
   If config is off or the token is absent, no dispatch happens and cards render

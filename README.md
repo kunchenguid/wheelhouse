@@ -115,7 +115,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 
 > **Heads-up - `auto_triage` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork with `CLAUDE_CODE_OAUTH_TOKEN` gets lightweight automatic PR-review summaries without another config edit.
-> Each pure pending PR-review card is triaged at most once per `head_sha`; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, and later unchanged scans do not spend another token call.
+> The cache is keyed by PR `head_sha`; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, while later unchanged scans do not spend again unless a trusted recovery path clears the cache and the spend guards allow another queued attempt.
 > A brand-new eligible PR-review card is first labeled `pending-triage` and has no decision checkboxes until that first attempt completes.
 > Completion publishes the normal card whether triage succeeds, fails, times out, or cannot be started.
 > If successful triage also returns a fresh structured recommendation with an allowlisted action, Wheelhouse adds an *Accept recommendation* checkbox that still routes through the deterministic handler.
@@ -124,8 +124,8 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 
 > **Heads-up - `auto_triage_issues` defaults ON, independently of `auto_triage`.**
 > Same idea as PR auto triage, but for issue-triage cards, gated by its own flag - toggling either one never affects the other.
-> Issues have no head SHA, so each pure pending issue-triage card is triaged at most once per `updatedAt` revision (the issue's GraphQL `updatedAt`, which advances on any edit or new comment); existing open cards with no fresh `triaged_sha` marker backfill on the next scan.
-> Because an issue's `updatedAt` is not a material card field, a new comment can make a card eligible for one fresh triage attempt without a full card refresh.
+> Issues have no head SHA, so the cache is keyed by the issue's GraphQL `updatedAt`, which advances on any edit or new comment; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, while later unchanged scans follow the same spend-guarded recovery rule as PR auto triage.
+> Because an issue's `updatedAt` is not a material card field, a new comment can make a card eligible for a fresh spend-guarded triage attempt without a full card refresh.
 > A brand-new eligible issue-triage card uses the same `pending-triage` placeholder and publishes its checkboxes when the first attempt completes, success or failure alike.
 > A successful structured issue recommendation can also add the same deterministic *Accept recommendation* checkbox, limited to issue-safe actions.
 > Set it to `false` to opt out globally, or add `auto_triage_issues: false` to a single `repos:` entry.
@@ -229,7 +229,7 @@ Auto triage and deep review keep their action prompts independent of target size
   The workflow asks for structured `recommended_action` and `recommended_reason` fields; trusted code normalizes them and only adds *Accept recommendation* when the action is safe for that card kind and any required reason text is present.
   It also requires source evidence and checks at least one quoted anchor against the fetched target text before publishing the advisory result.
   If a captured field is one of the known claude-code-action harness polling/status lines, trusted rendering preserves it and labels it `[automated status]`.
-  It is cached by PR head SHA, so an unchanged hourly scan does not re-run it.
+  It is cached by PR head SHA, so an unchanged hourly scan does not re-run it unless a trusted recovery path clears the cache and the spend guards admit another attempt.
   Newly created eligible cards are rendered as `pending-triage` placeholders and queued for that first triage attempt in the same scan or ingest run that creates them.
   The placeholder has no decision checkboxes, and the normal card is published when the attempt succeeds, fails, times out, or cannot be started.
   Existing pure pending PR-review cards that predate the feature backfill once on the next scan.
@@ -363,8 +363,8 @@ The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
 The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
-For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
-Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
+For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch may queue a fresh spend-guarded triage attempt for that head.
+Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for a fresh spend-guarded triage attempt.
 An eligible card created by scan-backstop or ingest is also queued in that same run, so it does not wait for a later backfill scan.
 If that newly created card is eligible for auto triage, it starts as `pending-triage`; `triage-apply`, `triage-fail`, dispatch-failure handling, or the recovery step publishes it and removes `pending-triage`.
 If auto-triage eligibility turns off while a held card is refreshed, the refresh publishes the normal checkboxes without adding a synthetic triage section.
@@ -439,8 +439,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Any uncertainty skips the close.
   Contributor comments, reviews, review comments, edits, or head pushes after the ask stop cleanup and clear the active pending label.
   Owner, configured-maintainer, and bot activity does not reset the clock.
-- **Auto triage is advisory and cached, for PRs and issues alike.** Automatic triage edits only this repo's decision card with the default token, after the scan or ingest path has marked `triaged_sha` for the current revision (a PR's head SHA, or an issue's `updatedAt` - issues have no head SHA).
-  That marker is the spend-control cache: an unchanged revision is not re-triaged, even if the lightweight workflow errors or times out.
+- **Auto triage is advisory, cached, and spend-guarded for PRs and issues alike.** Automatic triage edits only this repo's decision card with the default token, after the scan or ingest path has reserved daily budget and marked `triaged_sha` plus `triage_attempts` for the current revision (a PR's head SHA, or an issue's `updatedAt` - issues have no head SHA).
+  That marker is the queue cache: an unchanged revision is not re-triaged unless a trusted recovery path clears the cache and both the per-revision attempt cap and daily ceiling permit another dispatch.
   A brand-new card that is eligible for that attempt is created under an additional `pending-triage` label with no decision checkboxes.
   It keeps `needs-decision` so the triage workflow can still resolve it, but the checkbox, slash-command, and plain-English decision paths ignore it until the attempt completes.
   `triage-apply`, `triage-fail`, dispatch-failure handling, and the recovery step all publish the normal checkboxes fail-open, so a stuck or failed triage run does not permanently hide a card.

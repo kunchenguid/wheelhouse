@@ -11,7 +11,8 @@ bounded, tokenless, no-tool Claude turn is given the preserved candidate plus th
 required schema and asked to REPAIR its structure (no diff re-read, no fresh
 analysis). The repaired output is validated again; if still invalid the card
 records the visible triage-unavailable error now carrying the structural
-validation reason. Structurally there is at most one repair attempt per revision.
+validation reason. Structurally there is at most one repair attempt per admitted
+triage dispatch.
 
 These tests are OFFLINE: pure helpers, mocked card I/O, and static YAML
 inspection - the live LLM turn is only exercised end-to-end in CI.

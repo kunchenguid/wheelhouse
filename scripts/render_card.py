@@ -731,9 +731,10 @@ def triage_fresh(item, state):
     """True when the card has already attempted auto-triage for this item's
     current revision (a PR's head SHA, or an issue's `updatedAt`).
 
-    `triaged_sha` is a cost-control cache, not a material refresh field. It is
-    written before the workflow dispatch so a failed or timed-out workflow does
-    not get re-run every hourly scan for the same revision.
+    `triaged_sha` is a queue cache, not a material refresh field. It is written
+    before the workflow dispatch so a failed or timed-out workflow does not get
+    re-run every hourly scan for the same revision unless a trusted recovery path
+    clears it and the spend guards admit another attempt.
     """
     revision = triage_revision(item)
     state = state or {}

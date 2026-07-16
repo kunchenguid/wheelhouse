@@ -7,7 +7,7 @@ Nothing here is required to run the machine, and nothing here changes how Wheelh
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 An ingest dispatch never performs scan-time auto-merge; this fork enables `auto_merge` fleet-wide, but only a later `scan-backstop` pass can evaluate a target repository after it has practically opted in with a non-empty default-branch `VISION.md` and every live safety gate passes.
-For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
+For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config, token gates, and spend guards as the scheduled scan.
 That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
 When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
 If successful triage returns a fresh structured recommendation with an action allowed for that card kind, the published boxes can include an `Accept recommendation` shortcut.
@@ -74,7 +74,8 @@ A stale render version can also apply internal card-body repairs, such as qualif
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 The activity-stamp edit is also hidden-state only, so it does not update visible title, summary, or recommendation text.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh or activity-stamp edit cannot clobber an in-flight or consumed decision.
-When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.
+When auto triage is eligible, the hub reserves daily budget and writes `triaged_sha` plus `triage_attempts` for the current revision before dispatching `triage.yml`, so a failed or timed-out run does not retry every scan.
+Trusted recovery paths may clear the cache for a later retry, but the next dispatch still has to pass the per-revision attempt cap and daily ceiling.
 For a held card, any completed attempt publishes the decision boxes fail-open; if workflow dispatch itself fails after the cache write, the hub publishes the card immediately with an unavailable note.
 If `triage.yml` fails before its update step, its final recovery step publishes a genuinely stuck held card for that exact revision, or clears the queued cache when trusted source setup was unavailable so a later scan can retry.
 For a newly created card, that queueing happens in the same ingest run, not only on the later hourly scan.
