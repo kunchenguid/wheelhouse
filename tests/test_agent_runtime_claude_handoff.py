@@ -107,12 +107,15 @@ def available_pythons() -> list[tuple[str, str]]:
     return ordered
 
 
-def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path, dict, dict]:
+def build_fixture(root: Path, action: str = "deep-review.search", include_vision: bool = False) -> tuple[Path, dict, dict]:
     prompt = root / "prompt.txt"
     target = root / "target.txt"
     repository = root / "repository"
     prompt.write_text("Inspect the immutable input.\n", encoding="utf-8")
     target.write_text("bounded target\n", encoding="utf-8")
+    vision = root / "vision.md"
+    if include_vision:
+        vision.write_text("Project vision.\n", encoding="utf-8")
     repository.mkdir()
     (repository / "source.py").write_text("value = 1\n", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
@@ -146,6 +149,7 @@ def build_fixture(root: Path, action: str = "deep-review.search") -> tuple[Path,
         target_file=str(target),
         repository_dir=str(repository),
         repository_commit=repo_commit,
+        vision_file=str(vision) if include_vision else None,
     )
     handoff = root / "handoff"
     metadata = pack(str(bundle / "task.json"), str(bundle), str(handoff), '["owner/repo"]')
@@ -233,17 +237,166 @@ def main():
             and hydrated["action"] == "deep-review.search",
         )
         before = workspace_input_observation(task, str(workspace))
+        signed_paths = {item["logicalPath"] for item in task["spec"]["inputs"]}
+        check(
+            "handoff: signed inputs are target.txt, target-src, repository-provenance.json",
+            signed_paths == {"target.txt", "target-src", "repository-provenance.json"},
+        )
+
+        # Option A: unrelated scratch / declared outputs / .git must not change signed evidence.
+        (workspace / "search-request.json").write_text('{"query":"related issues"}\n', encoding="utf-8")
+        (workspace / "decision.json").write_text('{"mode":"action"}\n', encoding="utf-8")
+        (workspace / "search-response.json").write_text('{"hits":[]}\n', encoding="utf-8")
+        (workspace / "rate-state.json").write_text("{}\n", encoding="utf-8")
+        (workspace / ".claude").mkdir()
+        (workspace / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+        (workspace / ".git" / "config").write_text("[user]\n\tname = wheelhouse\n", encoding="utf-8")
+        after_scratch = workspace_input_observation(task, str(workspace))
+        check(
+            "handoff: undeclared scratch plus unchanged signed inputs keeps equal observation",
+            after_scratch == before,
+        )
+        check(
+            "handoff: search-request.json does not change signed-input observation",
+            after_scratch == before,
+        )
+        check(
+            "handoff: decision.json does not change signed-input observation",
+            after_scratch == before,
+        )
+        check(
+            "handoff: .git metadata does not change signed-input observation",
+            after_scratch == before,
+        )
+
+        vision_root = root / "vision-case"
+        vision_root.mkdir()
+        vision_handoff, _, vision_task = build_fixture(vision_root, include_vision=True)
+        vision_workspace = vision_root / "workspace"
+        hydrate(str(vision_handoff), str(vision_workspace))
+        vision_before = workspace_input_observation(vision_task, str(vision_workspace))
+        vision_paths = {item["logicalPath"] for item in vision_task["spec"]["inputs"]}
+        (vision_workspace / "vision.md").chmod(0o600)
+        (vision_workspace / "vision.md").write_text("Changed vision scratch.\n", encoding="utf-8")
+        check(
+            "handoff: vision.md is hydrated but excluded from signed-input observation",
+            "vision.md" in vision_paths
+            and workspace_input_observation(vision_task, str(vision_workspace)) == vision_before,
+        )
+
+        def observation_fails(label: str, mutator) -> None:
+            mutator()
+            try:
+                workspace_input_observation(task, str(workspace))
+            except ContractError:
+                check(label, True)
+            else:
+                check(label, False)
+
         (workspace / "target.txt").chmod(0o600)
         (workspace / "target.txt").write_text("mutated target\n", encoding="utf-8")
-        try:
-            workspace_input_observation(task, str(workspace))
-        except ContractError:
-            check("handoff: post-action input mutation fails closed", True)
-        else:
-            check("handoff: post-action input mutation fails closed", False)
+        observation_fails(
+            "handoff: post-action target.txt byte mutation fails closed",
+            lambda: None,
+        )
         (workspace / "target.txt").write_text("bounded target\n", encoding="utf-8")
         (workspace / "target.txt").chmod(0o400)
         check("handoff: stable input observation is deterministic", workspace_input_observation(task, str(workspace)) == before)
+
+        observation_fails(
+            "handoff: target.txt mode change fails closed",
+            lambda: (workspace / "target.txt").chmod(0o600),
+        )
+        (workspace / "target.txt").chmod(0o400)
+
+        original_target = (workspace / "target.txt").read_bytes()
+        (workspace / "target.txt").unlink()
+        observation_fails(
+            "handoff: target.txt deletion fails closed",
+            lambda: None,
+        )
+        (workspace / "target.txt").write_bytes(original_target)
+        (workspace / "target.txt").chmod(0o400)
+
+        (workspace / "target.txt").unlink()
+        (workspace / "target.txt").symlink_to("/etc/hosts")
+        observation_fails(
+            "handoff: target.txt symlink replacement fails closed",
+            lambda: None,
+        )
+        (workspace / "target.txt").unlink()
+        (workspace / "target.txt").write_bytes(original_target)
+        (workspace / "target.txt").chmod(0o400)
+
+        provenance = workspace / "repository-provenance.json"
+        original_provenance = provenance.read_bytes()
+        provenance.chmod(0o600)
+        provenance.write_text(json.dumps({"tampered": True}) + "\n", encoding="utf-8")
+        observation_fails(
+            "handoff: repository-provenance.json mutation fails closed",
+            lambda: None,
+        )
+        provenance.write_bytes(original_provenance)
+        provenance.chmod(0o400)
+
+        target_src = workspace / "target-src"
+        nested = target_src / "source.py"
+        original_nested = nested.read_bytes()
+        nested.chmod(0o600)
+        nested.write_text("value = 2\n", encoding="utf-8")
+        observation_fails(
+            "handoff: target-src file byte mutation fails closed",
+            lambda: None,
+        )
+        nested.write_bytes(original_nested)
+        nested.chmod(0o400)
+
+        observation_fails(
+            "handoff: target-src file mode change fails closed",
+            lambda: nested.chmod(0o600),
+        )
+        nested.chmod(0o400)
+
+        os.chmod(target_src, 0o700)
+        extra = target_src / "extra_untracked.py"
+        extra.write_text("x = 1\n", encoding="utf-8")
+        extra.chmod(0o400)
+        os.chmod(target_src, 0o500)
+        observation_fails(
+            "handoff: extra file under target-src fails closed",
+            lambda: None,
+        )
+        os.chmod(target_src, 0o700)
+        extra.unlink()
+        os.chmod(target_src, 0o500)
+
+        os.chmod(target_src, 0o700)
+        nested.unlink()
+        nested.symlink_to("/etc/hosts")
+        os.chmod(target_src, 0o500)
+        observation_fails(
+            "handoff: target-src symlink introduction fails closed",
+            lambda: None,
+        )
+        os.chmod(target_src, 0o700)
+        nested.unlink()
+        nested.write_bytes(original_nested)
+        nested.chmod(0o400)
+        os.chmod(target_src, 0o500)
+
+        # Directory root mode change (0500 required).
+        os.chmod(target_src, 0o700)
+        observation_fails(
+            "handoff: target-src directory mode change fails closed",
+            lambda: None,
+        )
+        os.chmod(target_src, 0o500)
+
+        check(
+            "handoff: signed-input observation restored after fail-closed cases",
+            workspace_input_observation(task, str(workspace)) == before,
+        )
 
         artifact = next(path for path in (handoff / "bundle" / "artifacts" / "sha256").iterdir() if path.is_file())
         for path in handoff.rglob("*"):

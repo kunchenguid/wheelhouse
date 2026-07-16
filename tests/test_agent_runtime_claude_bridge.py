@@ -306,6 +306,88 @@ def main():
         overflow, _ = run_bridge(overflow_bundle, overflow_execution, "overflow")
         check("bridge: oversized duration emits stable protocol failure", overflow["status"] == "failed" and overflow["error"]["code"] == "harness.protocol")
 
+        # Successful controller completion still requires equal non-null signed-input evidence.
+        def bridge_with_observations(label: str, post_observation, target_inputs_read_only: bool, pre_observation: str = "b" * 64):
+            task_obj, bundle_dir = make_bundle(root / label)
+            execution_path = root / ("%s.json" % label)
+            transcript(execution_path, IMMUTABLE_MODEL, "HOLD\n\n- Reviewed the bounded target.")
+            result_path = bundle_dir / ("result-%s.json" % label)
+            events_path = bundle_dir / ("events-%s.ndjson" % label)
+            handoff_sha256 = "a" * 64
+            enforced = {
+                name: task_obj["spec"]["limits"][name]
+                for name, quality in task_obj["spec"]["limits"]["enforcement"].items()
+                if quality == "externally-enforced"
+            }
+            proof = {
+                "version": 1,
+                "boundary": "separate-read-only-github-job",
+                "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"},
+                "writeCapableGithubTokenAvailable": False,
+                "fleetTokenAvailable": False,
+                "readonlyTokenBoundary": "absent",
+                "spendStarted": True,
+                "isolationLevel": "github-readonly-artifact-bridge-v1",
+                "artifactHydration": "content-addressed-bounded-verified",
+                "targetInputsReadOnly": target_inputs_read_only,
+                "preActionInputObservationSha256": pre_observation,
+                "postActionInputObservationSha256": post_observation,
+                "declaredOutputPaths": claude_declared_outputs(task_obj["metadata"]["action"]),
+                "workspaceRepository": "local-no-remote",
+                "declaredTools": claude_declared_tools(task_obj["metadata"]["action"]),
+                "action": task_obj["metadata"]["action"],
+                "actionSourceCommit": ACTION_COMMIT,
+                "actionMetadataQuality": "pinned-action-reference",
+                "actionMetadataSha256": None,
+                "taskSha256": canonical_sha256(task_obj),
+                "handoffManifestSha256": handoff_sha256,
+                "transcriptSha256": file_sha256(execution_path),
+                "childExecutionTimeoutMs": task_obj["spec"]["limits"]["childExecutionTimeoutMs"],
+                "controller": {
+                    "parentRunId": "1",
+                    "parentRunAttempt": "1",
+                    "modelRunId": "2",
+                    "hardDeadlineMs": None,
+                    "dispatchDeadlineMs": task_obj["spec"]["limits"]["dispatchDeadlineMs"],
+                    "childExecutionTimeoutMs": task_obj["spec"]["limits"]["childExecutionTimeoutMs"],
+                    "enforcedLimits": enforced,
+                    "conclusion": "success",
+                    "terminationReason": "completed",
+                    "dispatchRef": "main",
+                    "expectedCommitSha": task_obj["metadata"]["wheelhouseRevision"],
+                    "observedCommitSha": task_obj["metadata"]["wheelhouseRevision"],
+                    "correlationId": "a" * 32,
+                },
+            }
+            enforcement_path = bundle_dir / ("enforcement-%s.json" % label)
+            enforcement_path.write_text(json.dumps(proof), encoding="utf-8")
+            return bridge(
+                str(bundle_dir / "task.json"),
+                str(bundle_dir),
+                str(execution_path),
+                "",
+                str(enforcement_path),
+                handoff_sha256,
+                str(result_path),
+                str(events_path),
+            )
+
+        null_post = bridge_with_observations("null-post", None, False)
+        check(
+            "bridge: null post-action signed-input observation rejects successful controller",
+            null_post["status"] == "failed" and null_post["error"]["code"] == "sandbox.violation",
+        )
+        unequal_post = bridge_with_observations("unequal-post", "c" * 64, True)
+        check(
+            "bridge: unequal post-action signed-input observation rejects successful controller",
+            unequal_post["status"] == "failed" and unequal_post["error"]["code"] == "sandbox.violation",
+        )
+        equal_post = bridge_with_observations("equal-post", "b" * 64, True)
+        check(
+            "bridge: equal non-null signed-input observation allows trusted success",
+            equal_post["status"] == "succeeded",
+        )
+
     if FAILURES:
         raise SystemExit("%d Claude bridge checks failed" % len(FAILURES))
     print("\nall Claude bridge tests passed")
