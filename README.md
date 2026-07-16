@@ -136,6 +136,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > An invalid cap fails closed to 1 and logs an error.
 > `triage_daily_ceiling` is one global reservation budget per UTC calendar day, defaults to 100, accepts integers from 1 through 2000, and has no per-repository override.
 > An invalid daily ceiling fails closed to 0, so no automatic triage is queued until the configuration is corrected.
+> If a reservation is denied because the budget is unavailable, a held card is published with its normal decision controls and a concise deferred-advisory note, without consuming an attempt for that revision.
 > Its closed maintenance-ledger issue stores only a version, UTC day, and reserved count; a day rollover resets the count in the same by-number verified write that reserves the new day's first unit.
 > Each verified reservation authorizes at most one existing triage dispatch, and that dispatch can make at most two model calls because schema repair is bounded to one additional call.
 > The default worst case is therefore 100 automatic-triage reservations and 200 model calls per UTC day across scans and ingest runs.
@@ -563,6 +564,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **A card shows `pending-triage` and no decision checkboxes.**
   Its first auto-triage attempt has been queued but has not published yet.
   Wait for the **triage** workflow to attach either the `Triage` section or an unavailable note; either outcome removes `pending-triage` and restores the normal checkboxes.
+  If the configured budget is unavailable before dispatch, the scan or ingest run should publish the card immediately with a deferred-advisory note and leave it eligible for a later retry.
   If the dispatch itself could not be started, the scan or ingest run should publish the card immediately with a "could not be started" note.
   If the triage run failed before its update step, the final recovery step should publish it with a "did not finish" note, or clear the queued cache when trusted source setup was unavailable so a later scan can retry.
 - **A PR-review or issue-triage card has no Triage section.**

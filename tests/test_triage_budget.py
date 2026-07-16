@@ -727,7 +727,13 @@ def test_reservation_or_card_verification_failure_never_dispatches():
         },
     ), patched(core, {"load_config": lambda: config}):
         assert rc.mark_triage_queued(42, candidate, body) is None
-    assert edits == []
+    assert len(edits) == 1
+    deferred_state = core.parse_state_block(edits[0][1])
+    assert rc.TRIAGE_BUDGET_DEFERRED in edits[0][1]
+    assert "<!-- opt:merge -->" in edits[0][1]
+    assert "triaged_sha" not in deferred_state
+    assert "triage_status" not in deferred_state
+    assert rc.TRIAGE_ATTEMPTS_FIELD not in deferred_state
 
     reads = 0
     edits = []
@@ -800,6 +806,108 @@ def test_reservation_or_card_verification_failure_never_dispatches():
         assert rc.mark_triage_queued(42, candidate, body) is None
     assert reads == 3
     assert core.parse_state_block(written_body)[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
+
+
+def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retries():
+    config = {
+        "repos": {"wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}},
+        "triage_attempt_cap_per_revision": 2,
+        "triage_daily_ceiling": 100,
+    }
+    def unavailable_ledger():
+        fake = FakeGh(budget_issue())
+        fake.fail_list = True
+        return fake
+
+    scenarios = [
+        ("invalid config", lambda: FakeGh(), dict(config, triage_daily_ceiling=0)),
+        (
+            "exhausted capacity",
+            lambda: FakeGh(budget_issue(reserved=1)),
+            dict(config, triage_daily_ceiling=1),
+        ),
+        ("malformed ledger", lambda: FakeGh(budget_issue(body="malformed")), config),
+        ("unavailable ledger", unavailable_ledger, config),
+    ]
+
+    for label, fake_factory, scenario_config in scenarios:
+        for kind, expected_checkbox in (
+            ("pr-review", "<!-- opt:merge -->"),
+            ("issue-triage", "<!-- opt:close -->"),
+        ):
+            candidate = item(kind=kind, revision="rev-%s-%s" % (kind, label.replace(" ", "-")))
+            held = rc.render(candidate, held=True)
+            current = {
+                "number": 42,
+                "body": held["body"],
+                "state": "OPEN",
+                "labels": [{"name": name} for name in held["labels"]],
+                "author": {"login": rc.GET_CARD_AUTOMATION_AUTHOR},
+            }
+            edits = []
+
+            def edit(number, new_body, remove_labels=None):
+                edits.append((number, new_body, remove_labels or []))
+                current["body"] = new_body
+                names = {entry["name"] for entry in current["labels"]}
+                for removed in remove_labels or []:
+                    names.discard(removed)
+                current["labels"] = [{"name": name} for name in sorted(names)]
+
+            replacements = {
+                "get_card": lambda number: copy.deepcopy(current),
+                "_edit_issue_body": edit,
+            }
+            with budget_boundary(fake_factory()), patched(rc, replacements), patched(
+                core, {"load_config": lambda: scenario_config}
+            ), redirect_stdout(io.StringIO()):
+                assert rc.mark_triage_queued(42, candidate, held["body"]) is None
+
+            assert len(edits) == 1, "%s %s" % (label, kind)
+            number, published_body, removed = edits[0]
+            state = core.parse_state_block(published_body)
+            assert number == 42
+            assert rc.HOLD_LABEL in removed
+            assert "held" not in state
+            assert "triaged_sha" not in state
+            assert "triage_status" not in state
+            assert rc.TRIAGE_ATTEMPTS_FIELD not in state
+            assert rc.TRIAGE_BUDGET_DEFERRED in published_body
+            assert expected_checkbox in published_body
+            assert rc.HOLD_LABEL not in {entry["name"] for entry in current["labels"]}
+            assert rc.should_auto_triage(
+                candidate,
+                state,
+                current["labels"],
+                has_token=True,
+            )
+
+            retry_order = []
+
+            def retry_reserve(number, queued_item, ceiling):
+                retry_order.append("reserve")
+                return True
+
+            def retry_edit(number, new_body, remove_labels=None):
+                retry_order.append("card-write")
+                current["body"] = new_body
+
+            with patched(
+                rc,
+                {
+                    "get_card": lambda number: copy.deepcopy(current),
+                    "reserve_triage_budget": retry_reserve,
+                    "_edit_issue_body": retry_edit,
+                },
+            ), patched(core, {"load_config": lambda: config}), redirect_stdout(io.StringIO()):
+                permit = rc.mark_triage_queued(42, candidate, current["body"])
+
+            retry_state = core.parse_state_block(current["body"])
+            assert isinstance(permit, rc._TriageDispatchPermit), "%s %s" % (label, kind)
+            assert retry_order == ["reserve", "card-write"]
+            assert retry_state["triage_status"] == "queued"
+            assert retry_state["triaged_sha"] == rc.triage_revision(candidate)
+            assert retry_state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
 
 
 def test_dispatch_capability_and_workflow_admission_make_bypass_impossible():
@@ -908,6 +1016,7 @@ TESTS = [
     test_invalid_zero_ceiling_never_reads_or_writes_a_ledger,
     test_mark_queue_reserves_then_writes_and_verifies_one_attempt,
     test_reservation_or_card_verification_failure_never_dispatches,
+    test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retries,
     test_dispatch_capability_and_workflow_admission_make_bypass_impossible,
     test_source_boundary_and_concurrency_cover_every_current_writer,
     test_one_reservation_prices_the_bounded_two_call_schema_repair,

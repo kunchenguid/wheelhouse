@@ -281,6 +281,10 @@ EVIDENCE_FIELD = "evidence"
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
 TRIAGE_UNAVAILABLE = "Auto triage unavailable for this version."
+TRIAGE_BUDGET_DEFERRED = (
+    "Automated advisory generation was deferred because the configured budget "
+    "was unavailable."
+)
 
 _STATE_BLOCK_RE = re.compile(
     r"<!--\s*(?:wheelhouse|triage)-state:\s*(\{.*?\})\s*-->",
@@ -1808,6 +1812,49 @@ def body_with_triage_result(
     updated = _publish_decision_section(updated, kind, new_state["options"])
     updated = _set_recommendation_section_visible(updated, visible=not recommendation)
     return _replace_state_block(updated, new_state)
+
+
+def body_with_triage_budget_deferred(body, item, message=TRIAGE_BUDGET_DEFERRED):
+    state = _unique_state_block(body)
+    kind = item.get("kind", "pr-review")
+    revision = triage_revision(item)
+    if not state or kind not in AUTO_TRIAGE_FLAG_BY_KIND or state.get("kind") != kind:
+        return body
+    if not revision:
+        return body
+    if kind == "issue-triage":
+        if _issue_revision_is_older(revision, state):
+            return body
+        state = dict(state)
+        state["updated_at"] = revision
+    elif state_revision(state, kind) != revision:
+        return body
+    clean = remove_triage_section(body)
+    clean = _insert_triage_section(clean, triage_section(error=message))
+    new_state = dict(state)
+    for key in (
+        "held",
+        "triaged_sha",
+        "triage_status",
+        "triage_error",
+        "triage_recommendation",
+        "triage_repair_status",
+        "triage_repair_reason",
+        "triage_repair_candidate",
+        "automerge_verdict",
+        "triaged_base_sha",
+        "triaged_vision_sha",
+    ):
+        new_state.pop(key, None)
+    new_state.pop(RECONCILE_ABSENCE_FIELD, None)
+    new_state = _state_with_activity_reflected(
+        new_state, item, allow_without_baseline=True
+    )
+    new_state["options"] = options_for_state(kind, state.get("options"), new_state)
+    clean = _publish_decision_section(clean, kind, new_state["options"])
+    clean = _ensure_recommendation_section(clean, item.get("recommendation"))
+    clean = _set_recommendation_section_visible(clean, visible=True)
+    return _replace_state_block(clean, new_state)
 
 
 DECISION_START = "<!-- wheelhouse-decision:start -->"
@@ -3604,6 +3651,7 @@ def mark_triage_queued(number, item, body):
         )
         return None
     if not reserve_triage_budget(number, item, ceiling):
+        publish_triage_budget_deferral(number, item, body)
         return None
     # A triage consumer is the only body writer outside the shared workflow
     # group. Re-read after reservation so an interleaving result can only leak
@@ -3632,6 +3680,26 @@ def mark_triage_queued(number, item, body):
         )
         return None
     return _TriageDispatchPermit(number, item, _TRIAGE_DISPATCH_SEAL)
+
+
+def publish_triage_budget_deferral(number, item, body):
+    current = get_card(number)
+    if not _queue_card_snapshot_matches(current, number, item, body):
+        _defer_triage_budget(
+            number,
+            item,
+            "budget-deferral-card-race",
+            "card changed before budget deferral could publish",
+            error=True,
+        )
+        return False
+    new_body = body_with_triage_budget_deferred(current.get("body", ""), item)
+    if new_body == current.get("body", ""):
+        return False
+    state = parse_state_block(current.get("body", ""))
+    remove_labels = [HOLD_LABEL] if (state or {}).get("held") else []
+    _edit_issue_body(number, new_body, remove_labels=remove_labels)
+    return True
 
 
 def reflect_activity(number, item, body, card_updated_at=""):
