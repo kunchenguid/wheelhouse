@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""Offline regression coverage for the inert bounded triage replay path."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import tempfile
+from contextlib import contextmanager, redirect_stdout
+from io import StringIO
+from pathlib import Path
+import sys
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from scripts import agent_claim  # noqa: E402
+import render_card as rc  # noqa: E402
+import triage_replay as replay  # noqa: E402
+
+
+@contextmanager
+def patched(module, replacements):
+    originals = {name: getattr(module, name) for name in replacements}
+    for name, value in replacements.items():
+        setattr(module, name, value)
+    try:
+        yield
+    finally:
+        for name, value in originals.items():
+            setattr(module, name, value)
+
+
+def base_item(number=17, kind="pr-review", revision="abcdef1"):
+    return {
+        "repo": "wheelhouse",
+        "number": number,
+        "kind": kind,
+        "head_sha": revision if kind == "pr-review" else "",
+        "updated_at": revision if kind == "issue-triage" else "2026-07-16T10:00:00Z",
+        "title": "Replay this exact source",
+        "author": "contributor",
+        "bucket": "merge-ready" if kind == "pr-review" else "issue-triage",
+        "comp": "pass" if kind == "pr-review" else "n/a",
+        "tests": "green" if kind == "pr-review" else "n/a",
+        "url": "https://github.com/example/wheelhouse/pull/%s" % number,
+        "summary": "offline replay fixture",
+        "recommendation": "Review it.",
+        "priority": "med",
+        "auto_triage": True,
+        "auto_triage_issues": True,
+        "triage_attempt_cap_per_revision": 2,
+    }
+
+
+def source(number=17, kind="pr-review", revision="abcdef1", state="open"):
+    value = {
+        "number": number,
+        "state": state,
+        "title": "Replay this exact source",
+        "html_url": "https://github.com/example/wheelhouse/pull/%s" % number,
+        "updated_at": "2026-07-16T10:00:00Z",
+        "user": {"login": "contributor"},
+    }
+    if kind == "pr-review":
+        value["head"] = {"sha": revision}
+    else:
+        value["updated_at"] = revision
+    return value
+
+
+def card(number=42, target=17, kind="pr-review", revision="abcdef1", status="error"):
+    candidate = base_item(target, kind, revision)
+    rendered = rc.render(candidate)
+    body = rendered["body"]
+    state = rc._unique_state_block(body)
+    if status is None:
+        pass
+    else:
+        state = rc._state_with_triage(
+            state,
+            revision,
+            status,
+            error="structural triage failure" if status == "error" else None,
+        )
+        body = rc._replace_state_block(body, state)
+    return {
+        "number": number,
+        "title": rendered["title"],
+        "body": body,
+        "labels": [{"name": name} for name in rendered["labels"]],
+        "state": "OPEN",
+        "updatedAt": "2026-07-16T10:01:00Z",
+        "author": {"login": rc.CARD_AUTOMATION_AUTHOR},
+        "comments": [],
+    }
+
+
+def config():
+    return {
+        "repos": {"wheelhouse": {"name": "wheelhouse"}},
+        "auto_triage": True,
+        "auto_triage_issues": True,
+        "triage_attempt_cap_per_revision": 2,
+        "triage_attempt_caps": {"wheelhouse": 2},
+        "triage_daily_ceiling": 1200,
+    }
+
+
+@contextmanager
+def replay_environment(cards, sources, remaining=1200):
+    card_reads = []
+    source_reads = []
+    edits = []
+    queued = []
+    dispatched = []
+
+    def get_card(number):
+        card_reads.append(number)
+        value = cards.get(number)
+        return copy.deepcopy(value) if value is not None else None
+
+    def edit(number, body, remove_labels=None):
+        edits.append((number, body))
+        cards[number]["body"] = body
+        cards[number]["updatedAt"] = "2026-07-16T10:02:00Z"
+
+    def source_read(owner, repo, number, kind):
+        source_reads.append((owner, repo, number, kind))
+        value = sources.get((repo, number, kind))
+        if isinstance(value, Exception):
+            raise value
+        return copy.deepcopy(value)
+
+    def mark(number, item, body):
+        queued.append((number, item["repo"], item["number"]))
+        new_body = rc.body_with_triage_queued(body, item, attempt_cap=2)
+        assert new_body != body
+        cards[number]["body"] = new_body
+        return object()
+
+    def dispatch(permit):
+        dispatched.append(permit)
+
+    replacements = {
+        "get_card": get_card,
+        "_edit_issue_body": edit,
+        "triage_budget_remaining": lambda ceiling: min(remaining, ceiling),
+        "auto_triage_has_token": lambda: True,
+        "mark_triage_queued": mark,
+        "dispatch_triage_workflow": dispatch,
+    }
+    old_env = dict(os.environ)
+    os.environ.update(
+        {
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REPOSITORY_OWNER": "owner",
+            "GITHUB_ACTOR": "owner",
+            "GITHUB_RUN_NUMBER": "77",
+            "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN": "true",
+        }
+    )
+    try:
+        with (
+            patched(rc, replacements),
+            patched(replay, {"_source_json": source_read}),
+            patched(replay.core, {"load_config": config}),
+        ):
+            yield {
+                "card_reads": card_reads,
+                "source_reads": source_reads,
+                "edits": edits,
+                "queued": queued,
+                "dispatched": dispatched,
+            }
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+def cards_file(numbers):
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(
+        [{"number": number, "body": "untrusted listing data"} for number in numbers],
+        handle,
+    )
+    handle.close()
+    return handle.name
+
+
+def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    try:
+        with replay_environment(cards, sources) as calls:
+            first = replay.run(path, "wave-one", 25)
+            first_state = rc._unique_state_block(cards[42]["body"])
+            assert first == {
+                "eligible": 1,
+                "planned": 1,
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert first_state[replay.REPLAY_FIELD]["version"] == 1
+            assert first_state[replay.REPLAY_FIELD]["cleared"] == "error"
+            assert first_state["triage_status"] == "queued"
+            assert first_state["triage_attempts"]["count"] == 2
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+            second = replay.run(path, "wave-two", 25)
+            assert second["eligible"] == second["written"] == second["queued"] == 0
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+            assert all(number == 42 for number in calls["card_reads"])
+            assert all(read[2:] == (17, "pr-review") for read in calls["source_reads"])
+    finally:
+        os.unlink(path)
+
+
+def test_absent_cache_gets_absent_marker_and_one_queued_attempt():
+    revision = "2026-07-16T10:00:00Z"
+    cards = {42: card(kind="issue-triage", revision=revision, status=None)}
+    sources = {
+        ("wheelhouse", 17, "issue-triage"): source(
+            kind="issue-triage", revision=revision
+        )
+    }
+    path = cards_file([42])
+    try:
+        with replay_environment(cards, sources) as calls:
+            result = replay.run(path, "absent-wave", 25)
+            state = rc._unique_state_block(cards[42]["body"])
+            assert result["queued"] == 1
+            assert state[replay.REPLAY_FIELD]["cleared"] == "absent"
+            assert state["triage_attempts"]["count"] == 1
+            assert len(calls["edits"]) == 1
+            assert calls["source_reads"] == [
+                ("owner", "wheelhouse", 17, "issue-triage"),
+                ("owner", "wheelhouse", 17, "issue-triage"),
+            ]
+    finally:
+        os.unlink(path)
+
+
+def inspect(card_value, source_value=None):
+    cards = {42: card_value}
+    sources = {
+        ("wheelhouse", 17, "pr-review"): source_value
+        if source_value is not None
+        else source()
+    }
+    with replay_environment(cards, sources):
+        return replay.inspect_candidate(42, config(), "owner", True)
+
+
+def with_state(card_value, mutate):
+    value = copy.deepcopy(card_value)
+    state = rc._unique_state_block(value["body"])
+    mutate(state)
+    value["body"] = rc._replace_state_block(value["body"], state)
+    return value
+
+
+def test_never_cleared_matrix_fails_closed():
+    queued = card(status="queued")
+    succeeded = card(status="succeeded")
+    stale = with_state(
+        card(), lambda state: state.__setitem__("triaged_sha", "deadbee")
+    )
+    closed = copy.deepcopy(card())
+    closed["state"] = "CLOSED"
+    held_queued = with_state(queued, lambda state: state.__setitem__("held", True))
+    non_refreshable = copy.deepcopy(card())
+    non_refreshable["labels"].append({"name": "processing"})
+    wrong_kind = with_state(
+        card(), lambda state: state.__setitem__("kind", "ci-approval")
+    )
+    wrong_kind["labels"] = [
+        {"name": "kind:ci-approval"} if row["name"].startswith("kind:") else row
+        for row in wrong_kind["labels"]
+    ]
+    malformed = copy.deepcopy(card())
+    malformed["body"] += "\n<!-- wheelhouse-state: {} -->"
+    unparseable_status = with_state(
+        card(), lambda state: state.__setitem__("triage_status", {"bad": True})
+    )
+    cases = [
+        (queued, source(), "queued"),
+        (succeeded, source(), "succeeded"),
+        (stale, source(), "stale revision"),
+        (closed, source(), "closed card"),
+        (held_queued, source(), "held queued"),
+        (non_refreshable, source(), "non-refreshable"),
+        (wrong_kind, source(), "wrong kind"),
+        (card(), source(state="closed"), "source closed"),
+        (card(), RuntimeError("404"), "source 404"),
+        (card(), source(revision="deadbee"), "source moved"),
+        (malformed, source(), "malformed state"),
+        (unparseable_status, source(), "unparseable status"),
+    ]
+    for value, live, label in cases:
+        plan, reason = inspect(value, live)
+        assert plan is None, (label, reason)
+
+
+def valid_marker(revision="abcdef1"):
+    return {
+        "version": 1,
+        "wave": "old-wave",
+        "revision": revision,
+        "cleared": "error",
+        "at": "2026-07-16T10:00:00Z",
+        "run_number": 12,
+    }
+
+
+def test_marker_mismatch_matrix_never_clears_or_resets_cap():
+    markers = []
+    wrong_version = valid_marker()
+    wrong_version["version"] = 2
+    markers.append(wrong_version)
+    markers.append(valid_marker("deadbee"))
+    forged = valid_marker()
+    forged["extra"] = "forged"
+    markers.append(forged)
+    malformed = "not-an-object"
+    markers.append(malformed)
+    for marker in markers:
+        value = with_state(
+            card(), lambda state: state.__setitem__(replay.REPLAY_FIELD, marker)
+        )
+        before = value["body"]
+        state_before = rc._unique_state_block(before)
+        plan, reason = inspect(value)
+        assert plan is None
+        assert reason == "replay-marker-untrusted"
+        assert value["body"] == before
+        assert rc.triage_attempt_count(state_before, "pr-review", "abcdef1", 2) == 1
+
+
+def test_dry_run_and_budget_bound_list_plans_with_zero_writes():
+    cards = {42: card(number=42, target=17), 43: card(number=43, target=18)}
+    sources = {
+        ("wheelhouse", 17, "pr-review"): source(17),
+        ("wheelhouse", 18, "pr-review"): source(18),
+    }
+    path = cards_file([43, 42])
+    before = {number: value["body"] for number, value in cards.items()}
+    try:
+        output = StringIO()
+        with (
+            replay_environment(cards, sources, remaining=1) as calls,
+            redirect_stdout(output),
+        ):
+            result = replay.run(path, "dry-wave", 25, dry_run=True)
+            assert result == {"eligible": 2, "planned": 1, "deferred": 1, "written": 0}
+            assert (
+                not calls["edits"] and not calls["queued"] and not calls["dispatched"]
+            )
+            assert before == {number: value["body"] for number, value in cards.items()}
+            assert "DRY-RUN card #42" in output.getvalue()
+            assert "replay deferred 1 candidates" in output.getvalue()
+            assert "writes=0" in output.getvalue()
+    finally:
+        os.unlink(path)
+
+
+def test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit():
+    old_env = dict(os.environ)
+    valid = {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY_OWNER": "owner",
+        "GITHUB_ACTOR": "owner",
+        "GITHUB_RUN_NUMBER": "77",
+    }
+    try:
+        os.environ.update(valid)
+        assert replay._entry("valid-wave", 25) == ("owner", 77)
+        cases = [
+            ({"GITHUB_EVENT_NAME": "schedule"}, "valid-wave", 25),
+            ({"GITHUB_ACTOR": "someone-else"}, "valid-wave", 25),
+            ({}, "Bad_Wave", 25),
+            ({}, "valid-wave", 0),
+            ({"GITHUB_RUN_NUMBER": "not-a-number"}, "valid-wave", 25),
+        ]
+        for env_overrides, wave, limit in cases:
+            os.environ.update(valid)
+            os.environ.update(env_overrides)
+            try:
+                replay._entry(wave, limit)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError((env_overrides, wave, limit))
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+class FakeRecordGh:
+    def __init__(self):
+        self.comments = []
+        self.next_id = 1
+        self.writes = []
+
+    def __call__(self, *args):
+        if "--paginate" in args:
+            return [copy.deepcopy(self.comments)]
+        method = args[args.index("--method") + 1] if "--method" in args else "GET"
+        endpoint = next(value for value in args if value.startswith("repos/"))
+        if method in {"POST", "PATCH"}:
+            body = next(value[5:] for value in args if value.startswith("body="))
+            self.writes.append((method, endpoint, body))
+            if method == "POST":
+                row = {
+                    "id": self.next_id,
+                    "body": body,
+                    "user": {"login": "github-actions[bot]"},
+                }
+                self.next_id += 1
+                self.comments.append(row)
+                return copy.deepcopy(row)
+            comment_id = int(endpoint.rsplit("/", 1)[-1])
+            row = next(row for row in self.comments if row["id"] == comment_id)
+            row["body"] = body
+            return copy.deepcopy(row)
+        comment_id = int(endpoint.rsplit("/", 1)[-1])
+        return copy.deepcopy(
+            next(row for row in self.comments if row["id"] == comment_id)
+        )
+
+
+def record_args(event_key, status, code="consumer.committed"):
+    return argparse.Namespace(
+        issue=42,
+        repo_slug="owner/wheelhouse",
+        event_key=event_key,
+        revision="abcdef1",
+        status=status,
+        code=code,
+    )
+
+
+def test_result_records_cover_success_failure_bound_and_duplicate_editing():
+    fake = FakeRecordGh()
+    success_key = "a" * 64
+    failure_key = "b" * 64
+    with patched(agent_claim, {"gh_json": fake}):
+        agent_claim.record_triage_result(record_args(success_key, "succeeded"))
+        agent_claim.record_triage_result(record_args(success_key, "succeeded"))
+        agent_claim.record_triage_result(
+            record_args(failure_key, "error", "consumer.rejected")
+        )
+        agent_claim.record_triage_result(
+            record_args(success_key, "error", "consumer.rejected")
+        )
+    assert len(fake.comments) == 2
+    assert [method for method, _, _ in fake.writes] == ["POST", "POST", "PATCH"]
+    records = [agent_claim.parse_triage_record(row["body"]) for row in fake.comments]
+    assert {record["status"] for record in records} == {"error"}
+    assert all(len(row["body"].encode("utf-8")) < 512 for row in fake.comments)
+    assert all(
+        "target" not in row["body"] and "comment" not in row["body"]
+        for row in fake.comments
+    )
+
+
+def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
+    scan_text = (ROOT / ".github/workflows/scan-backstop.yml").read_text(
+        encoding="utf-8"
+    )
+    scan = yaml.safe_load(scan_text)
+    on_doc = scan.get(True) or scan.get("on")
+    dispatch_inputs = on_doc["workflow_dispatch"]["inputs"]
+    assert dispatch_inputs["replay_wave"]["default"] == ""
+    assert dispatch_inputs["replay_limit"]["default"] == "25"
+    step = next(
+        value
+        for value in scan["jobs"]["reconcile"]["steps"]
+        if value.get("name") == "Replay one bounded auto-triage wave"
+    )
+    assert "github.event_name == 'workflow_dispatch'" in step["if"]
+    assert "inputs.replay_wave != ''" in step["if"]
+    assert "scripts/triage_replay.py" in step["run"]
+    assert "--dry-run" in (ROOT / "scripts/triage_replay.py").read_text(
+        encoding="utf-8"
+    )
+    replay_text = (ROOT / "scripts/triage_replay.py").read_text(encoding="utf-8")
+    assert "reconcile.maybe_queue_auto_triage" in replay_text
+    assert "dispatch_triage_workflow" not in replay_text
+    assert replay.REPLAY_FIELD not in rc.MATERIAL_FIELDS
+    triage_text = (ROOT / ".github/workflows/triage.yml").read_text(encoding="utf-8")
+    assert "triage_queued_for_head" in triage_text
+    assert "agent_claim.py record" in triage_text
+    assert "wheelhouse-triage-record" in (ROOT / "scripts/agent_claim.py").read_text(
+        encoding="utf-8"
+    )
+
+
+TESTS = [
+    test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
+    test_absent_cache_gets_absent_marker_and_one_queued_attempt,
+    test_never_cleared_matrix_fails_closed,
+    test_marker_mismatch_matrix_never_clears_or_resets_cap,
+    test_dry_run_and_budget_bound_list_plans_with_zero_writes,
+    test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit,
+    test_result_records_cover_success_failure_bound_and_duplicate_editing,
+    test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries,
+]
+
+
+if __name__ == "__main__":
+    for test in TESTS:
+        test()
+        print("ok - %s" % test.__name__)

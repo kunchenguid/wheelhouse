@@ -6,8 +6,9 @@ name: triage
 # on the target, closes anything, approves CI, or feeds the deterministic
 # decision path. scan-backstop / ingest queue it with workflow_dispatch after
 # first writing the current revision into the card state (a PR's `head_sha`, or
-# an issue's `updatedAt` - issues have no head SHA), so each revision gets at
-# most one attempt. `auto_triage` gates pr-review cards; the INDEPENDENT
+# an issue's `updatedAt` - issues have no head SHA), so ordinary scans cannot
+# retry-loop a revision. The capped, marker-versioned replay path may authorize
+# one additional attempt. `auto_triage` gates pr-review cards; the INDEPENDENT
 # `auto_triage_issues` gates issue-triage cards - each can be toggled off
 # without affecting the other.
 # If the card is held under `pending-triage`, this workflow publishes its real
@@ -1331,6 +1332,29 @@ jobs:
           else
             echo "recover: queued triage cache is not stale for these inputs"
           fi
+
+      - name: Record the bounded triage attempt result
+        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
+          TRIAGE_STATUS: ${{ steps.card-consumer.outputs.triage_status || steps.card-recovery.outputs.triage_status || 'error' }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+        run: |
+          set -euo pipefail
+          code="consumer.rejected"
+          if { [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; } || { [ "${{ steps.card-recovery.outcome }}" = "success" ] && [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; }; then
+            code="consumer.committed"
+          fi
+          "$TRUSTED_PYTHON" scripts/agent_claim.py record \
+            --issue "$ISSUE" --repo-slug "$REPO_SLUG" \
+            --event-key "$EVENT_KEY" --revision "$REVISION" \
+            --status "$TRIAGE_STATUS" --code "$code"
 
       - name: Finalize primary triage claim and stage evidence
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}

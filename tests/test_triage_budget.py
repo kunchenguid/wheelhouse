@@ -188,7 +188,7 @@ def load_temp_config(payload):
 def test_config_defaults_boundaries_and_override():
     config, errors = load_temp_config({"repos": [{"name": "alpha"}]})
     assert config["triage_attempt_cap_per_revision"] == 2
-    assert config["triage_daily_ceiling"] == 100
+    assert config["triage_daily_ceiling"] == 1200
     assert config["triage_attempt_caps"]["alpha"] == 2
     assert errors == ""
 
@@ -548,6 +548,31 @@ def test_ledger_exhaustion_and_utc_day_rollover():
     }
 
 
+def test_replay_remaining_capacity_preflight_is_read_only_and_fail_closed():
+    missing = FakeGh()
+    with budget_boundary(missing), redirect_stdout(io.StringIO()):
+        assert rc.triage_budget_remaining(1200, today="2026-07-16") == 1200
+    assert missing.create_calls == missing.patch_calls == 0
+
+    current = FakeGh(budget_issue(reserved=748))
+    with budget_boundary(current), redirect_stdout(io.StringIO()):
+        assert rc.triage_budget_remaining(1200, today="2026-07-16") == 452
+    assert current.list_calls == current.get_calls == 1
+    assert current.create_calls == current.patch_calls == 0
+
+    rollover = FakeGh(budget_issue(day="2026-07-15", reserved=1200))
+    with budget_boundary(rollover), redirect_stdout(io.StringIO()):
+        assert rc.triage_budget_remaining(1200, today="2026-07-16") == 1200
+    assert rollover.patch_calls == 0
+
+    malformed = FakeGh(budget_issue(body="malformed"))
+    output = io.StringIO()
+    with budget_boundary(malformed), redirect_stdout(output):
+        assert rc.triage_budget_remaining(1200, today="2026-07-16") == 0
+    assert malformed.patch_calls == 0
+    assert "failed closed" in output.getvalue()
+
+
 def test_untrusted_duplicate_and_ambiguous_ledgers_halt_reservations():
     variants = [
         budget_issue(state="open"),
@@ -819,9 +844,10 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
         "triage_attempt_cap_per_revision": 2,
         "triage_daily_ceiling": 100,
     }
+    utc_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     def unavailable_ledger():
-        fake = FakeGh(budget_issue())
+        fake = FakeGh(budget_issue(day=utc_day))
         fake.fail_list = True
         return fake
 
@@ -829,14 +855,14 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
         ("invalid config", lambda: FakeGh(), dict(config, triage_daily_ceiling=0)),
         (
             "exhausted capacity",
-            lambda: FakeGh(
-                budget_issue(
-                    day=datetime.now(timezone.utc).strftime("%Y-%m-%d"), reserved=1
-                )
-            ),
+            lambda: FakeGh(budget_issue(day=utc_day, reserved=1)),
             dict(config, triage_daily_ceiling=1),
         ),
-        ("malformed ledger", lambda: FakeGh(budget_issue(body="malformed")), config),
+        (
+            "malformed ledger",
+            lambda: FakeGh(budget_issue(day=utc_day, body="malformed")),
+            config,
+        ),
         ("unavailable ledger", unavailable_ledger, config),
     ]
 
@@ -876,7 +902,8 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
                 patched(core, {"load_config": lambda: scenario_config}),
                 redirect_stdout(io.StringIO()),
             ):
-                assert rc.mark_triage_queued(42, candidate, held["body"]) is None
+                permit = rc.mark_triage_queued(42, candidate, held["body"])
+                assert permit is None, "%s %s unexpectedly reserved" % (label, kind)
 
             assert len(edits) == 1, "%s %s" % (label, kind)
             number, published_body, removed = edits[0]
@@ -1016,11 +1043,8 @@ def test_one_reservation_prices_the_bounded_two_call_schema_repair():
     assert '"triage.schema-repair": (60_000, 75_000, 1, 0, 65_536)' in task_builder
 
     readme = read("README.md")
-    assert "100 automatic-triage reservations and 200 model calls" in readme
-    assert (
-        "Owner-triggered deep review and natural-language decisions are outside"
-        in readme
-    )
+    assert "1200 automatic-triage reservations and 2400 model calls" in readme
+    assert "Owner-triggered deep review and natural-language decisions are outside" in readme
 
 
 TESTS = [
@@ -1033,6 +1057,7 @@ TESTS = [
     test_ledger_parser_rejects_every_malformed_class,
     test_ledger_creation_uses_returned_number_and_ignores_list_lag,
     test_ledger_exhaustion_and_utc_day_rollover,
+    test_replay_remaining_capacity_preflight_is_read_only_and_fail_closed,
     test_untrusted_duplicate_and_ambiguous_ledgers_halt_reservations,
     test_all_ledger_io_failures_halt_and_verified_write_leaks_safely,
     test_invalid_zero_ceiling_never_reads_or_writes_a_ledger,

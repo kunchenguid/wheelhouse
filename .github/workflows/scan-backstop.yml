@@ -24,6 +24,15 @@ on:
   schedule:
     - cron: "17 * * * *" # hourly, best-effort
   workflow_dispatch:
+    inputs:
+      replay_wave:
+        description: "Operator replay wave slug (empty keeps replay inert)"
+        required: false
+        default: ""
+      replay_limit:
+        description: "Maximum cards in this reviewable replay wave (1..100)"
+        required: false
+        default: "25"
 
 permissions:
   contents: read
@@ -127,6 +136,27 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/reconcile.py scan.json cards.json automerge.json
+
+      # Phase 3 replay is deliberately operator-only and inert by default.
+      # Scheduled runs can never reach this step, and workflow_dispatch keeps
+      # replay_wave empty unless the owner explicitly names a reviewed wave.
+      # Candidate rows contribute issue numbers only; the script re-reads every
+      # card and target by exact number before any state-only marker write, then
+      # re-enters reconcile.maybe_queue_auto_triage so queue-before-dispatch and
+      # both spend guards stay authoritative.
+      - name: Replay one bounded auto-triage wave
+        if: github.event_name == 'workflow_dispatch' && inputs.replay_wave != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          REPLAY_WAVE: ${{ inputs.replay_wave }}
+          REPLAY_LIMIT: ${{ inputs.replay_limit }}
+        run: |
+          python scripts/triage_replay.py cards.json \
+            --wave "$REPLAY_WAVE" \
+            --limit "$REPLAY_LIMIT"
 
       # Track per-repo consecutive scan failures in a dedicated (closed) ledger
       # issue in THIS repo, and fail the run loudly if a fleet repo has been dark
