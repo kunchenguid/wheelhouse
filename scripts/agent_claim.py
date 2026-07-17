@@ -20,6 +20,8 @@ from agent_runtime.contract import ContractError
 MAX_COMMENT_BYTES = 16_384
 TRIAGE_RECORD_VERSION = 1
 TRIAGE_RECORD_PREFIX = "<!-- wheelhouse-triage-record:"
+TRIAGE_CLAIM_SUPERSEDED_VERSION = 1
+TRIAGE_CLAIM_SUPERSEDED_PREFIX = "<!-- wheelhouse-agent-claim-superseded:"
 TRIAGE_ACTIONS = {
     "triage.pr.local",
     "triage.pr.search",
@@ -134,9 +136,10 @@ def supersede_triage_claim(
         return {"event_key": event_key, "superseded": False}
 
     claim = existing[0]
-    superseded_marker = (
-        "<!-- wheelhouse-agent-claim-superseded:v1:%s -->" % event_key
-    )
+    original_updated_at = claim.get("updated_at")
+    if _trusted_comment_time(original_updated_at) is None:
+        raise ContractError("triage claim timestamp was not trusted")
+    superseded_marker = triage_claim_superseded_marker(event_key, original_updated_at)
     body = claim["body"].replace(marker, superseded_marker, 1)
     body = (
         body.rstrip()
@@ -184,6 +187,133 @@ def _trusted_comment_time(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
 
 
+def triage_claim_superseded_marker(event_key: str, original_updated_at: str) -> str:
+    record = {
+        "version": TRIAGE_CLAIM_SUPERSEDED_VERSION,
+        "event_key": event_key,
+        "original_updated_at": original_updated_at,
+    }
+    return "%s %s -->" % (
+        TRIAGE_CLAIM_SUPERSEDED_PREFIX,
+        json.dumps(record, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def parse_triage_claim_superseded_marker(body: object) -> dict | None:
+    if not isinstance(body, str) or len(body.encode("utf-8")) > MAX_COMMENT_BYTES:
+        return None
+    if body.count(TRIAGE_CLAIM_SUPERSEDED_PREFIX) != 1:
+        return None
+    start = body.find(TRIAGE_CLAIM_SUPERSEDED_PREFIX)
+    end = body.find(" -->", start)
+    if end < 0:
+        return None
+    encoded = body[start + len(TRIAGE_CLAIM_SUPERSEDED_PREFIX) : end].strip()
+
+    def no_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate superseded claim key")
+            value[key] = item
+        return value
+
+    try:
+        record = json.loads(encoded, object_pairs_hook=no_duplicate_keys)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(record, dict) or set(record) != {
+        "version",
+        "event_key",
+        "original_updated_at",
+    }:
+        return None
+    event_key = record.get("event_key")
+    original_updated_at = record.get("original_updated_at")
+    if (
+        isinstance(record.get("version"), bool)
+        or record.get("version") != TRIAGE_CLAIM_SUPERSEDED_VERSION
+        or not isinstance(event_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", event_key)
+        or _trusted_comment_time(original_updated_at) is None
+    ):
+        return None
+    return record
+
+
+def trusted_superseded_triage_claim_comment(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    comment_id = value.get("id")
+    body = value.get("body")
+    user = value.get("user") or {}
+    login = user.get("login") if isinstance(user, dict) else None
+    record = parse_triage_claim_superseded_marker(body)
+    marker = (
+        triage_claim_superseded_marker(
+            record["event_key"], record["original_updated_at"]
+        )
+        if record
+        else ""
+    )
+    terminal_bodies = {
+        "Agent triage event finished with consumer.committed. %s\n\n"
+        "Superseded by an operator-approved exact-revision auto-triage replay."
+        % marker,
+        "Agent triage event finished with consumer.rejected. %s\n\n"
+        "Superseded by an operator-approved exact-revision auto-triage replay."
+        % marker,
+    }
+    if (
+        isinstance(comment_id, bool)
+        or not isinstance(comment_id, int)
+        or comment_id < 1
+        or login != "github-actions[bot]"
+        or record is None
+        or body not in terminal_bodies
+    ):
+        return None
+    trusted = {"id": comment_id, "body": body, "record": record}
+    for field in ("created_at", "updated_at"):
+        if isinstance(value.get(field), str):
+            trusted[field] = value[field]
+    return trusted
+
+
+def list_superseded_triage_claims(
+    repo_slug: str, issue: int, event_key: str
+) -> list[dict]:
+    pages = gh_json(
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/%s/issues/%s/comments?per_page=100" % (repo_slug, issue),
+    )
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise ContractError("superseded triage claim pagination was invalid")
+    matches = []
+    for page in pages:
+        for value in page:
+            body = value.get("body") if isinstance(value, dict) else None
+            if (
+                not isinstance(body, str)
+                or TRIAGE_CLAIM_SUPERSEDED_PREFIX not in body
+            ):
+                continue
+            user = value.get("user") if isinstance(value, dict) else None
+            login = user.get("login") if isinstance(user, dict) else None
+            if login != "github-actions[bot]":
+                continue
+            trusted = trusted_superseded_triage_claim_comment(value)
+            if trusted is None:
+                raise ContractError("superseded triage claim marker was not trusted")
+            if trusted["record"]["event_key"] == event_key:
+                matches.append(trusted)
+    if len(matches) > 1:
+        raise ContractError("triage attempt has duplicate superseded claims")
+    return matches
+
+
 def triage_replay_duplicate_only_evidence(
     *,
     action: str,
@@ -224,20 +354,28 @@ def triage_replay_duplicate_only_evidence(
     event_key = event_key_sha256(identity)
     marker = event_claim_marker(event_key)
     claims = list_claims(repo_slug, issue, marker)
-    if len(claims) != 1:
-        return False
-    claim = claims[0]
-    claim_time = _trusted_comment_time(claim.get("updated_at"))
-    terminal_bodies = {
-        "Agent triage event finished with consumer.committed. %s" % marker,
-        "Agent triage event finished with consumer.rejected. %s" % marker,
-    }
-    if (
-        claim_time is None
-        or claim_time > replay_time
-        or claim["body"] not in terminal_bodies
-    ):
-        return False
+    if len(claims) == 1:
+        claim = claims[0]
+        claim_time = _trusted_comment_time(claim.get("updated_at"))
+        terminal_bodies = {
+            "Agent triage event finished with consumer.committed. %s" % marker,
+            "Agent triage event finished with consumer.rejected. %s" % marker,
+        }
+        if (
+            claim_time is None
+            or claim_time > replay_time
+            or claim["body"] not in terminal_bodies
+        ):
+            return False
+    else:
+        superseded = list_superseded_triage_claims(repo_slug, issue, event_key)
+        if len(superseded) != 1:
+            return False
+        claim_time = _trusted_comment_time(
+            superseded[0]["record"].get("original_updated_at")
+        )
+        if claim_time is None or claim_time > replay_time:
+            return False
     records = list_triage_records(repo_slug, issue, event_key)
     if not records:
         return True

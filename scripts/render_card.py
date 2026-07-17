@@ -3842,12 +3842,12 @@ def mark_triage_queued(
     before this function returns a dispatch permit. Any uncertainty defers.
     """
     cap, ceiling = _configured_triage_spend_limits(item)
-    state = parse_state_block(body)
-    if triage_attempts_exhausted(item, state, cap=cap):
-        report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
-        return None
     candidate_body = prepare_body(body) if prepare_body else body
     if prepare_body and candidate_body == body:
+        return None
+    state = parse_state_block(candidate_body)
+    if triage_attempts_exhausted(item, state, cap=cap):
+        report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
         return None
     new_body = body_with_triage_queued(candidate_body, item, attempt_cap=cap)
     if new_body == body or new_body == candidate_body:
