@@ -549,8 +549,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   (delivered-then-dropped by the transcript cap - fixed separately) and from
   E2BIG / auth / rate-limit / infra, which all leave NO extractable result and so
   keep today's fail-open behavior byte-for-byte. An evidence-anchor failure
-  (parse OK but the model's quotes do not anchor to `target.txt`) is ALSO
-  excluded - a repair turn cannot conjure real quotes. The pure decision helpers
+  (parse OK but the model's evidence spans do not anchor to `target.txt`) is ALSO
+  excluded - a repair turn cannot conjure real target spans. The pure decision helpers
   are `render_card.plan_triage_repair` (should a schema-miss get a repair turn,
   and build its prompt) and `render_card.decide_triage_apply` (route the final
   apply to `success`/`repaired`/`repair-failed`/`anchor-fail`/`no-result`); both

@@ -1210,13 +1210,13 @@ def evidence_anchor_ok(
     outcome.
 
     Lenient on purpose so a genuine triage is never regressed: it requires only
-    ONE genuine quote (paraphrase or format drift in the others is fine, and
-    context-only quotes from target-src simply do not count toward the bar since
-    the diff itself lives in target.txt). It catches wholesale fabrication,
-    which is the failure this defends against. The caller invokes it only when
-    target.txt was actually read from disk; a checker-side read failure skips
-    the check (see _triage_evidence_verified) rather than rejecting a real
-    result."""
+    one genuine target span, while paraphrase or format drift in the rest is
+    fine, and context-only target-src evidence simply does not count toward the
+    bar since the diff itself lives in target.txt. It catches wholesale
+    fabrication, which is the failure this defends against. The caller invokes
+    it only when target.txt was actually read from disk; a checker-side read
+    failure skips the check (see _triage_evidence_verified) rather than
+    rejecting a real result."""
     quotes, fallback = _evidence_candidates(evidence)
     hay = _normalize_evidence_text(target_text)
     if not hay:
@@ -1248,11 +1248,11 @@ def _read_target_text(path, limit=4_000_000):
 
 
 def _triage_evidence_verified(data, target_file):
-    """Anchor-check the parsed triage's evidence quotes against the on-disk
+    """Anchor-check the parsed triage's evidence spans against the on-disk
     target.txt. Fail-OPEN when target.txt is unreadable/empty (the required
     non-empty `evidence` schema field in normalize_triage is the primary guard,
     and a checker-side infra failure must never reject a real triage);
-    fail-CLOSED only when target.txt is readable AND no quote matches it."""
+    fail-CLOSED only when target.txt is readable AND no span matches it."""
     target_text = _read_target_text(target_file)
     if not target_text:
         return True
@@ -4713,9 +4713,9 @@ def decide_triage_apply(
                        produced a valid result -> apply the repaired triage.
     - `repair-failed`: original invalid (schema-miss) and no valid repair -> the
                        visible triage-unavailable error, now carrying `reason`.
-    - `anchor-fail`  : original parsed but its evidence quotes did not anchor to
+    - `anchor-fail`  : original parsed but its evidence spans did not anchor to
                        the fetched target -> unchanged fail-open (NO repair; a
-                       repair turn cannot conjure real quotes).
+                       repair turn cannot conjure real target spans).
     - `no-result`    : nothing was delivered (excluded classes) -> unchanged.
 
     `triage` is the RAW parsed dict for success/repaired (fed straight to
@@ -4813,7 +4813,7 @@ def main():
         "--target-file",
         default="",
         help="Path to the on-disk target.txt used to anchor-check the model's "
-        "evidence quotes (pass-by-reference lazy/fabrication guard). Optional: "
+        "evidence spans (pass-by-reference lazy/fabrication guard). Optional: "
         "when absent or unreadable the anchor check is skipped and the required "
         "non-empty evidence schema field remains the primary guard.",
     )
