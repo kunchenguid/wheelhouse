@@ -27,6 +27,10 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
+An operator-approved exact-revision auto-triage replay first tombstones only the matching primary-triage claim marker and directly verifies that admission can no longer discover it.
+The original claim comment remains as a bounded superseded audit record, while schema-repair, deep-review, and natural-language claim identities are outside the supersede operation.
+If that tombstone cannot be written and verified, replay refuses the card before queueing or reservation.
+An admission duplicate for an exact queued revision is projected as a terminal card error without clearing the queue cache key, making the denial visible without enabling an hourly retry loop.
 Automatic triage also dual-writes one bounded claim-keyed `wheelhouse-triage-record` hidden comment for each admitted attempt, containing only version, event key, revision, structural status, and structural consumer code.
 Card consumers do not read that migration record yet.
 Automatic triage also reserves from the closed UTC daily budget ledger before its verified queued-card checkpoint.

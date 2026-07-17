@@ -160,6 +160,7 @@ jobs:
           FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}
           REPLAY_WAVE: ${{ inputs.replay_wave }}
           REPLAY_LIMIT: ${{ inputs.replay_limit }}
           REPLAY_DRY_RUN: ${{ inputs.replay_dry_run }}

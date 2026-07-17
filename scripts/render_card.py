@@ -4021,6 +4021,7 @@ def update_card_triage(
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
+    require_queued=False,
 ):
     """Attach a completed auto-triage attempt's result to its card.
 
@@ -4046,6 +4047,8 @@ def update_card_triage(
     if not state:
         return False
     kind = state.get("kind")
+    if require_queued and not triage_queued_for_head(state, revision):
+        return False
     held = bool(state.get("held"))
     remove_labels = []
     if held:
@@ -4768,6 +4771,11 @@ def main():
     tf.add_argument("--issue", required=True)
     tf.add_argument("--revision", required=True)
     tf.add_argument("--message", default=TRIAGE_UNAVAILABLE)
+    tf.add_argument(
+        "--queued-only",
+        action="store_true",
+        help="Apply the terminal failure only while this exact revision is queued.",
+    )
 
     tr = sub.add_parser("triage-recover")
     tr.add_argument("--issue", required=True)
@@ -4936,7 +4944,11 @@ def main():
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
         applied = update_card_triage(
-            args.issue, args.revision, error=args.message, owner=owner
+            args.issue,
+            args.revision,
+            error=args.message,
+            owner=owner,
+            require_queued=args.queued_only,
         )
         _github_output("applied", "true" if applied else "false")
         _github_output("triage_status", "error")

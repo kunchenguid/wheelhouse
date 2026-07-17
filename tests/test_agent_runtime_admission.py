@@ -69,6 +69,32 @@ def main():
     else:
         check("identity: triage cannot be widened by event delivery id", False)
 
+    for excluded_action in (
+        "triage.schema-repair",
+        "deep-review.local",
+        "nl-decision.local",
+    ):
+        try:
+            agent_claim.supersede_triage_claim(
+                action=excluded_action,
+                owner="owner",
+                repo="repo",
+                number=7,
+                issue=42,
+                revision="abcdef1",
+                repo_slug="owner/cards",
+            )
+        except ContractError:
+            check(
+                "claim: replay supersede rejects %s scope" % excluded_action,
+                True,
+            )
+        else:
+            check(
+                "claim: replay supersede rejects %s scope" % excluded_action,
+                False,
+            )
+
     record = stage_record(
         action="deep-review.local",
         source_sha="a" * 40,

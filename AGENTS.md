@@ -456,7 +456,13 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Automatic-triage replay is operator-only, exact-revision, and once per card revision.**
   `scripts/triage_replay.py` is reachable only from an owner-started `scan-backstop.yml` `workflow_dispatch` with a non-empty validated `replay_wave`; the input defaults empty and the scheduled path cannot reach it.
   Candidate listings supply issue numbers only, while every card and live target is re-read by exact number before a marker write.
-  Replay clears only a proven current `triage_status:error` non-success cache or marks an entirely absent cache, preserves the derived attempt count, writes the versioned non-material `triage_replay` marker once, and re-enters `reconcile.maybe_queue_auto_triage` so the existing reservation, queued checkpoint, sealed dispatch permit, and `triage.yml` admission remain authoritative.
+  Before replay clears a proven current `triage_status:error` non-success cache or marks an entirely absent cache, it tombstones the exact primary-triage claim marker that would otherwise deny re-admission while preserving the comment as an audit trail.
+  The tombstone is directly verified and must make the exact marker undiscoverable before queueing; any read, write, or verification failure refuses that card before an attempt count or daily reservation is consumed.
+  Schema-repair, deep-review, and natural-language claims have distinct action or event identities and can never be superseded by replay.
+  Replay then preserves the derived attempt count, writes the versioned non-material `triage_replay` marker once, and re-enters `reconcile.maybe_queue_auto_triage` so the existing reservation, queued checkpoint, sealed dispatch permit, and `triage.yml` admission remain authoritative.
+  The one bounded cohort exception recognizes a prior replay whose still-visible terminal primary claim and any claim-keyed result record both predate the replay marker, proving that the replay was denied before task construction.
+  Only that duplicate-only reservation is removed from the per-revision attempt count and once-per-revision marker guard; the daily ledger reservation and every other guard remain intact.
+  If `triage.yml` nevertheless denies an exact queued revision as `admission.duplicate`, its trusted card consumer records `triage_status:error` without clearing `triaged_sha`, so the denial is visible and cannot create an hourly requeue loop.
   Malformed or mismatched state, markers, identities, revisions, labels, authorship, sources, attempt counts, or budget ledgers fail closed.
   `--dry-run` performs the same exact-number eligibility reads and reports planned actions without any GitHub write.
   `docs/AGENT_RUNTIME.md` owns the additive `wheelhouse-triage-record` migration record shape.
