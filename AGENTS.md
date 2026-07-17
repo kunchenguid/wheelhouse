@@ -653,7 +653,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `head_sha` from the tick event, and `deep-review.yml` uses those immutable
   inputs for bot-dispatched runs instead of re-reading the mutable card body.
   Owner-triggered `workflow_dispatch` can also be run with only `issue=...` for direct verification; that path fetches and parses the current card body with `github.token`.
-  Every direct Claude action in the separately permissioned model workflow has `allowed_bots: github-actions[bot]`, because the trusted parent dispatch makes that bot the exact child-workflow actor and the action otherwise rejects the run before it emits `execution_file`.
+  Every direct Claude action in the separately permissioned model workflow has `allowed_bots: github-actions[bot]`, because a bot-triggered trusted caller retains that exact actor in the reusable model job and the action otherwise rejects the run before it emits `execution_file`.
   Keep that allow-list exact - never `*` and never an external bot actor.
   The manual `needs-deep-review` label path is unchanged (a human applying it raises the `labeled` event normally) and remains a card-body parse path in `deep-review.yml`, alongside owner-triggered issue-only `workflow_dispatch` verification runs.
   This is a deliberate asymmetry: the manual label and issue-only workflow-dispatch paths authorize only the repository owner.
@@ -1168,7 +1168,8 @@ AgentTask `idempotencyKey` is the normalized event-key hash.
 Content-free `wheelhouse-agent-stage` records begin at admission and bind action, Wheelhouse source SHA, event-key hash, and execution ID when available; they never carry prompt, comment, target, search, or credential content.
 
 The seven current direct Claude Action invocations are the explicit production adapter path behind the unified selection boundary.
-They run only in the separately permissioned `claude-model.yml` workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
+They run only in the separately permissioned `claude-model.yml` reusable workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
+Each local reusable-workflow call resolves from the caller's exact commit and also passes that commit as `expected_commit_sha`; the model job must observe the same `GITHUB_SHA` before hydration, checkpointing, or provider execution.
 Every direct step is conditional on the resolved Claude mode, and no provider failure can trigger a different adapter.
 Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
 Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
@@ -1177,7 +1178,9 @@ Repository inputs are packaged by `agent_runtime/task_builder.py` from the exact
 A source checkout may be branch-attached because `actions/checkout@v4` checks an external repository's default branch out with `git checkout -B`; exact HEAD equality plus clean pre/post conditions bind that production issue-triage shape, while AgentTask `git.detached` describes the emitted content-addressed snapshot.
 See `tests/test_agent_runtime_repo_snapshot.py`.
 The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, verifies the complete handoff into a fresh workspace, and enables the pinned action's subprocess isolation.
-Trusted parent jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary, supervise the hard deadline, and normalize only a task-bound transcript plus observed enforcement record.
+Its finalizer re-verifies the handoff, normalizes and binds the result, then exposes only a bounded verified result artifact to the trusted caller-side consumer.
+The reusable model job owns the task-bound execution timeout and its finalizer normalizes only a task-bound transcript plus observed enforcement record.
+Trusted caller-side jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary and accept only the verified normalized result artifact.
 
 The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.
 

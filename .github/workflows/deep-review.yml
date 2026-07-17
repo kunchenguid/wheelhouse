@@ -120,6 +120,29 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    outputs:
+      gate_mode: ${{ steps.gate.outputs.mode }}
+      issue: ${{ steps.target.outputs.issue }}
+      slug: ${{ steps.resolve.outputs.slug }}
+      repo: ${{ steps.resolve.outputs.repo }}
+      number: ${{ steps.resolve.outputs.number }}
+      kind: ${{ steps.resolve.outputs.kind }}
+      revision: ${{ steps.resolve.outputs.revision }}
+      head_ok: ${{ steps.verify_head.outputs.head_ok }}
+      head_verdict: ${{ steps.verify_head.outputs.verdict }}
+      event_admitted: ${{ steps.event-claim.outputs.admitted }}
+      event_action: ${{ steps.event-claim.outputs.action }}
+      event_key: ${{ steps.event-claim.outputs.event_key }}
+      claim_id: ${{ steps.event-claim.outputs.comment_id }}
+      claim_marker: ${{ steps.event-claim.outputs.marker }}
+      pre_model_fresh: ${{ steps.pre-model-freshness.outputs.fresh }}
+      claude_ready: ${{ steps.claude-model.outcome == 'success' }}
+      input_artifact: ${{ steps.claude-model.outputs.input-artifact }}
+      output_artifact: ${{ steps.claude-model.outputs.output-artifact }}
+      handoff_sha256: ${{ steps.claude-model.outputs.handoff-sha256 }}
+      correlation_id: ${{ steps.claude-model.outputs.correlation-id }}
+      child_timeout_minutes: ${{ steps.claude-model.outputs.child-timeout-minutes }}
+      codex_result_artifact: ${{ steps.codex-result-name.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -568,11 +591,10 @@ jobs:
           set -euo pipefail
           if [ "$SEARCH" = "true" ]; then action="deep-review.search"; else action="deep-review.local"; fi
           repository_commit="$(git -C target-src rev-parse HEAD)"
-          revision="$REVISION"
           python scripts/agent_runtime.py build-task \
             --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
-            --number "$NUMBER" --kind "$KIND" --revision "$revision" \
+            --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit" \
             --event-key "$EVENT_KEY"
@@ -644,7 +666,6 @@ jobs:
             action="deep-review.local"
           fi
           repository_commit="$(git -C target-src rev-parse HEAD)"
-          revision="$REVISION"
           python scripts/agent_runtime.py build-task \
             --action "$action" \
             --prompt prompt.txt \
@@ -654,7 +675,7 @@ jobs:
             --repo "$REPO" \
             --number "$NUMBER" \
             --kind "$KIND" \
-            --revision "$revision" \
+            --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" \
             --target-file target.txt \
             --repository-dir target-src \
@@ -681,18 +702,104 @@ jobs:
         if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
         run: python scripts/agent_runtime.py summary --result '${{ steps.agent-runtime.outputs.result }}'
 
+      - id: codex-result-name
+        if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
+        run: echo "artifact=wheelhouse-deep-codex-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the normalized Codex deep-review result
+        if: ${{ always() && steps.agent-runtime.outputs.result != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.codex-result-name.outputs.artifact }}
+          path: ${{ steps.agent-runtime.outputs.result }}
+          if-no-files-found: error
+          retention-days: 1
+
+  deep-model:
+    needs: deep-review
+    if: ${{ needs.deep-review.outputs.claude_ready == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/claude-model.yml
+    with:
+      input_artifact: ${{ needs.deep-review.outputs.input_artifact }}
+      output_artifact: ${{ needs.deep-review.outputs.output_artifact }}
+      handoff_sha256: ${{ needs.deep-review.outputs.handoff_sha256 }}
+      expected_commit_sha: ${{ github.sha }}
+      correlation_id: ${{ needs.deep-review.outputs.correlation_id }}
+      child_timeout_minutes: ${{ fromJSON(needs.deep-review.outputs.child_timeout_minutes) }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
+
+  deep-review-consume:
+    needs: [deep-review, deep-model]
+    if: ${{ always() && needs.deep-review.outputs.event_admitted == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - id: trusted-src
+        run: |
+          set -euo pipefail
+          trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
+          python_path="$(command -v python)"
+          gh_path="$(command -v gh)"
+          safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          rm -rf "$trusted"
+          mkdir -p "$trusted"
+          tar --exclude=.git -cf - . | tar -xf - -C "$trusted"
+          find "$trusted" -type f -exec chmod a-w {} +
+          find "$trusted" -type d -exec chmod a-w {} +
+          {
+            echo "path=$trusted"
+            echo "python=$python_path"
+            echo "safe_path=$safe_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: claude-result
+        name: Receive the trusted normalized deep-review result
+        if: ${{ needs.deep-review.outputs.gate_mode == 'claude' && needs.deep-model.outputs.result_artifact != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/claude-model-result
+        with:
+          artifact: ${{ needs.deep-model.outputs.result_artifact }}
+          invocation-id: deep-review
+
+      - id: codex-result
+        name: Receive the normalized Codex deep-review result
+        if: ${{ needs.deep-review.outputs.gate_mode == 'codex' && needs.deep-review.outputs.codex_result_artifact != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.deep-review.outputs.codex_result_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-deep-codex-result
+
       - id: post-model-freshness
         name: Re-read target revision before deep-review projection
-        if: ${{ always() && steps.pre-model-freshness.outputs.fresh == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           CARD_TOKEN: ${{ github.token }}
-          SLUG: ${{ steps.resolve.outputs.slug }}
-          NUMBER: ${{ steps.resolve.outputs.number }}
-          KIND: ${{ steps.resolve.outputs.kind }}
-          EXPECTED_REVISION: ${{ steps.resolve.outputs.revision }}
-          CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
-          CLAIM_MARKER: ${{ steps.event-claim.outputs.marker }}
+          SLUG: ${{ needs.deep-review.outputs.slug }}
+          NUMBER: ${{ needs.deep-review.outputs.number }}
+          KIND: ${{ needs.deep-review.outputs.kind }}
+          EXPECTED_REVISION: ${{ needs.deep-review.outputs.revision }}
+          CLAIM_ID: ${{ needs.deep-review.outputs.claim_id }}
+          CLAIM_MARKER: ${{ needs.deep-review.outputs.claim_marker }}
           CARD_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -710,27 +817,26 @@ jobs:
             GH_TOKEN="$CARD_TOKEN" gh api --method PATCH \
               "repos/$CARD_REPO/issues/comments/$CLAIM_ID" -f "body=$body" >/dev/null
             python scripts/agent_runtime.py stage \
-              --action "${{ steps.event-claim.outputs.action }}" \
+              --action "${{ needs.deep-review.outputs.event_action }}" \
               --source-sha "${{ github.sha }}" \
-              --event-key "${{ steps.event-claim.outputs.event_key }}" \
+              --event-key "${{ needs.deep-review.outputs.event_key }}" \
               --stage stale --status failed --code target.stale
           fi
 
-      # Post the normalized verdict on the card with THIS repo's token.
       - id: verdict-consumer
         name: Post the verdict on the card
-        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.post-model-freshness.outputs.fresh == 'true' }}
+        if: ${{ steps.post-model-freshness.outputs.fresh == 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE: ${{ steps.target.outputs.issue }}
-          HEAD_OK: ${{ steps.verify_head.outputs.head_ok }}
-          HEAD_VERDICT: ${{ steps.verify_head.outputs.verdict }}
-          EXECUTION_FILE: ${{ steps.claude-model.outputs.result || steps.agent-runtime.outputs.result }}
-          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+          ISSUE: ${{ needs.deep-review.outputs.issue }}
+          HEAD_OK: ${{ needs.deep-review.outputs.head_ok }}
+          HEAD_VERDICT: ${{ needs.deep-review.outputs.head_verdict }}
+          EXECUTION_FILE: ${{ needs.deep-review.outputs.gate_mode == 'claude' && steps.claude-result.outputs.result || format('{0}/wheelhouse-deep-codex-result/result.json', runner.temp) }}
+          TARGET_REPO: ${{ needs.deep-review.outputs.repo }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          CLAIM_ID: ${{ steps.event-claim.outputs.comment_id }}
-          CLAIM_MARKER: ${{ steps.event-claim.outputs.marker }}
+          CLAIM_ID: ${{ needs.deep-review.outputs.claim_id }}
+          CLAIM_MARKER: ${{ needs.deep-review.outputs.claim_marker }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -763,7 +869,6 @@ jobs:
             CLAIM_ID="$CLAIM_ID" \
             CLAIM_MARKER="$CLAIM_MARKER" \
             "$TRUSTED_PYTHON" - <<'PY'
-          import json
           import os
           import subprocess
           import sys
@@ -771,115 +876,37 @@ jobs:
           sys.path.insert(0, "scripts")
           import render_card as cards
           import wheelhouse_core as core
+          from agent_runtime.consumer import result_text
 
-          FALLBACK = "Deep review ran but produced no verdict (see the workflow run logs)."
-
-          def text_from_content(content):
-              if isinstance(content, str):
-                  return content.strip()
-              if not isinstance(content, list):
-                  return ""
-              parts = []
-              for item in content:
-                  if (
-                      isinstance(item, dict)
-                      and item.get("type") == "text"
-                      and isinstance(item.get("text"), str)
-                  ):
-                      text = item["text"].strip()
-                      if text:
-                          parts.append(text)
-              return "\n".join(parts).strip()
-
-          def extract_verdict(path):
-              if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-                  return ""
+          verdict = ""
+          path = os.environ.get("EXECUTION_FILE", "")
+          if path:
               try:
-                  from agent_runtime.consumer import result_text
-                  normalized = result_text(path, require_success=True)
-                  if normalized:
-                      return normalized
-              except (ImportError, OSError, ValueError):
+                  verdict = result_text(path, require_success=True)
+              except (OSError, ValueError):
                   pass
-              try:
-                  with open(path, encoding="utf-8") as f:
-                      events = json.load(f)
-              except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                  return ""
-              if not isinstance(events, list):
-                  return ""
-
-              for event in reversed(events):
-                  if (
-                      isinstance(event, dict)
-                      and event.get("type") == "result"
-                      and not event.get("is_error")
-                      and isinstance(event.get("result"), str)
-                      and event["result"].strip()
-                  ):
-                      return event["result"].strip()
-
-              for event in reversed(events):
-                  if isinstance(event, dict) and event.get("type") == "assistant":
-                      message = event.get("message")
-                      if isinstance(message, dict):
-                          text = text_from_content(message.get("content"))
-                          if text:
-                              return text
-              return ""
-
-          failed = False
+          failed = not verdict
           if os.environ.get("HEAD_OK") == "false":
-              verdict = os.environ.get("HEAD_VERDICT", "").strip()
-              if not verdict:
-                  verdict = "Deep review did not run because the target PR head moved after the card decision."
+              verdict = os.environ.get("HEAD_VERDICT", "").strip() or "Deep review did not run because the target PR head moved after the card decision."
               failed = True
-          else:
-              verdict = extract_verdict(os.environ.get("EXECUTION_FILE", ""))
-              if not verdict:
-                  verdict = FALLBACK
-                  failed = True
-
-          # The card lives in THIS (cards) repo, but the verdict is about the
-          # TARGET repo. Label known automated harness status lines, then
-          # qualify any bare `#N` the model wrote so it does not autolink to
-          # this repo instead. Owner/repo come from the deterministic `resolve`
-          # step output, never from the model text.
+          elif not verdict:
+              verdict = "Deep review ran but produced no verdict (see the workflow run logs)."
           verdict = cards.label_automated_status_lines(verdict)
-          verdict = core.qualify_issue_refs(
-              verdict,
-              os.environ.get("GITHUB_REPOSITORY_OWNER", ""),
-              os.environ.get("TARGET_REPO", ""),
-          )
-
+          verdict = core.qualify_issue_refs(verdict, os.environ.get("GITHUB_REPOSITORY_OWNER", ""), os.environ.get("TARGET_REPO", ""))
           body = "%s\n\n%s" % (verdict, os.environ["CLAIM_MARKER"])
-          subprocess.run(
-              [
-                  "gh",
-                  "api",
-                  "--method",
-                  "PATCH",
-                  "repos/%s/issues/comments/%s" % (
-                      os.environ["GH_REPO"],
-                      os.environ["CLAIM_ID"],
-                  ),
-                  "-f",
-                  "body=%s" % body,
-              ],
-              check=True,
-          )
+          subprocess.run(["gh", "api", "--method", "PATCH", "repos/%s/issues/comments/%s" % (os.environ["GH_REPO"], os.environ["CLAIM_ID"]), "-f", "body=%s" % body], check=True)
           if failed:
               sys.exit(1)
           PY
 
       - name: Record deep-review consumer stage
-        if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
+        if: ${{ always() }}
         run: |
           status="failed"; stage="consumer-rejected"; code="consumer.rejected"
           if [ "${{ steps.verdict-consumer.outcome }}" = "success" ]; then status="ok"; stage="consumer-committed"; code="consumer.committed"; fi
-          if [ "${{ steps.pre-model-freshness.outputs.fresh }}" = "false" ] || [ "${{ steps.post-model-freshness.outputs.fresh }}" = "false" ]; then code="consumer.stale"; fi
+          if [ "${{ needs.deep-review.outputs.pre_model_fresh }}" = "false" ] || [ "${{ steps.post-model-freshness.outputs.fresh }}" = "false" ]; then code="consumer.stale"; fi
           python scripts/agent_runtime.py stage \
-            --action "${{ steps.event-claim.outputs.action }}" \
+            --action "${{ needs.deep-review.outputs.event_action }}" \
             --source-sha "${{ github.sha }}" \
-            --event-key "${{ steps.event-claim.outputs.event_key }}" \
+            --event-key "${{ needs.deep-review.outputs.event_key }}" \
             --stage "$stage" --status "$status" --code "$code"

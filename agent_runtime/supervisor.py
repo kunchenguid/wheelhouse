@@ -54,7 +54,7 @@ FALLBACK_ELIGIBLE = {
     "transport.connection",
     "transport.stream_interrupted",
 }
-RETRYABLE = FALLBACK_ELIGIBLE
+RETRYABLE = FALLBACK_ELIGIBLE | {"source.revision_mismatch"}
 
 
 def _now() -> str:

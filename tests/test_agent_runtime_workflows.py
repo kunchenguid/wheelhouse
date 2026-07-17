@@ -54,6 +54,15 @@ def main():
     checkpoint = next((index for index, step in enumerate(model_steps) if step.get("name") == "Write conservative pre-invocation checkpoint"), -1)
     checkpoint_upload = next((index for index, step in enumerate(model_steps) if step.get("name") == "Upload durable pre-invocation checkpoint"), -1)
     check("production: durable spend checkpoint precedes every direct action", repository < checkpoint < checkpoint_upload < min(direct) and '"spendStarted": True' in model_steps[checkpoint]["run"] and "-attempt" in str(model_steps[checkpoint_upload]))
+    check(
+        "production: provider checkpoint rebinds the hydrated task to the caller commit",
+        (model_steps[checkpoint].get("env") or {}).get("EXPECTED_COMMIT_SHA")
+        == "${{ inputs.expected_commit_sha }}"
+        and 'task.get("metadata", {}).get("wheelhouseRevision")'
+        in model_steps[checkpoint]["run"]
+        and 'os.environ["GITHUB_SHA"] != os.environ["EXPECTED_COMMIT_SHA"]'
+        in model_steps[checkpoint]["run"],
+    )
     check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
     capture = next(step for step in model_steps if step.get("id") == "capture")
     check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
@@ -88,7 +97,7 @@ def main():
         "production: every packaged handoff invocation redirects bytecode via disjoint PYTHONPYCACHEPREFIX",
         len(packaged_invocations) >= 3
         and all(
-            (step.get("env") or {}).get("PYTHONPYCACHEPREFIX") == "${{ runner.temp }}/wheelhouse-pycache"
+            str((step.get("env") or {}).get("PYTHONPYCACHEPREFIX", "")).startswith("${{ runner.temp }}/wheelhouse-")
             and "mkdir -p" in str(step.get("run", ""))
             and "PYTHONPYCACHEPREFIX collides with signed handoff" in str(step.get("run", ""))
             and "unset PYTHONDONTWRITEBYTECODE" in str(step.get("run", ""))
@@ -159,21 +168,35 @@ def main():
     model_calls = [step for _, step in all_steps if step.get("uses") == "./.github/actions/claude-model-call"]
     check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 4 and len(codex_build_steps) == 4)
     check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 4)
-    check("runtime: trusted bridge requires observed enforcement proof", "--enforcement-file" in component and "bridge-claude" in component)
+    model_text = WORKFLOWS["model"].read_text()
+    check("runtime: trusted bridge requires observed enforcement proof", "from agent_runtime.claude_bridge import bridge" in model_text and 'proof="$RAW/enforcement.json"' in model_text)
     check("runtime: handoff has byte and file bounds plus complete digest verification", "MAX_HANDOFF_BYTES" in handoff and "MAX_HANDOFF_FILES" in handoff and "_verify_bundle" in handoff and "manifest verification failed" in handoff)
     check("runtime: model job receives a trusted manifest identity", "handoff_sha256" in WORKFLOWS["model"].read_text() and "steps.pack.outputs.manifestSha256" in component)
-    dispatch = Path("scripts/claude_model_dispatch.py").read_text()
-    check("runtime: trusted parent dispatches by ref and binds expected commit", "--dispatch-ref" in component and "--expected-sha" in component and "expected_commit_sha" in dispatch and '"--ref", args.dispatch_ref' in dispatch)
-    check("runtime: child correlation separates title identity from revision validation", "display_title" in dispatch and "observed_sha" in dispatch and "revision-mismatch" in dispatch)
-    check("runtime: child lookup is recent, branch-scoped, and page-bounded", "LOOKUP_WINDOW_SECONDS" in dispatch and "MAX_LOOKUP_PAGES" in dispatch and "urlencode" in dispatch and "--paginate" not in dispatch)
-    check("runtime: correlated child polling uses its run ID", "def run_status" in dispatch and "run_status(run_id, child_deadline)" in dispatch)
-    check("runtime: parent discovery, cancellation, and commands are bounded", "dispatch_deadline" in dispatch and "CANCEL_WAIT_SECONDS" in dispatch and "COMMAND_TIMEOUT_SECONDS" in dispatch and "while not run_id" not in dispatch and "def cancel_and_wait" in dispatch)
-    check("runtime: parent SIGTERM uses shared cancellation and recovery cleanup", "signal.SIGTERM" in dispatch and "def terminate_parent" in dispatch and "ParentCancelled" in dispatch and "finally:" in dispatch and "recover_attempt(run_id, recovery_conclusion, termination_reason, cancellation)" in dispatch)
-    check("runtime: undiscovered delayed child has its own job timeout", "child_timeout_minutes" in WORKFLOWS["model"].read_text() and "timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}" in WORKFLOWS["model"].read_text() and "child_timeout_minutes=%d" in dispatch)
+    reusable_calls = [job for doc in docs.values() for job in doc.get("jobs", {}).values() if job.get("uses") == "./.github/workflows/claude-model.yml"]
+    check("runtime: caller binds reusable model job to its own commit", len(reusable_calls) == 4 and all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for job in reusable_calls))
+    check("runtime: local workflow reference eliminates mutable branch resolution", all(job.get("uses") == "./.github/workflows/claude-model.yml" for job in reusable_calls) and "github.ref_name" not in text and "gh workflow run" not in component)
+    check(
+        "runtime: source validation remains distinct from job binding",
+        "steps.source.outputs.match == 'true'" in model_text
+        and 'if [ "$GITHUB_SHA" = "$EXPECTED_COMMIT_SHA" ]; then' in model_text
+        and "write_revision_mismatch_result" in model_text
+        and "source.revision_mismatch"
+        in Path("agent_runtime/claude_bridge.py").read_text(),
+    )
+    check("runtime: reusable boundary removes title/run discovery", not Path("scripts/claude_model_dispatch.py").exists() and "display_title" not in component and "matching_run" not in component)
+    check("runtime: GitHub job cancellation retains durable checkpoint recovery", "Upload durable pre-invocation checkpoint" in model_text and "Download durable pre-invocation checkpoint" in model_text and "needs.model.result" in model_text)
+    check("runtime: child execution timeout remains task-bound", "child_timeout_minutes" in model_text and "timeout-minutes: ${{ inputs.child_timeout_minutes }}" in model_text)
     check("runtime: provenance distinguishes write-capable token absence", "writeCapableGithubTokenAvailable" in WORKFLOWS["model"].read_text() and "writeCapableGithubTokenAvailable" in Path("agent_runtime/claude_bridge.py").read_text())
     check("runtime: no trusted consumer reads raw Claude execution data", all("outputs.execution_file" not in str((step.get("env") or {}).get(name, "")) for _, step in all_steps for name in ("EXECUTION_FILE", "RUNTIME_RESULT") if step.get("id") != "capture" and "bridge-claude" not in str(step.get("run", ""))))
-    model_action = Path(".github/actions/claude-model-call/action.yml").read_text(encoding="utf-8")
-    check("runtime: parent revision mismatch bypasses child evidence", "steps.dispatch.outputs.result_file == ''" in model_action and "PARENT_RESULT" in model_action and "steps.result.outputs.result" in model_action)
+    check("runtime: source mismatch emits a trusted result without provider evidence", "write_revision_mismatch_result" in model_text and "caller-commit" in model_text and "steps.source.outputs.match == 'true'" in model_text)
+    check(
+        "runtime: source mismatch cannot consume the durable provider checkpoint",
+        model_steps[checkpoint].get("if")
+        == "${{ steps.hydrate.outcome == 'success' }}"
+        and model_steps[checkpoint_upload].get("if")
+        == "${{ steps.hydrate.outcome == 'success' }}"
+        and "steps.source.outputs.match == 'true'" in str(capture.get("if", "")),
+    )
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
     check("runtime: no configured action can reach a Codex workflow path", all(row["target"] == "claude" for row in yaml.safe_load(Path("wheelhouse.config.yml").read_text())["agent_runtime"]["actions"].values()))
     check("runtime: all use pinned app-server package", text.count("@openai/codex@0.144.0") >= 3)
@@ -183,7 +206,6 @@ def main():
     check("runtime: every Codex setup installs only verified local artifacts", all("npm install --offline" in step["run"] and '"$tarball"' in step["run"] and 'tar -xzf "$platform_tarball"' in step["run"] for step in package_steps))
     check("runtime: verification precedes install and executable extraction", all(step["run"].index("agent_runtime.py verify-package") < step["run"].index("npm install --offline") < step["run"].index('tar -xzf "$platform_tarball"') < step["run"].index("--version | grep") for step in package_steps))
     check("runtime: all verify vendored protocol pins", text.count("agent_runtime.py verify-pins") >= 3)
-    model_text = WORKFLOWS["model"].read_text()
     check("runtime: Claude proof records only observed bridge controls", all(value in model_text for value in ("github-readonly-artifact-bridge-v1", "content-addressed-bounded-verified", "targetInputsReadOnly", "local-no-remote", "declaredTools")) and "subprocessIsolation" not in model_text and "bubblewrap socat" not in model_text)
     check("runtime: Claude harness provenance is observed or explicitly pinned", all(value in model_text for value in ("actionSourceCommit", "actionMetadataQuality", "actionMetadataSha256")) and "canonical_sha256({\"actionCommit\"" not in Path("agent_runtime/claude_bridge.py").read_text())
 
@@ -196,10 +218,11 @@ def main():
 
     triage = docs["triage"]
     triage_steps = {step.get("id"): step for step in steps(triage) if step.get("id")}
-    check("triage consumer: Claude AgentResult required", "steps.claude-model.outputs.result" in str((triage_steps["triage-result"].get("env") or {}).get("EXECUTION_FILE")))
-    check("repair consumer: normalized repair result required", "steps.claude-repair-model.outputs.result" in str((triage_steps["repair-result"].get("env") or {}).get("RUNTIME_RESULT")))
+    compact = next(step for step in steps(triage) if step.get("id") == "compact-results")
+    check("triage consumer: Claude AgentResult required", "steps.primary-result.outputs.result" in str((compact.get("env") or {}).get("PRIMARY")))
+    check("repair consumer: normalized repair result required", "steps.repair-result-received.outputs.result" in str((compact.get("env") or {}).get("REPAIR")))
     deep_post = next(step for step in steps(docs["deep"]) if step.get("name") == "Post the verdict on the card")
-    check("deep consumer: Claude AgentResult required", "steps.claude-model.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
+    check("deep consumer: Claude AgentResult required", "steps.claude-result.outputs.result" in str((deep_post.get("env") or {}).get("EXECUTION_FILE")))
     deep_steps = steps(docs["deep"])
     deep_ids = [step.get("id") for step in deep_steps]
     deep_gate = next(step for step in deep_steps if step.get("id") == "gate")
@@ -207,6 +230,63 @@ def main():
     check("deep selection: gate uses validated resolved repository", (deep_gate.get("env") or {}).get("TARGET_REPO") == "${{ steps.resolve.outputs.repo }}" and '--repo "$TARGET_REPO"' in deep_gate["run"])
     nl_result = next(step for step in steps(docs["decision"]) if step.get("id") == "nl-result")
     check("NL consumer: runtime final exported before deterministic route", "agent_runtime.py export-final" in nl_result["run"])
+    nl_consume_steps = docs["decision"]["jobs"]["nl-claude-consume"]["steps"]
+    nl_export = next(step for step in nl_consume_steps if step.get("id") == "nl-result")
+    nl_failure = next(
+        step for step in nl_consume_steps if step.get("id") == "nl-failure-consumer"
+    )
+    nl_stage = next(
+        step
+        for step in nl_consume_steps
+        if step.get("name") == "Record natural-language consumer stage"
+    )
+    check(
+        "NL projection: trusted result export runs under always for admitted Claude work",
+        "always()" in str(nl_export.get("if", ""))
+        and nl_export.get("continue-on-error") is True
+        and "steps.nl-claude-result.outputs.result"
+        in str((nl_export.get("env") or {}).get("RUNTIME_RESULT", "")),
+    )
+    check(
+        "NL projection: source drift receives the precise bounded retry note",
+        (nl_failure.get("env") or {}).get("ERROR_CODE")
+        == "${{ steps.nl-claude-result.outputs.error-code }}"
+        and "source.revision_mismatch" in nl_failure["run"]
+        and "Wheelhouse updated while this request waited; please retry."
+        in nl_failure["run"]
+        and "The assistant did not produce a trusted result." in nl_failure["run"],
+    )
+    check(
+        "NL projection: final stage preserves the normalized model error code",
+        (nl_stage.get("env") or {}).get("MODEL_ERROR_CODE")
+        == "${{ steps.nl-claude-result.outputs.error-code }}"
+        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"' in nl_stage["run"],
+    )
+    triage_consume_steps = docs["triage"]["jobs"]["triage-claude-consume"][
+        "steps"
+    ]
+    triage_card = next(
+        step for step in triage_consume_steps if step.get("id") == "card-consumer"
+    )
+    triage_stage = next(
+        step
+        for step in triage_consume_steps
+        if step.get("name") == "Finalize primary triage claim and stage evidence"
+    )
+    check(
+        "triage projection: source drift receives the precise retry result",
+        (triage_card.get("env") or {}).get("PRIMARY_ERROR_CODE")
+        == "${{ steps.primary-result.outputs.error-code }}"
+        and "source.revision_mismatch" in triage_card["run"]
+        and "Wheelhouse updated while this request waited; please retry."
+        in triage_card["run"],
+    )
+    check(
+        "triage projection: final claim preserves the normalized model error code",
+        (triage_stage.get("env") or {}).get("MODEL_ERROR_CODE")
+        == "${{ steps.primary-result.outputs.error-code }}"
+        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"],
+    )
     execute = next(step for step in steps(docs["decision"]) if step.get("id") == "execute")
     check("NL safety: deterministic FLEET_TOKEN executor remains separate", (execute.get("env") or {}).get("GH_TOKEN") == "${{ secrets.FLEET_TOKEN }}")
     check("NL safety: model runtime never receives FLEET_TOKEN", all("FLEET_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))

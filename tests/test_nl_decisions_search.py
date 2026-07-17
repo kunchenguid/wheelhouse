@@ -452,7 +452,7 @@ def read_file(path):
 
 
 def test_claude_output_is_isolated_before_routing():
-    steps = handle_steps()
+    steps = load_workflow()["jobs"]["nl-claude-consume"]["steps"]
     trusted = step_by_id(steps, "trusted-src")
     preserve = step_by_id(steps, "nl-result")
     route = step_by_id(steps, "route")
@@ -498,7 +498,8 @@ def test_claude_output_is_isolated_before_routing():
             "workflow: nl-result exports only normalized decision.json in runner temp",
             "${RUNNER_TEMP}/wheelhouse-nl" in run
             and "agent_runtime.py export-final" in run
-            and "steps.nl-claude-model.outputs.result" in str(env.get("RUNTIME_RESULT")),
+            and "steps.nl-claude-result.outputs.result"
+            in str(env.get("RUNTIME_RESULT")),
         )
         check(
             "workflow: raw model decision bypass is absent",
@@ -577,18 +578,19 @@ def test_claude_output_is_isolated_before_routing():
     preserve_i = step_index(steps, lambda s: s.get("id") == "nl-result")
     route_i = step_index(steps, lambda s: s.get("id") == "route")
     execute_i = step_index(steps, lambda s: s.get("id") == "execute")
-    claude_indexes = [step_index(steps, lambda s: s.get("id") == "nl-claude-model")]
     check(
-        "workflow: trusted source is prepared before every Claude step",
+        "workflow: trusted source is prepared before normalized result receipt",
         trusted_i is not None
-        and claude_indexes
-        and all(trusted_i < i for i in claude_indexes),
+        and step_index(steps, lambda s: s.get("id") == "nl-claude-result")
+        > trusted_i,
     )
     check(
-        "workflow: nl-result runs after every Claude step",
+        "workflow: nl-result runs after the caller-bound model job",
         preserve_i is not None
-        and claude_indexes
-        and all(i < preserve_i for i in claude_indexes),
+        and load_workflow()["jobs"]["nl-model"].get("uses")
+        == "./.github/workflows/claude-model.yml"
+        and "nl-model"
+        in load_workflow()["jobs"]["nl-claude-consume"].get("needs", []),
     )
     check(
         "workflow: trusted deterministic steps run after result isolation",

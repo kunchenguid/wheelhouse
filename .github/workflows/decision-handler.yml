@@ -44,6 +44,26 @@ jobs:
       kind: ${{ steps.decide.outputs.kind }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
       target_revision: ${{ steps.decide.outputs.target_revision }}
+      nl_proceed: ${{ steps.nl-gate.outputs.proceed }}
+      nl_runtime_mode: ${{ steps.nl-gate.outputs.runtime_mode }}
+      nl_action: ${{ steps.nl-gate.outputs.action }}
+      nl_repo: ${{ steps.nl-gate.outputs.repo }}
+      nl_number: ${{ steps.nl-gate.outputs.number }}
+      nl_kind: ${{ steps.nl-gate.outputs.kind }}
+      nl_revision: ${{ steps.nl-gate.outputs.revision }}
+      nl_admitted: ${{ steps.nl-claim.outputs.admitted }}
+      nl_event_key: ${{ steps.nl-claim.outputs.event_key }}
+      nl_claim_id: ${{ steps.nl-claim.outputs.comment_id }}
+      nl_claim_marker: ${{ steps.nl-claim.outputs.marker }}
+      nl_pre_model_fresh: ${{ steps.nl-pre-model-freshness.outputs.fresh }}
+      nl_prompt_built: ${{ steps.nl-prompt.outcome == 'success' }}
+      claude_ready: ${{ steps.nl-claude-model.outcome == 'success' }}
+      input_artifact: ${{ steps.nl-claude-model.outputs.input-artifact }}
+      output_artifact: ${{ steps.nl-claude-model.outputs.output-artifact }}
+      handoff_sha256: ${{ steps.nl-claude-model.outputs.handoff-sha256 }}
+      correlation_id: ${{ steps.nl-claude-model.outputs.correlation-id }}
+      child_timeout_minutes: ${{ steps.nl-claude-model.outputs.child-timeout-minutes }}
+      baseline_artifact: ${{ steps.nl-baseline-name.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -452,7 +472,6 @@ jobs:
           bundle: ${{ steps.nl-claude-task.outputs.bundle }}
           invocation-id: nl-decision
           allowed-repos: ${{ steps.nl-search-tool.outputs.repos || '[]' }}
-          delivered-file: "true"
 
       - name: Prepare the pinned Codex sandboxed adapter worker
         if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
@@ -537,11 +556,24 @@ jobs:
         if: ${{ always() && steps.nl-agent-runtime.outputs.result != '' }}
         run: python scripts/agent_runtime.py summary --result '${{ steps.nl-agent-runtime.outputs.result }}'
 
+      - id: nl-baseline-name
+        if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' }}
+        run: echo "artifact=wheelhouse-nl-baseline-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the exact post-claim card baseline
+        if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.nl-baseline-name.outputs.artifact }}
+          path: nl-card-baseline.json
+          if-no-files-found: error
+          retention-days: 1
+
       - id: nl-result
-        if: steps.nl-claim.outputs.admitted == 'true'
+        if: ${{ steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' }}
         env:
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
-          RUNTIME_RESULT: ${{ steps.nl-claude-model.outputs.result || steps.nl-agent-runtime.outputs.result }}
+          RUNTIME_RESULT: ${{ steps.nl-agent-runtime.outputs.result }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -559,7 +591,7 @@ jobs:
 
       - id: nl-post-model-freshness
         name: Re-read target revision before natural-language projection
-        if: ${{ always() && steps.nl-pre-model-freshness.outputs.fresh == 'true' }}
+        if: ${{ always() && steps.nl-pre-model-freshness.outputs.fresh == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' }}
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           CARD_TOKEN: ${{ github.token }}
@@ -865,7 +897,7 @@ jobs:
       # that had none.
       - id: nl-failure-consumer
         name: Note NL processing failure on card
-        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-post-model-freshness.outputs.fresh == 'true' && steps.nl-prompt.outcome == 'success' && steps.route.outcome == 'skipped' }}
+        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' && steps.nl-post-model-freshness.outputs.fresh == 'true' && steps.nl-prompt.outcome == 'success' && steps.route.outcome == 'skipped' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
@@ -885,7 +917,7 @@ jobs:
             -f "body=$body" >/dev/null
 
       - name: Record natural-language consumer stage
-        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' }}
+        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' }}
         run: |
           status="failed"; stage="consumer-rejected"; code="consumer.rejected"
           if [ "${{ steps.nl-action-consumer.outcome }}" = "success" ] || [ "${{ steps.nl-reply-consumer.outcome }}" = "success" ]; then
@@ -897,6 +929,380 @@ jobs:
             --action "${{ steps.nl-gate.outputs.action }}" \
             --source-sha "${{ github.sha }}" \
             --event-key "${{ steps.nl-claim.outputs.event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
+
+  nl-model:
+    needs: handle
+    if: ${{ needs.handle.outputs.claude_ready == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/claude-model.yml
+    with:
+      input_artifact: ${{ needs.handle.outputs.input_artifact }}
+      output_artifact: ${{ needs.handle.outputs.output_artifact }}
+      handoff_sha256: ${{ needs.handle.outputs.handoff_sha256 }}
+      expected_commit_sha: ${{ github.sha }}
+      correlation_id: ${{ needs.handle.outputs.correlation_id }}
+      child_timeout_minutes: ${{ fromJSON(needs.handle.outputs.child_timeout_minutes) }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
+
+  nl-claude-consume:
+    needs: [handle, nl-model]
+    if: ${{ always() && needs.handle.outputs.nl_admitted == 'true' && needs.handle.outputs.nl_runtime_mode == 'claude' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - id: trusted-src
+        run: |
+          set -euo pipefail
+          trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
+          python_path="$(command -v python)"
+          gh_path="$(command -v gh)"
+          safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          rm -rf "$trusted"
+          mkdir -p "$trusted"
+          tar --exclude=.git -cf - . | tar -xf - -C "$trusted"
+          find "$trusted" -type f -exec chmod a-w {} +
+          find "$trusted" -type d -exec chmod a-w {} +
+          {
+            echo "path=$trusted"
+            echo "python=$python_path"
+            echo "safe_path=$safe_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the exact post-claim card baseline
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.handle.outputs.baseline_artifact }}
+          path: .
+
+      - id: nl-claude-result
+        name: Receive the trusted normalized natural-language result
+        if: ${{ needs.nl-model.outputs.result_artifact != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/claude-model-result
+        with:
+          artifact: ${{ needs.nl-model.outputs.result_artifact }}
+          invocation-id: nl-decision
+
+      - id: nl-result
+        name: Export the trusted natural-language result
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          RUNTIME_RESULT: ${{ steps.nl-claude-result.outputs.result }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/wheelhouse-nl"
+          out_file="${out_dir}/decision.json"
+          mkdir -p "$out_dir"
+          : > "$out_file"
+          test -n "${RUNTIME_RESULT:-}"
+          python scripts/agent_runtime.py export-final \
+            --result "$RUNTIME_RESULT" --out "$out_file"
+
+      - id: nl-post-model-freshness
+        name: Re-read target revision before natural-language projection
+        if: ${{ always() && needs.handle.outputs.nl_pre_model_fresh == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          CARD_TOKEN: ${{ github.token }}
+          SLUG: ${{ github.repository_owner }}/${{ needs.handle.outputs.nl_repo }}
+          NUMBER: ${{ needs.handle.outputs.nl_number }}
+          KIND: ${{ needs.handle.outputs.nl_kind }}
+          EXPECTED_REVISION: ${{ needs.handle.outputs.nl_revision }}
+          CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
+          CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
+          CARD_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          observed=""
+          if [ "$KIND" = "issue-triage" ]; then
+            observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
+          else
+            observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
+          fi
+          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            body="The assistant output was rejected because the target revision changed or could not be verified. The card remains open and no target action was taken. ${CLAIM_MARKER}"
+            GH_TOKEN="$CARD_TOKEN" gh api --method PATCH \
+              "repos/$CARD_REPO/issues/comments/$CLAIM_ID" -f "body=$body" >/dev/null
+            python scripts/agent_runtime.py stage \
+              --action "${{ needs.handle.outputs.nl_action }}" \
+              --source-sha "${{ github.sha }}" \
+              --event-key "${{ needs.handle.outputs.nl_event_key }}" \
+              --stage stale --status failed --code target.stale
+          fi
+
+      - id: route
+        if: ${{ steps.nl-result.outcome == 'success' && steps.nl-post-model-freshness.outputs.fresh == 'true' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
+        env:
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          KIND: ${{ needs.handle.outputs.nl_kind }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            DECISION_FILE="$DECISION_FILE" \
+            ISSUE_BODY="$ISSUE_BODY" \
+            KIND="$KIND" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
+
+      - id: current-card
+        if: ${{ steps.route.outputs.mode == 'action' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          allowed=false
+          gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments > current-card.json
+          if [ -f nl-card-baseline.json ] && jq -e --slurpfile baseline nl-card-baseline.json '
+            . as $current
+            | $baseline[0] as $before
+            | ([.labels[].name] | sort | unique) == ([$before.labels[].name] | sort | unique)
+            and (.body // "") == ($before.body // "")
+            and (.updatedAt // "") == ($before.updatedAt // "")
+            and ([.comments[]?] | length) == ([$before.comments[]?] | length)
+            and .state == "OPEN"
+            and ([.labels[].name] | index("needs-decision") != null)
+            and ([.labels[].name] | index("processing") == null)
+            and ([.labels[].name] | index("resolved") == null)
+            and ([.labels[].name] | index("blocked") == null)
+            and ([.labels[].name] | index("wheelhouse:auto-merge-claim") == null)
+          ' current-card.json >/dev/null; then
+            allowed=true
+          fi
+          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
+
+      - name: Mark processing
+        if: ${{ steps.route.outputs.mode == 'action' && steps.current-card.outputs.allowed == 'true' }}
+        uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
+        with:
+          action: add
+          create: true
+          issue_number: ${{ github.event.issue.number }}
+          github_token: ${{ github.token }}
+          labels: processing
+
+      - id: execute
+        if: ${{ steps.route.outputs.mode == 'action' && steps.current-card.outputs.allowed == 'true' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
+        env:
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          DECISION: ${{ steps.route.outputs.decision }}
+          FREE_TEXT: ${{ steps.route.outputs.free_text }}
+          TARGET_REPO: ${{ steps.route.outputs.target_repo }}
+          TARGET_NUMBER: ${{ steps.route.outputs.target_number }}
+          KIND: ${{ steps.route.outputs.kind }}
+          HEAD_SHA: ${{ steps.route.outputs.head_sha }}
+          TARGET_REVISION: ${{ steps.route.outputs.target_revision }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/wheelhouse-home"
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            HOME="${RUNNER_TEMP}/wheelhouse-home" \
+            GH_PROMPT_DISABLED=1 \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            GH_TOKEN="$GH_TOKEN" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            DECISION="$DECISION" \
+            FREE_TEXT="$FREE_TEXT" \
+            TARGET_REPO="$TARGET_REPO" \
+            TARGET_NUMBER="$TARGET_NUMBER" \
+            KIND="$KIND" \
+            HEAD_SHA="$HEAD_SHA" \
+            TARGET_REVISION="$TARGET_REVISION" \
+            "$TRUSTED_PYTHON" scripts/apply_decision.py execute
+
+      - id: nl-action-consumer
+        name: Comment result on card
+        if: ${{ always() && steps.route.outputs.mode == 'action' && steps.current-card.outputs.allowed == 'true' && steps.execute.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ steps.execute.outputs.result_message }}
+          CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
+          CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
+          REPO_SLUG: ${{ github.repository }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          GH_PROMPT_DISABLED: "1"
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          body="${MESSAGE:-No actionable result.}"$'\n\n'"${CLAIM_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
+            -f "body=$body" >/dev/null
+
+      - name: Clear processing label
+        if: ${{ always() && steps.route.outputs.mode == 'action' && steps.current-card.outputs.allowed == 'true' }}
+        uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
+        with:
+          action: remove
+          issue_number: ${{ github.event.issue.number }}
+          github_token: ${{ github.token }}
+          labels: processing
+
+      - name: Resolve card label
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.terminal_state == 'resolved' }}
+        uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
+        with:
+          action: add
+          create: true
+          issue_number: ${{ github.event.issue.number }}
+          github_token: ${{ github.token }}
+          labels: resolved
+
+      - name: Block card label
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && (steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
+        uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
+        with:
+          action: add
+          create: true
+          issue_number: ${{ github.event.issue.number }}
+          github_token: ${{ github.token }}
+          labels: blocked
+
+      - name: Drop needs-decision on terminal
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && (steps.execute.outputs.terminal_state == 'resolved' || steps.execute.outputs.terminal_state == 'blocked' || steps.execute.outputs.terminal_state == 'error') }}
+        uses: issue-ops/labeler@9210b145e254445abdbfd33099941e7637d56d4e # v4.0.0
+        with:
+          action: remove
+          issue_number: ${{ github.event.issue.number }}
+          github_token: ${{ github.token }}
+          labels: needs-decision
+
+      - name: Close resolved card
+        if: ${{ always() && steps.current-card.outputs.allowed == 'true' && steps.execute.outputs.terminal_state == 'resolved' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          GH_PROMPT_DISABLED: "1"
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: gh issue close "${{ github.event.issue.number }}" || true
+
+      - id: nl-reply-consumer
+        name: Post NL reply
+        if: ${{ steps.route.outputs.mode == 'answer' || steps.route.outputs.mode == 'clarify' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLY: ${{ steps.route.outputs.answer }}
+          CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
+          CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
+          REPO_SLUG: ${{ github.repository }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          body="${REPLY}"$'\n\n'"${CLAIM_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
+            -f "body=$body" >/dev/null
+
+      - id: nl-failure-consumer
+        name: Note NL processing failure on card
+        if: ${{ always() && steps.nl-post-model-freshness.outputs.fresh == 'true' && needs.handle.outputs.nl_prompt_built == 'true' && steps.route.outcome == 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
+          CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
+          ERROR_CODE: ${{ steps.nl-claude-result.outputs.error-code }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set -euo pipefail
+          if [ "$ERROR_CODE" = "source.revision_mismatch" ]; then
+            note="Wheelhouse updated while this request waited; please retry."
+          else
+            note="The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code."
+          fi
+          body="${note} ${CLAIM_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
+            -f "body=$body" >/dev/null
+
+      - name: Record natural-language consumer stage
+        if: ${{ always() }}
+        env:
+          MODEL_ERROR_CODE: ${{ steps.nl-claude-result.outputs.error-code }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          status="failed"; stage="consumer-rejected"; code="${MODEL_ERROR_CODE:-consumer.rejected}"
+          if [ "${{ steps.nl-action-consumer.outcome }}" = "success" ] || [ "${{ steps.nl-reply-consumer.outcome }}" = "success" ]; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          elif [ "${{ needs.handle.outputs.nl_pre_model_fresh }}" = "false" ] || [ "${{ steps.nl-post-model-freshness.outputs.fresh }}" = "false" ]; then
+            code="consumer.stale"
+          fi
+          python scripts/agent_runtime.py stage \
+            --action "${{ needs.handle.outputs.nl_action }}" \
+            --source-sha "${{ github.sha }}" \
+            --event-key "${{ needs.handle.outputs.nl_event_key }}" \
             --stage "$stage" --status "$status" --code "$code"
 
   investigate-dispatch:

@@ -1024,7 +1024,11 @@ def test_source_boundary_and_concurrency_cover_every_current_writer():
 
 def test_one_reservation_prices_the_bounded_two_call_schema_repair():
     workflow = yaml.safe_load(read(".github/workflows/triage.yml"))
-    steps = workflow["jobs"]["triage"]["steps"]
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+    ]
     model_calls = [
         step
         for step in steps
@@ -1035,7 +1039,9 @@ def test_one_reservation_prices_the_bounded_two_call_schema_repair():
         step for step in model_calls if step.get("id") == "claude-repair-model"
     )
     assert "claude-repair-task.outcome == 'success'" in repair.get("if", "")
-    repair_task = next(step for step in steps if step.get("id") == "claude-repair-task")
+    repair_task = next(
+        step for step in steps if step.get("id") == "claude-repair-task"
+    )
     assert "repair-claim.outputs.admitted == 'true'" in repair_task.get("if", "")
     workflow_text = read(".github/workflows/triage.yml")
     assert workflow_text.count("id: claude-repair-model") == 1

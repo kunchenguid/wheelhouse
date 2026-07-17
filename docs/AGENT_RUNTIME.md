@@ -23,7 +23,8 @@ Provider environment overrides are rejected.
 The current selection cannot target Codex or reach its workflow installation branches.
 
 The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
-Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff with signed hidden paths preserved, and dispatch the selected action to `claude-model.yml`.
+Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff with signed hidden paths preserved, and invoke `claude-model.yml` through a local reusable-workflow job.
+GitHub resolves that local reusable workflow from the caller's commit, and every caller also passes its exact `github.sha` as the expected source revision.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
@@ -44,11 +45,13 @@ Deep-review and natural-language decision events remain outside this automatic-t
 The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and returns only a bounded transcript and observed enforcement record.
 It revalidates the signed target inputs after the action and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
-The trusted parent bounds dispatch and correlation, validates the correlated child revision separately, supervises known child runs, and atomically emits `AgentResult` plus content-free events.
+The reusable model workflow validates its observed `GITHUB_SHA` against the expected caller commit before hydration or provider admission.
+Its separately permissioned finalizer verifies the handoff again, binds the observed source revision into the enforcement proof, and atomically emits `AgentResult` plus content-free events as a bounded artifact for the trusted consumer.
 Triage and schema-repair claims record `consumer-committed` only after the trusted card projection reports an actual exact-revision update or held-card recovery; a successful no-op or stale projection remains `consumer-rejected`.
 Every task limit carries provider-neutral enforcement evidence as `externally-enforced`, `adapter-enforced`, or `unavailable`, and an unavailable value is explicitly `null`.
-Claude records the exact end-to-end hard deadline as unavailable because GitHub can delay workflow discovery.
-Its separate dispatch deadline and child-job execution timeout are externally enforced, and its trusted artifact, transcript, event, and final-output bounds remain explicit.
+Claude records the exact end-to-end hard deadline as unavailable because GitHub can delay a reusable job.
+The obsolete API dispatch deadline is unavailable because the model job is part of the caller's workflow graph, while the child-job execution timeout remains externally enforced.
+Trusted artifact, transcript, event, and final-output bounds remain explicit.
 The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before action invocation, so cancellation or an action crash cannot downgrade a possibly spent attempt.
 The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
@@ -164,7 +167,7 @@ Committed hidden roots such as `.agents`, `.claude`, `.github`, and `.gitignore`
 No symlink may reach the signed handoff or hydrated model workspace.
 
 Final-result delivery is independent of transcript retention.
-A bounded Claude transcript is transferred once from the read-only model workflow to its trusted parent with one-day artifact retention, then discarded after normalization.
+A bounded Claude transcript is transferred once within the read-only reusable workflow for trusted normalization with one-day artifact retention, then only the verified normalized result artifact crosses to the trusted consumer.
 A schema-invalid but delivered triage candidate remains available to the existing one-turn repair policy.
 Missing output and evidence failure do not trigger schema repair.
 Trusted code still performs normalized triage, evidence anchoring, cross-repository reference qualification, natural-language action allowlisting, card claims, revision checks, PR head checks, and auto-merge G0-G7 checks.
@@ -174,8 +177,9 @@ No model output directly authorizes or performs a GitHub action.
 ## Deadlines, cancellation, and retry
 
 Sandboxed worker actions have a soft deadline, a cancellation grace interval, and a hard deadline.
-For Claude, the trusted parent has a bounded dispatch and correlation window, while the separately permissioned child job has its own task-bound GitHub Actions timeout.
-The end-to-end Claude hard deadline is unavailable because a queued child may become discoverable only after its parent window closes, but that delayed child still cannot execute beyond its own job timeout.
+For Claude, the separately permissioned reusable job has its own task-bound GitHub Actions timeout.
+The end-to-end Claude hard deadline is unavailable because GitHub may queue the reusable job, but a delayed job still cannot execute beyond its own job timeout.
+Cancellation or timeout leaves the pre-invocation checkpoint available to the always-running finalizer, which emits a conservative normalized failure instead of trusting missing output.
 The worker counts every logical provider request and turn before it can proceed, including continuations after rejected tool calls, disables provider and stream retries, and interrupts before continuation at an observed token ceiling or after any observed overrun.
 Codex receives the task input ceiling through its pinned app-server context configuration and additional native output-schema string ceilings before the first provider request.
 Durable worker checkpoints preserve observed spend, usage, and model provenance if the worker crashes or is killed after spend begins.
@@ -191,7 +195,7 @@ Current actions permit one candidate attempt and no runtime retry.
 The existing exactly-one schema repair is a separate task, not a provider retry.
 Fallback remains `none`.
 
-Stable error families distinguish contract, config, selection, capability, auth, quota, provider, transport, input, provenance, tool, sandbox, lifecycle, harness, output, stale-target, consumer, and internal failures.
+Stable error families distinguish contract, config, selection, capability, auth, quota, provider, transport, input, provenance, tool, sandbox, lifecycle, harness, output, stale-target, source-revision, consumer, and internal failures.
 Persisted messages are bounded and content-free.
 
 ## Provenance and diagnostics
@@ -226,11 +230,13 @@ If a secret exposure is suspected, disable the credential-bearing workflow first
 For triage, revision freshness and held-card recovery remain product-level safeguards outside the runtime.
 A failed, cancelled, or missing result publishes an eligible held card through the existing exact-revision fail-open path.
 A stale attempt cannot publish over a newer revision.
+The retryable `source.revision_mismatch` code publishes the bounded "Wheelhouse updated while this request waited; please retry." explanation instead of being collapsed into a provider or schema failure.
 
 For deep review, missing output posts the existing fixed no-verdict note and leaves the card open.
 
 For natural-language mapping, missing or invalid output cannot produce an action.
 The marker-keyed failure note remains bounded and fire-once.
+A normalized `source.revision_mismatch` result uses the same precise retry explanation, while unknown failures keep the generic note.
 A successful mapped action still enters the existing card claim and deterministic executor.
 
 To inspect a failure:

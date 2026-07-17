@@ -803,7 +803,7 @@ def claude_limit_enforcement() -> dict[str, str]:
     return {
         "softDeadlineMs": "unavailable",
         "hardDeadlineMs": "unavailable",
-        "dispatchDeadlineMs": "externally-enforced",
+        "dispatchDeadlineMs": "unavailable",
         "childExecutionTimeoutMs": "externally-enforced",
         "cancelGraceMs": "unavailable",
         "maxTurns": "unavailable",
@@ -1100,7 +1100,7 @@ def build_task(
             "limits": {
                 "softDeadlineMs": None if adapter == "claude-action-compat" else soft,
                 "hardDeadlineMs": None if adapter == "claude-action-compat" else hard,
-                "dispatchDeadlineMs": 60_000 if adapter == "claude-action-compat" else None,
+                "dispatchDeadlineMs": None,
                 "childExecutionTimeoutMs": ((hard + 59_999) // 60_000) * 60_000 if adapter == "claude-action-compat" else None,
                 "cancelGraceMs": None if adapter == "claude-action-compat" else 10000,
                 "maxTurns": None if adapter == "claude-action-compat" else turns,

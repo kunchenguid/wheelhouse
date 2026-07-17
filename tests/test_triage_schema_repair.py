@@ -625,40 +625,70 @@ def test_cli_triage_apply_repair_end_to_end():
 def test_triage_yml_repair_wiring():
     triage_source = read(".github", "workflows", "triage.yml")
     doc = yaml.safe_load(triage_source)
-    steps = doc["jobs"]["triage"]["steps"]
-    model_steps = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
-    ids = [s.get("id") for s in steps]
+    prepare_job = doc["jobs"]["triage-repair-prepare"]
+    prepare_steps = prepare_job["steps"]
+    consume_job = doc["jobs"]["triage-claude-consume"]
+    consume_steps = consume_job["steps"]
+    repair_job = doc["jobs"]["triage-repair-model"]
+    model_steps = yaml.safe_load(
+        read(".github", "workflows", "claude-model.yml")
+    )["jobs"]["model"]["steps"]
     check(
         "yaml: every primary evidence schema asks for one JSON string",
         triage_source.count("a single JSON string, not an array") == 3,
     )
 
-    def idx(pred):
+    def idx(steps, pred):
         for i, s in enumerate(steps):
             if pred(s):
                 return i
         return None
 
-    tr_i = idx(lambda s: s.get("id") == "triage-result")
-    prep_i = idx(lambda s: s.get("id") == "repair-prep")
-    rep_i = idx(lambda s: s.get("id") == "claude-repair-model")
-    res_i = idx(lambda s: s.get("id") == "repair-result")
-    fresh_i = idx(lambda s: s.get("id") == "post-model-freshness")
-    upd_i = idx(lambda s: s.get("name") == "Update the decision card")
-
-    check("yaml: repair-prep step exists", "repair-prep" in ids)
-    check("yaml: Claude repair model boundary exists", "claude-repair-model" in ids)
-    check("yaml: repair-result step exists", "repair-result" in ids)
-    check(
-        "yaml: repair runs AFTER triage-result and BEFORE the card update",
-        None not in (tr_i, prep_i, rep_i, res_i, fresh_i, upd_i)
-        and tr_i < prep_i < rep_i < res_i < fresh_i < upd_i,
+    tr_i = idx(prepare_steps, lambda s: s.get("id") == "triage-result")
+    prep_i = idx(prepare_steps, lambda s: s.get("id") == "repair-prep")
+    rep_i = idx(prepare_steps, lambda s: s.get("id") == "claude-repair-model")
+    received_i = idx(
+        consume_steps, lambda s: s.get("id") == "repair-result-received"
+    )
+    compact_i = idx(consume_steps, lambda s: s.get("id") == "compact-results")
+    fresh_i = idx(consume_steps, lambda s: s.get("id") == "post-model-freshness")
+    upd_i = idx(
+        consume_steps, lambda s: s.get("name") == "Update the decision card"
     )
 
-    prep = steps[prep_i]
+    check("yaml: repair-prep step exists", prep_i is not None)
+    check("yaml: Claude repair model boundary exists", rep_i is not None)
+    check("yaml: repair-result receiver exists", received_i is not None)
+    check(
+        "yaml: repair preparation follows primary result extraction",
+        None not in (tr_i, prep_i, rep_i) and tr_i < prep_i < rep_i,
+    )
+    check(
+        "yaml: repair model and projection follow the caller-bound job graph",
+        prepare_job.get("needs") == ["triage", "triage-model"]
+        and repair_job.get("needs") == "triage-repair-prepare"
+        and repair_job.get("uses") == "./.github/workflows/claude-model.yml"
+        and all(
+            name in consume_job.get("needs", [])
+            for name in ("triage-model", "triage-repair-prepare", "triage-repair-model")
+        )
+        and None not in (received_i, compact_i, fresh_i, upd_i)
+        and received_i < compact_i < fresh_i < upd_i,
+    )
+
+    prep = prepare_steps[prep_i]
     prun = str(prep.get("run", ""))
-    check("yaml: repair-prep reads the delivered result path", prep.get("env", {}).get("ORIG_RESULT") == "${{ steps.triage-result.outputs.path }}")
-    check("yaml: repair-prep runs the trusted render_card.py triage-repair-prep", "triage-repair-prep" in prun and 'TRUSTED_SRC/scripts/render_card.py' in prun.replace('"', "").replace("$", ""))
+    check(
+        "yaml: repair-prep reads the delivered result path",
+        prep.get("env", {}).get("ORIG_RESULT")
+        == "${{ steps.triage-result.outputs.path }}",
+    )
+    check(
+        "yaml: repair-prep runs the trusted render_card.py triage-repair-prep",
+        "triage-repair-prep" in prun
+        and "TRUSTED_SRC/scripts/render_card.py"
+        in prun.replace('"', "").replace("$", ""),
+    )
     check(
         "yaml: repair-prep is pass-by-reference (never inlines target.txt)",
         "cat target.txt" not in prun and "gh pr diff" not in prun,
@@ -667,43 +697,93 @@ def test_triage_yml_repair_wiring():
     rep = next(s for s in model_steps if s.get("id") == "triage_repair")
     repw = rep.get("with", {})
     dumped = yaml.safe_dump(rep)
-    boundary = steps[rep_i]
-    check("yaml: Claude repair boundary follows its immutable task", "steps.claude-repair-task.outcome == 'success'" in str(boundary.get("if", "")))
-    check("yaml: claude_repair is fail-open (continue-on-error)", rep.get("continue-on-error") is True)
-    check("yaml: claude_repair uses the pinned action", str(rep.get("uses", "")).endswith("fad22eb3fa582b7357fc0ea48af6645851b884fd"))
-    check("yaml: Claude repair prompt is hydrated from its AgentTask", repw.get("prompt") == "${{ steps.hydrate.outputs.prompt }}")
-    check("yaml: claude_repair is exactly one turn", "--max-turns 1" in str(repw.get("claude_args", "")))
-    check("yaml: claude_repair requests an empty allowlist", '--allowedTools ""' in str(repw.get("claude_args", "")))
+    boundary = prepare_steps[rep_i]
+    check(
+        "yaml: Claude repair boundary follows its immutable task",
+        "steps.claude-repair-task.outcome == 'success'"
+        in str(boundary.get("if", "")),
+    )
+    check(
+        "yaml: repair reusable job binds the caller commit",
+        repair_job.get("with", {}).get("expected_commit_sha")
+        == "${{ github.sha }}",
+    )
+    check(
+        "yaml: claude_repair is fail-open (continue-on-error)",
+        rep.get("continue-on-error") is True,
+    )
+    check(
+        "yaml: claude_repair uses the pinned action",
+        str(rep.get("uses", "")).endswith(
+            "fad22eb3fa582b7357fc0ea48af6645851b884fd"
+        ),
+    )
+    check(
+        "yaml: Claude repair prompt is hydrated from its AgentTask",
+        repw.get("prompt") == "${{ steps.hydrate.outputs.prompt }}",
+    )
+    check(
+        "yaml: claude_repair is exactly one turn",
+        "--max-turns 1" in str(repw.get("claude_args", "")),
+    )
+    check(
+        "yaml: claude_repair requests an empty allowlist",
+        '--allowedTools ""' in str(repw.get("claude_args", "")),
+    )
     settings = str(repw.get("settings", ""))
     check(
         "yaml: claude_repair fail-closed deny of exec/file/network tools",
         '"deny"' in settings and all(t in settings for t in ("Bash", "Read", "Write", "WebFetch", "Grep", "Glob")),
     )
-    check("yaml: claude_repair is tokenless (no FLEET_TOKEN)", "FLEET_TOKEN" not in dumped)
-    check("yaml: claude_repair is tokenless (no READONLY_TOKEN)", "READONLY_TOKEN" not in dumped)
-    check("yaml: claude_repair allowed_bots stays narrow", repw.get("allowed_bots") == "github-actions[bot]")
-    check("yaml: claude_repair uses immutable model", "--model claude-sonnet-4-6" in str(repw.get("claude_args", "")))
+    check(
+        "yaml: claude_repair is tokenless (no FLEET_TOKEN)",
+        "FLEET_TOKEN" not in dumped,
+    )
+    check(
+        "yaml: claude_repair is tokenless (no READONLY_TOKEN)",
+        "READONLY_TOKEN" not in dumped,
+    )
+    check(
+        "yaml: claude_repair allowed_bots stays narrow",
+        repw.get("allowed_bots") == "github-actions[bot]",
+    )
+    check(
+        "yaml: claude_repair uses immutable model",
+        "--model claude-sonnet-4-6" in str(repw.get("claude_args", "")),
+    )
 
-    res = steps[res_i]
-    rrun = str(res.get("run", ""))
-    check("yaml: repair-result extracts via the trusted render_card.py", "extract-result" in rrun)
-    check("yaml: repair-result reads normalized AgentResult", "steps.claude-repair-model.outputs.result" in str(res.get("env", {}).get("RUNTIME_RESULT")))
+    received = consume_steps[received_i]
+    compact = consume_steps[compact_i]
+    check(
+        "yaml: repair result crosses only the verified normalized artifact boundary",
+        received.get("uses") == "./.github/actions/claude-model-result"
+        and received.get("with", {}).get("artifact")
+        == "${{ needs.triage-repair-model.outputs.result_artifact }}"
+        and compact.get("env", {}).get("REPAIR")
+        == "${{ steps.repair-result-received.outputs.result }}"
+        and "extract-result" in str(compact.get("run", "")),
+    )
 
-    upd = steps[upd_i]
+    upd = consume_steps[upd_i]
     update_run = str(upd.get("run", ""))
     check(
         "yaml: card update wires the repaired result file into triage-apply",
-        upd.get("env", {}).get("REPAIR_EXECUTION_FILE") == "${{ steps.repair-result.outputs.path }}"
+        upd.get("env", {}).get("REPAIR_EXECUTION_FILE")
+        == "${{ steps.compact-results.outputs.repair }}"
         and upd.get("env", {}).get("REPAIR_CLAIM_ADMITTED")
-        == "${{ steps.repair-claim.outputs.admitted }}"
+        == "${{ needs.triage-repair-prepare.outputs.repair_admitted }}"
         and "--repair-execution-file" in update_run
         and "--repair-claim-admitted" in update_run,
     )
-    check("yaml: scrubbed consumers preserve the output channel", update_run.count('GITHUB_OUTPUT="$GITHUB_OUTPUT"') == 2)
-    fresh = steps[fresh_i]
+    check(
+        "yaml: scrubbed consumers preserve the output channel",
+        'GITHUB_OUTPUT="$GITHUB_OUTPUT"' in update_run,
+    )
+    fresh = consume_steps[fresh_i]
     check(
         "yaml: final freshness re-reads the exact target revision fail closed",
-        fresh.get("env", {}).get("EXPECTED_REVISION") == "${{ steps.resolve.outputs.revision }}"
+        fresh.get("env", {}).get("EXPECTED_REVISION")
+        == "${{ needs.triage.outputs.revision }}"
         and "issues/$NUMBER" in str(fresh.get("run", ""))
         and "pulls/$NUMBER" in str(fresh.get("run", ""))
         and "target.stale" in str(fresh.get("run", "")),
@@ -712,19 +792,33 @@ def test_triage_yml_repair_wiring():
         "yaml: card projection rejects post-model freshness loss",
         "steps.post-model-freshness.outputs.fresh == 'false'" in str(upd.get("env", {}).get("HEAD_OK", "")),
     )
-    primary_finalize = next(s for s in steps if s.get("name") == "Finalize primary triage claim and stage evidence")
-    repair_finalize = next(s for s in steps if s.get("name") == "Finalize schema-repair claim and stage evidence")
-    recovery_i = idx(lambda s: s.get("id") == "card-recovery")
-    primary_finalize_i = idx(lambda s: s.get("name") == "Finalize primary triage claim and stage evidence")
-    repair_finalize_i = idx(lambda s: s.get("name") == "Finalize schema-repair claim and stage evidence")
+    primary_finalize = next(
+        s
+        for s in consume_steps
+        if s.get("name") == "Finalize primary triage claim and stage evidence"
+    )
+    repair_finalize = next(
+        s
+        for s in consume_steps
+        if s.get("name") == "Finalize schema-repair claim and stage evidence"
+    )
+    recovery_i = idx(consume_steps, lambda s: s.get("id") == "card-recovery")
+    primary_finalize_i = idx(
+        consume_steps,
+        lambda s: s.get("name") == "Finalize primary triage claim and stage evidence",
+    )
+    repair_finalize_i = idx(
+        consume_steps,
+        lambda s: s.get("name") == "Finalize schema-repair claim and stage evidence",
+    )
     primary_run = str(primary_finalize.get("run", ""))
     repair_run = str(repair_finalize.get("run", ""))
     check(
         "yaml: admitted schema repair emits event-bound terminal evidence",
-        repair_finalize.get("env", {}).get("REPAIR_EVENT_KEY") == "${{ steps.repair-claim.outputs.event_key }}"
-        and "steps.repair-claim.outputs.admitted == 'true'" in str(repair_finalize.get("if", ""))
+        "needs.triage-repair-prepare.outputs.repair_admitted == 'true'"
+        in str(repair_finalize.get("if", ""))
         and "--action triage.schema-repair" in repair_run
-        and '--event-key "$REPAIR_EVENT_KEY"' in repair_run,
+        and "needs.triage-repair-prepare.outputs.repair_event_key" in repair_run,
     )
     check(
         "yaml: each durable claim is patched before its terminal stage",
