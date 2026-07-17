@@ -223,6 +223,46 @@ def cards_file(numbers):
     return handle.name
 
 
+def attempt_reset_fixture():
+    cards = {}
+    sources = {}
+    for card_number, (revision, prior_wave, prior_run) in sorted(
+        replay.ATTEMPT_RESET_COHORT.items()
+    ):
+        kind = "issue-triage" if revision.endswith("Z") else "pr-review"
+        target = card_number + 10_000
+        value = card(
+            number=card_number,
+            target=target,
+            kind=kind,
+            revision=revision,
+        )
+        state = rc._unique_state_block(value["body"])
+        state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+            "version": rc.TRIAGE_ATTEMPTS_VERSION,
+            "kind": kind,
+            "revision": revision,
+            "count": 2,
+        }
+        state[replay.REPLAY_FIELD] = {
+            "version": replay.REPLAY_VERSION,
+            "wave": prior_wave,
+            "revision": revision,
+            "cleared": "error",
+            "at": "2026-07-17T20:00:00Z",
+            "run_number": prior_run,
+        }
+        value["body"] = rc._replace_state_block(value["body"], state)
+        cards[card_number] = value
+        sources[("wheelhouse", target, kind)] = source(
+            number=target,
+            kind=kind,
+            revision=revision,
+        )
+    supplied = ",".join(str(number) for number in sorted(cards))
+    return cards, sources, supplied
+
+
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
     cards = {42: card()}
     sources = {("wheelhouse", 17, "pr-review"): source()}
@@ -248,6 +288,127 @@ def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
             assert len(calls["queued"]) == len(calls["dispatched"]) == 1
             assert all(number == 42 for number in calls["card_reads"])
             assert all(read[2:] == (17, "pr-review") for read in calls["source_reads"])
+    finally:
+        os.unlink(path)
+
+
+def test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry():
+    cards, sources, supplied = attempt_reset_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            result = replay.run(
+                path,
+                replay.ATTEMPT_RESET_WAVE,
+                len(replay.ATTEMPT_RESET_COHORT),
+                attempts_reset_cards=supplied,
+            )
+            assert result == {
+                "eligible": 19,
+                "planned": 19,
+                "deferred": 0,
+                "written": 19,
+                "queued": 19,
+            }
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 19
+            for number, value in cards.items():
+                state = rc._unique_state_block(value["body"])
+                assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+                assert state[replay.REPLAY_FIELD] == {
+                    "version": replay.ATTEMPT_RESET_REPLAY_VERSION,
+                    "wave": replay.ATTEMPT_RESET_WAVE,
+                    "revision": replay.ATTEMPT_RESET_COHORT[number][0],
+                    "cleared": "error",
+                    "at": state[replay.REPLAY_FIELD]["at"],
+                    "run_number": 77,
+                    "attempt_reset": True,
+                }
+            assert config()["triage_attempt_cap_per_revision"] == 2
+            assert config()["triage_attempt_caps"]["wheelhouse"] == 2
+            try:
+                replay.run(
+                    path,
+                    replay.ATTEMPT_RESET_WAVE,
+                    len(replay.ATTEMPT_RESET_COHORT),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset was reusable")
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 19
+    finally:
+        os.unlink(path)
+
+
+def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
+    _, _, supplied = attempt_reset_fixture()
+    assert replay._attempt_reset_count(
+        {
+            rc.TRIAGE_ATTEMPTS_FIELD: {
+                "version": True,
+                "kind": "pr-review",
+                "revision": "abcdef1",
+                "count": 2,
+            }
+        },
+        "pr-review",
+        "abcdef1",
+        2,
+    ) is None
+    invalid_inputs = (
+        ("wrong-wave", supplied),
+        (replay.ATTEMPT_RESET_WAVE, supplied + ",9999"),
+        (
+            replay.ATTEMPT_RESET_WAVE,
+            ",".join(supplied.split(",")[:-1]),
+        ),
+        (replay.ATTEMPT_RESET_WAVE, supplied + ",1367"),
+    )
+    for wave, value in invalid_inputs:
+        try:
+            replay._attempt_reset_scope(wave, value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError((wave, value))
+
+    cards, sources, supplied = attempt_reset_fixture()
+    moved = min(cards)
+    state = rc._unique_state_block(cards[moved]["body"])
+    old_revision = replay.ATTEMPT_RESET_COHORT[moved][0]
+    kind = state["kind"]
+    moved_revision = (
+        "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
+    )
+    state["updated_at" if kind == "issue-triage" else "head_sha"] = moved_revision
+    state["triaged_sha"] = moved_revision
+    state[rc.TRIAGE_ATTEMPTS_FIELD]["revision"] = moved_revision
+    state[replay.REPLAY_FIELD]["revision"] = moved_revision
+    cards[moved]["body"] = rc._replace_state_block(cards[moved]["body"], state)
+    target = state["number"]
+    sources.pop(("wheelhouse", target, kind))
+    sources[("wheelhouse", target, kind)] = source(
+        number=target,
+        kind=kind,
+        revision=moved_revision,
+    )
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            try:
+                replay.run(
+                    path,
+                    replay.ATTEMPT_RESET_WAVE,
+                    len(replay.ATTEMPT_RESET_COHORT),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError((moved, old_revision, moved_revision))
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
     finally:
         os.unlink(path)
 
@@ -942,6 +1103,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert dispatch_inputs["replay_limit"]["default"] == "25"
     assert "1..25" in dispatch_inputs["replay_limit"]["description"]
     assert dispatch_inputs["replay_dry_run"]["default"] is True
+    assert dispatch_inputs["replay_attempts_reset_cards"]["default"] == ""
     dry_run_guard = (
         "github.event_name == 'workflow_dispatch' && "
         "inputs.replay_wave != '' && inputs.replay_dry_run"
@@ -974,11 +1136,19 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "scripts/triage_replay.py" in step["run"]
     assert "REPLAY_DRY_RUN" in step["run"]
     assert "args+=(--dry-run)" in step["run"]
+    assert "REPLAY_ATTEMPTS_RESET_CARDS" in step["run"]
+    assert "--attempts-reset-cards" in step["run"]
     assert "--dry-run" in (ROOT / "scripts/triage_replay.py").read_text(
         encoding="utf-8"
     )
     replay_text = (ROOT / "scripts/triage_replay.py").read_text(encoding="utf-8")
     assert replay.REPLAY_LIMIT_MAX == 25
+    assert len(replay.ATTEMPT_RESET_COHORT) == 19
+    assert replay.ATTEMPT_RESET_WAVE == "evidence-empty-e7-final"
+    wheelhouse_config = yaml.safe_load(
+        (ROOT / "wheelhouse.config.yml").read_text(encoding="utf-8")
+    )
+    assert wheelhouse_config["triage_attempt_cap_per_revision"] == 2
     assert "reconcile.maybe_queue_auto_triage" in replay_text
     assert "dispatch_triage_workflow" not in replay_text
     assert replay.REPLAY_FIELD not in rc.MATERIAL_FIELDS
@@ -1002,6 +1172,8 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
 
 TESTS = [
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
+    test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry,
+    test_attempt_reset_refuses_outside_scope_and_any_state_mismatch,
     test_absent_cache_gets_absent_marker_and_one_queued_attempt,
     test_same_revision_refresh_preserves_replay_marker,
     test_queue_failure_does_not_unlock_card_for_later_schedule,

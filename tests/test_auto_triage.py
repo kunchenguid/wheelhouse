@@ -755,8 +755,31 @@ def test_triage_requires_evidence_field():
     check("evidence: missing evidence rejected", rc.normalize_triage(missing) is None)
     blank = dict(complete, evidence="   ")
     check("evidence: blank evidence rejected", rc.normalize_triage(blank) is None)
-    nonstr = dict(complete, evidence=["target.txt: quote"])
-    check("evidence: non-string evidence rejected", rc.normalize_triage(nonstr) is None)
+    evidence_list = dict(
+        complete,
+        evidence=[
+            'target.txt: "def grok(): ..."',
+            'target-src/grok.py: "return model.run()"',
+        ],
+    )
+    check(
+        "evidence: a non-empty list of non-empty strings is accepted",
+        rc.normalize_triage(evidence_list) is not None,
+    )
+    check(
+        "evidence: an empty list is rejected",
+        rc.normalize_triage(dict(complete, evidence=[])) is None,
+    )
+    check(
+        "evidence: a list containing an empty item is rejected",
+        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", " "]))
+        is None,
+    )
+    check(
+        "evidence: a list containing a non-string item is rejected",
+        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", 3]))
+        is None,
+    )
     check(
         "evidence: parse_triage_json rejects a complete-but-evidence-less result",
         rc.parse_triage_json(
@@ -794,10 +817,38 @@ def test_evidence_anchor_ok_catches_fabrication():
         "anchor: whitespace/case differences still verify",
         rc.evidence_anchor_ok('target.txt: "DEF   grok_request(prompt):"', target),
     )
+    check(
+        "anchor: single-quoted list evidence verifies after markdown cleanup",
+        rc.evidence_anchor_ok(
+            [
+                "target.txt: 'def `grok_request`(prompt):'",
+                "target-src/grok.py: 'unrelated source-only quote'",
+            ],
+            target,
+        ),
+    )
+    check(
+        "anchor: fallback path segment verifies after ellipsis splitting",
+        rc.evidence_anchor_ok(
+            "target.txt: context omitted ... return call_model('grok', prompt)",
+            target,
+        ),
+    )
     fabricated = 'target.txt: "def totally_made_up_symbol(xyz):" was added here'
     check(
         "anchor: a fabricated quote is rejected",
         rc.evidence_anchor_ok(fabricated, target) is False,
+    )
+    check(
+        "anchor: a fabricated evidence list is rejected",
+        rc.evidence_anchor_ok(
+            [
+                "target.txt: 'def totally_made_up_symbol(xyz):'",
+                "target-src/fake.py: invented content that is not in the target",
+            ],
+            target,
+        )
+        is False,
     )
     check(
         "anchor: evidence with no quoted spans is rejected",

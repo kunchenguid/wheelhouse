@@ -38,6 +38,10 @@ on:
         required: false
         type: boolean
         default: true
+      replay_attempts_reset_cards:
+        description: "One-time sanctioned comma-separated cohort cards (empty disables reset)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -164,10 +168,14 @@ jobs:
           REPLAY_WAVE: ${{ inputs.replay_wave }}
           REPLAY_LIMIT: ${{ inputs.replay_limit }}
           REPLAY_DRY_RUN: ${{ inputs.replay_dry_run }}
+          REPLAY_ATTEMPTS_RESET_CARDS: ${{ inputs.replay_attempts_reset_cards }}
         run: |
           args=(cards.json --wave "$REPLAY_WAVE" --limit "$REPLAY_LIMIT")
           if [ "$REPLAY_DRY_RUN" = "true" ]; then
             args+=(--dry-run)
+          fi
+          if [ -n "$REPLAY_ATTEMPTS_RESET_CARDS" ]; then
+            args+=(--attempts-reset-cards "$REPLAY_ATTEMPTS_RESET_CARDS")
           fi
           python scripts/triage_replay.py "${args[@]}"
 

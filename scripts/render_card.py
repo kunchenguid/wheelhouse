@@ -1105,8 +1105,8 @@ def _normalize_triage_with_reason(data):
     # is validation-only and is deliberately NOT rendered on the card;
     # triage-apply additionally anchor-checks it against the on-disk target.txt
     # so fabricated quotes are rejected too (see evidence_anchor_ok).
-    evidence = data.get(EVIDENCE_FIELD)
-    if not isinstance(evidence, str) or not evidence.strip():
+    evidence = _flatten_evidence(data.get(EVIDENCE_FIELD))
+    if evidence is None:
         return None, "field %r is missing or empty" % EVIDENCE_FIELD
     action = normalize_recommendation_action(data.get("recommended_action"))
     reason = ""
@@ -1146,20 +1146,63 @@ def _normalize_triage_with_reason(data):
     return triage, ""
 
 
-_EVIDENCE_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"')
+_EVIDENCE_QUOTE_RE = re.compile(
+    r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\''
+)
+_EVIDENCE_SEGMENT_RE = re.compile(r"(?:\r?\n|\s+\|\s+)")
+_EVIDENCE_ELLIPSIS_RE = re.compile(r"(?:\u2026|\.{3})")
+_EVIDENCE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-+*]\s+|[0-9]+[.)]\s+)")
+_EVIDENCE_PATH_PREFIX_RE = re.compile(
+    r"^\s*(?:target\.txt|target-src/[^\s:]+)(?::[0-9]+(?:-[0-9]+)?)?:\s*",
+    re.IGNORECASE,
+)
+
+
+def _flatten_evidence(evidence):
+    """Return one non-empty evidence string for either accepted JSON shape."""
+    if isinstance(evidence, str):
+        return evidence.strip() or None
+    if not isinstance(evidence, list) or not evidence:
+        return None
+    flattened = []
+    for value in evidence:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        flattened.append(value.strip())
+    return " | ".join(flattened)
 
 
 def _normalize_evidence_text(text):
-    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    text = re.sub(r"[`*]", "", str(text or ""))
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def evidence_anchor_ok(evidence, target_text, min_quote_len=12):
+def _evidence_candidates(evidence):
+    """Yield primary quoted spans and conservative unquoted fragments."""
+    text = _flatten_evidence(evidence)
+    if text is None:
+        return [], []
+    quoted = [left or right for left, right in _EVIDENCE_QUOTE_RE.findall(text)]
+    fallback = []
+    for segment in _EVIDENCE_SEGMENT_RE.split(text):
+        segment = _EVIDENCE_LIST_PREFIX_RE.sub("", segment, count=1)
+        segment = _EVIDENCE_PATH_PREFIX_RE.sub("", segment, count=1)
+        for fragment in _EVIDENCE_ELLIPSIS_RE.split(segment):
+            fragment = fragment.strip().strip("'\" ")
+            if fragment:
+                fallback.append(fragment)
+    return quoted, fallback
+
+
+def evidence_anchor_ok(
+    evidence, target_text, min_quote_len=12, min_fallback_len=20
+):
     """Deterministic lazy/fabrication guard for pass-by-reference triage.
 
     The prompt requires the model to return `evidence`: 2-4 short verbatim
     quotes, each copied from the on-disk target.txt (the pre-fetched PR
     title/body/diff) or a target-src file it Read. This confirms that at least
-    one meaningful double-quoted span in `evidence` actually appears
+    one meaningful single- or double-quoted span in `evidence` actually appears
     (whitespace- and case-insensitively) in the on-disk target.txt. A run that
     never opened the files can only fabricate quotes, so its anchors are absent
     and this returns False -> the trusted triage-apply step treats it as no
@@ -1174,15 +1217,17 @@ def evidence_anchor_ok(evidence, target_text, min_quote_len=12):
     target.txt was actually read from disk; a checker-side read failure skips
     the check (see _triage_evidence_verified) rather than rejecting a real
     result."""
-    quotes = _EVIDENCE_QUOTE_RE.findall(evidence or "")
-    if not quotes:
-        return False
+    quotes, fallback = _evidence_candidates(evidence)
     hay = _normalize_evidence_text(target_text)
     if not hay:
         return False
     for quote in quotes:
         needle = _normalize_evidence_text(quote)
         if len(needle) >= min_quote_len and needle in hay:
+            return True
+    for fragment in fallback:
+        needle = _normalize_evidence_text(fragment)
+        if len(needle) >= min_fallback_len and needle in hay:
             return True
     return False
 
@@ -1211,7 +1256,13 @@ def _triage_evidence_verified(data, target_file):
     target_text = _read_target_text(target_file)
     if not target_text:
         return True
-    evidence = data.get(EVIDENCE_FIELD) if isinstance(data, dict) else ""
+    evidence = (
+        _flatten_evidence(data.get(EVIDENCE_FIELD))
+        if isinstance(data, dict)
+        else None
+    )
+    if evidence is None:
+        return False
     return evidence_anchor_ok(evidence, target_text)
 
 
@@ -4566,7 +4617,7 @@ def _repair_schema_lines(kind):
         '  "product_implications": "<string: does this deserve owner discussion, and why>",',
         '  "recommended_action": "<exactly one of: %s>",' % action_enum,
         '  "recommended_reason": "<one concise reason/comment string>",',
-        '  "evidence": "<2-4 short verbatim quotes, copied unchanged from the candidate>"',
+        '  "evidence": "<a single JSON string, not an array; 2-4 short verbatim quotes copied unchanged from the candidate>"',
         "}",
     ]
     if kind != "issue-triage":
@@ -4651,7 +4702,9 @@ def plan_triage_repair(result_text, kind):
     }
 
 
-def decide_triage_apply(result_text, repaired_text, target_file):
+def decide_triage_apply(
+    result_text, repaired_text, target_file, repair_claim_admitted=None
+):
     """Deterministic decision for the (repair-aware) triage-apply step. Returns
     `{outcome, triage, reason}` where outcome is one of:
 
@@ -4688,17 +4741,28 @@ def decide_triage_apply(result_text, repaired_text, target_file):
     candidate = redacted_candidate_shape(result_text)
     if repaired_text:
         repaired = parse_triage_json(repaired_text)
-        if repaired is not None and _triage_evidence_verified(repaired, target_file):
-            return {
-                "outcome": "repaired",
-                "triage": repaired,
-                "reason": reason,
-                "candidate": candidate,
-            }
+        if repaired is not None:
+            if _triage_evidence_verified(repaired, target_file):
+                return {
+                    "outcome": "repaired",
+                    "triage": repaired,
+                    "reason": reason,
+                    "candidate": candidate,
+                }
+            failed_reason = "repaired field 'evidence' did not anchor to the fetched target"
+        else:
+            failed_reason = (
+                triage_schema_reason(repaired_text)
+                or "repaired result failed schema validation"
+            )
+    elif repair_claim_admitted is False:
+        failed_reason = "schema repair claim was duplicate"
+    else:
+        failed_reason = "schema repair produced no result"
     return {
         "outcome": "repair-failed",
         "triage": None,
-        "reason": reason,
+        "reason": failed_reason,
         "candidate": candidate,
     }
 
@@ -4761,6 +4825,12 @@ def main():
         "delivered result is a schema-miss; if it validates (and its evidence "
         "anchors) the card gets the repaired triage, else the visible "
         "triage-unavailable error now carries the validation reason.",
+    )
+    ta.add_argument(
+        "--repair-claim-admitted",
+        default="",
+        help="Trusted schema-repair claim result: true, false, or empty when "
+        "the repair path was not reached.",
     )
 
     rp = sub.add_parser("triage-repair-prep")
@@ -4830,13 +4900,24 @@ def main():
         print(card["title"])
     elif args.cmd == "triage-apply":
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        if args.repair_claim_admitted not in {"", "true", "false"}:
+            ap.error("--repair-claim-admitted must be true, false, or empty")
+        repair_claim_admitted = {
+            "true": True,
+            "false": False,
+        }.get(args.repair_claim_admitted)
         result_text = extract_claude_result(args.execution_file)
         repaired_text = (
             extract_claude_result(args.repair_execution_file)
             if args.repair_execution_file
             else ""
         )
-        decision = decide_triage_apply(result_text, repaired_text, args.target_file)
+        decision = decide_triage_apply(
+            result_text,
+            repaired_text,
+            args.target_file,
+            repair_claim_admitted=repair_claim_admitted,
+        )
         outcome = decision["outcome"]
         applied = False
         if outcome == "success":

@@ -645,13 +645,13 @@ jobs:
               echo '  "product_implications": "whether this deserves owner discussion or is routine/low-risk, with why",'
               echo '  "recommended_action": "close | decline | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment to post or show for the recommended action",'
-              echo '  "evidence": "2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
+              echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
             elif [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
               echo '  "summary": "plain one-sentence summary of what the PR does",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment/review body for the recommended action",'
-              echo '  "evidence": "2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt",'
+              echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt",'
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
               echo '    "aligns_with_vision": true or false (does this PR align with the vision.md policy above),'
@@ -664,7 +664,7 @@ jobs:
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment/review body for the recommended action",'
-              echo '  "evidence": "2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
+              echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
             fi
             echo "}"
             echo "Do not include Markdown fences or extra prose."
@@ -1141,6 +1141,7 @@ jobs:
           # Compact result of the ONE bounded schema-repair turn (empty unless a
           # delivered result was a schema-miss and the repair step ran).
           REPAIR_EXECUTION_FILE: ${{ steps.repair-result.outputs.path }}
+          REPAIR_CLAIM_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           # The prepare step writes target.txt in the workspace root (it has no
@@ -1198,7 +1199,8 @@ jobs:
                 --base-sha "$BASE_SHA" \
                 --target-file "${TARGET_FILE:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
-                --repair-execution-file "${REPAIR_EXECUTION_FILE:-}"
+                --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
+                --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"
           fi
 
       # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
