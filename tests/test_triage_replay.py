@@ -58,14 +58,21 @@ def base_item(number=17, kind="pr-review", revision="abcdef1"):
     }
 
 
-def source(number=17, kind="pr-review", revision="abcdef1", state="open"):
+def source(
+    number=17,
+    kind="pr-review",
+    revision="abcdef1",
+    state="open",
+    author_login="contributor",
+    author_type="User",
+):
     value = {
         "number": number,
         "state": state,
         "title": "Replay this exact source",
         "html_url": "https://github.com/example/wheelhouse/pull/%s" % number,
         "updated_at": "2026-07-16T10:00:00Z",
-        "user": {"login": "contributor"},
+        "user": {"login": author_login, "type": author_type},
     }
     if kind == "pr-review":
         value["head"] = {"sha": revision}
@@ -104,6 +111,7 @@ def card(number=42, target=17, kind="pr-review", revision="abcdef1", status="err
 def config():
     return {
         "repos": {"wheelhouse": {"name": "wheelhouse"}},
+        "maintainer": "co-maintainer",
         "auto_triage": True,
         "auto_triage_issues": True,
         "triage_attempt_cap_per_revision": 2,
@@ -391,6 +399,19 @@ def test_marker_mismatch_matrix_never_clears_or_resets_cap():
         assert rc.triage_attempt_count(state_before, "pr-review", "abcdef1", 2) == 1
 
 
+def test_replay_applies_scan_author_filter_to_live_source():
+    cases = [
+        (source(author_login="owner"), "owner"),
+        (source(author_login="co-maintainer"), "maintainer"),
+        (source(author_login="github-actions[bot]"), "bot suffix"),
+        (source(author_login="app", author_type="Bot"), "bot type"),
+    ]
+    for live, label in cases:
+        plan, reason = inspect(card(), live)
+        assert plan is None, label
+        assert reason == "source-author-excluded", (label, reason)
+
+
 def test_dry_run_and_budget_bound_list_plans_with_zero_writes():
     cards = {42: card(number=42, target=17), 43: card(number=43, target=18)}
     sources = {
@@ -530,6 +551,28 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert dispatch_inputs["replay_limit"]["default"] == "25"
     assert "1..25" in dispatch_inputs["replay_limit"]["description"]
     assert dispatch_inputs["replay_dry_run"]["default"] is True
+    dry_run_guard = (
+        "github.event_name == 'workflow_dispatch' && "
+        "inputs.replay_wave != '' && inputs.replay_dry_run"
+    )
+    write_capable_steps = {
+        "Scan the fleet",
+        "Claim auto-merge decision cards",
+        "Validate auto-merge decision cards",
+        "Auto-merge eligible PRs",
+        "Record auto-merges",
+        "Reconcile the queue",
+        "Check fleet-scan health",
+    }
+    for guarded in write_capable_steps:
+        guarded_step = next(
+            value
+            for value in scan["jobs"]["reconcile"]["steps"]
+            if value.get("name") == guarded
+        )
+        condition = guarded_step.get("if", "")
+        assert dry_run_guard in condition, guarded
+        assert "!" in condition, guarded
     step = next(
         value
         for value in scan["jobs"]["reconcile"]["steps"]
@@ -563,6 +606,7 @@ TESTS = [
     test_queue_failure_does_not_unlock_card_for_later_schedule,
     test_never_cleared_matrix_fails_closed,
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
+    test_replay_applies_scan_author_filter_to_live_source,
     test_dry_run_and_budget_bound_list_plans_with_zero_writes,
     test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit,
     test_result_records_cover_success_failure_bound_and_duplicate_editing,

@@ -136,6 +136,14 @@ def _effective_policy(config, repo, kind):
     }
 
 
+def _maintainer_logins(config, owner):
+    return {
+        str(login).strip().casefold()
+        for login in (owner, (config or {}).get("maintainer", ""))
+        if str(login).strip()
+    }
+
+
 def inspect_candidate(number, config, owner, has_token):
     """Return an eligible replay plan or a fail-closed skip reason."""
     card = render_card.get_card(number)
@@ -186,6 +194,11 @@ def inspect_candidate(number, config, owner, has_token):
         source = _source_json(owner, repo, target_number, kind)
     except (json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeError):
         return None, "source-unreadable"
+    source_author = source.get("user") if isinstance(source.get("user"), dict) else {}
+    if core._author_excluded_from_queue(
+        source_author, _maintainer_logins(config, owner)
+    ):
+        return None, "source-author-excluded"
     if str(source.get("state") or "").lower() != "open":
         return None, "source-closed"
     if kind == "issue-triage" and "pull_request" in source:
