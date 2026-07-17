@@ -655,6 +655,9 @@ def test_triage_yml_repair_wiring():
     upd_i = idx(
         consume_steps, lambda s: s.get("name") == "Update the decision card"
     )
+    target_download_i = idx(
+        consume_steps, lambda s: s.get("name") == "Download exact target evidence"
+    )
 
     check("yaml: repair-prep step exists", prep_i is not None)
     check("yaml: Claude repair model boundary exists", rep_i is not None)
@@ -674,6 +677,12 @@ def test_triage_yml_repair_wiring():
         )
         and None not in (received_i, compact_i, fresh_i, upd_i)
         and received_i < compact_i < fresh_i < upd_i,
+    )
+    check(
+        "yaml: missing target evidence cannot block stale projection",
+        target_download_i is not None
+        and consume_steps[target_download_i].get("if")
+        == "${{ needs.triage.outputs.target_artifact != '' }}",
     )
 
     prep = prepare_steps[prep_i]

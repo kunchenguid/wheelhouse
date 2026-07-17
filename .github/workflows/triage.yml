@@ -1685,6 +1685,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download exact target evidence
+        if: ${{ needs.triage.outputs.target_artifact != '' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.triage.outputs.target_artifact }}
