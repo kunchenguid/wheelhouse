@@ -184,6 +184,28 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
     % CLOSING_REFS_PAGE_SIZE
 )
 
+OPEN_PR_CLOSING_REFS_GQL = (
+    """
+query($owner:String!, $name:String!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(states:OPEN, first:%d, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        closingIssuesReferences(first:%d) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { number }
+        }
+      }
+    }
+  }
+}
+"""
+    % (PR_PAGE_SIZE, CLOSING_REFS_PAGE_SIZE)
+)
+
 PR_MERGEABLE_GQL = """
 query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
@@ -610,6 +632,27 @@ def gh_graphql_closing_refs_page(owner, name, number, after):
     return pr["closingIssuesReferences"]
 
 
+def gh_graphql_open_pr_closing_refs_page(owner, name, after=None):
+    args = [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + OPEN_PR_CLOSING_REFS_GQL,
+        "-f",
+        "owner=" + owner,
+        "-f",
+        "name=" + name,
+    ]
+    if after is not None:
+        args.extend(["-f", "after=" + after])
+    data = _gh_graphql_data(args)
+    repository = data["data"]["repository"]
+    if not repository:
+        raise RuntimeError("repository %s/%s not found" % (owner, name))
+    return repository["pullRequests"]
+
+
 def gh_graphql_pr_mergeable(owner, name, number):
     """Read just `mergeable` for one PR. Fetching a single PR forces GitHub to
     compute mergeability (the bulk list often returns UNKNOWN under load), so this
@@ -728,6 +771,123 @@ def _closing_map(prs):
         for number in pr.get("closes") or []:
             closing.setdefault(number, []).append(pr["number"])
     return closing
+
+
+def _open_pr_closing_refs(owner, name):
+    """Read every open PR and its first page of closing references strictly."""
+    first_page = gh_graphql_open_pr_closing_refs_page(owner, name)
+    if not isinstance(first_page, dict):
+        raise RuntimeError("open PR closing-reference read returned unexpected data")
+    total_count = first_page.get("totalCount")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+    ):
+        raise RuntimeError("open PR closing-reference total is unavailable")
+    nodes = list(first_page.get("nodes") or [])
+    page_info = first_page.get("pageInfo")
+    if not isinstance(page_info, dict) or not isinstance(
+        page_info.get("hasNextPage"), bool
+    ):
+        raise RuntimeError("open PR closing-reference pagination is unavailable")
+    seen_cursors = set()
+    while page_info["hasNextPage"]:
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise RuntimeError("open PR closing-reference pagination did not advance")
+        seen_cursors.add(cursor)
+        page = gh_graphql_open_pr_closing_refs_page(owner, name, cursor)
+        if not isinstance(page, dict) or page.get("totalCount") != total_count:
+            raise RuntimeError("open PR closing-reference pagination changed shape")
+        page_nodes = page.get("nodes")
+        next_page_info = page.get("pageInfo")
+        if not isinstance(page_nodes, list) or not isinstance(next_page_info, dict):
+            raise RuntimeError("open PR closing-reference page is incomplete")
+        if not isinstance(next_page_info.get("hasNextPage"), bool):
+            raise RuntimeError("open PR closing-reference pagination is incomplete")
+        nodes.extend(page_nodes)
+        page_info = next_page_info
+    if len(nodes) != total_count:
+        raise RuntimeError(
+            "open PR closing-reference read is incomplete (%d of %d)"
+            % (len(nodes), total_count)
+        )
+    return nodes
+
+
+def same_closing_issue_overlap(owner, name, number):
+    """Return (read_complete, existing overlap note) for one open PR.
+
+    The note is produced by the same `_closing_map` / `_overlap_note` path used
+    by the fleet scan. Any malformed, incomplete, duplicated, or raced read is
+    reported as incomplete so an acting caller can fail closed.
+    """
+    try:
+        if isinstance(number, bool):
+            return (False, "")
+        target_number = int(number)
+        if target_number < 1 or str(target_number) != str(number):
+            return (False, "")
+        prs = _open_pr_closing_refs(owner, name)
+        enriched = []
+        seen_prs = set()
+        target_seen = 0
+        target_closes = None
+        for pr in prs:
+            if not isinstance(pr, dict):
+                return (False, "")
+            pr_number = pr.get("number")
+            if (
+                isinstance(pr_number, bool)
+                or not isinstance(pr_number, int)
+                or pr_number < 1
+                or pr_number in seen_prs
+            ):
+                return (False, "")
+            seen_prs.add(pr_number)
+            closing_refs = pr.get("closingIssuesReferences")
+            if not isinstance(closing_refs, dict):
+                return (False, "")
+            closing_total = closing_refs.get("totalCount")
+            closing_nodes = closing_refs.get("nodes")
+            closing_page_info = closing_refs.get("pageInfo")
+            if (
+                isinstance(closing_total, bool)
+                or not isinstance(closing_total, int)
+                or closing_total < 0
+                or not isinstance(closing_nodes, list)
+                or not isinstance(closing_page_info, dict)
+                or not isinstance(closing_page_info.get("hasNextPage"), bool)
+            ):
+                return (False, "")
+            closes, complete = _closing_issue_numbers(owner, name, pr)
+            if (
+                not complete
+                or not isinstance(closes, list)
+                or len(closes) != closing_total
+            ):
+                return (False, "")
+            if any(
+                isinstance(issue, bool)
+                or not isinstance(issue, int)
+                or issue < 1
+                for issue in closes
+            ) or len(set(closes)) != len(closes):
+                return (False, "")
+            enriched.append({"number": pr_number, "closes": closes})
+            if pr_number == target_number:
+                target_seen += 1
+                target_closes = closes
+        if target_seen != 1 or target_closes is None:
+            return (False, "")
+        closing = _closing_map(enriched)
+        return (
+            True,
+            _overlap_note(target_number, target_closes, closing, set()),
+        )
+    except Exception:  # noqa: BLE001 - every unreadable shape must fail closed
+        return (False, "")
 
 
 def _dedupe_numbered_nodes(nodes):
@@ -3010,6 +3170,10 @@ def build_repo(
             "summary": summary,
             "recommendation": _recommendation(pr["bucket"]),
             "priority": priority,
+            # The existing presentation note is also a trusted scan-time
+            # auto-merge safety fact. An empty string proves no overlap in this
+            # complete scan; a non-empty string is the ambiguity evidence.
+            "same_closing_issue_overlap": overlap,
         }
         if kind == "pr-review":
             item["auto_triage"] = triage_enabled

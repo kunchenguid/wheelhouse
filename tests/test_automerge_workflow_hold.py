@@ -65,6 +65,7 @@ def item_for(head, kind="pr-review"):
         "summary": "compliance=pass tests=green",
         "recommendation": "Merge - compliance and tests are green.",
         "url": "https://github.com/owner/fmt/pull/5",
+        "same_closing_issue_overlap": "",
     }
 
 
@@ -336,6 +337,7 @@ class LifecycleWorld:
             "maintainers": core.maintainers,
             "get_owner": core.get_owner,
             "gh_rest": core.gh_rest,
+            "closing_overlap": core.same_closing_issue_overlap,
             "get_card": render_card.get_card,
             "gh": render_card._gh,
             "ensure_labels": render_card.ensure_labels,
@@ -367,6 +369,7 @@ class LifecycleWorld:
         core.maintainers = lambda: {"owner"}
         core.get_owner = lambda: "owner"
         core.gh_rest = self.target_gh
+        core.same_closing_issue_overlap = lambda owner, repo, number: (True, "")
         render_card.get_card = self.get_card
         render_card._gh = self.gh
         render_card.ensure_labels = lambda labels: [
@@ -398,6 +401,7 @@ class LifecycleWorld:
         core.maintainers = self._saved["maintainers"]
         core.get_owner = self._saved["get_owner"]
         core.gh_rest = self._saved["gh_rest"]
+        core.same_closing_issue_overlap = self._saved["closing_overlap"]
         render_card.get_card = self._saved["get_card"]
         render_card._gh = self._saved["gh"]
         render_card.ensure_labels = self._saved["ensure_labels"]

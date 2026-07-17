@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import yaml
@@ -823,7 +824,11 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
         ("invalid config", lambda: FakeGh(), dict(config, triage_daily_ceiling=0)),
         (
             "exhausted capacity",
-            lambda: FakeGh(budget_issue(reserved=1)),
+            lambda: FakeGh(
+                budget_issue(
+                    day=datetime.now(timezone.utc).strftime("%Y-%m-%d"), reserved=1
+                )
+            ),
             dict(config, triage_daily_ceiling=1),
         ),
         ("malformed ledger", lambda: FakeGh(budget_issue(body="malformed")), config),

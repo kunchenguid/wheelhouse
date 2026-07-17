@@ -23,8 +23,8 @@ Every auto-merge requires ALL of (see the numbered contract in AGENTS.md):
       aligns with the base VISION.md, no ineligible existing/default behavior
       change, recommends merge (class C also strictly opt-in + default off)
   G7  immediately re-check the card, head SHA, base SHA, default-branch VISION.md,
-      mergeability, clean state, escape hatch, and configured check contexts,
-      then do_merge
+      mergeability, clean state, escape hatch, configured check contexts, and
+      same-closing-issue ambiguity, then do_merge
 Plus a per-PR `wheelhouse:no-auto-merge` escape hatch, global/per-repo switches
 (shipped code default OFF; this repository's committed global switch is ON), a
 durable audit ledger, and a resolved decision record.
@@ -160,6 +160,21 @@ def normalize_behavior_class(value):
     """Map a model-supplied class token to one of A/B/C, else '' (ineligible)."""
     text = str(value or "").strip().upper()
     return text if text in ELIGIBLE_BEHAVIOR_CLASSES else ""
+
+
+def _scan_same_closing_issue_clear(item):
+    """Require the complete fleet scan to prove no same-issue ambiguity."""
+    if "same_closing_issue_overlap" not in item or not isinstance(
+        item.get("same_closing_issue_overlap"), str
+    ):
+        return (
+            False,
+            "same-closing-issue overlap evidence is unavailable (failing closed)",
+        )
+    note = item["same_closing_issue_overlap"]
+    if note:
+        return (False, "same-closing-issue ambiguity: %s" % note[:240])
+    return (True, "")
 
 
 def behavior_verdict_facts(verdict):
@@ -889,6 +904,15 @@ def evaluate_candidate(
     # indeterminate guards pass. Presentation callers overwrite this row from
     # their actual scan result.
     met("scan_complete", "candidate came from a complete healthy scan")
+
+    closing_issue_clear, closing_issue_reason = _scan_same_closing_issue_clear(item)
+    if closing_issue_clear:
+        result["gates"]["same_closing_issue_overlap"] = "none"
+    else:
+        if not result["hold_reason"]:
+            result["hold_reason"] = closing_issue_reason
+        if not full_evaluation:
+            return finish(False)
 
     enabled = core._auto_merge_enabled(repo_cfg, global_auto_merge)
     if enabled:
@@ -1897,6 +1921,9 @@ def claim_cards(scan, cards):
     for item in (scan or {}).get("items") or []:
         if item.get("kind") != "pr-review" or item.get("bucket") != "merge-ready":
             continue
+        closing_issue_clear, _ = _scan_same_closing_issue_clear(item)
+        if not closing_issue_clear:
+            continue
         repo = item.get("repo")
         number = str(item.get("number") or "")
         repo_cfg = (cfg["repos"] or {}).get(repo, {})
@@ -2040,7 +2067,7 @@ def _read_card_with_card_token(number, card_token):
             os.environ["GH_TOKEN"] = original_token
 
 
-def final_auto_merge_guard(expected_card, repo, number, card_token):
+def final_auto_merge_guard(expected_card, owner, repo, number, card_token):
     def guard(pr):
         if core.NO_AUTO_MERGE_LABEL in _pr_label_names(pr):
             return (False, "escape hatch label appeared before merging")
@@ -2054,6 +2081,16 @@ def final_auto_merge_guard(expected_card, repo, number, card_token):
         )
         if not card_ok:
             return (False, "card claim changed: %s" % card_reason)
+        overlap_read, overlap_note = core.same_closing_issue_overlap(
+            owner, repo, number
+        )
+        if not overlap_read:
+            return (
+                False,
+                "same-closing-issue overlap could not be re-read",
+            )
+        if overlap_note:
+            return (False, "same-closing-issue ambiguity: %s" % overlap_note[:240])
         return (True, "")
 
     return guard
@@ -2115,7 +2152,7 @@ def act_merge(
         expected_base_sha=base_sha,
         require_clean_merge_state=True,
         auto_merge_guard=final_auto_merge_guard(
-            expected_card, repo, number, card_token
+            expected_card, owner, repo, number, card_token
         ),
     )
     if terminal == "resolved" and message.startswith("Merged "):
