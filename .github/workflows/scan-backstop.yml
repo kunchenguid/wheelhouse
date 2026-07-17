@@ -30,7 +30,7 @@ on:
         required: false
         default: ""
       replay_limit:
-        description: "Maximum cards in this reviewable replay wave (1..100)"
+        description: "Maximum cards in this reviewable replay wave (1..25)"
         required: false
         default: "25"
       replay_dry_run:

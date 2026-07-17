@@ -282,6 +282,19 @@ def test_absent_cache_gets_absent_marker_and_one_queued_attempt():
         os.unlink(path)
 
 
+def test_same_revision_refresh_preserves_replay_marker():
+    value = card()
+    state = rc._unique_state_block(value["body"])
+    state[replay.REPLAY_FIELD] = valid_marker()
+    marked = rc._replace_state_block(value["body"], state)
+    refreshed = rc.render(base_item())["body"]
+    preserved = rc._preserve_same_revision_triage(
+        refreshed, marked, base_item(), state, owner="owner"
+    )
+    new_state = rc._unique_state_block(preserved)
+    assert new_state[replay.REPLAY_FIELD] == valid_marker()
+
+
 def inspect(card_value, source_value=None):
     cards = {42: card_value}
     sources = {
@@ -421,6 +434,7 @@ def test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit():
             ({"GITHUB_ACTOR": "someone-else"}, "valid-wave", 25),
             ({}, "Bad_Wave", 25),
             ({}, "valid-wave", 0),
+            ({}, "valid-wave", 26),
             ({"GITHUB_RUN_NUMBER": "not-a-number"}, "valid-wave", 25),
         ]
         for env_overrides, wave, limit in cases:
@@ -514,6 +528,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     dispatch_inputs = on_doc["workflow_dispatch"]["inputs"]
     assert dispatch_inputs["replay_wave"]["default"] == ""
     assert dispatch_inputs["replay_limit"]["default"] == "25"
+    assert "1..25" in dispatch_inputs["replay_limit"]["description"]
     assert dispatch_inputs["replay_dry_run"]["default"] is True
     step = next(
         value
@@ -529,6 +544,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         encoding="utf-8"
     )
     replay_text = (ROOT / "scripts/triage_replay.py").read_text(encoding="utf-8")
+    assert replay.REPLAY_LIMIT_MAX == 25
     assert "reconcile.maybe_queue_auto_triage" in replay_text
     assert "dispatch_triage_workflow" not in replay_text
     assert replay.REPLAY_FIELD not in rc.MATERIAL_FIELDS
@@ -543,6 +559,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
 TESTS = [
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_absent_cache_gets_absent_marker_and_one_queued_attempt,
+    test_same_revision_refresh_preserves_replay_marker,
     test_queue_failure_does_not_unlock_card_for_later_schedule,
     test_never_cleared_matrix_fails_closed,
     test_marker_mismatch_matrix_never_clears_or_resets_cap,

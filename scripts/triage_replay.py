@@ -27,7 +27,7 @@ import wheelhouse_core as core  # noqa: E402
 REPLAY_FIELD = "triage_replay"
 REPLAY_VERSION = 1
 REPLAY_LIMIT_DEFAULT = 25
-REPLAY_LIMIT_MAX = 100
+REPLAY_LIMIT_MAX = 25
 REPLAY_WAVE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
 PR_REVISION_RE = re.compile(r"^[0-9A-Fa-f]{7,64}$")
 ISSUE_REVISION_RE = re.compile(
