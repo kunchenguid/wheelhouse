@@ -122,16 +122,24 @@ def config():
 
 @contextmanager
 def replay_environment(
-    cards, sources, remaining=1200, stub_queue=True, stub_claim=True
+    cards,
+    sources,
+    remaining=1200,
+    stub_queue=True,
+    stub_claim=True,
+    card_read_hook=None,
 ):
     card_reads = []
     source_reads = []
     edits = []
     queued = []
     dispatched = []
+    claims = []
 
     def get_card(number):
         card_reads.append(number)
+        if card_read_hook is not None:
+            card_read_hook(number, len(card_reads), cards)
         value = cards.get(number)
         return copy.deepcopy(value) if value is not None else None
 
@@ -181,14 +189,18 @@ def replay_environment(
         }
     )
     try:
+        def supersede(**kwargs):
+            claims.append(kwargs)
+            return {
+                "event_key": "a" * 64,
+                "superseded": False,
+            }
+
         claim_context = (
             patched(
                 replay.agent_claim,
                 {
-                    "supersede_triage_claim": lambda **kwargs: {
-                        "event_key": "a" * 64,
-                        "superseded": False,
-                    },
+                    "supersede_triage_claim": supersede,
                     "triage_replay_duplicate_only_evidence": lambda **kwargs: False,
                 },
             )
@@ -207,6 +219,7 @@ def replay_environment(
                 "edits": edits,
                 "queued": queued,
                 "dispatched": dispatched,
+                "claims": claims,
             }
     finally:
         os.environ.clear()
@@ -226,9 +239,8 @@ def cards_file(numbers):
 def attempt_reset_fixture():
     cards = {}
     sources = {}
-    for card_number, (revision, prior_wave, prior_run) in sorted(
-        replay.ATTEMPT_RESET_COHORT.items()
-    ):
+    for card_number, prior_marker in sorted(replay.ATTEMPT_RESET_COHORT.items()):
+        revision = prior_marker["revision"]
         kind = "issue-triage" if revision.endswith("Z") else "pr-review"
         target = card_number + 10_000
         value = card(
@@ -244,14 +256,7 @@ def attempt_reset_fixture():
             "revision": revision,
             "count": 2,
         }
-        state[replay.REPLAY_FIELD] = {
-            "version": replay.REPLAY_VERSION,
-            "wave": prior_wave,
-            "revision": revision,
-            "cleared": "error",
-            "at": "2026-07-17T20:00:00Z",
-            "run_number": prior_run,
-        }
+        state[replay.REPLAY_FIELD] = dict(prior_marker)
         value["body"] = rc._replace_state_block(value["body"], state)
         cards[card_number] = value
         sources[("wheelhouse", target, kind)] = source(
@@ -317,7 +322,7 @@ def test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry():
                 assert state[replay.REPLAY_FIELD] == {
                     "version": replay.ATTEMPT_RESET_REPLAY_VERSION,
                     "wave": replay.ATTEMPT_RESET_WAVE,
-                    "revision": replay.ATTEMPT_RESET_COHORT[number][0],
+                    "revision": replay.ATTEMPT_RESET_COHORT[number]["revision"],
                     "cleared": "error",
                     "at": state[replay.REPLAY_FIELD]["at"],
                     "run_number": 77,
@@ -376,7 +381,7 @@ def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     cards, sources, supplied = attempt_reset_fixture()
     moved = min(cards)
     state = rc._unique_state_block(cards[moved]["body"])
-    old_revision = replay.ATTEMPT_RESET_COHORT[moved][0]
+    old_revision = replay.ATTEMPT_RESET_COHORT[moved]["revision"]
     kind = state["kind"]
     moved_revision = (
         "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
@@ -409,6 +414,127 @@ def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
                 raise AssertionError((moved, old_revision, moved_revision))
             assert not calls["edits"] and not calls["queued"]
             assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_attempt_reset_binds_complete_prior_marker_identity():
+    cards, sources, supplied = attempt_reset_fixture()
+    changed = min(cards)
+    state = rc._unique_state_block(cards[changed]["body"])
+    state[replay.REPLAY_FIELD]["at"] = "2026-07-17T20:00:00Z"
+    cards[changed]["body"] = rc._replace_state_block(cards[changed]["body"], state)
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            try:
+                replay.run(
+                    path,
+                    replay.ATTEMPT_RESET_WAVE,
+                    len(replay.ATTEMPT_RESET_COHORT),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset accepted wrong prior marker")
+            assert not calls["claims"]
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_attempt_reset_second_read_mismatch_is_atomic_zero_write():
+    cards, sources, supplied = attempt_reset_fixture()
+    changed = max(cards)
+
+    def race_card(number, read_count, live_cards):
+        if read_count == len(replay.ATTEMPT_RESET_COHORT) + len(live_cards):
+            state = rc._unique_state_block(live_cards[number]["body"])
+            state["triage_status"] = "queued"
+            live_cards[number]["body"] = rc._replace_state_block(
+                live_cards[number]["body"], state
+            )
+
+    path = cards_file([])
+    before = {number: value["body"] for number, value in cards.items()}
+    try:
+        with replay_environment(
+            cards, sources, card_read_hook=race_card
+        ) as calls:
+            try:
+                replay.run(
+                    path,
+                    replay.ATTEMPT_RESET_WAVE,
+                    len(replay.ATTEMPT_RESET_COHORT),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset mutated before full preflight")
+            assert len(calls["card_reads"]) >= len(replay.ATTEMPT_RESET_COHORT) * 2
+            assert not calls["claims"]
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
+            changed_only = {
+                number: value["body"]
+                for number, value in cards.items()
+                if value["body"] != before[number]
+            }
+            assert set(changed_only) == {changed}
+    finally:
+        os.unlink(path)
+
+
+def test_v2_reset_marker_is_never_ordinary_replay_evidence():
+    parked = card(status="queued")
+    state = rc._unique_state_block(parked["body"])
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": "abcdef1",
+        "count": 2,
+    }
+    state[replay.REPLAY_FIELD] = {
+        "version": replay.ATTEMPT_RESET_REPLAY_VERSION,
+        "wave": replay.ATTEMPT_RESET_WAVE,
+        "revision": "abcdef1",
+        "cleared": "error",
+        "at": "2026-07-17T20:00:00Z",
+        "run_number": 77,
+        "attempt_reset": True,
+    }
+    parked["body"] = rc._replace_state_block(parked["body"], state)
+    cards = {42: parked}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    calls = {"duplicate": 0}
+
+    def duplicate(**kwargs):
+        calls["duplicate"] += 1
+        return True
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as replay_calls,
+            patched(
+                replay.agent_claim,
+                {
+                    "supersede_triage_claim": lambda **kwargs: {
+                        "event_key": "a" * 64,
+                        "superseded": False,
+                    },
+                    "triage_replay_duplicate_only_evidence": duplicate,
+                },
+            ),
+        ):
+            result = replay.run(path, "ordinary-wave", 25)
+            assert result["eligible"] == result["written"] == result["queued"] == 0
+            assert calls["duplicate"] == 0
+            assert not replay_calls["edits"] and not replay_calls["queued"]
+            assert not replay_calls["dispatched"]
     finally:
         os.unlink(path)
 
@@ -1174,6 +1300,9 @@ TESTS = [
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry,
     test_attempt_reset_refuses_outside_scope_and_any_state_mismatch,
+    test_attempt_reset_binds_complete_prior_marker_identity,
+    test_attempt_reset_second_read_mismatch_is_atomic_zero_write,
+    test_v2_reset_marker_is_never_ordinary_replay_evidence,
     test_absent_cache_gets_absent_marker_and_one_queued_attempt,
     test_same_revision_refresh_preserves_replay_marker,
     test_queue_failure_does_not_unlock_card_for_later_schedule,

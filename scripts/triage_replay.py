@@ -51,26 +51,134 @@ MAX_RUN_NUMBER = 9_007_199_254_740_991
 # replay marker observed before this fix. The capability cannot follow a moved
 # target, admit another card, or be reused after its v2 marker is written.
 ATTEMPT_RESET_WAVE = "evidence-empty-e7-final"
+
+
+def _attempt_reset_prior_marker(revision, wave, run_number, at):
+    return {
+        "version": REPLAY_VERSION,
+        "wave": wave,
+        "revision": revision,
+        "cleared": "error",
+        "at": at,
+        "run_number": run_number,
+    }
+
+
 ATTEMPT_RESET_COHORT = {
-    1367: ("bf88f51742cd401e8c8f207fb4c5abd847afb386", "cohort-rerun-1", 237),
-    1368: ("2026-07-14T22:18:31Z", "cohort-rerun-1", 237),
-    1374: ("2c241fb3dd6dcb2a4399c920e873977760274226", "cohort-rerun-1", 237),
-    1378: ("81084b38f3f05c9837f008778d043af4e856d055", "cohort-rerun-1", 237),
-    1386: ("2026-07-15T14:07:59Z", "cohort-rerun-1", 237),
-    1388: ("2026-07-15T09:50:55Z", "cohort-rerun-1", 237),
-    1389: ("2026-07-15T09:39:31Z", "cohort-rerun-1", 237),
-    1390: ("2026-07-15T00:16:28Z", "cohort-rerun-1", 237),
-    1391: ("2026-07-14T12:33:32Z", "cohort-rerun-1", 237),
-    1393: ("2026-07-15T11:36:12Z", "cohort-rerun-1", 237),
-    1395: ("2026-07-14T12:16:32Z", "cohort-rerun-1", 237),
-    1396: ("2026-07-14T04:16:19Z", "cohort-rerun-1", 237),
-    1397: ("83ca8584c5e0387d44e9521d1616183bb3e31faa", "cohort-rerun-1", 237),
-    1398: ("19057b7f4626f235544ecafdbdf8a1e6ffd7a642", "cohort-rerun-1", 237),
-    1399: ("2026-07-16T00:25:10Z", "cohort-rerun-1", 237),
-    1400: ("2026-07-15T23:49:21Z", "cohort-rerun-2", 238),
-    1414: ("2026-07-16T15:33:54Z", "cohort-rerun-2", 238),
-    1415: ("2026-07-16T16:17:20Z", "cohort-rerun-2", 238),
-    1420: ("2026-07-16T19:40:06Z", "cohort-rerun-2", 238),
+    1367: _attempt_reset_prior_marker(
+        "bf88f51742cd401e8c8f207fb4c5abd847afb386",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:07:39Z",
+    ),
+    1368: _attempt_reset_prior_marker(
+        "2026-07-14T22:18:31Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:07:47Z",
+    ),
+    1374: _attempt_reset_prior_marker(
+        "2c241fb3dd6dcb2a4399c920e873977760274226",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:08:02Z",
+    ),
+    1378: _attempt_reset_prior_marker(
+        "81084b38f3f05c9837f008778d043af4e856d055",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:08:11Z",
+    ),
+    1386: _attempt_reset_prior_marker(
+        "2026-07-15T14:07:59Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:08:35Z",
+    ),
+    1388: _attempt_reset_prior_marker(
+        "2026-07-15T09:50:55Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:08:50Z",
+    ),
+    1389: _attempt_reset_prior_marker(
+        "2026-07-15T09:39:31Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:08:57Z",
+    ),
+    1390: _attempt_reset_prior_marker(
+        "2026-07-15T00:16:28Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:04Z",
+    ),
+    1391: _attempt_reset_prior_marker(
+        "2026-07-14T12:33:32Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:12Z",
+    ),
+    1393: _attempt_reset_prior_marker(
+        "2026-07-15T11:36:12Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:27Z",
+    ),
+    1395: _attempt_reset_prior_marker(
+        "2026-07-14T12:16:32Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:42Z",
+    ),
+    1396: _attempt_reset_prior_marker(
+        "2026-07-14T04:16:19Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:50Z",
+    ),
+    1397: _attempt_reset_prior_marker(
+        "83ca8584c5e0387d44e9521d1616183bb3e31faa",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:09:58Z",
+    ),
+    1398: _attempt_reset_prior_marker(
+        "19057b7f4626f235544ecafdbdf8a1e6ffd7a642",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:10:06Z",
+    ),
+    1399: _attempt_reset_prior_marker(
+        "2026-07-16T00:25:10Z",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:10:14Z",
+    ),
+    1400: _attempt_reset_prior_marker(
+        "2026-07-15T23:49:21Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:23:41Z",
+    ),
+    1414: _attempt_reset_prior_marker(
+        "2026-07-16T15:33:54Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:24:27Z",
+    ),
+    1415: _attempt_reset_prior_marker(
+        "2026-07-16T16:17:20Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:24:36Z",
+    ),
+    1420: _attempt_reset_prior_marker(
+        "2026-07-16T19:40:06Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:24:45Z",
+    ),
 }
 
 
@@ -164,7 +272,7 @@ def _attempt_reset_scope(wave, value):
         raise ValueError("attempt reset cards must not contain duplicates")
     if set(numbers) != set(ATTEMPT_RESET_COHORT):
         raise ValueError("attempt reset cards must exactly match the sanctioned cohort")
-    return {number: ATTEMPT_RESET_COHORT[number] for number in sorted(numbers)}
+    return {number: dict(ATTEMPT_RESET_COHORT[number]) for number in sorted(numbers)}
 
 
 def _attempt_reset_count(state, kind, revision, cap):
@@ -328,20 +436,20 @@ def inspect_candidate(
     marker = state.get(REPLAY_FIELD) if REPLAY_FIELD in state else None
     if marker is not None and not _valid_marker(marker, revision):
         return None, "replay-marker-untrusted"
+    if (
+        attempt_reset is None
+        and marker is not None
+        and marker.get("version") == ATTEMPT_RESET_REPLAY_VERSION
+    ):
+        return None, "replay-marker-untrusted"
     status = state.get("triage_status")
     duplicate_reentry = False
     if attempt_reset is not None:
-        expected_revision, expected_wave, expected_run_number = attempt_reset
+        expected_marker = attempt_reset
+        expected_revision = expected_marker["revision"]
         if revision != expected_revision:
             return None, "attempt-reset-revision-mismatch"
-        if (
-            marker is None
-            or marker.get("version") != REPLAY_VERSION
-            or marker.get("wave") != expected_wave
-            or marker.get("run_number") != expected_run_number
-            or marker.get("revision") != revision
-            or marker.get("cleared") != "error"
-        ):
+        if marker != expected_marker:
             return None, "attempt-reset-prior-marker-mismatch"
         if state.get("held") or triaged_sha != revision or status != "error":
             return None, "attempt-reset-state-mismatch"
@@ -423,6 +531,65 @@ def inspect_candidate(
         "duplicate_reentry": duplicate_reentry,
         "attempt_reset": attempt_reset is not None,
     }, "eligible"
+
+
+def _card_snapshot_identity(card):
+    if not isinstance(card, dict):
+        return None
+    author = card.get("author") if isinstance(card.get("author"), dict) else {}
+    return {
+        "number": card.get("number"),
+        "title": card.get("title", ""),
+        "body": card.get("body", ""),
+        "labels": sorted(_label_names(card.get("labels")) or []),
+        "state": card.get("state", ""),
+        "updated_at": render_card.card_updated_at(card),
+        "comments": reconcile._comment_count(card.get("comments")),
+        "author": author.get("login", ""),
+    }
+
+
+def _plans_match_for_reset(initial, reread):
+    return bool(
+        initial
+        and reread
+        and initial.get("number") == reread.get("number")
+        and initial.get("revision") == reread.get("revision")
+        and initial.get("cleared") == reread.get("cleared")
+        and initial.get("attempt_count") == reread.get("attempt_count")
+        and initial.get("action") == reread.get("action")
+        and initial.get("item") == reread.get("item")
+        and initial.get("state") == reread.get("state")
+        and _card_snapshot_identity(initial.get("card"))
+        == _card_snapshot_identity(reread.get("card"))
+    )
+
+
+def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_token):
+    if not attempt_reset_scope:
+        return selected
+    if len(selected) != len(attempt_reset_scope):
+        raise ValueError("attempt reset requires the complete eligible cohort")
+    reread_plans = []
+    for initial in selected:
+        number = initial["number"]
+        plan, reason = inspect_candidate(
+            number,
+            config,
+            owner,
+            has_token,
+            attempt_reset=attempt_reset_scope.get(number),
+        )
+        if not plan or not _plans_match_for_reset(initial, plan):
+            print(
+                "::warning::attempt reset preflight refused card #%s: %s"
+                % (number, reason if not plan else "card-raced-before-reset")
+            )
+            raise ValueError(
+                "attempt reset refused because a sanctioned card changed before mutation"
+            )
+        reread_plans.append(plan)
+    return reread_plans
 
 
 def _marker(wave, revision, cleared, run_number, attempt_reset=False):
@@ -586,6 +753,9 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             "deferred": deferred,
             "written": 0,
         }
+    selected = _preflight_attempt_reset(
+        selected, attempt_reset_scope, config, owner, has_token
+    )
     written = 0
     queued = 0
     for initial in selected:
@@ -603,7 +773,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             )
             continue
         live = render_card.get_card(plan["number"])
-        if not reconcile._matches_snapshot(live, plan["card"]):
+        if _card_snapshot_identity(live) != _card_snapshot_identity(plan["card"]):
             print(
                 "::warning::replay deferred card #%s: card-raced-before-queue"
                 % plan["number"]
