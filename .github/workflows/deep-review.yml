@@ -791,6 +791,7 @@ jobs:
 
       - id: post-model-freshness
         name: Re-read target revision before deep-review projection
+        if: ${{ needs.deep-review.outputs.pre_model_fresh == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
           CARD_TOKEN: ${{ github.token }}

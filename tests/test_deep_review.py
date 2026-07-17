@@ -480,6 +480,14 @@ def test_code_grounded_checkout_and_tool_isolation():
     )
     check("workflow: verdict.md handoff is gone", "verdict.md" not in dr)
     check("workflow: a trusted post step exists", post is not None)
+    post_freshness = step_by_id(consume_steps, "post-model-freshness")
+    check("workflow: post-model freshness step exists", post_freshness is not None)
+    if post_freshness:
+        check(
+            "workflow: post-model projection preserves the pre-model stale gate",
+            str(post_freshness.get("if", ""))
+            == "${{ needs.deep-review.outputs.pre_model_fresh == 'true' }}",
+        )
     if post:
         env = yaml.safe_dump(post.get("env", {}))
         run = str(post.get("run", ""))
