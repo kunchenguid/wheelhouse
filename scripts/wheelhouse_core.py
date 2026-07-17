@@ -740,29 +740,59 @@ def _page_open_issues(owner, name, first_page):
 
 
 def _closing_issue_numbers(owner, name, pr):
-    first_page = pr.get("closingIssuesReferences") or {}
-    nodes = list(first_page.get("nodes") or [])
-    page_info = first_page.get("pageInfo") or {}
-    if not page_info:
-        return (
-            [i["number"] for i in nodes],
-            first_page.get("totalCount", len(nodes)) <= len(nodes),
-        )
+    pr_number = pr.get("number")
+    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+        raise RuntimeError("closing issue PR number is unavailable")
+    first_page = pr.get("closingIssuesReferences")
+    if not isinstance(first_page, dict):
+        raise RuntimeError("closing issue references are unavailable")
+    total_count = first_page.get("totalCount")
+    page_info = first_page.get("pageInfo")
+    first_nodes = first_page.get("nodes")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+        or not isinstance(first_nodes, list)
+        or not isinstance(page_info, dict)
+        or not isinstance(page_info.get("hasNextPage"), bool)
+    ):
+        raise RuntimeError("closing issue reference page is incomplete")
+    nodes = list(first_nodes)
     seen_cursors = set()
     while page_info.get("hasNextPage"):
         cursor = page_info.get("endCursor")
-        if not cursor or cursor in seen_cursors:
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise RuntimeError("closing issue pagination did not advance")
         seen_cursors.add(cursor)
-        page = gh_graphql_closing_refs_page(owner, name, pr["number"], cursor)
-        nodes.extend(page.get("nodes") or [])
-        page_info = page.get("pageInfo") or {}
-        if not page_info:
-            return (
-                [i["number"] for i in nodes],
-                page.get("totalCount", len(nodes)) <= len(nodes),
-            )
-    return [i["number"] for i in nodes], True
+        page = gh_graphql_closing_refs_page(owner, name, pr_number, cursor)
+        if not isinstance(page, dict) or page.get("totalCount") != total_count:
+            raise RuntimeError("closing issue reference pagination changed shape")
+        page_nodes = page.get("nodes")
+        page_info = page.get("pageInfo")
+        if (
+            not isinstance(page_nodes, list)
+            or not isinstance(page_info, dict)
+            or not isinstance(page_info.get("hasNextPage"), bool)
+        ):
+            raise RuntimeError("closing issue reference page is incomplete")
+        nodes.extend(page_nodes)
+    numbers = []
+    seen_numbers = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise RuntimeError("closing issue reference node is incomplete")
+        number = node.get("number")
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+            or number in seen_numbers
+        ):
+            raise RuntimeError("closing issue reference node is invalid")
+        seen_numbers.add(number)
+        numbers.append(number)
+    return numbers, len(numbers) == total_count
 
 
 def _closing_map(prs):

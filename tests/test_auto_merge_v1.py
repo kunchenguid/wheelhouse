@@ -753,6 +753,74 @@ def test_G7_unreadable_same_closing_issue_overlap_holds_fail_closed():
     )
 
 
+def test_G7_malformed_later_closing_ref_page_holds_fail_closed():
+    cases = (
+        (
+            "malformed",
+            {
+                "totalCount": 2,
+                "pageInfo": {},
+                "nodes": [{"number": 43}],
+            },
+        ),
+        (
+            "raced",
+            {
+                "totalCount": 3,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 43}],
+            },
+        ),
+    )
+    original_overlap = core.same_closing_issue_overlap
+    saved_open = core.gh_graphql_open_pr_closing_refs_page
+    saved_closing = core.gh_graphql_closing_refs_page
+    try:
+        for label, second_closing_page in cases:
+            w, items, cards = default_world()
+            w.same_closing_issue_overlap = (
+                lambda owner, repo, number: original_overlap(owner, repo, number)
+            )
+
+            def open_pr_page(owner, repo, after=None):
+                return {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "number": 5,
+                            "closingIssuesReferences": {
+                                "totalCount": 2,
+                                "pageInfo": {
+                                    "hasNextPage": True,
+                                    "endCursor": "close-2",
+                                },
+                                "nodes": [{"number": 42}],
+                            },
+                        }
+                    ],
+                }
+
+            core.gh_graphql_open_pr_closing_refs_page = open_pr_page
+            core.gh_graphql_closing_refs_page = (
+                lambda owner, repo, number, after: second_closing_page
+            )
+            payload, _ = run_act(w, items, cards)
+            check(
+                "G7: %s later closing-ref page holds fail closed" % label,
+                not payload["merges"]
+                and "could not be re-read" in _held_reason(payload),
+            )
+            check(
+                "G7: %s later closing-ref page never clears" % label,
+                w.do_merge_final_guards
+                == [(False, "same-closing-issue overlap could not be re-read")],
+            )
+    finally:
+        core.gh_graphql_open_pr_closing_refs_page = saved_open
+        core.gh_graphql_closing_refs_page = saved_closing
+
+
 def test_live_same_closing_issue_overlap_reuses_scan_note_computation():
     def pr(number, closes):
         return {
