@@ -499,7 +499,10 @@ def test_cli_triage_apply_repair_end_to_end():
         check("e2e: repaired card records success", st.get("triage_status") == "succeeded")
         check("e2e: repaired card records repair telemetry", st.get("triage_repair_status") == "repaired")
         check("e2e: repaired card shows the model's summary", VALID["summary"] in cap.get("body", ""))
-        check("e2e: repaired card reports explicit applied output", cap.get("outputs") == "applied=true\n")
+        check(
+            "e2e: repaired card reports explicit applied output",
+            cap.get("outputs") == "applied=true\ntriage_status=succeeded\n",
+        )
 
         # repair-failure cap: invalid original + still-invalid repair -> visible
         # error carrying the reason, exactly one repair attempt (the CLI consults
@@ -531,11 +534,25 @@ def test_cli_triage_apply_repair_end_to_end():
               st4.get("triage_status") == "succeeded" and st4.get("triage_repair_status") is None)
 
         skipped = _run_triage_apply(469, "newer-revision", queued, valid, "", tf)
-        check("e2e: stale card reports explicit rejected output", skipped.get("outputs") == "applied=false\n" and "body" not in skipped)
+        check(
+            "e2e: stale card reports explicit rejected output",
+            skipped.get("outputs")
+            == "applied=false\ntriage_status=succeeded\n"
+            and "body" not in skipped,
+        )
         failed = _run_triage_fail(469, "8b7547c1", queued)
-        check("e2e: triage-fail reports explicit applied output", failed.get("outputs") == "applied=true\n" and "body" in failed)
+        check(
+            "e2e: triage-fail reports explicit applied output",
+            failed.get("outputs") == "applied=true\ntriage_status=error\n"
+            and "body" in failed,
+        )
         failed_stale = _run_triage_fail(469, "newer-revision", queued)
-        check("e2e: stale triage-fail reports explicit rejected output", failed_stale.get("outputs") == "applied=false\n" and "body" not in failed_stale)
+        check(
+            "e2e: stale triage-fail reports explicit rejected output",
+            failed_stale.get("outputs")
+            == "applied=false\ntriage_status=error\n"
+            and "body" not in failed_stale,
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -2586,7 +2586,10 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
             "recover(%s): hold label removed via gh edit" % kind,
             any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
         )
-        check("recover(%s): reports explicit applied output" % kind, applied_output == "applied=true\n")
+        check(
+            "recover(%s): reports explicit applied output" % kind,
+            applied_output == "applied=true\ntriage_status=error\n",
+        )
 
 
 def test_triage_recover_cli_is_noop_when_not_stuck():
@@ -2704,7 +2707,10 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
             "recover no-op (%s): no card write happened" % label,
             calls["gh_calls"] == [],
         )
-        check("recover no-op (%s): reports explicit rejected output" % label, applied_output == "applied=false\n")
+        check(
+            "recover no-op (%s): reports explicit rejected output" % label,
+            applied_output == "applied=false\ntriage_status=error\n",
+        )
 
 
 def test_scan_and_ingest_can_dispatch_with_default_token():

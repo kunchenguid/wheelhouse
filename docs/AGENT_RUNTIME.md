@@ -27,8 +27,11 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
+Automatic triage also dual-writes one bounded claim-keyed `wheelhouse-triage-record` hidden comment for each admitted attempt, containing only version, event key, revision, structural status, and structural consumer code.
+Card consumers do not read that migration record yet.
 Automatic triage also reserves from the closed UTC daily budget ledger before its verified queued-card checkpoint.
-The default `triage_daily_ceiling` is 100 reservations per UTC day, and each reservation can reach at most one primary call plus one bounded schema-repair call, for a 200-model-call daily worst case.
+The default `triage_daily_ceiling` is 1200 reservations per UTC day, and each reservation can reach at most one primary call plus one bounded schema-repair call, for a 2400-model-call daily worst case.
+The finite default lets approved replay waves complete without cost throttling while preserving a hard runaway-containment bound.
 The per-card `triage_attempt_cap_per_revision` defaults to two queued attempts for one card-kind source revision.
 Malformed cap configuration fails closed to one, while malformed ceiling or ledger state fails closed to zero new reservations.
 Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.

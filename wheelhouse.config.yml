@@ -279,13 +279,15 @@ auto_triage_issues: true
 # per-repository override above.
 # Invalid values fail closed to 1.
 # `triage_daily_ceiling` is one fleet-wide count of reservations per UTC day.
-# It defaults to 100 and accepts integers from 1 through 2000.
+# It defaults to 1200 and accepts integers from 1 through 2000.
+# The default lets approved replay waves complete without cost throttling while
+# remaining a finite runaway-containment bound.
 # It has no per-repository override; any invalid configuration fails closed to
 # zero automatic triage reservations until corrected.
 # One reservation permits at most one triage dispatch, whose bounded schema
 # repair can make at most two model calls total.
 triage_attempt_cap_per_revision: 2
-triage_daily_ceiling: 100
+triage_daily_ceiling: 1200
 
 # Code-grounded deep review is ALWAYS available (there is no enable flag). Tick
 # the "Investigate" box, or have the repo owner apply the `needs-deep-review`

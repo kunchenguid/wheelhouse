@@ -95,7 +95,7 @@ maintainer: ""            # optional extra login allowed to drive decisions and 
 auto_triage: true         # LLM side-job: quick advisory PR-card triage (DEFAULT ON)
 auto_triage_issues: true  # LLM side-job: quick advisory issue-card triage (DEFAULT ON, independent of auto_triage)
 triage_attempt_cap_per_revision: 2  # queued attempts per card-kind source revision (1..5)
-triage_daily_ceiling: 100            # fleet-wide auto-triage reservations per UTC day (1..2000)
+triage_daily_ceiling: 1200           # fleet-wide auto-triage reservations per UTC day (1..2000)
 nl_decisions: false       # LLM side-job: reply to a card in plain English (off by default)
 card_issues: true         # also scan un-addressed issues, not just PRs; owner/maintainer/bot authors are skipped
 auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON; see Security notes)
@@ -135,12 +135,12 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > **Automatic-triage spend bounds.**
 > `triage_attempt_cap_per_revision` counts queued attempts for one card kind and source revision, defaults to 2, accepts integers from 1 through 5, and may be overridden per repository.
 > An invalid cap fails closed to 1 and logs an error.
-> `triage_daily_ceiling` is one global reservation budget per UTC calendar day, defaults to 100, accepts integers from 1 through 2000, and has no per-repository override.
+> `triage_daily_ceiling` is one global reservation budget per UTC calendar day, defaults to 1200, accepts integers from 1 through 2000, and has no per-repository override.
 > An invalid daily ceiling fails closed to 0, so no automatic triage is queued until the configuration is corrected.
 > If a reservation is denied because the budget is unavailable, a held card is published with its normal decision controls and a concise deferred-advisory note, without consuming an attempt for that revision.
 > Its closed maintenance-ledger issue stores only a version, UTC day, and reserved count; a day rollover resets the count in the same by-number verified write that reserves the new day's first unit.
 > Each verified reservation authorizes at most one existing triage dispatch, and that dispatch can make at most two model calls because schema repair is bounded to one additional call.
-> The default worst case is therefore 100 automatic-triage reservations and 200 model calls per UTC day across scans and ingest runs.
+> The default worst case is therefore 1200 automatic-triage reservations and 2400 model calls per UTC day across scans, ingest runs, and explicitly operator-triggered replay waves.
 > Reservations happen before the card is marked queued, so a crash can waste daily capacity but cannot undercount or authorize extra spend.
 > Owner-triggered deep review and natural-language decisions are outside this ceiling because they require deliberate owner actions and separate durable claims.
 
@@ -617,6 +617,7 @@ scripts/
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, reflect target activity, close consumed ones
+  triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
@@ -628,6 +629,7 @@ tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-a
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, activity-stamp interaction, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
+tests/test_triage_replay.py    offline unit test for owner-only replay eligibility, dry-run behavior, exact-revision gates, and result records
 tests/test_triage_prompt_size.py offline regression test for bounded pass-by-reference triage and deep-review prompts
 tests/test_auto_merge_v1.py    offline unit test for scan-time auto-merge gates, same-closing-issue overlap holds, claims, live rechecks, audit records, and ledger recovery
 tests/test_automerge_card_ui.py offline end-to-end test for authoritative criterion evaluation, fail-closed display states, and real card rendering

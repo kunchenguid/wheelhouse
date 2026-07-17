@@ -1648,6 +1648,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_repair_candidate",
         "automerge_verdict",
         TRIAGE_ATTEMPTS_FIELD,
+        "triage_replay",
     ):
         if key in (old_state or {}):
             state[key] = old_state[key]
@@ -3668,6 +3669,70 @@ def reserve_triage_budget(number, item, ceiling, today=None):
         )
 
 
+def triage_budget_remaining(ceiling, today=None):
+    """Return trusted remaining UTC triage capacity without mutating the ledger.
+
+    Replay uses this read-only preflight to bound a wave before it writes a
+    once-per-revision marker. The authoritative reservation still happens in
+    ``mark_triage_queued`` immediately before the queued card write. Every
+    malformed, duplicate, unreadable, or invalid state fails closed to zero.
+    A missing ledger means the full ceiling remains; creating it is left to the
+    first real reservation so dry-run mode stays write-free.
+    """
+    if (
+        isinstance(ceiling, bool)
+        or not isinstance(ceiling, int)
+        or ceiling < core.TRIAGE_DAILY_CEILING_MIN
+        or ceiling > core.TRIAGE_DAILY_CEILING_MAX
+    ):
+        print(
+            "::error::triage-budget remaining-capacity check received an "
+            "invalid ceiling"
+        )
+        return 0
+    day = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        parsed_day = datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        parsed_day = ""
+    if parsed_day != day:
+        print(
+            "::error::triage-budget remaining-capacity check received an "
+            "invalid UTC day"
+        )
+        return 0
+    try:
+        issues = _list_triage_budget_issues()
+        if len(issues) > 1:
+            raise RuntimeError("multiple triage budget ledger issues exist")
+        if not issues:
+            return ceiling
+        listed_number = (
+            issues[0].get("number") if isinstance(issues[0], dict) else None
+        )
+        if (
+            isinstance(listed_number, bool)
+            or not isinstance(listed_number, int)
+            or listed_number < 1
+        ):
+            raise RuntimeError("triage budget ledger listing is untrusted")
+        issue = _get_triage_budget_issue(listed_number)
+        trusted, reason = _trusted_triage_budget_issue(issue)
+        if not trusted:
+            raise RuntimeError(reason)
+        record = parse_triage_budget(issue.get("body") or "")
+        if record is None:
+            raise RuntimeError("triage budget ledger marker is malformed")
+        reserved = record["reserved"] if record["day"] == day else 0
+        return max(0, ceiling - reserved)
+    except Exception as error:
+        print(
+            "::error::triage-budget remaining-capacity check failed closed (%s)"
+            % str(error)[:180]
+        )
+        return 0
+
+
 def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
     new_body = body_with_reconcile_absence(
         body, count, run_number=run_number, closed_at=closed_at
@@ -3767,7 +3832,9 @@ def _queue_card_snapshot_matches(card, number, item, body):
     )
 
 
-def mark_triage_queued(number, item, body):
+def mark_triage_queued(
+    number, item, body, prepare_body=None, publish_budget_deferral=True
+):
     """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
     The global daily reservation lands first. The per-revision attempt count and
@@ -3779,8 +3846,11 @@ def mark_triage_queued(number, item, body):
     if triage_attempts_exhausted(item, state, cap=cap):
         report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
         return None
-    new_body = body_with_triage_queued(body, item, attempt_cap=cap)
-    if new_body == body:
+    candidate_body = prepare_body(body) if prepare_body else body
+    if prepare_body and candidate_body == body:
+        return None
+    new_body = body_with_triage_queued(candidate_body, item, attempt_cap=cap)
+    if new_body == body or new_body == candidate_body:
         return None
     before = get_card(number)
     if not _queue_card_snapshot_matches(before, number, item, body):
@@ -3794,6 +3864,8 @@ def mark_triage_queued(number, item, body):
         )
         return None
     if not reserve_triage_budget(number, item, ceiling):
+        if not publish_budget_deferral:
+            return None
         publish_triage_budget_deferral(number, item, body)
         return None
     # A triage consumer is the only body writer outside the shared workflow
@@ -4815,6 +4887,10 @@ def main():
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
             )
         _github_output("applied", "true" if applied else "false")
+        _github_output(
+            "triage_status",
+            "succeeded" if outcome in {"success", "repaired"} else "error",
+        )
     elif args.cmd == "triage-repair-prep":
         # Decide whether the ORIGINAL delivered result is a schema-miss that
         # warrants ONE bounded repair turn, and if so publish that turn's prompt
@@ -4863,6 +4939,7 @@ def main():
             args.issue, args.revision, error=args.message, owner=owner
         )
         _github_output("applied", "true" if applied else "false")
+        _github_output("triage_status", "error")
     elif args.cmd == "triage-recover":
         # Last-resort fail-open safety net, run `always()` at the end of
         # triage.yml using the RAW workflow_dispatch inputs (never a `resolve`
@@ -4904,6 +4981,7 @@ def main():
                     owner=owner,
                 )
         _github_output("applied", "true" if applied else "false")
+        _github_output("triage_status", "error")
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)
