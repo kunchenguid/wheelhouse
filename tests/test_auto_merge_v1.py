@@ -821,6 +821,70 @@ def test_G7_malformed_later_closing_ref_page_holds_fail_closed():
         core.gh_graphql_closing_refs_page = saved_closing
 
 
+def test_G7_malformed_open_pr_first_page_nodes_hold_fail_closed():
+    cases = (
+        ("missing", object()),
+        ("null", None),
+        ("object", {}),
+        ("string", "not-a-list"),
+    )
+    original_overlap = core.same_closing_issue_overlap
+    saved_open = core.gh_graphql_open_pr_closing_refs_page
+    try:
+        for label, value in cases:
+            w, items, cards = default_world()
+            w.same_closing_issue_overlap = (
+                lambda owner, repo, number: original_overlap(owner, repo, number)
+            )
+
+            def open_pr_page(owner, repo, after=None):
+                if after is None:
+                    page = {
+                        "totalCount": 1,
+                        "pageInfo": {"hasNextPage": True, "endCursor": "next"},
+                    }
+                    if label != "missing":
+                        page["nodes"] = value
+                    return page
+                return {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "number": 5,
+                            "closingIssuesReferences": {
+                                "totalCount": 1,
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                                "nodes": [{"number": 42}],
+                            },
+                        }
+                    ],
+                }
+
+            core.gh_graphql_open_pr_closing_refs_page = open_pr_page
+            complete, note = original_overlap("owner", "fmt", 5)
+            check(
+                "G7 read: %s first-page nodes fail closed" % label,
+                complete is False and note == "",
+            )
+            payload, _ = run_act(w, items, cards)
+            check(
+                "G7: %s first-page nodes hold fail closed" % label,
+                not payload["merges"]
+                and "could not be re-read" in _held_reason(payload),
+            )
+            check(
+                "G7: %s first-page nodes never clear" % label,
+                w.do_merge_final_guards
+                == [(False, "same-closing-issue overlap could not be re-read")],
+            )
+    finally:
+        core.gh_graphql_open_pr_closing_refs_page = saved_open
+
+
 def test_live_same_closing_issue_overlap_reuses_scan_note_computation():
     def pr(number, closes):
         return {

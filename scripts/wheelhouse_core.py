@@ -815,7 +815,10 @@ def _open_pr_closing_refs(owner, name):
         or total_count < 0
     ):
         raise RuntimeError("open PR closing-reference total is unavailable")
-    nodes = list(first_page.get("nodes") or [])
+    first_nodes = first_page.get("nodes")
+    if not isinstance(first_nodes, list):
+        raise RuntimeError("open PR closing-reference page is incomplete")
+    nodes = list(first_nodes)
     page_info = first_page.get("pageInfo")
     if not isinstance(page_info, dict) or not isinstance(
         page_info.get("hasNextPage"), bool
