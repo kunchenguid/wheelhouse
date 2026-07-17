@@ -913,7 +913,11 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True)
         "headRepository": {"name": "demo", "owner": {"login": "owner"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"totalCount": 0, "nodes": []},
-        "closingIssuesReferences": {"totalCount": 0, "nodes": []},
+        "closingIssuesReferences": {
+            "totalCount": 0,
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [],
+        },
         "commits": {
             "nodes": [
                 {
@@ -1044,13 +1048,13 @@ def test_build_repo_multipage_ok_and_complete():
     first = {
         "totalCount": 45,
         "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
-        "nodes": [_full_pr(i) for i in range(30)],
+        "nodes": [_full_pr(i) for i in range(1, 31)],
     }
     pages = {
         "c1": {
             "totalCount": 45,
             "pageInfo": {"hasNextPage": False, "endCursor": "c2"},
-            "nodes": [_full_pr(i) for i in range(30, 45)],
+            "nodes": [_full_pr(i) for i in range(31, 46)],
         }
     }
     result, items, _ = _run_build_repo(first, pr_pages=pages)

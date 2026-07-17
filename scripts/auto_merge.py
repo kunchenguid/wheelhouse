@@ -1340,7 +1340,9 @@ def evaluate_candidate(
         )
         unmet("g7_immediate_recheck", evidence)
         if not result["hold_reason"]:
-            result["hold_reason"] = "G7 manual-merge hold state is %s" % workflow_hold_status
+            result["hold_reason"] = (
+                "G7 manual-merge hold state is %s" % workflow_hold_status
+            )
         return finish(False)
     unmet(
         "g7_immediate_recheck",
@@ -1697,7 +1699,9 @@ def persist_workflow_hold(record, card_token=""):
             raise RuntimeError("manual-merge hold card claim is not current")
         if not _audit_intent_record(state, handoff["card_issue"]):
             raise RuntimeError("manual-merge hold audit intent is unavailable")
-        if _card_has_pending_decision(labels) or _selected_card_option(card.get("body")):
+        if _card_has_pending_decision(labels) or _selected_card_option(
+            card.get("body")
+        ):
             raise RuntimeError("owner decision appeared before hold persistence")
         owner_action, owner_reason = _card_has_pending_owner_action(card)
         if owner_action:
@@ -3154,9 +3158,7 @@ def cmd_record(results_path, validated_claims_path=None):
     # independently confirmed in this record phase. Ignore the act-phase release
     # handoff for it until that verification succeeds.
     releases = [
-        record
-        for record in releases
-        if record.get("card_issue") not in workflow_cards
+        record for record in releases if record.get("card_issue") not in workflow_cards
     ]
     for workflow_hold in workflow_holds:
         try:

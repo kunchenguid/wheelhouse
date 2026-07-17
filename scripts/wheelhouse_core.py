@@ -184,8 +184,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
     % CLOSING_REFS_PAGE_SIZE
 )
 
-OPEN_PR_CLOSING_REFS_GQL = (
-    """
+OPEN_PR_CLOSING_REFS_GQL = """
 query($owner:String!, $name:String!, $after:String) {
   repository(owner:$owner, name:$name) {
     pullRequests(states:OPEN, first:%d, after:$after, orderBy:{field:UPDATED_AT, direction:DESC}) {
@@ -202,9 +201,7 @@ query($owner:String!, $name:String!, $after:String) {
     }
   }
 }
-"""
-    % (PR_PAGE_SIZE, CLOSING_REFS_PAGE_SIZE)
-)
+""" % (PR_PAGE_SIZE, CLOSING_REFS_PAGE_SIZE)
 
 PR_MERGEABLE_GQL = """
 query($owner:String!, $name:String!, $number:Int!) {
@@ -361,9 +358,7 @@ def load_config():
     triage_attempt_caps = {}
     for r in repos:
         if isinstance(r, dict) and r.get("name"):
-            triage_attempt_caps[r["name"]] = _triage_attempt_cap(
-                r, global_attempt_cap
-            )
+            triage_attempt_caps[r["name"]] = _triage_attempt_cap(r, global_attempt_cap)
             if "triage_daily_ceiling" in r:
                 # The daily budget is one fleet-wide ledger. A repository-level
                 # value would falsely imply an independent budget and is
@@ -902,9 +897,7 @@ def same_closing_issue_overlap(owner, name, number):
             ):
                 return (False, "")
             if any(
-                isinstance(issue, bool)
-                or not isinstance(issue, int)
-                or issue < 1
+                isinstance(issue, bool) or not isinstance(issue, int) or issue < 1
                 for issue in closes
             ) or len(set(closes)) != len(closes):
                 return (False, "")
@@ -3155,9 +3148,7 @@ def build_repo(
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
     triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
-    triage_attempt_cap = _triage_attempt_cap(
-        repo_cfg, triage_attempt_cap_per_revision
-    )
+    triage_attempt_cap = _triage_attempt_cap(repo_cfg, triage_attempt_cap_per_revision)
     auto_merge_vision_sha = ""
     if _auto_merge_enabled(repo_cfg, auto_merge) and any(
         pr.get("bucket") == "merge-ready" for pr in enriched
@@ -3404,9 +3395,7 @@ def build_repo(
         # reconcile can update an existing stale card to the new head's pending
         # state (never create a card, never queue triage for this revision).
         "ci_wait_refresh_items": [
-            _ci_wait_refresh_item(
-                slug, name, enriched_by_number[n], triage_enabled
-            )
+            _ci_wait_refresh_item(slug, name, enriched_by_number[n], triage_enabled)
             for n in ci_wait_numbers
             if n in enriched_by_number
         ],
@@ -5705,9 +5694,7 @@ def cmd_scan(only_repo=None, cards_path=None):
         "auto_merge": cfg["auto_merge"],
         "auto_triage": cfg["auto_triage"],
         "auto_triage_issues": cfg["auto_triage_issues"],
-        "triage_attempt_cap_per_revision": cfg[
-            "triage_attempt_cap_per_revision"
-        ],
+        "triage_attempt_cap_per_revision": cfg["triage_attempt_cap_per_revision"],
         "triage_daily_ceiling": cfg["triage_daily_ceiling"],
         "pending_contributor_cleanup": cfg["pending_contributor_cleanup"],
         "repos": out_repos,

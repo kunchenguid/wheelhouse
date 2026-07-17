@@ -227,9 +227,7 @@ def test_every_invalid_cap_and_ceiling_class_fails_closed_loudly():
         config, errors = load_temp_config(
             {
                 "triage_attempt_cap_per_revision": value,
-                "repos": [
-                    {"name": "alpha", "triage_attempt_cap_per_revision": value}
-                ],
+                "repos": [{"name": "alpha", "triage_attempt_cap_per_revision": value}],
             }
         )
         assert config["triage_attempt_cap_per_revision"] == 1
@@ -371,10 +369,7 @@ def test_attempt_state_legacy_derivation_and_strict_matrix():
         },
     }
     assert (
-        rc.triage_attempt_count(
-            issue_state, "issue-triage", new_issue_revision, 2
-        )
-        == 0
+        rc.triage_attempt_count(issue_state, "issue-triage", new_issue_revision, 2) == 0
     )
 
     capped_state = card_state(item())
@@ -413,9 +408,7 @@ def test_queued_body_increments_attempt_with_cache_in_one_nonmaterial_write():
     queued_again = rc.body_with_triage_queued(
         second_attempt_body, candidate, attempt_cap=2
     )
-    assert (
-        core.parse_state_block(queued_again)[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
-    )
+    assert core.parse_state_block(queued_again)[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
     exhausted = core.parse_state_block(queued_again)
     exhausted.pop("triaged_sha")
     exhausted.pop("triage_status")
@@ -458,13 +451,16 @@ def test_reconcile_refuses_a_revision_at_its_attempt_cap():
     }
     dispatched = []
     output = io.StringIO()
-    with patched(
-        reconcile.render_card,
-        {
-            "mark_triage_queued": lambda number, queued_item, body: True,
-            "dispatch_triage_workflow": lambda permit: dispatched.append(permit),
-        },
-    ), redirect_stdout(output):
+    with (
+        patched(
+            reconcile.render_card,
+            {
+                "mark_triage_queued": lambda number, queued_item, body: True,
+                "dispatch_triage_workflow": lambda permit: dispatched.append(permit),
+            },
+        ),
+        redirect_stdout(output),
+    ):
         queued = reconcile.maybe_queue_auto_triage(candidate, row, True)
     assert queued is False
     assert dispatched == []
@@ -501,7 +497,7 @@ def test_ledger_parser_rejects_every_malformed_class():
     assert rc.parse_triage_budget(body(valid) + "\n" + body(valid)) is None
     assert (
         rc.parse_triage_budget(
-            '<!-- wheelhouse-triage-budget: '
+            "<!-- wheelhouse-triage-budget: "
             '{"version":1,"day":"2026-07-16","reserved":1,"reserved":0} -->'
         )
         is None
@@ -518,9 +514,7 @@ def test_ledger_creation_uses_returned_number_and_ignores_list_lag():
     fake = FakeGh(issue=None)
     output = io.StringIO()
     with budget_boundary(fake), redirect_stdout(output):
-        reserved = rc.reserve_triage_budget(
-            42, item(), ceiling=100, today="2026-07-16"
-        )
+        reserved = rc.reserve_triage_budget(42, item(), ceiling=100, today="2026-07-16")
         reserved_again = rc.reserve_triage_budget(
             43, item(number=18), ceiling=100, today="2026-07-16"
         )
@@ -539,20 +533,14 @@ def test_ledger_exhaustion_and_utc_day_rollover():
     exhausted = FakeGh(budget_issue(reserved=100))
     output = io.StringIO()
     with budget_boundary(exhausted), redirect_stdout(output):
-        assert (
-            rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-            is False
-        )
+        assert rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is False
     assert exhausted.patch_calls == 0
     assert "budget.exhausted" in output.getvalue()
     assert "deferred until the next UTC day" in output.getvalue()
 
     rollover = FakeGh(budget_issue(day="2026-07-15", reserved=2000))
     with budget_boundary(rollover), redirect_stdout(io.StringIO()):
-        assert (
-            rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-            is True
-        )
+        assert rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is True
     assert rc.parse_triage_budget(rollover.issue["body"]) == {
         "version": 1,
         "day": "2026-07-16",
@@ -575,8 +563,7 @@ def test_untrusted_duplicate_and_ambiguous_ledgers_halt_reservations():
         output = io.StringIO()
         with budget_boundary(fake), redirect_stdout(output):
             assert (
-                rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-                is False
+                rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is False
             )
         assert fake.patch_calls == 0
         assert "malformed-ledger" in output.getvalue()
@@ -584,10 +571,7 @@ def test_untrusted_duplicate_and_ambiguous_ledgers_halt_reservations():
     duplicate = FakeGh()
     duplicate.list_payload = [[budget_issue(1), budget_issue(2)]]
     with budget_boundary(duplicate), redirect_stdout(io.StringIO()):
-        assert (
-            rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-            is False
-        )
+        assert rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is False
         assert (
             rc.reserve_triage_budget(43, item(number=18), 100, today="2026-07-16")
             is False
@@ -617,8 +601,7 @@ def test_all_ledger_io_failures_halt_and_verified_write_leaks_safely():
     for fake in cases:
         with budget_boundary(fake), redirect_stdout(io.StringIO()):
             assert (
-                rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-                is False
+                rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is False
             )
 
     # The reservation PATCH lands, but the following by-number read returns the
@@ -626,10 +609,7 @@ def test_all_ledger_io_failures_halt_and_verified_write_leaks_safely():
     leaked = FakeGh(budget_issue(reserved=0))
     leaked.stale_get_call = 2
     with budget_boundary(leaked), redirect_stdout(io.StringIO()):
-        assert (
-            rc.reserve_triage_budget(42, item(), 100, today="2026-07-16")
-            is False
-        )
+        assert rc.reserve_triage_budget(42, item(), 100, today="2026-07-16") is False
     assert rc.parse_triage_budget(leaked.issue["body"])["reserved"] == 1
 
 
@@ -668,18 +648,23 @@ def test_mark_queue_reserves_then_writes_and_verifies_one_attempt():
         current["body"] = new_body
 
     config = {
-        "repos": {"wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}},
+        "repos": {
+            "wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}
+        },
         "triage_attempt_cap_per_revision": 2,
         "triage_daily_ceiling": 100,
     }
-    with patched(
-        rc,
-        {
-            "get_card": get_card,
-            "reserve_triage_budget": reserve,
-            "_edit_issue_body": edit,
-        },
-    ), patched(core, {"load_config": lambda: config}):
+    with (
+        patched(
+            rc,
+            {
+                "get_card": get_card,
+                "reserve_triage_budget": reserve,
+                "_edit_issue_body": edit,
+            },
+        ),
+        patched(core, {"load_config": lambda: config}),
+    ):
         permit = rc.mark_triage_queued(42, candidate, body)
     assert isinstance(permit, rc._TriageDispatchPermit)
     assert order == ["reserve", "card-write"]
@@ -714,19 +699,24 @@ def test_reservation_or_card_verification_failure_never_dispatches():
         "author": {"login": rc.GET_CARD_AUTOMATION_AUTHOR},
     }
     config = {
-        "repos": {"wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}},
+        "repos": {
+            "wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}
+        },
         "triage_attempt_cap_per_revision": 2,
         "triage_daily_ceiling": 100,
     }
     edits = []
-    with patched(
-        rc,
-        {
-            "get_card": lambda number: copy.deepcopy(current),
-            "reserve_triage_budget": lambda number, queued_item, ceiling: False,
-            "_edit_issue_body": lambda *args, **kwargs: edits.append(args),
-        },
-    ), patched(core, {"load_config": lambda: config}):
+    with (
+        patched(
+            rc,
+            {
+                "get_card": lambda number: copy.deepcopy(current),
+                "reserve_triage_budget": lambda number, queued_item, ceiling: False,
+                "_edit_issue_body": lambda *args, **kwargs: edits.append(args),
+            },
+        ),
+        patched(core, {"load_config": lambda: config}),
+    ):
         assert rc.mark_triage_queued(42, candidate, body) is None
     assert len(edits) == 1
     deferred_state = core.parse_state_block(edits[0][1])
@@ -747,14 +737,18 @@ def test_reservation_or_card_verification_failure_never_dispatches():
             value["body"] += "\nowner edit"
         return value
 
-    with patched(
-        rc,
-        {
-            "get_card": racing_get,
-            "reserve_triage_budget": lambda number, queued_item, ceiling: True,
-            "_edit_issue_body": lambda *args, **kwargs: edits.append(args),
-        },
-    ), patched(core, {"load_config": lambda: config}), redirect_stdout(io.StringIO()):
+    with (
+        patched(
+            rc,
+            {
+                "get_card": racing_get,
+                "reserve_triage_budget": lambda number, queued_item, ceiling: True,
+                "_edit_issue_body": lambda *args, **kwargs: edits.append(args),
+            },
+        ),
+        patched(core, {"load_config": lambda: config}),
+        redirect_stdout(io.StringIO()),
+    ):
         assert rc.mark_triage_queued(42, candidate, body) is None
     assert edits == []
 
@@ -767,15 +761,19 @@ def test_reservation_or_card_verification_failure_never_dispatches():
     }
     exhausted_body = rc._replace_state_block(body, exhausted_state)
     reserve_calls = []
-    with patched(
-        rc,
-        {
-            "get_card": lambda number: (_ for _ in ()).throw(
-                AssertionError("exhausted attempts must not read the card")
-            ),
-            "reserve_triage_budget": lambda *args: reserve_calls.append(args),
-        },
-    ), patched(core, {"load_config": lambda: config}), redirect_stdout(io.StringIO()):
+    with (
+        patched(
+            rc,
+            {
+                "get_card": lambda number: (_ for _ in ()).throw(
+                    AssertionError("exhausted attempts must not read the card")
+                ),
+                "reserve_triage_budget": lambda *args: reserve_calls.append(args),
+            },
+        ),
+        patched(core, {"load_config": lambda: config}),
+        redirect_stdout(io.StringIO()),
+    ):
         assert rc.mark_triage_queued(42, candidate, exhausted_body) is None
     assert reserve_calls == []
 
@@ -796,14 +794,18 @@ def test_reservation_or_card_verification_failure_never_dispatches():
         nonlocal written_body
         written_body = new_body
 
-    with patched(
-        rc,
-        {
-            "get_card": stale_after_queue_get,
-            "reserve_triage_budget": lambda number, queued_item, ceiling: True,
-            "_edit_issue_body": queue_edit,
-        },
-    ), patched(core, {"load_config": lambda: config}), redirect_stdout(io.StringIO()):
+    with (
+        patched(
+            rc,
+            {
+                "get_card": stale_after_queue_get,
+                "reserve_triage_budget": lambda number, queued_item, ceiling: True,
+                "_edit_issue_body": queue_edit,
+            },
+        ),
+        patched(core, {"load_config": lambda: config}),
+        redirect_stdout(io.StringIO()),
+    ):
         assert rc.mark_triage_queued(42, candidate, body) is None
     assert reads == 3
     assert core.parse_state_block(written_body)[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
@@ -811,10 +813,13 @@ def test_reservation_or_card_verification_failure_never_dispatches():
 
 def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retries():
     config = {
-        "repos": {"wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}},
+        "repos": {
+            "wheelhouse": {"name": "wheelhouse", "triage_attempt_cap_per_revision": 2}
+        },
         "triage_attempt_cap_per_revision": 2,
         "triage_daily_ceiling": 100,
     }
+
     def unavailable_ledger():
         fake = FakeGh(budget_issue())
         fake.fail_list = True
@@ -840,7 +845,9 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
             ("pr-review", "<!-- opt:merge -->"),
             ("issue-triage", "<!-- opt:close -->"),
         ):
-            candidate = item(kind=kind, revision="rev-%s-%s" % (kind, label.replace(" ", "-")))
+            candidate = item(
+                kind=kind, revision="rev-%s-%s" % (kind, label.replace(" ", "-"))
+            )
             held = rc.render(candidate, held=True)
             current = {
                 "number": 42,
@@ -863,9 +870,12 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
                 "get_card": lambda number: copy.deepcopy(current),
                 "_edit_issue_body": edit,
             }
-            with budget_boundary(fake_factory()), patched(rc, replacements), patched(
-                core, {"load_config": lambda: scenario_config}
-            ), redirect_stdout(io.StringIO()):
+            with (
+                budget_boundary(fake_factory()),
+                patched(rc, replacements),
+                patched(core, {"load_config": lambda: scenario_config}),
+                redirect_stdout(io.StringIO()),
+            ):
                 assert rc.mark_triage_queued(42, candidate, held["body"]) is None
 
             assert len(edits) == 1, "%s %s" % (label, kind)
@@ -897,14 +907,18 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
                 retry_order.append("card-write")
                 current["body"] = new_body
 
-            with patched(
-                rc,
-                {
-                    "get_card": lambda number: copy.deepcopy(current),
-                    "reserve_triage_budget": retry_reserve,
-                    "_edit_issue_body": retry_edit,
-                },
-            ), patched(core, {"load_config": lambda: config}), redirect_stdout(io.StringIO()):
+            with (
+                patched(
+                    rc,
+                    {
+                        "get_card": lambda number: copy.deepcopy(current),
+                        "reserve_triage_budget": retry_reserve,
+                        "_edit_issue_body": retry_edit,
+                    },
+                ),
+                patched(core, {"load_config": lambda: config}),
+                redirect_stdout(io.StringIO()),
+            ):
                 permit = rc.mark_triage_queued(42, candidate, current["body"])
 
             retry_state = core.parse_state_block(current["body"])
@@ -1003,7 +1017,10 @@ def test_one_reservation_prices_the_bounded_two_call_schema_repair():
 
     readme = read("README.md")
     assert "100 automatic-triage reservations and 200 model calls" in readme
-    assert "Owner-triggered deep review and natural-language decisions are outside" in readme
+    assert (
+        "Owner-triggered deep review and natural-language decisions are outside"
+        in readme
+    )
 
 
 TESTS = [

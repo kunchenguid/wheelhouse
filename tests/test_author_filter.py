@@ -68,7 +68,11 @@ def pr_node(
         "headRepository": {"name": "demo-fork", "owner": {"login": "forker"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"nodes": []},
-        "closingIssuesReferences": {"nodes": [{"number": i} for i in (closes or [])]},
+        "closingIssuesReferences": {
+            "totalCount": len(closes or []),
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [{"number": i} for i in (closes or [])],
+        },
         "commits": {"nodes": [{"commit": {"statusCheckRollup": status_rollup}}]},
     }
     if closing_total is not None:

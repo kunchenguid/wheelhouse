@@ -669,9 +669,7 @@ def test_class_C_without_optin_holds_end_to_end():
 
 def test_same_closing_issue_overlap_holds_end_to_end():
     w, items, cards = default_world()
-    items[0]["same_closing_issue_overlap"] = (
-        "overlaps PR(s) #6 (all close issue #42)"
-    )
+    items[0]["same_closing_issue_overlap"] = "overlaps PR(s) #6 (all close issue #42)"
     payload, _ = run_act(w, items, cards)
     check(
         "act: same-closing-issue ambiguity holds",
@@ -723,7 +721,8 @@ def test_G7_same_closing_issue_overlap_is_rechecked_at_merge_boundary():
     payload, _ = run_act(w, items, cards)
     check(
         "G7: overlap appearing after the clear scan is held",
-        not payload["merges"] and "same-closing-issue ambiguity" in _held_reason(payload),
+        not payload["merges"]
+        and "same-closing-issue ambiguity" in _held_reason(payload),
     )
     check(
         "G7: overlap is checked inside the final do_merge guard",
@@ -731,8 +730,7 @@ def test_G7_same_closing_issue_overlap_is_rechecked_at_merge_boundary():
         == [
             (
                 False,
-                "same-closing-issue ambiguity: overlaps PR(s) #6 "
-                "(all close issue #42)",
+                "same-closing-issue ambiguity: overlaps PR(s) #6 (all close issue #42)",
             )
         ],
     )
@@ -778,8 +776,8 @@ def test_G7_malformed_later_closing_ref_page_holds_fail_closed():
     try:
         for label, second_closing_page in cases:
             w, items, cards = default_world()
-            w.same_closing_issue_overlap = (
-                lambda owner, repo, number: original_overlap(owner, repo, number)
+            w.same_closing_issue_overlap = lambda owner, repo, number: original_overlap(
+                owner, repo, number
             )
 
             def open_pr_page(owner, repo, after=None):
@@ -833,8 +831,8 @@ def test_G7_malformed_open_pr_first_page_nodes_hold_fail_closed():
     try:
         for label, value in cases:
             w, items, cards = default_world()
-            w.same_closing_issue_overlap = (
-                lambda owner, repo, number: original_overlap(owner, repo, number)
+            w.same_closing_issue_overlap = lambda owner, repo, number: original_overlap(
+                owner, repo, number
             )
 
             def open_pr_page(owner, repo, after=None):
@@ -902,8 +900,7 @@ def test_live_same_closing_issue_overlap_reuses_scan_note_computation():
         complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
         check(
             "G7 read: live overlap uses the existing presentation note",
-            complete
-            and note == "overlaps PR(s) #6 (all close issue #42)",
+            complete and note == "overlaps PR(s) #6 (all close issue #42)",
         )
 
         core._open_pr_closing_refs = lambda owner, repo: [pr(5, [42]), pr(6, [43])]
@@ -947,6 +944,7 @@ def test_live_same_closing_issue_overlap_open_pr_pagination_is_strict():
     calls = []
     saved = core.gh_graphql_open_pr_closing_refs_page
     try:
+
         def page(owner, repo, after=None):
             calls.append(after)
             return first if after is None else second
