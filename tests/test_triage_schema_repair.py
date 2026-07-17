@@ -170,6 +170,10 @@ def test_build_repair_prompt():
         check("prompt(%s): embeds the candidate" % kind, VALID["summary"] in p and "<candidate>" in p)
         check("prompt(%s): forbids reading files / re-analysis" % kind, "NO tools" in p and "re-analysis" in p.lower())
         check("prompt(%s): requires verbatim evidence" % kind, "VERBATIM" in p)
+        check(
+            "prompt(%s): requires evidence as one string" % kind,
+            "single JSON string, not an array" in p,
+        )
         check("prompt(%s): output-only-JSON instruction" % kind, "ONLY a single compact JSON object" in p)
 
     # Schema lockstep: every field the repair prompt promises must be a field
@@ -197,6 +201,19 @@ def test_plan_trigger_discipline():
     valid = rc.plan_triage_repair(json.dumps(VALID), "pr-review")
     check("plan: a valid delivered result needs NO repair", valid["repair_needed"] is False)
     check("plan: valid result carries no prompt", valid["prompt"] == "")
+
+    array_evidence = dict(
+        VALID,
+        evidence=[
+            'target.txt: "add bounded stop conditions to crewmate briefs"',
+            'target-src/brief.py: "bounded stop conditions"',
+        ],
+    )
+    array_plan = rc.plan_triage_repair(json.dumps(array_evidence), "pr-review")
+    check(
+        "plan: array evidence is accepted by primary validation without repair",
+        array_plan["repair_needed"] is False,
+    )
 
     # Schema-miss = delivered but invalid -> repair with a prompt.
     invalid = {k: v for k, v in VALID.items() if k != "recommended_action"}
@@ -234,10 +251,25 @@ def test_decide_routing():
         # repair-failure cap (clause 6): invalid original + still-invalid repair.
         dec2 = rc.decide_triage_apply(invalid, invalid, tf)
         check("route: schema-miss + still-invalid repair -> repair-failed", dec2["outcome"] == "repair-failed")
+        check(
+            "route: repair-failed reports the repaired schema stage",
+            "recommended_action" in dec2["reason"],
+        )
 
         # schema-miss with NO repair supplied (repair step errored / no output).
         dec3 = rc.decide_triage_apply(invalid, "", tf)
         check("route: schema-miss + no repair output -> repair-failed", dec3["outcome"] == "repair-failed")
+        check(
+            "route: missing repair output reports the actual stage",
+            dec3["reason"] == "schema repair produced no result",
+        )
+        duplicate = rc.decide_triage_apply(
+            invalid, "", tf, repair_claim_admitted=False
+        )
+        check(
+            "route: duplicate repair claim reports the actual stage",
+            duplicate["reason"] == "schema repair claim was duplicate",
+        )
 
         # original already valid -> success, repair never consulted.
         dec4 = rc.decide_triage_apply(valid, valid, tf)
@@ -259,6 +291,26 @@ def test_decide_routing():
         repaired_fabricated = json.dumps(fabricated)
         dec7 = rc.decide_triage_apply(invalid, repaired_fabricated, tf)
         check("route: a repair with non-anchoring evidence -> repair-failed", dec7["outcome"] == "repair-failed")
+        check(
+            "route: repaired anchor failure reports the actual stage",
+            dec7["reason"]
+            == "repaired field 'evidence' did not anchor to the fetched target",
+        )
+
+        array_valid = dict(
+            VALID,
+            evidence=[
+                "target.txt: 'add bounded stop conditions to crewmate briefs'",
+                "target-src/brief.py: unrelated source quote",
+            ],
+        )
+        array_decision = rc.decide_triage_apply(
+            json.dumps(array_valid), "", tf
+        )
+        check(
+            "route: array evidence anchors on the primary path",
+            array_decision["outcome"] == "success",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -421,7 +473,15 @@ def test_cli_repair_prep():
 # --------------------------------------------------------------------------- #
 # 8. CLI: triage-apply --repair-execution-file end-to-end (mocked card I/O)
 # --------------------------------------------------------------------------- #
-def _run_triage_apply(issue, revision, card_body, exec_file, repair_file, target_file):
+def _run_triage_apply(
+    issue,
+    revision,
+    card_body,
+    exec_file,
+    repair_file,
+    target_file,
+    repair_claim_admitted="",
+):
     """Drive the real triage-apply CLI branch with card reads/writes mocked."""
     captured = {}
     orig_get, orig_edit, orig_argv = rc.get_card, rc._edit_issue_body, sys.argv
@@ -441,6 +501,7 @@ def _run_triage_apply(issue, revision, card_body, exec_file, repair_file, target
                 "--issue", str(issue), "--revision", revision,
                 "--execution-file", exec_file,
                 "--repair-execution-file", repair_file,
+                "--repair-claim-admitted", repair_claim_admitted,
                 "--target-file", target_file,
             ]
             rc.main()
@@ -512,7 +573,10 @@ def test_cli_triage_apply_repair_end_to_end():
         check("e2e: repair-failure records error", st2.get("triage_status") == "error")
         check("e2e: repair-failure records repair-failed telemetry", st2.get("triage_repair_status") == "repair-failed")
         check("e2e: repair-failure records the redacted candidate shape", bool(st2.get("triage_repair_candidate")))
-        check("e2e: repair-failure error carries the structural reason", "recommended_action" in (st2.get("triage_error") or ""))
+        check(
+            "e2e: repair-failure error carries the repaired structural reason",
+            "product_implications" in (st2.get("triage_error") or ""),
+        )
 
         # EXCLUDED classes take the unchanged path with NO repair telemetry.
         empty_exec = os.path.join(d, "noresult.json")
@@ -559,10 +623,15 @@ def test_cli_triage_apply_repair_end_to_end():
 # 9. triage.yml static wiring + token/posture isolation (clause 7)
 # --------------------------------------------------------------------------- #
 def test_triage_yml_repair_wiring():
-    doc = yaml.safe_load(read(".github", "workflows", "triage.yml"))
+    triage_source = read(".github", "workflows", "triage.yml")
+    doc = yaml.safe_load(triage_source)
     steps = doc["jobs"]["triage"]["steps"]
     model_steps = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))["jobs"]["model"]["steps"]
     ids = [s.get("id") for s in steps]
+    check(
+        "yaml: every primary evidence schema asks for one JSON string",
+        triage_source.count("a single JSON string, not an array") == 3,
+    )
 
     def idx(pred):
         for i, s in enumerate(steps):
@@ -625,7 +694,10 @@ def test_triage_yml_repair_wiring():
     check(
         "yaml: card update wires the repaired result file into triage-apply",
         upd.get("env", {}).get("REPAIR_EXECUTION_FILE") == "${{ steps.repair-result.outputs.path }}"
-        and "--repair-execution-file" in update_run,
+        and upd.get("env", {}).get("REPAIR_CLAIM_ADMITTED")
+        == "${{ steps.repair-claim.outputs.admitted }}"
+        and "--repair-execution-file" in update_run
+        and "--repair-claim-admitted" in update_run,
     )
     check("yaml: scrubbed consumers preserve the output channel", update_run.count('GITHUB_OUTPUT="$GITHUB_OUTPUT"') == 2)
     fresh = steps[fresh_i]

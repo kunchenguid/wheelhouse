@@ -343,7 +343,7 @@ def test_diff_complete_fails_closed_when_diff_exceeds_the_cap():
 
 def test_triage_apply_anchor_checks_evidence_against_on_disk_target():
     """The trusted card-update step passes the on-disk target.txt to
-    triage-apply so it can anchor-check the model's evidence quotes (the
+    triage-apply so it can anchor-check the model's evidence spans (the
     lazy/fabrication guard). The path is the absolute workspace path (target.txt
     is written outside the trusted-src snapshot)."""
     text = _read(".github/workflows/triage.yml")
