@@ -46,6 +46,7 @@ def item(**overrides):
         "recommendation": "Merge - compliance and tests are green.",
         "priority": "med",
         "auto_triage": True,
+        "same_closing_issue_overlap": "",
     }
     value.update(overrides)
     return value

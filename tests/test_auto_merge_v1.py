@@ -21,6 +21,7 @@ input HOLDS for human review. These tests cover, end-to-end through the
     self-authorization, live green+CLEAN mergeability, blast radius) via
     representative live-card fixtures walked through PASS and HOLD outcomes;
   * the G7 live head + merge-state re-check immediately before acting;
+  * same-closing-issue ambiguity at scan time and at the final act boundary;
   * the per-PR `wheelhouse:no-auto-merge` escape hatch and the global/per-repo
     kill switches;
   * the durable audit ledger (parse/append/render + cap) and the resolved
@@ -31,7 +32,7 @@ input HOLDS for human review. These tests cover, end-to-end through the
     still required (no claim, no merge, no verdict spend without it), the
     self-authorization exclusion and base-branch read still hold under global
     true, and the shipped code default stays OFF when the global key is absent;
-  * the DELIBERATE ABSENCE of an open-PR file-overlap gate and of any
+  * the DELIBERATE ABSENCE of an open-PR same-file overlap gate and of any
     per-contributor / per-scan rate cap (captain override).
 """
 
@@ -169,6 +170,7 @@ def make_item(repo, number, head, comp="pass", tests="green", bucket="merge-read
         "head_sha": head,
         "comp": comp,
         "tests": tests,
+        "same_closing_issue_overlap": "",
     }
 
 
@@ -186,6 +188,8 @@ class World:
         self.files = {}  # (slug, str(number)) -> (files, ok, complete)
         self.check_status = {}
         self.check_status_seq = {}
+        self.closing_issue_overlap = {}
+        self.closing_issue_overlap_seq = {}
         self.do_merge_calls = []
         self.do_merge_clean_guards = []
         self.do_merge_final_guards = []
@@ -232,6 +236,13 @@ class World:
         if sequence:
             return sequence.pop(0) if len(sequence) > 1 else sequence[0]
         return self.check_status.get(key, (True, "comp=pass tests=green"))
+
+    def same_closing_issue_overlap(self, owner, repo, number):
+        key = (owner, repo, str(number))
+        sequence = self.closing_issue_overlap_seq.get(key)
+        if sequence:
+            return sequence.pop(0) if len(sequence) > 1 else sequence[0]
+        return self.closing_issue_overlap.get(key, (True, ""))
 
     def do_merge(
         self,
@@ -284,6 +295,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         "live": am.live_pr,
         "compare": am.immutable_compare_files,
         "checks": am.live_check_status,
+        "closing_overlap": core.same_closing_issue_overlap,
         "domerge": apply_decision.do_merge,
         "get_card": render_card.get_card,
         "edit_body": render_card._edit_issue_body,
@@ -301,6 +313,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
     am.live_pr = world.live_pr
     am.immutable_compare_files = world.immutable_compare_files
     am.live_check_status = world.live_check_status
+    core.same_closing_issue_overlap = world.same_closing_issue_overlap
     apply_decision.do_merge = world.do_merge
     am.closed_audit_intent_entries = lambda card_token: getattr(
         world, "closed_audit_intents", {}
@@ -351,6 +364,7 @@ def run_act(world, items, cards, has_token=True, has_card_token=True):
         am.live_pr = saved["live"]
         am.immutable_compare_files = saved["compare"]
         am.live_check_status = saved["checks"]
+        core.same_closing_issue_overlap = saved["closing_overlap"]
         apply_decision.do_merge = saved["domerge"]
         render_card.get_card = saved["get_card"]
         render_card._edit_issue_body = saved["edit_body"]
@@ -651,6 +665,308 @@ def test_class_C_without_optin_holds_end_to_end():
     payload, err = run_act(w, items, cards)
     check("act: class C w/o opt-in holds", not payload["merges"] and payload["holds"])
     check("act: no merge attempted", not w.do_merge_calls)
+
+
+def test_same_closing_issue_overlap_holds_end_to_end():
+    w, items, cards = default_world()
+    items[0]["same_closing_issue_overlap"] = "overlaps PR(s) #6 (all close issue #42)"
+    payload, _ = run_act(w, items, cards)
+    check(
+        "act: same-closing-issue ambiguity holds",
+        not payload["merges"] and bool(payload["holds"]),
+    )
+    check("act: same-closing-issue ambiguity never merges", not w.do_merge_calls)
+
+
+def test_no_same_closing_issue_overlap_still_merges():
+    w, items, cards = default_world()
+    payload, _ = run_act(w, items, cards)
+    check(
+        "act: proven absence of same-closing-issue overlap still merges",
+        len(payload["merges"]) == 1,
+    )
+    check(
+        "act: final same-closing-issue guard passes on a complete clear read",
+        w.do_merge_final_guards == [(True, "")],
+    )
+
+
+def test_unknown_scan_same_closing_issue_overlap_holds_fail_closed():
+    for label, value in (
+        ("missing", None),
+        ("null", None),
+        ("boolean", False),
+        ("object", {}),
+    ):
+        w, items, cards = default_world()
+        if label == "missing":
+            items[0].pop("same_closing_issue_overlap")
+        else:
+            items[0]["same_closing_issue_overlap"] = value
+        payload, _ = run_act(w, items, cards)
+        check(
+            "act: %s scan overlap evidence holds fail closed" % label,
+            not payload["merges"]
+            and "unavailable" in _held_reason(payload)
+            and not w.do_merge_calls,
+        )
+
+
+def test_G7_same_closing_issue_overlap_is_rechecked_at_merge_boundary():
+    w, items, cards = default_world()
+    w.closing_issue_overlap[("owner", "fmt", "5")] = (
+        True,
+        "overlaps PR(s) #6 (all close issue #42)",
+    )
+    payload, _ = run_act(w, items, cards)
+    check(
+        "G7: overlap appearing after the clear scan is held",
+        not payload["merges"]
+        and "same-closing-issue ambiguity" in _held_reason(payload),
+    )
+    check(
+        "G7: overlap is checked inside the final do_merge guard",
+        w.do_merge_final_guards
+        == [
+            (
+                False,
+                "same-closing-issue ambiguity: overlaps PR(s) #6 (all close issue #42)",
+            )
+        ],
+    )
+
+
+def test_G7_unreadable_same_closing_issue_overlap_holds_fail_closed():
+    w, items, cards = default_world()
+    w.closing_issue_overlap[("owner", "fmt", "5")] = (False, "")
+    payload, _ = run_act(w, items, cards)
+    check(
+        "G7: unreadable overlap re-read is held",
+        not payload["merges"] and "could not be re-read" in _held_reason(payload),
+    )
+    check(
+        "G7: unreadable overlap re-read fails the final guard",
+        w.do_merge_final_guards
+        == [(False, "same-closing-issue overlap could not be re-read")],
+    )
+
+
+def test_G7_malformed_later_closing_ref_page_holds_fail_closed():
+    cases = (
+        (
+            "malformed",
+            {
+                "totalCount": 2,
+                "pageInfo": {},
+                "nodes": [{"number": 43}],
+            },
+        ),
+        (
+            "raced",
+            {
+                "totalCount": 3,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 43}],
+            },
+        ),
+    )
+    original_overlap = core.same_closing_issue_overlap
+    saved_open = core.gh_graphql_open_pr_closing_refs_page
+    saved_closing = core.gh_graphql_closing_refs_page
+    try:
+        for label, second_closing_page in cases:
+            w, items, cards = default_world()
+            w.same_closing_issue_overlap = lambda owner, repo, number: original_overlap(
+                owner, repo, number
+            )
+
+            def open_pr_page(owner, repo, after=None):
+                return {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "number": 5,
+                            "closingIssuesReferences": {
+                                "totalCount": 2,
+                                "pageInfo": {
+                                    "hasNextPage": True,
+                                    "endCursor": "close-2",
+                                },
+                                "nodes": [{"number": 42}],
+                            },
+                        }
+                    ],
+                }
+
+            core.gh_graphql_open_pr_closing_refs_page = open_pr_page
+            core.gh_graphql_closing_refs_page = (
+                lambda owner, repo, number, after: second_closing_page
+            )
+            payload, _ = run_act(w, items, cards)
+            check(
+                "G7: %s later closing-ref page holds fail closed" % label,
+                not payload["merges"]
+                and "could not be re-read" in _held_reason(payload),
+            )
+            check(
+                "G7: %s later closing-ref page never clears" % label,
+                w.do_merge_final_guards
+                == [(False, "same-closing-issue overlap could not be re-read")],
+            )
+    finally:
+        core.gh_graphql_open_pr_closing_refs_page = saved_open
+        core.gh_graphql_closing_refs_page = saved_closing
+
+
+def test_G7_malformed_open_pr_first_page_nodes_hold_fail_closed():
+    cases = (
+        ("missing", object()),
+        ("null", None),
+        ("object", {}),
+        ("string", "not-a-list"),
+    )
+    original_overlap = core.same_closing_issue_overlap
+    saved_open = core.gh_graphql_open_pr_closing_refs_page
+    try:
+        for label, value in cases:
+            w, items, cards = default_world()
+            w.same_closing_issue_overlap = lambda owner, repo, number: original_overlap(
+                owner, repo, number
+            )
+
+            def open_pr_page(owner, repo, after=None):
+                if after is None:
+                    page = {
+                        "totalCount": 1,
+                        "pageInfo": {"hasNextPage": True, "endCursor": "next"},
+                    }
+                    if label != "missing":
+                        page["nodes"] = value
+                    return page
+                return {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "number": 5,
+                            "closingIssuesReferences": {
+                                "totalCount": 1,
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                                "nodes": [{"number": 42}],
+                            },
+                        }
+                    ],
+                }
+
+            core.gh_graphql_open_pr_closing_refs_page = open_pr_page
+            complete, note = original_overlap("owner", "fmt", 5)
+            check(
+                "G7 read: %s first-page nodes fail closed" % label,
+                complete is False and note == "",
+            )
+            payload, _ = run_act(w, items, cards)
+            check(
+                "G7: %s first-page nodes hold fail closed" % label,
+                not payload["merges"]
+                and "could not be re-read" in _held_reason(payload),
+            )
+            check(
+                "G7: %s first-page nodes never clear" % label,
+                w.do_merge_final_guards
+                == [(False, "same-closing-issue overlap could not be re-read")],
+            )
+    finally:
+        core.gh_graphql_open_pr_closing_refs_page = saved_open
+
+
+def test_live_same_closing_issue_overlap_reuses_scan_note_computation():
+    def pr(number, closes):
+        return {
+            "number": number,
+            "closingIssuesReferences": {
+                "totalCount": len(closes),
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": issue} for issue in closes],
+            },
+        }
+
+    saved = core._open_pr_closing_refs
+    try:
+        core._open_pr_closing_refs = lambda owner, repo: [pr(5, [42]), pr(6, [42])]
+        complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
+        check(
+            "G7 read: live overlap uses the existing presentation note",
+            complete and note == "overlaps PR(s) #6 (all close issue #42)",
+        )
+
+        core._open_pr_closing_refs = lambda owner, repo: [pr(5, [42]), pr(6, [43])]
+        complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
+        check("G7 read: a complete non-overlap is clear", complete and note == "")
+
+        def unreadable(owner, repo):
+            raise RuntimeError("unreadable")
+
+        core._open_pr_closing_refs = unreadable
+        complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
+        check(
+            "G7 read: unreadable open-PR evidence fails closed",
+            complete is False and note == "",
+        )
+    finally:
+        core._open_pr_closing_refs = saved
+
+
+def test_live_same_closing_issue_overlap_open_pr_pagination_is_strict():
+    def refs(number, issue):
+        return {
+            "number": number,
+            "closingIssuesReferences": {
+                "totalCount": 1,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": issue}],
+            },
+        }
+
+    first = {
+        "totalCount": 2,
+        "pageInfo": {"hasNextPage": True, "endCursor": "next"},
+        "nodes": [refs(5, 42)],
+    }
+    second = {
+        "totalCount": 2,
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [refs(6, 42)],
+    }
+    calls = []
+    saved = core.gh_graphql_open_pr_closing_refs_page
+    try:
+
+        def page(owner, repo, after=None):
+            calls.append(after)
+            return first if after is None else second
+
+        core.gh_graphql_open_pr_closing_refs_page = page
+        complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
+        check(
+            "G7 read: every open-PR page participates in overlap detection",
+            complete
+            and note == "overlaps PR(s) #6 (all close issue #42)"
+            and calls == [None, "next"],
+        )
+
+        second["totalCount"] = 3
+        calls.clear()
+        complete, note = core.same_closing_issue_overlap("owner", "fmt", 5)
+        check(
+            "G7 read: changed pagination totals fail closed",
+            complete is False and note == "" and calls == [None, "next"],
+        )
+    finally:
+        core.gh_graphql_open_pr_closing_refs_page = saved
 
 
 # --------------------------------------------------------------------------- #
@@ -2357,7 +2673,7 @@ def test_do_merge_race_and_error_outcomes():
 # --------------------------------------------------------------------------- #
 # DELIBERATE ABSENCE of an overlap gate and any rate cap (captain override)
 # --------------------------------------------------------------------------- #
-def test_no_open_pr_overlap_gate():
+def test_no_open_pr_file_overlap_gate():
     # Two open merge-ready PRs whose file sets fully overlap BOTH merge - there
     # is intentionally no open-PR file-overlap gate in V1.
     w = World()
@@ -2376,12 +2692,12 @@ def test_no_open_pr_overlap_gate():
     ]
     payload, _ = run_act(w, items, cards)
     check(
-        "absence: overlapping-file PRs BOTH auto-merge (no overlap gate)",
+        "absence: overlapping-file PRs BOTH auto-merge (no same-file gate)",
         len(payload["merges"]) == 2,
     )
     check(
-        "absence: no overlap helper exists in auto_merge",
-        not any("overlap" in n for n in dir(am)),
+        "absence: no same-file overlap helper exists in auto_merge",
+        not any("file_overlap" in n for n in dir(am)),
     )
 
 
