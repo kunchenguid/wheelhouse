@@ -1781,6 +1781,7 @@ jobs:
           REPAIR_EXECUTION_FILE: ${{ steps.compact-results.outputs.repair }}
           REPAIR_CLAIM_ADMITTED: ${{ needs.triage-repair-prepare.outputs.repair_admitted }}
           PRIMARY_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
+          REPAIR_ERROR_CODE: ${{ steps.repair-result-received.outputs.error-code }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
@@ -1795,6 +1796,10 @@ jobs:
           mkdir -p "$TRUSTED_HOME"
           common=(PATH="$TRUSTED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 HOME="$TRUSTED_HOME" GH_TOKEN="$GH_TOKEN" GH_REPO="$GH_REPO" GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" GITHUB_OUTPUT="$GITHUB_OUTPUT")
           if [ "$PRIMARY_ERROR_CODE" = "source.revision_mismatch" ]; then
+            env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
+              --issue "$ISSUE" --revision "$REVISION" \
+              --message "Wheelhouse updated while this request waited; please retry."
+          elif [ "$REPAIR_ERROR_CODE" = "source.revision_mismatch" ]; then
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
               --issue "$ISSUE" --revision "$REVISION" \
               --message "Wheelhouse updated while this request waited; please retry."
@@ -1847,7 +1852,7 @@ jobs:
           REVISION: ${{ needs.triage.outputs.revision }}
           EVENT_KEY: ${{ needs.triage.outputs.event_key }}
           TRIAGE_STATUS: ${{ steps.card-consumer.outputs.triage_status || steps.card-recovery.outputs.triage_status || 'error' }}
-          MODEL_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
+          MODEL_ERROR_CODE: ${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}
         run: |
           set -euo pipefail
           code="${MODEL_ERROR_CODE:-consumer.rejected}"

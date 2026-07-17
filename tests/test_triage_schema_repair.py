@@ -776,6 +776,13 @@ def test_triage_yml_repair_wiring():
         and "--repair-claim-admitted" in update_run,
     )
     check(
+        "yaml: repair source drift projects to bounded triage retry",
+        upd.get("env", {}).get("REPAIR_ERROR_CODE")
+        == "${{ steps.repair-result-received.outputs.error-code }}"
+        and '[ "$REPAIR_ERROR_CODE" = "source.revision_mismatch" ]' in update_run
+        and "Wheelhouse updated while this request waited; please retry." in update_run,
+    )
+    check(
         "yaml: scrubbed consumers preserve the output channel",
         'GITHUB_OUTPUT="$GITHUB_OUTPUT"' in update_run,
     )
@@ -813,6 +820,11 @@ def test_triage_yml_repair_wiring():
     )
     primary_run = str(primary_finalize.get("run", ""))
     repair_run = str(repair_finalize.get("run", ""))
+    record = next(
+        s
+        for s in consume_steps
+        if s.get("name") == "Record the bounded triage attempt result"
+    )
     check(
         "yaml: admitted schema repair emits event-bound terminal evidence",
         "needs.triage-repair-prepare.outputs.repair_admitted == 'true'"
@@ -834,6 +846,11 @@ def test_triage_yml_repair_wiring():
         and "steps.card-recovery.outputs.applied" in repair_run
         and primary_run.count('= "true"') >= 1
         and repair_run.count('= "true"') >= 1,
+    )
+    check(
+        "yaml: repair source drift is the recorded triage model code",
+        (record.get("env") or {}).get("MODEL_ERROR_CODE")
+        == "${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}",
     )
     check(
         "yaml: terminal evidence follows fail-open recovery",

@@ -277,6 +277,8 @@ def main():
         "triage projection: source drift receives the precise retry result",
         (triage_card.get("env") or {}).get("PRIMARY_ERROR_CODE")
         == "${{ steps.primary-result.outputs.error-code }}"
+        and (triage_card.get("env") or {}).get("REPAIR_ERROR_CODE")
+        == "${{ steps.repair-result-received.outputs.error-code }}"
         and "source.revision_mismatch" in triage_card["run"]
         and "Wheelhouse updated while this request waited; please retry."
         in triage_card["run"],
