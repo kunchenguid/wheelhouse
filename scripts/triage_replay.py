@@ -274,21 +274,14 @@ def _marker(wave, revision, cleared, run_number):
     }
 
 
-def _write_replay_marker(plan, wave, run_number):
-    before = plan["card"]
-    current = render_card.get_card(plan["number"])
-    if not reconcile._matches_snapshot(current, before):
-        return None, "card-raced-before-marker"
-    state = render_card._unique_state_block(current.get("body", ""))
+def _body_with_replay_marker(body, plan, wave, run_number):
+    state = render_card._unique_state_block(body)
     if state != plan["state"]:
-        return None, "card-state-raced-before-marker"
+        return body
     new_state = dict(state)
     if plan["cleared"] == "error":
         for field in TRIAGE_NON_SUCCESS_FIELDS:
             new_state.pop(field, None)
-    # Materialize the fail-closed legacy derivation before clearing
-    # triaged_sha. Otherwise an old error card with no explicit attempt record
-    # would incorrectly reset from one proven attempt to zero.
     new_state[render_card.TRIAGE_ATTEMPTS_FIELD] = {
         "version": render_card.TRIAGE_ATTEMPTS_VERSION,
         "kind": plan["item"]["kind"],
@@ -299,18 +292,11 @@ def _write_replay_marker(plan, wave, run_number):
         wave, plan["revision"], plan["cleared"], run_number
     )
     clean = (
-        render_card.remove_triage_section(current.get("body", ""))
+        render_card.remove_triage_section(body)
         if plan["cleared"] == "error"
-        else current.get("body", "")
+        else body
     )
-    expected_body = render_card._replace_state_block(clean, new_state)
-    if expected_body == current.get("body", ""):
-        return None, "marker-write-noop"
-    render_card._edit_issue_body(plan["number"], expected_body)
-    verified = render_card.get_card(plan["number"])
-    if not reconcile._matches_expected_write(verified, current, expected_body):
-        return None, "marker-write-unverified"
-    return reconcile.current_card({"number": plan["number"]}), "marked"
+    return render_card._replace_state_block(clean, new_state)
 
 
 def _candidate_numbers(path):
@@ -410,16 +396,30 @@ def run(cards_path, wave, limit, dry_run=False):
                 % (initial["number"], reason)
             )
             continue
-        row, reason = _write_replay_marker(plan, wave, run_number)
-        if not row:
-            print("::warning::replay deferred card #%s: %s" % (plan["number"], reason))
+        live = render_card.get_card(plan["number"])
+        if not reconcile._matches_snapshot(live, plan["card"]):
+            print(
+                "::warning::replay deferred card #%s: card-raced-before-queue"
+                % plan["number"]
+            )
             continue
-        written += 1
-        if reconcile.maybe_queue_auto_triage(plan["item"], row, has_token, owner=owner):
+        current = reconcile.current_card({"number": plan["number"]})
+        prepare_body = lambda body, plan=plan: _body_with_replay_marker(
+            body, plan, wave, run_number
+        )
+        if reconcile.maybe_queue_auto_triage(
+            plan["item"],
+            current,
+            has_token,
+            owner=owner,
+            prepare_body=prepare_body,
+            publish_budget_deferral=False,
+        ):
             queued += 1
+            written += 1
         else:
             print(
-                "::warning::replay marker landed but queueing deferred for card #%s"
+                "::warning::replay queueing deferred without card unlock for card #%s"
                 % plan["number"]
             )
     print(

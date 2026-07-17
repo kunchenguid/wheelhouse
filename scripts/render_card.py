@@ -3831,7 +3831,9 @@ def _queue_card_snapshot_matches(card, number, item, body):
     )
 
 
-def mark_triage_queued(number, item, body):
+def mark_triage_queued(
+    number, item, body, prepare_body=None, publish_budget_deferral=True
+):
     """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
     The global daily reservation lands first. The per-revision attempt count and
@@ -3843,8 +3845,11 @@ def mark_triage_queued(number, item, body):
     if triage_attempts_exhausted(item, state, cap=cap):
         report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
         return None
-    new_body = body_with_triage_queued(body, item, attempt_cap=cap)
-    if new_body == body:
+    candidate_body = prepare_body(body) if prepare_body else body
+    if prepare_body and candidate_body == body:
+        return None
+    new_body = body_with_triage_queued(candidate_body, item, attempt_cap=cap)
+    if new_body == body or new_body == candidate_body:
         return None
     before = get_card(number)
     if not _queue_card_snapshot_matches(before, number, item, body):
@@ -3858,6 +3863,8 @@ def mark_triage_queued(number, item, body):
         )
         return None
     if not reserve_triage_budget(number, item, ceiling):
+        if not publish_budget_deferral:
+            return None
         publish_triage_budget_deferral(number, item, body)
         return None
     # A triage consumer is the only body writer outside the shared workflow

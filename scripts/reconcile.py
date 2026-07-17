@@ -173,7 +173,9 @@ def _reconcile_run_number():
 auto_triage_has_token = render_card.auto_triage_has_token
 
 
-def maybe_queue_auto_triage(item, row, has_token, owner=""):
+def maybe_queue_auto_triage(
+    item, row, has_token, owner="", prepare_body=None, publish_budget_deferral=True
+):
     """Queue lightweight advisory triage when this card revision lacks a cache.
 
     The card is marked queued before dispatch so a failed workflow still counts
@@ -189,19 +191,29 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
     """
     if not row:
         return False
-    if not render_card.should_auto_triage(
-        item, row.get("state"), row.get("labels"), has_token
-    ):
+    state = row.get("state")
+    if prepare_body:
+        state = render_card.parse_state_block(prepare_body(row.get("body", "")))
+    if not render_card.should_auto_triage(item, state, row.get("labels"), has_token):
         if render_card.triage_attempt_deferral_needed(
-            item, row.get("state"), row.get("labels"), has_token
+            item, state, row.get("labels"), has_token
         ):
             render_card.report_triage_attempt_exhaustion(row["number"], item)
         return False
     revision = render_card.triage_revision(item)
     try:
-        permit = render_card.mark_triage_queued(
-            row["number"], item, row.get("body", "")
-        )
+        if prepare_body or not publish_budget_deferral:
+            permit = render_card.mark_triage_queued(
+                row["number"],
+                item,
+                row.get("body", ""),
+                prepare_body=prepare_body,
+                publish_budget_deferral=publish_budget_deferral,
+            )
+        else:
+            permit = render_card.mark_triage_queued(
+                row["number"], item, row.get("body", "")
+            )
         if not permit:
             return False
     except Exception as e:

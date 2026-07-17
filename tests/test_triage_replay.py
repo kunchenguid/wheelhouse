@@ -113,7 +113,7 @@ def config():
 
 
 @contextmanager
-def replay_environment(cards, sources, remaining=1200):
+def replay_environment(cards, sources, remaining=1200, stub_queue=True):
     card_reads = []
     source_reads = []
     edits = []
@@ -137,10 +137,12 @@ def replay_environment(cards, sources, remaining=1200):
             raise value
         return copy.deepcopy(value)
 
-    def mark(number, item, body):
+    def mark(number, item, body, prepare_body=None, publish_budget_deferral=True):
         queued.append((number, item["repo"], item["number"]))
+        body = prepare_body(body) if prepare_body else body
         new_body = rc.body_with_triage_queued(body, item, attempt_cap=2)
         assert new_body != body
+        edits.append((number, new_body))
         cards[number]["body"] = new_body
         return object()
 
@@ -152,9 +154,10 @@ def replay_environment(cards, sources, remaining=1200):
         "_edit_issue_body": edit,
         "triage_budget_remaining": lambda ceiling: min(remaining, ceiling),
         "auto_triage_has_token": lambda: True,
-        "mark_triage_queued": mark,
         "dispatch_triage_workflow": dispatch,
     }
+    if stub_queue:
+        replacements["mark_triage_queued"] = mark
     old_env = dict(os.environ)
     os.environ.update(
         {
@@ -218,6 +221,38 @@ def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
             assert len(calls["queued"]) == len(calls["dispatched"]) == 1
             assert all(number == 42 for number in calls["card_reads"])
             assert all(read[2:] == (17, "pr-review") for read in calls["source_reads"])
+    finally:
+        os.unlink(path)
+
+
+def test_queue_failure_does_not_unlock_card_for_later_schedule():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    before = cards[42]["body"]
+    try:
+        with replay_environment(cards, sources, stub_queue=False) as calls:
+            with patched(
+                rc,
+                {"reserve_triage_budget": lambda number, item, ceiling: False},
+            ):
+                result = replay.run(path, "wave-one", 25)
+            state = rc._unique_state_block(cards[42]["body"])
+            assert result == {
+                "eligible": 1,
+                "planned": 1,
+                "deferred": 0,
+                "written": 0,
+                "queued": 0,
+            }
+            assert cards[42]["body"] == before
+            assert replay.REPLAY_FIELD not in state
+            assert state["triage_status"] == "error"
+            assert (
+                not calls["edits"]
+                and not calls["queued"]
+                and not calls["dispatched"]
+            )
     finally:
         os.unlink(path)
 
@@ -479,6 +514,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     dispatch_inputs = on_doc["workflow_dispatch"]["inputs"]
     assert dispatch_inputs["replay_wave"]["default"] == ""
     assert dispatch_inputs["replay_limit"]["default"] == "25"
+    assert dispatch_inputs["replay_dry_run"]["default"] is True
     step = next(
         value
         for value in scan["jobs"]["reconcile"]["steps"]
@@ -487,6 +523,8 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "github.event_name == 'workflow_dispatch'" in step["if"]
     assert "inputs.replay_wave != ''" in step["if"]
     assert "scripts/triage_replay.py" in step["run"]
+    assert "REPLAY_DRY_RUN" in step["run"]
+    assert "args+=(--dry-run)" in step["run"]
     assert "--dry-run" in (ROOT / "scripts/triage_replay.py").read_text(
         encoding="utf-8"
     )
@@ -505,6 +543,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
 TESTS = [
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_absent_cache_gets_absent_marker_and_one_queued_attempt,
+    test_queue_failure_does_not_unlock_card_for_later_schedule,
     test_never_cleared_matrix_fails_closed,
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
     test_dry_run_and_budget_bound_list_plans_with_zero_writes,

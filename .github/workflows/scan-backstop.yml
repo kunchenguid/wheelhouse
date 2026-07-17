@@ -33,6 +33,11 @@ on:
         description: "Maximum cards in this reviewable replay wave (1..100)"
         required: false
         default: "25"
+      replay_dry_run:
+        description: "Plan the exact-number replay wave without writes"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -153,10 +158,13 @@ jobs:
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           REPLAY_WAVE: ${{ inputs.replay_wave }}
           REPLAY_LIMIT: ${{ inputs.replay_limit }}
+          REPLAY_DRY_RUN: ${{ inputs.replay_dry_run }}
         run: |
-          python scripts/triage_replay.py cards.json \
-            --wave "$REPLAY_WAVE" \
-            --limit "$REPLAY_LIMIT"
+          args=(cards.json --wave "$REPLAY_WAVE" --limit "$REPLAY_LIMIT")
+          if [ "$REPLAY_DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python scripts/triage_replay.py "${args[@]}"
 
       # Track per-repo consecutive scan failures in a dedicated (closed) ledger
       # issue in THIS repo, and fail the run loudly if a fleet repo has been dark
