@@ -18,11 +18,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
+from scripts import agent_claim  # noqa: E402
 
 REPLAY_FIELD = "triage_replay"
 REPLAY_VERSION = 1
@@ -42,6 +44,25 @@ TRIAGE_NON_SUCCESS_FIELDS = (
     "triage_repair_candidate",
 )
 MAX_RUN_NUMBER = 9_007_199_254_740_991
+
+
+def _triage_action(kind):
+    search = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN", "")
+    if search not in {"true", "false"}:
+        raise ValueError("replay requires the trusted READONLY_TOKEN presence flag")
+    noun = "issue" if kind == "issue-triage" else "pr"
+    mode = "search" if search == "true" else "local"
+    return "triage.%s.%s" % (noun, mode)
+
+
+def _card_repo_slug(owner):
+    slug = os.environ.get("GITHUB_REPOSITORY", "")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug)
+        or slug.split("/", 1)[0] != owner
+    ):
+        raise ValueError("replay requires the trusted current repository slug")
+    return slug
 
 
 def _label_names(labels):
@@ -222,13 +243,35 @@ def inspect_candidate(number, config, owner, has_token):
     triaged_sha = state.get("triaged_sha")
     if triaged_sha is not None and triaged_sha != revision:
         return None, "triage-cache-stale"
-    if REPLAY_FIELD in state:
-        marker = state.get(REPLAY_FIELD)
-        if not _valid_marker(marker, revision):
-            return None, "replay-marker-untrusted"
-        return None, "already-replayed"
+    action = _triage_action(kind)
+    marker = state.get(REPLAY_FIELD) if REPLAY_FIELD in state else None
+    if marker is not None and not _valid_marker(marker, revision):
+        return None, "replay-marker-untrusted"
     status = state.get("triage_status")
-    if triaged_sha == revision and status == "error":
+    duplicate_reentry = False
+    if marker is not None:
+        if state.get("held") or triaged_sha != revision or status not in {
+            "queued",
+            "error",
+        }:
+            return None, "already-replayed"
+        try:
+            duplicate_reentry = agent_claim.triage_replay_duplicate_only_evidence(
+                action=action,
+                owner=owner,
+                repo=repo,
+                number=target_number,
+                issue=number,
+                revision=revision,
+                repo_slug=_card_repo_slug(owner),
+                replayed_at=marker["at"],
+            )
+        except Exception:
+            return None, "duplicate-evidence-unreadable"
+        if not duplicate_reentry:
+            return None, "already-replayed"
+        cleared = marker["cleared"]
+    elif triaged_sha == revision and status == "error":
         cleared = "error"
     elif triaged_sha is None:
         if any(field in state for field in TRIAGE_NON_SUCCESS_FIELDS[1:]):
@@ -260,6 +303,10 @@ def inspect_candidate(number, config, owner, has_token):
         return None, "auto-triage-disabled"
     cap = policy["triage_attempt_cap_per_revision"]
     attempt_count = render_card.triage_attempt_count(state, kind, revision, cap)
+    if duplicate_reentry:
+        if attempt_count < 1:
+            return None, "duplicate-attempt-count-untrusted"
+        attempt_count -= 1
     if attempt_count >= cap:
         return None, "attempt-cap-exhausted"
     return {
@@ -270,6 +317,8 @@ def inspect_candidate(number, config, owner, has_token):
         "revision": revision,
         "cleared": cleared,
         "attempt_count": attempt_count,
+        "action": action,
+        "duplicate_reentry": duplicate_reentry,
     }, "eligible"
 
 
@@ -292,7 +341,7 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     if state != plan["state"]:
         return body
     new_state = dict(state)
-    if plan["cleared"] == "error":
+    if plan["cleared"] == "error" or plan["duplicate_reentry"]:
         for field in TRIAGE_NON_SUCCESS_FIELDS:
             new_state.pop(field, None)
     new_state[render_card.TRIAGE_ATTEMPTS_FIELD] = {
@@ -306,7 +355,7 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     )
     clean = (
         render_card.remove_triage_section(body)
-        if plan["cleared"] == "error"
+        if plan["cleared"] == "error" or plan["duplicate_reentry"]
         else body
     )
     return render_card._replace_state_block(clean, new_state)
@@ -352,6 +401,7 @@ def _entry(wave, limit):
 
 def run(cards_path, wave, limit, dry_run=False):
     owner, run_number = _entry(wave, limit)
+    repo_slug = _card_repo_slug(owner)
     config = core.load_config()
     has_token = render_card.auto_triage_has_token()
     numbers = _candidate_numbers(cards_path)
@@ -417,6 +467,28 @@ def run(cards_path, wave, limit, dry_run=False):
             )
             continue
         current = reconcile.current_card({"number": plan["number"]})
+        try:
+            superseded = agent_claim.supersede_triage_claim(
+                action=plan["action"],
+                owner=owner,
+                repo=plan["item"]["repo"],
+                number=plan["item"]["number"],
+                issue=plan["number"],
+                revision=plan["revision"],
+                repo_slug=repo_slug,
+            )
+        except Exception as error:
+            print(
+                "::error::replay refused card #%s before queueing: "
+                "claim tombstone failed (%s)"
+                % (plan["number"], str(error)[:180])
+            )
+            continue
+        if superseded["superseded"]:
+            print(
+                "replay superseded stale triage claim for card #%s"
+                % plan["number"]
+            )
         prepare_body = lambda body, plan=plan: _body_with_replay_marker(
             body, plan, wave, run_number
         )

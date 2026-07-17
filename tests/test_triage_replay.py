@@ -8,7 +8,7 @@ import copy
 import json
 import os
 import tempfile
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import sys
@@ -121,7 +121,9 @@ def config():
 
 
 @contextmanager
-def replay_environment(cards, sources, remaining=1200, stub_queue=True):
+def replay_environment(
+    cards, sources, remaining=1200, stub_queue=True, stub_claim=True
+):
     card_reads = []
     source_reads = []
     edits = []
@@ -171,16 +173,33 @@ def replay_environment(cards, sources, remaining=1200, stub_queue=True):
         {
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REPOSITORY_OWNER": "owner",
+            "GITHUB_REPOSITORY": "owner/wheelhouse",
             "GITHUB_ACTOR": "owner",
             "GITHUB_RUN_NUMBER": "77",
             "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN": "true",
+            "WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN": "false",
         }
     )
     try:
+        claim_context = (
+            patched(
+                replay.agent_claim,
+                {
+                    "supersede_triage_claim": lambda **kwargs: {
+                        "event_key": "a" * 64,
+                        "superseded": False,
+                    },
+                    "triage_replay_duplicate_only_evidence": lambda **kwargs: False,
+                },
+            )
+            if stub_claim
+            else nullcontext()
+        )
         with (
             patched(rc, replacements),
             patched(replay, {"_source_json": source_read}),
             patched(replay.core, {"load_config": config}),
+            claim_context,
         ):
             yield {
                 "card_reads": card_reads,
@@ -261,6 +280,35 @@ def test_queue_failure_does_not_unlock_card_for_later_schedule():
                 and not calls["queued"]
                 and not calls["dispatched"]
             )
+    finally:
+        os.unlink(path)
+
+
+def test_claim_tombstone_failure_refuses_replay_before_attempt_or_reservation():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    before = cards[42]["body"]
+
+    def fail_tombstone(**kwargs):
+        raise RuntimeError("simulated claim PATCH failure")
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as calls,
+            patched(
+                replay.agent_claim,
+                {"supersede_triage_claim": fail_tombstone},
+            ),
+        ):
+            result = replay.run(path, "claim-write-failure", 25)
+        state = rc._unique_state_block(cards[42]["body"])
+        assert result["eligible"] == 1
+        assert result["written"] == result["queued"] == 0
+        assert cards[42]["body"] == before
+        assert state["triage_status"] == "error"
+        assert replay.REPLAY_FIELD not in state
+        assert not calls["edits"] and not calls["queued"] and not calls["dispatched"]
     finally:
         os.unlink(path)
 
@@ -444,8 +492,10 @@ def test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit():
     valid = {
         "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_REPOSITORY_OWNER": "owner",
+        "GITHUB_REPOSITORY": "owner/wheelhouse",
         "GITHUB_ACTOR": "owner",
         "GITHUB_RUN_NUMBER": "77",
+        "WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN": "false",
     }
     try:
         os.environ.update(valid)
@@ -503,6 +553,347 @@ class FakeRecordGh:
         return copy.deepcopy(
             next(row for row in self.comments if row["id"] == comment_id)
         )
+
+
+class FakeClaimGh:
+    def __init__(self):
+        self.comments = []
+        self.next_id = 1
+
+    def __call__(self, *args):
+        if "--paginate" in args:
+            return [copy.deepcopy(self.comments)]
+        method = args[args.index("--method") + 1] if "--method" in args else "GET"
+        endpoint = next(value for value in args if value.startswith("repos/"))
+        if method in {"POST", "PATCH"}:
+            body = next(value[5:] for value in args if value.startswith("body="))
+            if method == "POST":
+                row = {
+                    "id": self.next_id,
+                    "body": body,
+                    "user": {"login": "github-actions[bot]"},
+                    "created_at": "2026-07-16T09:00:00Z",
+                    "updated_at": "2026-07-16T09:00:00Z",
+                }
+                self.next_id += 1
+                self.comments.append(row)
+                return copy.deepcopy(row)
+            comment_id = int(endpoint.rsplit("/", 1)[-1])
+            row = next(row for row in self.comments if row["id"] == comment_id)
+            row["body"] = body
+            row["updated_at"] = "2026-07-16T11:00:00Z"
+            return copy.deepcopy(row)
+        comment_id = int(endpoint.rsplit("/", 1)[-1])
+        return copy.deepcopy(
+            next(row for row in self.comments if row["id"] == comment_id)
+        )
+
+
+def triage_claim_args():
+    return argparse.Namespace(
+        action="triage.pr.local",
+        owner="owner",
+        repo="wheelhouse",
+        number=17,
+        issue=42,
+        revision="abcdef1",
+        event_id="",
+        repo_slug="owner/wheelhouse",
+    )
+
+
+def test_duplicate_only_evidence_requires_a_terminal_pre_replay_claim_and_record():
+    args = triage_claim_args()
+    identity = agent_claim.normalized_event_identity(
+        action=args.action,
+        owner=args.owner,
+        repo=args.repo,
+        number=args.number,
+        card_issue=args.issue,
+        revision=args.revision,
+    )
+    event_key = agent_claim.event_key_sha256(identity)
+    marker = agent_claim.event_claim_marker(event_key)
+    fake = FakeClaimGh()
+    fake.comments.append(
+        {
+            "id": 1,
+            "body": "Agent triage event finished with consumer.committed. %s"
+            % marker,
+            "user": {"login": "github-actions[bot]"},
+            "created_at": "2026-07-16T09:00:00Z",
+            "updated_at": "2026-07-16T09:00:00Z",
+        }
+    )
+    evidence = dict(
+        action=args.action,
+        owner=args.owner,
+        repo=args.repo,
+        number=args.number,
+        issue=args.issue,
+        revision=args.revision,
+        repo_slug=args.repo_slug,
+        replayed_at="2026-07-16T10:00:00Z",
+    )
+    with patched(agent_claim, {"gh_json": fake}):
+        assert agent_claim.triage_replay_duplicate_only_evidence(**evidence)
+        fake.comments[0]["body"] = (
+            "Agent event admitted and is being processed.\n\n%s" % marker
+        )
+        assert not agent_claim.triage_replay_duplicate_only_evidence(**evidence)
+        fake.comments[0]["body"] = (
+            "Agent triage event finished with consumer.committed. %s" % marker
+        )
+        fake.comments[0]["updated_at"] = "2026-07-16T11:00:00Z"
+        assert not agent_claim.triage_replay_duplicate_only_evidence(**evidence)
+        fake.comments[0]["updated_at"] = "2026-07-16T09:00:00Z"
+        fake.comments.append(
+            {
+                "id": 2,
+                "body": agent_claim.triage_record_body(
+                    event_key, "abcdef1", "error", "consumer.rejected"
+                ),
+                "user": {"login": "github-actions[bot]"},
+                "created_at": "2026-07-16T11:00:00Z",
+                "updated_at": "2026-07-16T11:00:00Z",
+            }
+        )
+        assert not agent_claim.triage_replay_duplicate_only_evidence(**evidence)
+
+
+def test_replay_supersedes_failed_attempt_claim_before_exact_revision_readmission():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    fake = FakeClaimGh()
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "output"
+            old_output = os.environ.get("GITHUB_OUTPUT")
+            os.environ["GITHUB_OUTPUT"] = str(output_path)
+            try:
+                with (
+                    patched(agent_claim, {"gh_json": fake}),
+                    patched(replay.agent_claim, {"gh_json": fake}),
+                ):
+                    assert agent_claim.claim(triage_claim_args()) == 0
+                    first_outputs = output_path.read_text(encoding="utf-8")
+                    assert "admitted=true" in first_outputs
+                    marker = next(
+                        line.split("=", 1)[1]
+                        for line in first_outputs.splitlines()
+                        if line.startswith("marker=")
+                    )
+                    fake.comments[0]["body"] = (
+                        "Agent triage event finished with consumer.committed. %s"
+                        % marker
+                    )
+
+                    with replay_environment(cards, sources, stub_claim=False):
+                        replayed = replay.run(path, "claim-gap", 25)
+                    assert replayed["queued"] == 1
+                    assert (
+                        rc._unique_state_block(cards[42]["body"])["triage_status"]
+                        == "queued"
+                    )
+
+                    output_path.write_text("", encoding="utf-8")
+                    assert agent_claim.claim(triage_claim_args()) == 0
+                    second_outputs = output_path.read_text(encoding="utf-8")
+                    assert "admitted=true" in second_outputs
+                    assert marker not in fake.comments[0]["body"]
+            finally:
+                if old_output is None:
+                    os.environ.pop("GITHUB_OUTPUT", None)
+                else:
+                    os.environ["GITHUB_OUTPUT"] = old_output
+    finally:
+        os.unlink(path)
+
+
+def test_duplicate_only_parked_replay_does_not_consume_cap_or_once_marker():
+    parked = card()
+    state = rc._unique_state_block(parked["body"])
+    state = rc._state_with_triage(state, "abcdef1", "queued")
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": "abcdef1",
+        "count": 2,
+    }
+    state[replay.REPLAY_FIELD] = valid_marker()
+    parked["body"] = rc._replace_state_block(parked["body"], state)
+    cards = {42: parked}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    fake = FakeClaimGh()
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "output"
+            old_output = os.environ.get("GITHUB_OUTPUT")
+            os.environ["GITHUB_OUTPUT"] = str(output_path)
+            try:
+                with (
+                    patched(agent_claim, {"gh_json": fake}),
+                    patched(replay.agent_claim, {"gh_json": fake}),
+                ):
+                    assert agent_claim.claim(triage_claim_args()) == 0
+                    claim_outputs = output_path.read_text(encoding="utf-8")
+                    event_key = next(
+                        line.split("=", 1)[1]
+                        for line in claim_outputs.splitlines()
+                        if line.startswith("event_key=")
+                    )
+                    marker = next(
+                        line.split("=", 1)[1]
+                        for line in claim_outputs.splitlines()
+                        if line.startswith("marker=")
+                    )
+                    fake.comments[0]["body"] = (
+                        "Agent triage event finished with consumer.committed. %s"
+                        % marker
+                    )
+                    agent_claim.record_triage_result(
+                        record_args(event_key, "error", "consumer.committed")
+                    )
+
+                    with replay_environment(cards, sources, stub_claim=False):
+                        result = replay.run(path, "cohort-reentry", 25)
+
+                    new_state = rc._unique_state_block(cards[42]["body"])
+                    assert result["eligible"] == result["queued"] == 1
+                    assert new_state["triage_status"] == "queued"
+                    assert new_state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+                    assert new_state[replay.REPLAY_FIELD]["wave"] == "cohort-reentry"
+                    assert marker not in fake.comments[0]["body"]
+            finally:
+                if old_output is None:
+                    os.environ.pop("GITHUB_OUTPUT", None)
+                else:
+                    os.environ["GITHUB_OUTPUT"] = old_output
+    finally:
+        os.unlink(path)
+
+
+def test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral():
+    parked = card()
+    state = rc._unique_state_block(parked["body"])
+    state = rc._state_with_triage(state, "abcdef1", "queued")
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": "abcdef1",
+        "count": 2,
+    }
+    state[replay.REPLAY_FIELD] = valid_marker()
+    parked["body"] = rc._replace_state_block(parked["body"], state)
+    cards = {42: parked}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    fake = FakeClaimGh()
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "output"
+            old_output = os.environ.get("GITHUB_OUTPUT")
+            os.environ["GITHUB_OUTPUT"] = str(output_path)
+            try:
+                with (
+                    patched(agent_claim, {"gh_json": fake}),
+                    patched(replay.agent_claim, {"gh_json": fake}),
+                ):
+                    assert agent_claim.claim(triage_claim_args()) == 0
+                    claim_outputs = output_path.read_text(encoding="utf-8")
+                    event_key = next(
+                        line.split("=", 1)[1]
+                        for line in claim_outputs.splitlines()
+                        if line.startswith("event_key=")
+                    )
+                    marker = next(
+                        line.split("=", 1)[1]
+                        for line in claim_outputs.splitlines()
+                        if line.startswith("marker=")
+                    )
+                    fake.comments[0]["body"] = (
+                        "Agent triage event finished with consumer.committed. %s"
+                        % marker
+                    )
+                    agent_claim.record_triage_result(
+                        record_args(event_key, "error", "consumer.committed")
+                    )
+                    before = cards[42]["body"]
+
+                    with replay_environment(
+                        cards, sources, stub_queue=False, stub_claim=False
+                    ):
+                        with patched(
+                            rc,
+                            {
+                                "_configured_triage_spend_limits": lambda item: (
+                                    2,
+                                    1200,
+                                ),
+                                "reserve_triage_budget": (
+                                    lambda number, item, ceiling: False
+                                ),
+                            },
+                        ):
+                            failed = replay.run(path, "failed-reentry", 25)
+
+                    assert failed["eligible"] == 1
+                    assert failed["written"] == failed["queued"] == 0
+                    assert cards[42]["body"] == before
+                    assert marker not in fake.comments[0]["body"]
+                    assert (
+                        agent_claim.TRIAGE_CLAIM_SUPERSEDED_PREFIX
+                        in fake.comments[0]["body"]
+                    )
+
+                    with replay_environment(cards, sources, stub_claim=False):
+                        retried = replay.run(path, "retry-reentry", 25)
+
+                    new_state = rc._unique_state_block(cards[42]["body"])
+                    assert retried["eligible"] == retried["queued"] == 1
+                    assert new_state["triage_status"] == "queued"
+                    assert new_state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+                    assert new_state[replay.REPLAY_FIELD]["wave"] == "retry-reentry"
+            finally:
+                if old_output is None:
+                    os.environ.pop("GITHUB_OUTPUT", None)
+                else:
+                    os.environ["GITHUB_OUTPUT"] = old_output
+    finally:
+        os.unlink(path)
+
+
+def test_admission_denial_terminalizes_only_the_exact_queued_revision():
+    cards = {42: card(status="queued")}
+
+    def get_card(number):
+        return copy.deepcopy(cards.get(number))
+
+    def edit(number, body, remove_labels=None):
+        cards[number]["body"] = body
+
+    with patched(rc, {"get_card": get_card, "_edit_issue_body": edit}):
+        assert rc.update_card_triage(
+            42,
+            "abcdef1",
+            error="Exact-revision admission denied (admission.duplicate).",
+            require_queued=True,
+        )
+        terminal = rc._unique_state_block(cards[42]["body"])
+        assert terminal["triaged_sha"] == "abcdef1"
+        assert terminal["triage_status"] == "error"
+        assert terminal["triage_error"].endswith("(admission.duplicate).")
+        assert "### Triage" in cards[42]["body"]
+        before = cards[42]["body"]
+        assert not rc.update_card_triage(
+            42,
+            "abcdef1",
+            error="duplicate late write",
+            require_queued=True,
+        )
+        assert cards[42]["body"] == before
 
 
 def record_args(event_key, status, code="consumer.committed"):
@@ -597,6 +988,16 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "wheelhouse-triage-record" in (ROOT / "scripts/agent_claim.py").read_text(
         encoding="utf-8"
     )
+    denial = next(
+        value
+        for value in yaml.safe_load(triage_text)["jobs"]["triage"]["steps"]
+        if value.get("id") == "admission-denial-consumer"
+    )
+    assert "steps.event-claim.outputs.admitted == 'false'" in denial["if"]
+    assert "triage-fail" in denial["run"]
+    assert "admission.duplicate" in denial["run"]
+    assert "--queued-only" in denial["run"]
+    assert "ADMISSION_DENIED" in triage_text
 
 
 TESTS = [
@@ -604,12 +1005,18 @@ TESTS = [
     test_absent_cache_gets_absent_marker_and_one_queued_attempt,
     test_same_revision_refresh_preserves_replay_marker,
     test_queue_failure_does_not_unlock_card_for_later_schedule,
+    test_claim_tombstone_failure_refuses_replay_before_attempt_or_reservation,
     test_never_cleared_matrix_fails_closed,
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
     test_replay_applies_scan_author_filter_to_live_source,
     test_dry_run_and_budget_bound_list_plans_with_zero_writes,
     test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit,
     test_result_records_cover_success_failure_bound_and_duplicate_editing,
+    test_duplicate_only_evidence_requires_a_terminal_pre_replay_claim_and_record,
+    test_replay_supersedes_failed_attempt_claim_before_exact_revision_readmission,
+    test_duplicate_only_parked_replay_does_not_consume_cap_or_once_marker,
+    test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral,
+    test_admission_denial_terminalizes_only_the_exact_queued_revision,
     test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries,
 ]
 

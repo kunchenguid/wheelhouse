@@ -27,8 +27,14 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
+An operator-approved exact-revision auto-triage replay first tombstones only the matching primary-triage claim marker and directly verifies that admission can no longer discover it.
+The original claim comment remains as a bounded superseded audit record, while schema-repair, deep-review, and natural-language claim identities are outside the supersede operation.
+If that tombstone cannot be written and verified, replay refuses the card before queueing or reservation.
+The only replay marker that can re-enter its once guard is the proven `admission.duplicate`-only cohort: its terminal primary claim and any claim-keyed result record must both predate the replay marker, proving denial before task construction.
+That exception removes only the duplicate queued reservation from the per-revision attempt count and replay-marker guard; the daily ledger reservation and all other guards remain intact.
+An admission duplicate for an exact queued revision is projected as a terminal card error without clearing the queue cache key, making the denial visible without enabling an hourly retry loop.
 Automatic triage also dual-writes one bounded claim-keyed `wheelhouse-triage-record` hidden comment for each admitted attempt, containing only version, event key, revision, structural status, and structural consumer code.
-Card consumers do not read that migration record yet.
+Normal triage card consumers do not read that migration record, but replay may read it only as bounded duplicate-only evidence.
 Automatic triage also reserves from the closed UTC daily budget ledger before its verified queued-card checkpoint.
 The default `triage_daily_ceiling` is 1200 reservations per UTC day, and each reservation can reach at most one primary call plus one bounded schema-repair call, for a 2400-model-call daily worst case.
 The finite default lets approved replay waves complete without cost throttling while preserving a hard runaway-containment bound.

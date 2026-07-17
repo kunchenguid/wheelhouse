@@ -629,7 +629,7 @@ tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-a
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, activity-stamp interaction, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
-tests/test_triage_replay.py    offline unit test for owner-only replay eligibility, dry-run behavior, exact-revision gates, and result records
+tests/test_triage_replay.py    offline unit test for owner-only replay eligibility, claim tombstones, duplicate-only re-entry, admission duplicate projection, dry-run behavior, exact-revision gates, and result records
 tests/test_triage_prompt_size.py offline regression test for bounded pass-by-reference triage and deep-review prompts
 tests/test_auto_merge_v1.py    offline unit test for scan-time auto-merge gates, same-closing-issue overlap holds, claims, live rechecks, audit records, and ledger recovery
 tests/test_automerge_card_ui.py offline end-to-end test for authoritative criterion evaluation, fail-closed display states, and real card rendering

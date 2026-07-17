@@ -403,6 +403,46 @@ jobs:
             --event-key "${{ steps.event-claim.outputs.event_key }}" \
             --stage admitted --status "$status" --code "$code"
 
+      - id: admission-denial-consumer
+        name: Record an exact-revision admission denial on the card
+        if: ${{ always() && steps.event-claim.outputs.event_key != '' && steps.event-claim.outputs.admitted == 'false' && steps.trusted-src.outputs.path != '' }}
+        working-directory: ${{ steps.trusted-src.outputs.path }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          REVISION: ${{ steps.resolve.outputs.revision }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: "1"
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          mkdir -p "$TRUSTED_HOME"
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            HOME="$TRUSTED_HOME" \
+            GH_TOKEN="$GH_TOKEN" \
+            GH_REPO="$GH_REPO" \
+            GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
+              --issue "$ISSUE" \
+              --revision "$REVISION" \
+              --message "Auto triage did not run because exact-revision admission was denied (admission.duplicate)." \
+              --queued-only
+
       - id: prepare
         if: steps.event-freshness.outputs.fresh == 'true'
         env:
@@ -1183,6 +1223,7 @@ jobs:
           TRIAGE_GATE_ENABLED: ${{ steps.gate.outputs.enabled }}
           TRIAGE_GATE_MODE: ${{ steps.gate.outputs.mode }}
           TRIAGE_GATE_REASON: ${{ steps.gate.outputs.reason }}
+          ADMISSION_DENIED: ${{ steps.event-claim.outputs.event_key != '' && steps.event-claim.outputs.admitted == 'false' }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -1217,6 +1258,15 @@ jobs:
             fi
           fi
           export REVISION
+          command=(scripts/render_card.py triage-recover
+            --issue "$ISSUE" --kind "$KIND" --revision "$REVISION"
+            --message "$RECOVER_MESSAGE")
+          if [ "${ADMISSION_DENIED:-false}" = "true" ]; then
+            command=(scripts/render_card.py triage-fail
+              --issue "$ISSUE" --revision "$REVISION"
+              --message "Auto triage did not run because exact-revision admission was denied (admission.duplicate)."
+              --queued-only)
+          fi
           env -i \
             PATH="$TRUSTED_PATH" \
             PYTHONDONTWRITEBYTECODE=1 \
@@ -1227,11 +1277,7 @@ jobs:
             GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
             GITHUB_OUTPUT="$GITHUB_OUTPUT" \
-            "$TRUSTED_PYTHON" scripts/render_card.py triage-recover \
-              --issue "$ISSUE" \
-              --kind "$KIND" \
-              --revision "$REVISION" \
-              --message "$RECOVER_MESSAGE"
+            "$TRUSTED_PYTHON" "${command[@]}"
 
       - name: Clear queued triage cache if trusted source is unavailable
         if: always() && steps.trusted-src.outputs.path == ''

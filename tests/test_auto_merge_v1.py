@@ -3593,7 +3593,7 @@ def test_scan_backstop_wiring_and_token_discipline():
     check(
         "wiring: missing act results release validated claims under github.token",
         rec
-        and rec.get("if") == "always()"
+        and rec.get("if", "").startswith("${{ always()")
         and "record automerge.json automerge-valid-claims.json" in rec.get("run", ""),
     )
     check(
@@ -3611,7 +3611,9 @@ def test_scan_backstop_wiring_and_token_discipline():
     )
     check(
         "wiring: reconcile still runs when audit recovery fails",
-        by_name.get("Reconcile the queue", {}).get("if") == "always()",
+        by_name.get("Reconcile the queue", {})
+        .get("if", "")
+        .startswith("${{ always()"),
     )
     handler = yaml.safe_load(_read(".github/workflows/decision-handler.yml"))
     handler_steps = handler["jobs"]["handle"]["steps"]
