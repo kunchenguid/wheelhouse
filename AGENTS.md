@@ -449,7 +449,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `render_card.mark_triage_queued` reserves from the one trusted closed UTC daily ledger before it writes the non-material, versioned `triage_attempts` count and existing queued cache together, verifies the card by number, and returns the sole permit accepted by `dispatch_triage_workflow`.
   `triage_attempt_cap_per_revision` defaults to 2 queued attempts, accepts integers 1 through 5, may be overridden per repository, and fails closed to 1 when invalid.
   The global-only `triage_daily_ceiling` defaults to 1200 reservations per UTC day, accepts integers 1 through 2000, and fails closed to 0 when invalid; one reservation authorizes one triage run whose bounded schema repair permits at most two model calls.
-  The finite default sits above the roughly 748-card recovery backlog plus ordinary daily volume so an approved operator replay is paced by reviewable waves rather than cost.
+  The finite default keeps approved operator replay paced by reviewable waves rather than cost, while preserving a hard runaway-containment bound.
   Malformed, ambiguous, untrusted, duplicate, unreadable, or unverified ledger state denies reservations, and a crash or verification failure may leak capacity only in the safe direction.
   All current automatic queue writers are serialized by the `wheelhouse-backstop` concurrency group, while deep-review and natural-language decision runs remain outside this ceiling because they require deliberate owner actions and durable claims.
   The authoritative implementation and offline failure matrix are `scripts/render_card.py`, `scripts/wheelhouse_core.py`, and `tests/test_triage_budget.py`.
@@ -459,7 +459,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   Replay clears only a proven current `triage_status:error` non-success cache or marks an entirely absent cache, preserves the derived attempt count, writes the versioned non-material `triage_replay` marker once, and re-enters `reconcile.maybe_queue_auto_triage` so the existing reservation, queued checkpoint, sealed dispatch permit, and `triage.yml` admission remain authoritative.
   Malformed or mismatched state, markers, identities, revisions, labels, authorship, sources, attempt counts, or budget ledgers fail closed.
   `--dry-run` performs the same exact-number eligibility reads and reports planned actions without any GitHub write.
-  `triage.yml` also dual-writes one bounded claim-keyed `wheelhouse-triage-record` hidden comment for each admitted attempt through `scripts/agent_claim.py`; these additive records contain only version, event key, revision, structural status, and structural consumer code.
+  `docs/AGENT_RUNTIME.md` owns the additive `wheelhouse-triage-record` migration record shape.
 - **Accept recommendation is a deterministic shortcut, not model action.** A
   successful current auto-triage attempt for pr-review or issue-triage may
   prepend an `Accept recommendation` checkbox when the structured

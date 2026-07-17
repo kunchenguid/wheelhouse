@@ -279,9 +279,9 @@ auto_triage_issues: true
 # per-repository override above.
 # Invalid values fail closed to 1.
 # `triage_daily_ceiling` is one fleet-wide count of reservations per UTC day.
-# It defaults to 1200 and accepts integers from 1 through 2000. The default is
-# deliberately above the roughly 748-card recovery backlog plus ordinary daily
-# traffic, while remaining a finite runaway-containment bound.
+# It defaults to 1200 and accepts integers from 1 through 2000.
+# The default lets approved replay waves complete without cost throttling while
+# remaining a finite runaway-containment bound.
 # It has no per-repository override; any invalid configuration fails closed to
 # zero automatic triage reservations until corrected.
 # One reservation permits at most one triage dispatch, whose bounded schema

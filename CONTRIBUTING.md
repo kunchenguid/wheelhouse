@@ -53,6 +53,7 @@ python tests/test_ci_security_summary.py
 python tests/test_check_status.py
 python tests/test_author_filter.py
 python tests/test_auto_triage.py
+python tests/test_triage_replay.py
 python tests/test_auto_merge_v1.py
 python tests/test_deep_review.py
 python tests/test_nl_decisions_search.py
