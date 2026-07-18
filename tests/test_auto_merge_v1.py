@@ -2654,6 +2654,7 @@ def test_triage_persists_trusted_policy_revisions():
         triage=triage,
         vision_sha="trusted-vision-sha",
         base_sha="b" * 40,
+        automerge_behavior_available=True,
     )
     verdict = core.parse_state_block(body).get("automerge_verdict")
     check(
@@ -2679,6 +2680,7 @@ def test_complete_diff_triage_persists_independent_facts_without_vision():
         triage=triage,
         vision_sha="",
         base_sha="b" * 40,
+        automerge_behavior_available=True,
     )
     state = core.parse_state_block(body)
     verdict = state.get("automerge_verdict")
