@@ -16,6 +16,7 @@ from .admission import DIGEST
 from .contract import (
     ArtifactError,
     atomic_write_json,
+    canonical_json_bytes,
     canonical_sha256,
     file_sha256,
     load_json_regular,
@@ -836,10 +837,19 @@ def claude_isolation(action: str) -> dict[str, Any]:
     }
 
 
+def claude_native_structured_output(action: str) -> bool:
+    return action.startswith("nl-decision") and action not in SCHEMA_REPAIR_ACTIONS
+
+
 def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
+    structured_mechanisms = (
+        ["native-schema"]
+        if claude_native_structured_output(action)
+        else ["trusted-post-action-bridge"]
+    )
     required = [
         {"name": "input.text", "constraints": {"handoff": "content-addressed-bounded", "mount": "read-only"}},
-        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["trusted-post-action-bridge"]}},
+        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": structured_mechanisms}},
         {"name": "lifecycle.cancel", "constraints": {"mechanism": "parent-workflow-cancel"}},
         {"name": "provenance.actual-model", "constraints": {}},
         {"name": "provenance.actual-provider", "constraints": {}},
@@ -1043,8 +1053,18 @@ def build_task(
         inputs.append({"id": "vision", "artifact": artifact, "logicalPath": "vision.md", "sha256": digest, "mediaType": "text/markdown; charset=utf-8", "trust": "trusted", "mount": "read-only", "maxBytes": 40000, "bytes": size})
 
     schema_path, schema_id = _schema_for(action, repair_kind)
-    load_json_regular(schema_path, max_bytes=65536)
-    schema_digest, _, schema_artifact = _copy_file(schema_path, bundle, 65536)
+    schema_value = load_json_regular(schema_path, max_bytes=65536)
+    schema_source = schema_path
+    canonical_schema = bundle / ".canonical-output-schema"
+    if action.startswith("nl-decision"):
+        canonical_schema.write_bytes(canonical_json_bytes(schema_value))
+        schema_source = canonical_schema
+    try:
+        schema_digest, _, schema_artifact = _copy_file(
+            schema_source, bundle, 65536
+        )
+    finally:
+        canonical_schema.unlink(missing_ok=True)
     soft, hard, turns, tool_calls, final_bytes = ACTION_LIMITS[action]
     profile = selection["profile"]
     shim_version = "claude-action-compat/v1" if adapter == "claude-action-compat" else "codex-app-server/v1"
@@ -1054,7 +1074,14 @@ def build_task(
         "promptRole": "user",
         "nativeDefault": "pinned-claude-code-2.1.197" if adapter == "claude-action-compat" else "pinned-codex-0.144.0",
         "tools": "claude-action-mapped" if adapter == "claude-action-compat" else "dynamic-only",
-        "output": "trusted-post-action-bridge" if adapter == "claude-action-compat" else "turn/start.outputSchema",
+        "output": (
+            "native-schema+trusted-revalidation"
+            if adapter == "claude-action-compat"
+            and claude_native_structured_output(action)
+            else "trusted-post-action-bridge"
+            if adapter == "claude-action-compat"
+            else "turn/start.outputSchema"
+        ),
     }
     execution_id = str(uuid.uuid4())
     candidate = {

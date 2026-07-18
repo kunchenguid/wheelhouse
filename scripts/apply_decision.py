@@ -49,7 +49,8 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
                also tells the LLM it may use the read-only wheelhouse-search
                wrapper for answer context only.
 
-  nl-route     Read the LLM's STRUCTURED result (decision.json:
+  nl-route     Read the LLM's native STRUCTURED result (with decision.json as
+               the portable fallback carrier:
                {mode, action?, free_text?, answer?}) and emit deterministic
                outputs. The LLM only MAPS intent; this phase validates the
                action against the per-kind allowlist and hands `action` mode to
@@ -94,7 +95,10 @@ import nl_readonly_search as readonly_search  # noqa: E402
 # Restore the repository root before importing the agent_runtime package so the
 # sibling scripts/agent_runtime.py entrypoint cannot shadow that package.
 sys.path.insert(0, PROJECT_ROOT)
-from agent_runtime.consumer import result_text as agent_result_text  # noqa: E402
+from agent_runtime.consumer import (  # noqa: E402
+    load_agent_result,
+    result_text as agent_result_text,
+)
 from agent_runtime.contract import (  # noqa: E402
     ContractError,
     load_json_regular,
@@ -1410,15 +1414,17 @@ def build_nl_prompt(
         ]
     if search_enabled:
         parts += [
-            "Output: write ONLY a single JSON object to a file named `decision.json`",
-            "in the current directory. No prose, no code fences, and",
-            "do not write any other files. Shape:",
+            "Output: submit ONLY a single JSON object through the native structured",
+            "output schema. Also write the exact same compact object to a file named",
+            "`decision.json` solely as a portable fallback. No prose, no code fences,",
+            "and do not write any other files. Shape:",
         ]
     else:
         parts += [
-            "Output: write ONLY a single JSON object to a file named `decision.json`",
-            "in the current directory. No prose, no code fences, no other files, and",
-            "do not run any git or gh commands. Shape:",
+            "Output: submit ONLY a single JSON object through the native structured",
+            "output schema. Also write the exact same compact object to a file named",
+            "`decision.json` solely as a portable fallback. No prose, no code fences,",
+            "no other files, and do not run any git or gh commands. Shape:",
         ]
     parts += [
         "  " + schema,
@@ -1663,8 +1669,8 @@ def build_nl_repair_prompt(candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDA
         candidate = raw[:max_candidate_bytes].decode("utf-8", "ignore") + "\n[candidate truncated]"
     return "\n".join(
         [
-            "You previously produced a natural-language decision result that FAILED",
-            "strict JSON and nl-decision-v1 schema validation. Your ONLY task now",
+            "You previously produced a natural-language decision result whose native",
+            "structured-output carrier or nl-decision-v1 validation FAILED. Your ONLY task now",
             "is to REPAIR its STRUCTURE so it validates. This is NOT a re-analysis.",
             "",
             "STRICT RULES:",
@@ -1693,18 +1699,26 @@ def build_nl_repair_prompt(candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDA
     )
 
 
-def plan_nl_repair(result_text):
-    """Plan one repair only for a non-empty, delivered, schema-invalid result."""
+def plan_nl_repair(result_text, force_repair=False):
+    """Plan one repair for a delivered schema miss or failed native carrier."""
     text = (result_text or "").strip()
     if not text:
+        if force_repair:
+            return {
+                "repair_needed": True,
+                "reason": "native structured output was absent or failed trusted validation",
+                "prompt": build_nl_repair_prompt(text),
+            }
         return {
             "repair_needed": False,
             "reason": "no delivered result to repair",
             "prompt": "",
         }
     value, reason = _nl_parse_with_reason(text)
-    if value is not None:
+    if value is not None and not force_repair:
         return {"repair_needed": False, "reason": "", "prompt": ""}
+    if value is not None:
+        reason = "native structured output was absent or failed trusted validation"
     return {
         "repair_needed": True,
         "reason": reason or "delivered result failed nl-decision-v1 validation",
@@ -1712,18 +1726,31 @@ def plan_nl_repair(result_text):
     }
 
 
-def decide_nl_apply(result_text, repaired_text, repair_claim_admitted=None):
-    """Choose a schema-valid primary or one schema-valid repaired NL result."""
+def decide_nl_apply(
+    result_text,
+    repaired_text,
+    repair_claim_admitted=None,
+    repair_needed=False,
+    primary_trusted=True,
+    repair_trusted=True,
+):
+    """Choose one schema-valid result that also passed its trusted bridge."""
     primary, reason = _nl_parse_with_reason(result_text)
-    if primary is not None:
+    if primary is not None and primary_trusted:
         return {"outcome": "success", "result": primary, "reason": ""}
-    if not (result_text or "").strip():
+    if primary is not None:
+        reason = "native structured output was absent or failed trusted validation"
+    if not (result_text or "").strip() and not repair_needed:
         return {"outcome": "no-result", "result": None, "reason": ""}
     if repaired_text:
         repaired, repaired_reason = _nl_parse_with_reason(repaired_text)
-        if repaired is not None:
+        if repaired is not None and repair_trusted:
             return {"outcome": "repaired", "result": repaired, "reason": reason}
-        failure_reason = repaired_reason or "repaired result failed nl-decision-v1 validation"
+        failure_reason = (
+            "schema repair result did not pass trusted validation"
+            if repaired is not None
+            else repaired_reason or "repaired result failed nl-decision-v1 validation"
+        )
     elif repair_claim_admitted is False:
         failure_reason = "schema repair claim was duplicate"
     else:
@@ -1755,6 +1782,17 @@ def _agent_result_candidate(path):
     return agent_result_text(path, require_success=False)
 
 
+def _agent_result_trust(path):
+    result = load_agent_result(path)
+    if result is None:
+        return False, False
+    return (
+        result.get("status") == "succeeded",
+        result.get("status") == "failed"
+        and (result.get("error") or {}).get("code") == "output.schema_invalid",
+    )
+
+
 def cmd_nl_repair_prep():
     execution_file = ""
     prompt_file = ""
@@ -1764,7 +1802,11 @@ def cmd_nl_repair_prep():
             execution_file = args[index + 1]
         elif arg == "--prompt-file" and index + 1 < len(args):
             prompt_file = args[index + 1]
-    plan = plan_nl_repair(_agent_result_candidate(execution_file))
+    _, schema_invalid = _agent_result_trust(execution_file)
+    plan = plan_nl_repair(
+        _agent_result_candidate(execution_file),
+        force_repair=schema_invalid,
+    )
     set_output("repair_needed", "true" if plan["repair_needed"] else "false")
     set_output("reason", plan["reason"])
     if plan["repair_needed"]:
@@ -1874,9 +1916,12 @@ def cmd_nl_route():
     repair_claim_admitted = (
         True if claim_value == "true" else False if claim_value == "false" else None
     )
+    repair_needed = os.environ.get("NL_REPAIR_NEEDED", "").strip().lower() == "true"
     if execution_file:
         primary_text = _agent_result_candidate(execution_file)
         repaired_text = _agent_result_candidate(repair_execution_file)
+        primary_trusted, _ = _agent_result_trust(execution_file)
+        repair_trusted, _ = _agent_result_trust(repair_execution_file)
     else:
         decision_path = Path(os.environ.get("DECISION_FILE", "decision.json"))
         try:
@@ -1889,10 +1934,15 @@ def cmd_nl_route():
         except (OSError, UnicodeError):
             primary_text = ""
         repaired_text = ""
+        primary_trusted = True
+        repair_trusted = False
     decision = decide_nl_apply(
         primary_text,
         repaired_text,
         repair_claim_admitted=repair_claim_admitted,
+        repair_needed=repair_needed,
+        primary_trusted=primary_trusted,
+        repair_trusted=repair_trusted,
     )
     valid = decision["outcome"] in ("success", "repaired")
     out = (

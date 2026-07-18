@@ -492,13 +492,14 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
     What it *does* is refuse to *silently* auto-clear a repo that has such a workflow (contributor PRs raise a card with a warning, while excluded-author PRs log `suppressed-card`), and it flags **loudly** the genuine exploit shape - a `pull_request_target` workflow that also checks out the PR head (`ref: github.event.pull_request.head.*` / `github.head_ref`), which runs attacker-controlled code with your secrets.
     Treat that flag as a prompt to fix the upstream workflow, not as something this approval can contain.
 - **LLM injection defense (all LLM features).** Only trusted workflow prompts and owner/maintainer-authored text reach the LLM as instructions; the target diff/issue/code and optional search output are passed as clearly-delimited untrusted data, and the LLM is never given `FLEET_TOKEN` or write access to a fleet repo.
-  For `nl_decisions`, the no-`READONLY_TOKEN` branch can read the bounded on-disk target with `Read`/`Grep`/`Glob` and write `decision.json`, but has no shell or model `GH_TOKEN`.
+  For `nl_decisions`, both primary branches use native structured output for the canonical `nl-decision-v1` schema, while `decision.json` is only a bounded portable repair carrier.
+  The no-`READONLY_TOKEN` branch can read the bounded on-disk target with `Read`/`Grep`/`Glob`, but has no shell or model `GH_TOKEN`.
   For auto triage and deep review, the no-`READONLY_TOKEN` branch is Read/Grep/Glob only, no shell, and no model `GH_TOKEN`.
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
   It cannot run arbitrary `gh` or `git` commands.
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is normalized into `AgentResult` and re-validated against the per-kind allowlist before the deterministic handler acts.
-  If a delivered plain-English result fails strict JSON or schema validation, Wheelhouse makes one separate tokenless, no-tool repair attempt and re-validates it before replying or acting.
+  Missing, multiple, or invalid native output fails closed into one separate tokenless, no-tool repair attempt, which trusted code re-validates before replying or acting.
   If that repair is still invalid, the card stays open with a content-free retryable note.
   For deep review, the trusted workflow posts only the verdict extracted from a validated `AgentResult`; no deterministic downstream step reads raw model output or model-written files.
 - **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.
@@ -623,7 +624,7 @@ scripts/
   triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
-tests/test_nl_schema_repair.py offline unit test for bounded one-turn natural-language schema repair and retryable failure projection
+tests/test_nl_schema_repair.py offline unit test for native-first natural-language structured output, bounded one-turn repair, and retryable failure projection
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, fixed-K soft-close hysteresis, race guards, and self-healing
 tests/test_card_reuse.py       offline end-to-end card soft-close, trusted reuse, ambiguity, and lifecycle serialization tests

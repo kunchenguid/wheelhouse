@@ -154,6 +154,8 @@ Canonical tools are:
 
 Codex uses its native `turn/start.outputSchema` mechanism.
 The fake adapter and future adapters use the same action schemas and trusted validation.
+Natural-language primary calls pass the canonical content-bound `nl-decision-v1` schema to the pinned Claude action and accept only one terminal `structured_output` value.
+The trusted Claude bridge independently revalidates its byte bound, task binding, and schema before it emits `AgentResult`, so native generation alone can never authorize a reply or action.
 
 Path tools reject absolute paths, traversal, symlinks, devices, sockets, and escaping canonical paths.
 Results and call counts are bounded, including rejected tool attempts.
@@ -170,9 +172,11 @@ No symlink may reach the signed handoff or hydrated model workspace.
 
 Final-result delivery is independent of transcript retention.
 A bounded Claude transcript is transferred once within the read-only reusable workflow for trusted normalization with one-day artifact retention, then only the verified normalized result artifact crosses to the trusted consumer.
-A schema-invalid but delivered triage or natural-language candidate remains available to its one-turn repair policy.
-Natural-language repair receives only the bounded invalid candidate in a tokenless, no-tool, single-turn task and its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
-Missing output and evidence failure do not trigger schema repair.
+A schema-invalid but delivered triage candidate remains available to its one-turn repair policy.
+Natural-language primary calls fail closed when the native carrier is missing, multiple, or invalid, including the pinned Claude CLI's pre-2.1.205 silent schema-ignore behavior.
+Those failures receive one separately claimed portable repair task, using only the bounded native candidate when available, then the bounded `decision.json` carrier, then terminal prose.
+Natural-language repair is tokenless, no-tool, and single-turn, and its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
+Missing triage output and evidence failure do not trigger schema repair.
 Trusted code still performs normalized triage, evidence anchoring, cross-repository reference qualification, natural-language action allowlisting, card claims, revision checks, PR head checks, and auto-merge G0-G7 checks.
 
 No model output directly authorizes or performs a GitHub action.
@@ -238,7 +242,8 @@ The retryable `source.revision_mismatch` code publishes the bounded "Wheelhouse 
 For deep review, missing output posts the existing fixed no-verdict note and leaves the card open.
 
 For natural-language mapping, missing or invalid output cannot produce an action.
-A delivered primary result that fails strict JSON or `nl-decision-v1` validation receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
+The primary call is native first, and only bridge-validated terminal `structured_output` is a native success.
+A missing, multiple, or invalid native carrier, or a result that fails strict JSON or `nl-decision-v1` validation, receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
 The marker-keyed failure note remains bounded and fire-once.
 A normalized `source.revision_mismatch` result uses the same precise retry explanation, while unknown failures keep the generic note.
 A successful mapped action still enters the existing card claim and deterministic executor.

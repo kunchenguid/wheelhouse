@@ -21,7 +21,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import apply_decision as decision  # noqa: E402
 from agent_runtime.claude_bridge import IMMUTABLE_MODEL, bridge  # noqa: E402
-from agent_runtime.contract import validate_contract  # noqa: E402
+from agent_runtime.claude_handoff import hydrate, pack  # noqa: E402
+from agent_runtime.contract import (  # noqa: E402
+    canonical_json_bytes,
+    file_sha256,
+    load_json_regular,
+    validate_contract,
+)
 from agent_runtime_testlib import make_task, run_fake  # noqa: E402
 from test_agent_runtime_claude_bridge import (  # noqa: E402
     make_bundle,
@@ -47,6 +53,26 @@ VALID_ANSWER = {
     "mode": "answer",
     "answer": "The budget is enforced by the `max_tokens` limit.",
 }
+
+
+def native_transcript(execution: Path, structured_output, result_text=""):
+    execution.write_text(
+        json.dumps(
+            [
+                {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": result_text,
+                    "structured_output": structured_output,
+                    "duration_ms": 100,
+                    "num_turns": 1,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def parse_outputs(path: Path) -> dict[str, str]:
@@ -117,6 +143,19 @@ def test_pure_repair_contract():
     )
     plan = decision.plan_nl_repair(MALFORMED_ESCAPE)
     check("plan: delivered malformed escape gets one repair", plan["repair_needed"] is True)
+    forced = decision.plan_nl_repair(json.dumps(VALID_ANSWER), force_repair=True)
+    check(
+        "plan: schema-valid portable carrier still repairs after native failure",
+        forced["repair_needed"] is True
+        and "native structured output" in forced["reason"],
+    )
+    forced_empty = decision.plan_nl_repair("", force_repair=True)
+    check(
+        "plan: empty invalid native carrier still gets one repair",
+        forced_empty["repair_needed"] is True
+        and "native structured output" in forced_empty["reason"]
+        and "<candidate>" in forced_empty["prompt"],
+    )
     check(
         "plan: malformed escape has precise structural reason",
         plan["reason"] == "result was not parseable as strict JSON",
@@ -165,9 +204,241 @@ def test_pure_repair_contract():
         duplicate["outcome"] == "repair-failed"
         and duplicate["reason"] == "schema repair claim was duplicate",
     )
+    dishonest = decision.decide_nl_apply(
+        json.dumps(VALID_ANSWER),
+        "",
+        primary_trusted=False,
+    )
+    check(
+        "apply: schema-valid fallback carrier cannot masquerade as native success",
+        dishonest["outcome"] == "repair-failed" and dishonest["result"] is None,
+    )
 
 
-def route_cli(primary: Path, repair: Path, output: Path) -> dict[str, str]:
+def test_native_bridge_and_portable_fallback():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        _, native_bundle = make_bundle(
+            root / "native", action="nl-decision.local"
+        )
+        native_execution = root / "native-execution.json"
+        native_transcript(native_execution, VALID_ANSWER, "ignored terminal prose")
+        native_result, _ = run_bridge(
+            native_bundle, native_execution, "native"
+        )
+        check(
+            "native: terminal structured_output is independently validated and accepted",
+            native_result["status"] == "succeeded"
+            and native_result["final"]["value"] == VALID_ANSWER
+            and {row["name"] for row in native_result["final"]["validation"]}
+            >= {"native-schema", "json-schema", "observed-provenance"},
+        )
+        check(
+            "native: terminal prose and decision file are not the trusted success carrier",
+            native_result["delivered"]["value"] != "ignored terminal prose",
+        )
+
+        for label, invalid_value in (("null", None), ("empty", "")):
+            _, invalid_bundle = make_bundle(
+                root / ("invalid-" + label), action="nl-decision.local"
+            )
+            invalid_execution = root / ("invalid-" + label + "-execution.json")
+            native_transcript(invalid_execution, invalid_value)
+            invalid_result, _ = run_bridge(
+                invalid_bundle, invalid_execution, "invalid-" + label
+            )
+            repair_prompt = root / ("invalid-" + label + "-repair.txt")
+            prep_outputs = repair_prep_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                repair_prompt,
+                root / ("invalid-" + label + "-prep-output.txt"),
+            )
+            check(
+                "fallback: invalid native %s carrier gets exactly one repair" % label,
+                invalid_result["status"] == "failed"
+                and invalid_result["error"]["code"] == "output.schema_invalid"
+                and invalid_result.get("delivered", {}).get("value") == invalid_value
+                and prep_outputs.get("repair_needed") == "true"
+                and repair_prompt.is_file(),
+            )
+            repair_root = root / ("invalid-" + label + "-repair")
+            run_fake(repair_root, "nl-decision.schema-repair", final=VALID_ANSWER)
+            repaired_outputs = route_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                repair_root / "bundle" / "result.json",
+                root / ("invalid-" + label + "-route.txt"),
+                repair_claim_admitted="true",
+                repair_needed="true",
+            )
+            missing_repair_outputs = route_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                root / ("invalid-" + label + "-missing-repair.json"),
+                root / ("invalid-" + label + "-missing-route.txt"),
+                repair_needed="true",
+            )
+            check(
+                "fallback: invalid native %s carrier consumes trusted repair" % label,
+                repaired_outputs.get("result_valid") == "true"
+                and repaired_outputs.get("repair_status") == "repaired"
+                and repaired_outputs.get("answer") == VALID_ANSWER["answer"],
+            )
+            check(
+                "fallback: invalid native %s missing repair keeps retry projection" % label,
+                missing_repair_outputs.get("result_valid") == "false"
+                and missing_repair_outputs.get("failure_code") == "output.schema_invalid"
+                and "single bounded repair attempt"
+                in missing_repair_outputs.get("failure_message", ""),
+            )
+
+        _, absent_bundle = make_bundle(
+            root / "absent", action="nl-decision.local"
+        )
+        absent_execution = root / "absent-execution.json"
+        transcript(absent_execution, IMMUTABLE_MODEL, "Wrote decision.json.")
+        portable = root / "portable-decision.json"
+        portable.write_text(json.dumps(VALID_ANSWER) + "\n", encoding="utf-8")
+        absent_result_path = absent_bundle / "absent-result.json"
+        # run_bridge prepares the trusted enforcement proof. Re-run with the
+        # portable file after borrowing that exact fixture proof.
+        run_bridge(absent_bundle, absent_execution, "absent-proof")
+        absent_result = bridge(
+            str(absent_bundle / "task.json"),
+            str(absent_bundle),
+            str(absent_execution),
+            str(portable),
+            str(absent_bundle / "enforcement-absent-proof.json"),
+            "a" * 64,
+            str(absent_result_path),
+            str(absent_bundle / "absent-events.ndjson"),
+        )
+        check(
+            "fallback: missing native carrier fails closed with bounded repair data",
+            absent_result["status"] == "failed"
+            and absent_result["error"]["code"] == "output.schema_invalid"
+            and absent_result["delivered"]["value"] == json.dumps(VALID_ANSWER),
+        )
+
+        repair_root = root / "absent-repair"
+        run_fake(repair_root, "nl-decision.schema-repair", final=VALID_ANSWER)
+        outputs = route_cli(
+            absent_result_path,
+            repair_root / "bundle" / "result.json",
+            root / "absent-route.txt",
+        )
+        check(
+            "fallback: native absence routes only after one trusted repair",
+            outputs.get("result_valid") == "true"
+            and outputs.get("repair_status") == "repaired"
+            and outputs.get("answer") == VALID_ANSWER["answer"],
+        )
+
+        _, multiple_bundle = make_bundle(
+            root / "multiple", action="nl-decision.local"
+        )
+        multiple_execution = root / "multiple-execution.json"
+        native_transcript(multiple_execution, [VALID_ANSWER, VALID_ANSWER])
+        multiple_result, _ = run_bridge(
+            multiple_bundle, multiple_execution, "multiple"
+        )
+        check(
+            "native: multiple structured values never record native success",
+            multiple_result["status"] == "failed"
+            and multiple_result["error"]["code"] == "output.schema_invalid"
+            and "final" not in multiple_result,
+        )
+        invalid_repair_root = root / "multiple-invalid-repair"
+        run_fake(
+            invalid_repair_root,
+            "nl-decision.schema-repair",
+            final={"answer": "still missing mode"},
+        )
+        multiple_failed = route_cli(
+            multiple_bundle / "result-multiple.json",
+            invalid_repair_root / "bundle" / "result.json",
+            root / "multiple-failure-route.txt",
+        )
+        check(
+            "fallback: invalid native plus invalid repair keeps precise retry projection",
+            multiple_failed.get("result_valid") == "false"
+            and multiple_failed.get("failure_code") == "output.schema_invalid"
+            and "missing required field mode"
+            in multiple_failed.get("failure_reason", "")
+            and "single bounded repair attempt"
+            in multiple_failed.get("failure_message", "")
+            and multiple_failed.get("retryable") == "true",
+        )
+
+
+def test_bound_schema_is_passed_to_action():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        task, bundle = make_bundle(
+            root / "task", action="nl-decision.local"
+        )
+        handoff = root / "handoff"
+        pack(
+            str(bundle / "task.json"),
+            str(bundle),
+            str(handoff),
+            "[]",
+        )
+        outputs = hydrate(str(handoff), str(root / "workspace"))
+        schema = load_json_regular(
+            bundle / task["spec"]["output"]["schemaArtifact"],
+            max_bytes=65536,
+        )
+        check(
+            "schema: hydrated action argument is the bound canonical nl-decision-v1 bytes",
+            outputs["nativeSchema"].encode("utf-8")
+            == canonical_json_bytes(schema)
+            == (bundle / task["spec"]["output"]["schemaArtifact"]).read_bytes()
+            and task["spec"]["output"]["schemaSha256"]
+            == file_sha256(bundle / task["spec"]["output"]["schemaArtifact"]),
+        )
+        mechanisms = next(
+            row["constraints"]["mechanismAnyOf"]
+            for row in task["spec"]["capabilities"]["required"]
+            if row["name"] == "output.structured"
+        )
+        repair, _ = make_bundle(
+            root / "repair-task", action="nl-decision.schema-repair"
+        )
+        repair_mechanisms = next(
+            row["constraints"]["mechanismAnyOf"]
+            for row in repair["spec"]["capabilities"]["required"]
+            if row["name"] == "output.structured"
+        )
+        check(
+            "capability: primary negotiates native while repair stays portable",
+            mechanisms == ["native-schema"]
+            and repair_mechanisms == ["trusted-post-action-bridge"],
+        )
+
+    model = yaml.safe_load(
+        (ROOT / ".github/workflows/claude-model.yml").read_text()
+    )
+    steps = model["jobs"]["model"]["steps"]
+    for step_id in ("nl_local", "nl_search"):
+        args = step_by_id(steps, step_id)["with"]["claude_args"]
+        check(
+            "workflow: %s passes only the verified hydrated schema" % step_id,
+            args.count("--json-schema") == 1
+            and "${{ steps.hydrate.outputs.nativeSchema }}" in args,
+        )
+    check(
+        "workflow: portable repair does not claim native enforcement",
+        "--json-schema" not in step_by_id(steps, "nl_repair")["with"]["claude_args"],
+    )
+
+
+def route_cli(
+    primary: Path,
+    repair: Path,
+    output: Path,
+    repair_claim_admitted="",
+    repair_needed="",
+) -> dict[str, str]:
     state = {
         "repo": "firstmate",
         "number": 423,
@@ -180,12 +451,34 @@ def route_cli(primary: Path, repair: Path, output: Path) -> dict[str, str]:
         GITHUB_OUTPUT=str(output),
         NL_EXECUTION_FILE=str(primary),
         NL_REPAIR_EXECUTION_FILE=str(repair),
+        NL_REPAIR_CLAIM_ADMITTED=repair_claim_admitted,
+        NL_REPAIR_NEEDED=repair_needed,
         ISSUE_BODY=body,
         KIND="pr-review",
         GITHUB_REPOSITORY_OWNER="owner",
     )
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "apply_decision.py"), "nl-route"],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+    )
+    return parse_outputs(output)
+
+
+def repair_prep_cli(execution: Path, prompt: Path, output: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GITHUB_OUTPUT"] = str(output)
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "apply_decision.py"),
+            "nl-repair-prep",
+            "--execution-file",
+            str(execution),
+            "--prompt-file",
+            str(prompt),
+        ],
         cwd=ROOT,
         env=environment,
         check=True,
@@ -312,6 +605,7 @@ def test_structural_single_attempt_and_token_isolation():
         "NL_EXECUTION_FILE" in route["env"]
         and "NL_REPAIR_EXECUTION_FILE" in route["env"]
         and "NL_REPAIR_CLAIM_ADMITTED" in route["env"]
+        and "NL_REPAIR_NEEDED" in route["env"]
         and "steps.route.outputs.mode == 'answer'" in str(reply.get("if", "")),
     )
     check(
@@ -354,6 +648,8 @@ def test_structural_single_attempt_and_token_isolation():
 
 def main():
     test_pure_repair_contract()
+    test_native_bridge_and_portable_fallback()
+    test_bound_schema_is_passed_to_action()
     test_end_to_end_route_and_failure()
     test_structural_single_attempt_and_token_isolation()
     if FAILURES:
