@@ -1703,6 +1703,12 @@ def plan_nl_repair(result_text, force_repair=False):
     """Plan one repair for a delivered schema miss or failed native carrier."""
     text = (result_text or "").strip()
     if not text:
+        if force_repair:
+            return {
+                "repair_needed": True,
+                "reason": "native structured output was absent or failed trusted validation",
+                "prompt": build_nl_repair_prompt(text),
+            }
         return {
             "repair_needed": False,
             "reason": "no delivered result to repair",

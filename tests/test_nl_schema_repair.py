@@ -149,6 +149,13 @@ def test_pure_repair_contract():
         forced["repair_needed"] is True
         and "native structured output" in forced["reason"],
     )
+    forced_empty = decision.plan_nl_repair("", force_repair=True)
+    check(
+        "plan: empty invalid native carrier still gets one repair",
+        forced_empty["repair_needed"] is True
+        and "native structured output" in forced_empty["reason"]
+        and "<candidate>" in forced_empty["prompt"],
+    )
     check(
         "plan: malformed escape has precise structural reason",
         plan["reason"] == "result was not parseable as strict JSON",
@@ -231,6 +238,30 @@ def test_native_bridge_and_portable_fallback():
             "native: terminal prose and decision file are not the trusted success carrier",
             native_result["delivered"]["value"] != "ignored terminal prose",
         )
+
+        for label, invalid_value in (("null", None), ("empty", "")):
+            _, invalid_bundle = make_bundle(
+                root / ("invalid-" + label), action="nl-decision.local"
+            )
+            invalid_execution = root / ("invalid-" + label + "-execution.json")
+            native_transcript(invalid_execution, invalid_value)
+            invalid_result, _ = run_bridge(
+                invalid_bundle, invalid_execution, "invalid-" + label
+            )
+            repair_prompt = root / ("invalid-" + label + "-repair.txt")
+            prep_outputs = repair_prep_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                repair_prompt,
+                root / ("invalid-" + label + "-prep-output.txt"),
+            )
+            check(
+                "fallback: invalid native %s carrier gets exactly one repair" % label,
+                invalid_result["status"] == "failed"
+                and invalid_result["error"]["code"] == "output.schema_invalid"
+                and invalid_result.get("delivered", {}).get("value") == invalid_value
+                and prep_outputs.get("repair_needed") == "true"
+                and repair_prompt.is_file(),
+            )
 
         _, absent_bundle = make_bundle(
             root / "absent", action="nl-decision.local"
@@ -392,6 +423,26 @@ def route_cli(primary: Path, repair: Path, output: Path) -> dict[str, str]:
     )
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "apply_decision.py"), "nl-route"],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+    )
+    return parse_outputs(output)
+
+
+def repair_prep_cli(execution: Path, prompt: Path, output: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GITHUB_OUTPUT"] = str(output)
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "apply_decision.py"),
+            "nl-repair-prep",
+            "--execution-file",
+            str(execution),
+            "--prompt-file",
+            str(prompt),
+        ],
         cwd=ROOT,
         env=environment,
         check=True,
