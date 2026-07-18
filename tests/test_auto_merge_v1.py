@@ -29,7 +29,7 @@ input HOLDS for human review. These tests cover, end-to-end through the
   * base-branch-ONLY VISION.md reads (never the PR head);
   * the fleet-wide `auto_merge: true` switch this fork commits: the global flag
     alone opts a repo in (no per-repo key needed) yet a base-branch VISION.md is
-    still required (no claim, no merge, no verdict spend without it), the
+    still required (no claim, no merge, and no vision-bound verdict without it), the
     self-authorization exclusion and base-branch read still hold under global
     true, and the shipped code default stays OFF when the global key is absent;
   * the DELIBERATE ABSENCE of an open-PR same-file overlap gate and of any
@@ -52,6 +52,7 @@ import wheelhouse_core as core  # noqa: E402
 import render_card  # noqa: E402
 import apply_decision  # noqa: E402
 import auto_merge as am  # noqa: E402
+import automerge_criteria as schema  # noqa: E402
 
 _failures = []
 
@@ -72,6 +73,11 @@ ELIGIBLE_A = {
 }
 ELIGIBLE_B = dict(ELIGIBLE_A, behavior_class="B")
 ELIGIBLE_C = dict(ELIGIBLE_A, behavior_class="C", optin_default_off=True)
+INDEPENDENT_A = {
+    "behavior_class": "A",
+    "changes_existing_or_default_behavior": False,
+    "optin_default_off": False,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -565,6 +571,48 @@ def test_verdict_ineligible_and_fail_closed_defaults():
         check("verdict: malformed %r held" % (bad,), ok is False)
 
 
+def test_vision_independent_facts_are_evaluated_without_granting_eligibility():
+    facts, cls = am.behavior_verdict_facts(INDEPENDENT_A)
+    check(
+        "verdict split: independent class is evaluated",
+        cls == "A" and facts["g6_behavior_class"]["status"] == schema.STATUS_MET,
+    )
+    check(
+        "verdict split: default behavior and class-C mode are evaluated",
+        facts["g6_default_behavior"]["status"] == schema.STATUS_MET
+        and facts["g6_class_c_mode"]["status"] == schema.STATUS_MET,
+    )
+    check(
+        "verdict split: vision facts remain unavailable",
+        facts["g6_vision_alignment"]["status"] == schema.STATUS_UNAVAILABLE
+        and facts["g6_verdict_merge"]["status"] == schema.STATUS_UNAVAILABLE,
+    )
+    ok, _, reason = am.verdict_eligible(INDEPENDENT_A)
+    check(
+        "verdict split: independent facts alone never grant eligibility",
+        ok is False and "VISION.md" in reason,
+    )
+
+    default_change = dict(
+        INDEPENDENT_A, changes_existing_or_default_behavior=True
+    )
+    class_c_not_opted_in = dict(
+        INDEPENDENT_A, behavior_class="C", optin_default_off=False
+    )
+    check(
+        "verdict split: real default behavior failure is UNMET",
+        am.behavior_verdict_facts(default_change)[0]["g6_default_behavior"]["status"]
+        == schema.STATUS_UNMET,
+    )
+    check(
+        "verdict split: real class-C mode failure is UNMET",
+        am.behavior_verdict_facts(class_c_not_opted_in)[0]["g6_class_c_mode"][
+            "status"
+        ]
+        == schema.STATUS_UNMET,
+    )
+
+
 def test_verdict_normalization_and_persistence_fail_closed():
     # A missing required boolean means the verdict is never persisted (hold).
     bad = {"behavior_class": "A", "aligns_with_vision": True, "recommend_merge": True}
@@ -584,6 +632,11 @@ def test_verdict_normalization_and_persistence_fail_closed():
     check(
         "verdict: normalize coerces + upper-cases class",
         good and good["behavior_class"] == "B" and good["aligns_with_vision"] is True,
+    )
+    independent = render_card.normalize_automerge_verdict(INDEPENDENT_A)
+    check(
+        "verdict split: normalizer preserves complete-diff independent facts",
+        independent == INDEPENDENT_A,
     )
 
 
@@ -2611,6 +2664,41 @@ def test_triage_persists_trusted_policy_revisions():
     )
 
 
+def test_complete_diff_triage_persists_independent_facts_without_vision():
+    item = make_item("fmt", 5, "iv" * 20)
+    triage = {
+        "summary": "A focused change.",
+        "product_implications": "No broad behavior change.",
+        "evidence": "target.txt: quoted a line from the change",
+        "recommended_next_step": "merge - narrow and safe.",
+        "automerge": INDEPENDENT_A,
+    }
+    body = render_card.body_with_triage_result(
+        render_card.render(item)["body"],
+        item["head_sha"],
+        triage=triage,
+        vision_sha="",
+        base_sha="b" * 40,
+    )
+    state = core.parse_state_block(body)
+    verdict = state.get("automerge_verdict")
+    check(
+        "triage split: no-VISION result persists independent behavior facts",
+        verdict == INDEPENDENT_A,
+    )
+    check(
+        "triage split: no-VISION result keeps base cache but no vision binding",
+        state.get("triaged_base_sha") == "b" * 40
+        and "triaged_vision_sha" not in state
+        and "vision_sha" not in verdict
+        and "base_sha" not in verdict,
+    )
+    check(
+        "triage split: persisted independent record remains ineligible",
+        am.verdict_eligible(verdict)[0] is False,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # repo-state freeze invariants (ok:false / truncated / indeterminate)
 # --------------------------------------------------------------------------- #
@@ -2816,7 +2904,7 @@ def test_global_switch_on_is_the_practical_optin_via_vision():
     )
 
 
-def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
+def test_global_true_without_vision_holds_no_claim_merge_or_vision_verdict():
     # A repo opted in purely by the fleet-wide switch (no per-repo override) still
     # auto-merges NOTHING until it commits a default-branch VISION.md. G0 holds:
     # no merge attempt, no claim, and no behavior-verdict spend.
@@ -2834,9 +2922,9 @@ def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
         not w.do_merge_calls and not payload["merges"],
     )
 
-    # No CLAIM: a repo without VISION.md never gets a behavior verdict persisted
-    # (triage only produces one when VISION is present), and the claim phase
-    # requires a fresh eligible verdict, so such a card can never be claimed.
+    # No CLAIM: complete-diff triage persists the independent behavior facts,
+    # but the vision-bound alignment and merge recommendation stay absent. The
+    # claim phase still requires the complete eligible verdict.
     no_vision_state = {
         "repo": "fmt",
         "number": 5,
@@ -2845,16 +2933,22 @@ def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
         "triaged_sha": "h1" * 20,
         "triage_status": "succeeded",
         "triage_recommendation": {"action": "merge", "reason": ""},
-        # deliberately NO "automerge_verdict" - the no-VISION card state
+        "automerge_verdict": INDEPENDENT_A,
     }
     ok, _, _ = am._fresh_verdict_for_head(no_vision_state, "h1" * 20)
     check(
-        "global true + no VISION.md: claim gate refuses a verdict-less card",
+        "global true + no VISION.md: claim gate refuses independent facts alone",
         ok is False,
     )
+    no_vision_facts, _ = am.fresh_verdict_facts(no_vision_state, "h1" * 20)
+    check(
+        "global true + no VISION.md: independent rows remain informative",
+        no_vision_facts["g6_default_behavior"]["status"] == schema.STATUS_MET
+        and no_vision_facts["g6_class_c_mode"]["status"] == schema.STATUS_MET,
+    )
 
-    # No VERDICT SPEND: the base-branch VISION SHA that triage keys the auto-merge
-    # verdict on is empty when no VISION.md exists, so triage never asks for one.
+    # No VISION-BOUND VERDICT: the base-branch VISION SHA that binds alignment and
+    # final merge recommendation stays empty when no VISION.md exists.
     saved = core.gh_rest
     try:
 
@@ -2863,7 +2957,7 @@ def test_global_true_without_vision_holds_no_claim_no_merge_no_spend():
 
         core.gh_rest = _absent
         check(
-            "global true + no VISION.md: empty vision SHA -> no verdict spend",
+            "global true + no VISION.md: vision-bound verdict has no policy SHA",
             core._default_branch_vision_sha("owner/fmt") == "",
         )
         core.gh_rest = lambda path: {"type": "file", "sha": "vsha"}
@@ -3658,12 +3752,20 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         "contents/VISION.md?ref=" not in text and "VISION.md?" not in text,
     )
     check(
-        "triage: asks for the A/B/C behavior_class verdict when VISION present",
+        "triage: asks for A/B/C and both independent behavior facts",
         '"behavior_class"' in text and '"optin_default_off"' in text,
     )
     check(
-        "triage: verdict is gated on VISION_PRESENT (base VISION.md exists)",
-        "VISION_PRESENT" in text,
+        "triage: complete diffs produce independent facts without VISION.md",
+        'if [ "$DIFF_COMPLETE" = "true" ]; then' in text
+        and "AUTOMERGE_BEHAVIOR_AVAILABLE=true" in text
+        and 'elif [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then' in text,
+    )
+    check(
+        "triage: alignment and final merge remain gated on trusted VISION.md",
+        'if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
+        in text
+        and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
     )
     check(
         "triage: the VISION policy is labeled TRUSTED owner-authored (not head)",
@@ -3677,10 +3779,8 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         and '--base-sha "$BASE_SHA"' in text,
     )
     check(
-        "triage: incomplete diffs suppress auto-merge verdict storage",
-        'if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then'
-        in text
-        and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
+        "triage: incomplete diffs suppress every behavior fact",
+        "AUTOMERGE_BEHAVIOR_AVAILABLE=false" in text,
     )
     check(
         "triage: unavailable assessments retain the base revision for cache freshness",

@@ -258,7 +258,8 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
-# Bumped 7 -> 8 to group that UI by gate family and nest the G6 behavior branch.
+# Bumped 7 -> 8 to group criteria by gate family and split G6's complete-diff
+# behavior facts from its VISION.md-dependent subtree.
 CARD_RENDER_VERSION = 8
 
 AUTOMERGE_CRITERIA_GROUPS = (
@@ -273,13 +274,10 @@ AUTOMERGE_CRITERIA_GROUPS = (
     ("G6 (triage + behavior)", ("g6_",)),
     ("G7 (final gate)", ("g7_",)),
 )
-AUTOMERGE_BEHAVIOR_ROOT_ID = "g6_behavior_class"
-AUTOMERGE_BEHAVIOR_CHILD_IDS = frozenset(
+AUTOMERGE_VISION_CHILD_IDS = frozenset(
     {
         "g6_vision_alignment",
-        "g6_default_behavior",
         "g6_verdict_merge",
-        "g6_class_c_mode",
         "g6_vision_revision",
         "g6_base_revision",
     }
@@ -1162,9 +1160,11 @@ def _normalize_triage_with_reason(data):
         triage["recommended_next_step"] = (
             rec if rec.lower().startswith(allowed) else "look closer - " + rec
         )
-    # Optional auto-merge behavior verdict (pr-review only; asked by triage.yml
-    # only when the target's base branch carries a VISION.md). Non-material and
-    # advisory - auto_merge.py re-validates it and holds on any doubt.
+    # Optional auto-merge behavior facts (pr-review only). Complete-diff triage
+    # always asks for the VISION-independent fields; alignment and the final
+    # merge recommendation are included only with trusted base-branch VISION.md.
+    # Non-material and advisory - auto_merge.py re-validates every field and
+    # holds on any doubt.
     am = normalize_automerge_verdict(data.get("automerge"))
     if am:
         triage["automerge_verdict"] = am
@@ -1309,10 +1309,14 @@ def _coerce_verdict_bool(value):
 def normalize_automerge_verdict(data):
     """Parse the OPTIONAL `automerge` sub-object of the pr-review triage JSON into
     the structured `automerge_verdict` persisted in card state and later consumed
-    by auto_merge.py (the deterministic auto-merge executor). Fail-closed: a
-    missing sub-object, a non-dict, a blank behavior class, or a required boolean
-    that is not coercible returns None, so no verdict is persisted and the
-    executor holds.
+    by auto_merge.py (the deterministic auto-merge executor).
+
+    A complete diff always produces the VISION-independent behavior class,
+    existing/default-behavior, and class-C mode facts. The alignment and final
+    merge recommendation are an optional all-or-nothing extension produced only
+    when trusted default-branch VISION.md input is available. Missing or malformed
+    vision fields therefore retain the independent facts but can never make the
+    verdict eligible.
 
     `optin_default_off` is only required for class C, so it defaults to False when
     absent (which itself disqualifies a class-C PR at the executor). This is
@@ -1323,12 +1327,7 @@ def normalize_automerge_verdict(data):
     if not cls:
         return None
     verdict = {"behavior_class": cls}
-    for field in (
-        "aligns_with_vision",
-        "changes_existing_or_default_behavior",
-        "recommend_merge",
-        "optin_default_off",
-    ):
+    for field in ("changes_existing_or_default_behavior", "optin_default_off"):
         b = _coerce_verdict_bool(data.get(field))
         if b is None:
             if field == "optin_default_off":
@@ -1336,6 +1335,12 @@ def normalize_automerge_verdict(data):
             else:
                 return None
         verdict[field] = b
+    vision_fields = {
+        field: _coerce_verdict_bool(data.get(field))
+        for field in ("aligns_with_vision", "recommend_merge")
+    }
+    if all(value is not None for value in vision_fields.values()):
+        verdict.update(vision_fields)
     return verdict
 
 
@@ -1899,16 +1904,27 @@ def body_with_triage_result(
     automerge_verdict = (
         (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
     )
-    if (
-        automerge_verdict
-        and vision_sha
-        and re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or ""))
-    ):
+    if automerge_verdict:
         automerge_verdict = dict(automerge_verdict)
-        automerge_verdict["vision_sha"] = vision_sha
-        automerge_verdict["base_sha"] = base_sha
-    else:
-        automerge_verdict = None
+        vision_facts_complete = all(
+            isinstance(automerge_verdict.get(field), bool)
+            for field in ("aligns_with_vision", "recommend_merge")
+        )
+        if (
+            vision_facts_complete
+            and vision_sha
+            and re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or ""))
+        ):
+            automerge_verdict["vision_sha"] = vision_sha
+            automerge_verdict["base_sha"] = base_sha
+        else:
+            for field in (
+                "aligns_with_vision",
+                "recommend_merge",
+                "vision_sha",
+                "base_sha",
+            ):
+                automerge_verdict.pop(field, None)
     if not base_sha:
         base_sha = state.get("triaged_base_sha", "")
     if not vision_sha:
@@ -2226,16 +2242,35 @@ def _automerge_criteria_section(rows):
         if not family_rows:
             continue
         lines.extend(["#### %s" % family, ""])
-        behavior_root_seen = False
+        if family == "G6 (triage + behavior)":
+            independent_rows = [
+                row
+                for row in family_rows
+                if row.get("id") not in AUTOMERGE_VISION_CHILD_IDS
+            ]
+            vision_rows = [
+                row
+                for row in family_rows
+                if row.get("id") in AUTOMERGE_VISION_CHILD_IDS
+            ]
+            for row in independent_rows:
+                lines.append(_automerge_criterion_line(row, icons))
+            if vision_rows:
+                needs_vision = any(
+                    row.get("status") == criteria_schema.STATUS_UNAVAILABLE
+                    and "VISION.md" in str(row.get("evidence") or "")
+                    for row in vision_rows
+                )
+                parent = "- **VISION.md-dependent checks**"
+                if needs_vision:
+                    parent += " - _needs VISION.md_"
+                lines.append(parent)
+                for row in vision_rows:
+                    lines.append(_automerge_criterion_line(row, icons, indent="    "))
+            lines.append("")
+            continue
         for row in family_rows:
-            indent = (
-                "    "
-                if behavior_root_seen and row.get("id") in AUTOMERGE_BEHAVIOR_CHILD_IDS
-                else ""
-            )
-            lines.append(_automerge_criterion_line(row, icons, indent=indent))
-            if row.get("id") == AUTOMERGE_BEHAVIOR_ROOT_ID:
-                behavior_root_seen = True
+            lines.append(_automerge_criterion_line(row, icons))
         lines.append("")
     if lines[-1] == "":
         lines.pop()

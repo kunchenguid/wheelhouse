@@ -232,28 +232,12 @@ def behavior_verdict_facts(verdict):
         class_reason,
     )
     fact(
-        "g6_vision_alignment",
-        verdict.get("aligns_with_vision") is True,
-        "alignment confirmed"
-        if verdict.get("aligns_with_vision") is True
-        else "alignment not confirmed",
-        "verdict does not confirm alignment with VISION.md",
-    )
-    fact(
         "g6_default_behavior",
         verdict.get("changes_existing_or_default_behavior") is False,
         "no existing/default behavior change"
         if verdict.get("changes_existing_or_default_behavior") is False
         else "existing/default behavior change not ruled out",
         "verdict does not rule out an ineligible existing/default behavior change",
-    )
-    fact(
-        "g6_verdict_merge",
-        verdict.get("recommend_merge") is True,
-        "merge recommended"
-        if verdict.get("recommend_merge") is True
-        else "merge not recommended",
-        "verdict does not recommend merge",
     )
     class_c_ok = cls != "C" or verdict.get("optin_default_off") is True
     fact(
@@ -268,6 +252,36 @@ def behavior_verdict_facts(verdict):
         ),
         "class C but verdict does not confirm strictly opt-in and default off",
     )
+    vision_fields_present = any(
+        field in verdict for field in ("aligns_with_vision", "recommend_merge")
+    )
+    if not vision_fields_present:
+        for key in ("g6_vision_alignment", "g6_verdict_merge"):
+            facts[key] = {
+                "status": criteria_schema.STATUS_UNAVAILABLE,
+                "evidence": (
+                    "not evaluated because a trusted default-branch VISION.md "
+                    "is required"
+                ),
+                "reason": "trusted default-branch VISION.md is required",
+            }
+    else:
+        fact(
+            "g6_vision_alignment",
+            verdict.get("aligns_with_vision") is True,
+            "alignment confirmed"
+            if verdict.get("aligns_with_vision") is True
+            else "alignment not confirmed",
+            "verdict does not confirm alignment with VISION.md",
+        )
+        fact(
+            "g6_verdict_merge",
+            verdict.get("recommend_merge") is True,
+            "merge recommended"
+            if verdict.get("recommend_merge") is True
+            else "merge not recommended",
+            "verdict does not recommend merge",
+        )
     return facts, cls
 
 
@@ -1015,7 +1029,10 @@ def evaluate_candidate(
         if stopped:
             return stopped
     verdict = state.get("automerge_verdict")
-    structured_verdict = isinstance(verdict, dict)
+    vision_bound_verdict = isinstance(verdict, dict) and all(
+        isinstance(verdict.get(field), bool)
+        for field in ("aligns_with_vision", "recommend_merge")
+    )
 
     vision_present, vision_sha = vision_on_default_branch(slug)
     if vision_present:
@@ -1029,12 +1046,20 @@ def evaluate_candidate(
         )
         if stopped:
             return stopped
-    if not structured_verdict:
+    if not vision_present:
         stopped = fail(
             "g6_vision_revision",
-            "not evaluated because no structured behavior verdict exists to bind "
-            "to a VISION.md revision",
-            "G6 no structured behavior verdict",
+            "not evaluated because a trusted default-branch VISION.md is required",
+            "G6 trusted default-branch VISION.md is required",
+            unavailable=True,
+        )
+        if stopped:
+            return stopped
+    elif not vision_bound_verdict:
+        stopped = fail(
+            "g6_vision_revision",
+            "not evaluated because no vision-bound behavior verdict exists",
+            "G6 no vision-bound behavior verdict",
             unavailable=True,
         )
         if stopped:
@@ -1116,12 +1141,20 @@ def evaluate_candidate(
             return stopped
 
     base_sha = str((pr.get("base") or {}).get("sha") or "")
-    if not structured_verdict:
+    if not vision_present:
         stopped = fail(
             "g6_base_revision",
-            "not evaluated because no structured behavior verdict exists to bind "
-            "to a base revision",
-            "G6 no structured behavior verdict",
+            "not evaluated because a trusted default-branch VISION.md is required",
+            "G6 trusted default-branch VISION.md is required",
+            unavailable=True,
+        )
+        if stopped:
+            return stopped
+    elif not vision_bound_verdict:
+        stopped = fail(
+            "g6_base_revision",
+            "not evaluated because no vision-bound behavior verdict exists",
+            "G6 no vision-bound behavior verdict",
             unavailable=True,
         )
         if stopped:

@@ -549,10 +549,13 @@ jobs:
           # editing VISION.md must not be able to bless itself. The contents API
           # defaults to the default branch when no ?ref is given, which is exactly
           # the base-branch-only read we require. It is owner-authored TRUSTED
-          # policy (not contributor free-text). When absent, the auto-merge
-          # assessment is skipped entirely and the executor holds on G0.
+          # policy (not contributor free-text). A complete diff always gets the
+          # VISION-independent behavior classification. When VISION is absent,
+          # only alignment, revision binding, and final merge recommendation are
+          # skipped, and the executor still holds on G0.
           VISION_PRESENT=false
           VISION_SHA=""
+          AUTOMERGE_BEHAVIOR_AVAILABLE=false
           AUTOMERGE_VERDICT_AVAILABLE=false
           if [ "$KIND" = "pr-review" ]; then
             vision_limit_bytes=40000
@@ -574,7 +577,10 @@ jobs:
                 fi
               fi
             fi
-            if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then
+            if [ "$DIFF_COMPLETE" = "true" ]; then
+              AUTOMERGE_BEHAVIOR_AVAILABLE=true
+            fi
+            if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
               AUTOMERGE_VERDICT_AVAILABLE=true
             else
               VISION_SHA=""
@@ -649,19 +655,24 @@ jobs:
               echo "command except wheelhouse-search."
             fi
             echo
-            if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
-              echo "The target repository has opted into automatic merging and"
-              echo "committed the TRUSTED vision.md described above (read from its"
-              echo "DEFAULT branch, so it is owner-authored policy, not the PR's own"
-              echo "content). Judge whether this PR aligns with that vision and which"
-              echo "behavior class it is, so a deterministic gate can decide"
-              echo "auto-merge:"
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+              echo "The immutable PR diff is complete. Classify its behavior so the"
+              echo "decision card can show deterministic complete-diff facts:"
               echo "  A = no product behavior change (refactor/docs/tests/chore)"
               echo "  B = a narrow corrective bug fix that RESTORES intended behavior"
               echo "  C = a NEW feature that is strictly opt-in and disabled by default"
               echo "Any change that alters existing or default behavior (and is not a"
               echo "corrective bug fix restoring intended behavior) is INELIGIBLE."
-              echo "Be conservative: when unsure, do not confirm alignment or merge."
+              echo "Be conservative when classifying these facts."
+              if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+                echo
+                echo "The target repository has also opted into automatic merging and"
+                echo "committed the TRUSTED vision.md described above (read from its"
+                echo "DEFAULT branch, so it is owner-authored policy, not the PR's own"
+                echo "content). Judge whether this PR aligns with that vision and"
+                echo "whether it should be merged automatically now. Be conservative:"
+                echo "when unsure, do not confirm alignment or merge."
+              fi
               echo
             fi
             echo "Return ONLY a compact JSON object with exactly these string keys:"
@@ -672,7 +683,7 @@ jobs:
               echo '  "recommended_action": "close | decline | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment to post or show for the recommended action",'
               echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
-            elif [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+            elif [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
               echo '  "summary": "plain one-sentence summary of what the PR does",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
@@ -680,10 +691,14 @@ jobs:
               echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt",'
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
-              echo '    "aligns_with_vision": true or false (does this PR align with the vision.md policy above),'
               echo '    "changes_existing_or_default_behavior": true or false (true if it alters existing/default behavior other than a corrective bug fix),'
-              echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default),'
-              echo '    "recommend_merge": true or false (should this be merged automatically now)'
+              if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+                echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default),'
+                echo '    "aligns_with_vision": true or false (does this PR align with the vision.md policy above),'
+                echo '    "recommend_merge": true or false (should this be merged automatically now)'
+              else
+                echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default)'
+              fi
               echo '  }'
             else
               echo '  "summary": "plain one-sentence summary of what the PR does",'

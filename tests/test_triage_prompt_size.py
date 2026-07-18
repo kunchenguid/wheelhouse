@@ -303,12 +303,12 @@ def test_both_token_and_no_token_paths_use_the_same_by_reference_prompt():
 
 
 def test_diff_complete_fails_closed_when_diff_exceeds_the_cap():
-    """DIFF_COMPLETE / auto-merge verdict semantics under by-reference: the
-    verdict is only produced when the WHOLE diff is on disk. A diff that still
-    exceeds the (now generous) on-disk cap is truncated and fails CLOSED
-    (DIFF_COMPLETE=false -> no auto-merge verdict), where complete context is
-    required. A diff UNDER the cap is complete (the correctness upgrade: large
-    but sub-cap PRs, previously truncated at 120000, now get a verdict)."""
+    """DIFF_COMPLETE / auto-merge behavior semantics under by-reference: the
+    independent facts are produced only when the WHOLE diff is on disk. A diff
+    that still exceeds the generous on-disk cap is truncated and fails CLOSED
+    (DIFF_COMPLETE=false -> no behavior facts). A diff under the cap gets the
+    independent facts, while the vision-bound verdict still additionally
+    requires trusted default-branch VISION.md."""
     text = _read(".github/workflows/triage.yml")
     check("triage: DIFF_COMPLETE starts false (fail-closed default)", "DIFF_COMPLETE=false" in text)
     check(
@@ -328,9 +328,15 @@ def test_diff_complete_fails_closed_when_diff_exceeds_the_cap():
         trunc_idx != -1 and complete_idx != -1 and complete_idx > trunc_idx,
     )
     check(
-        "triage: auto-merge verdict requires VISION_PRESENT AND DIFF_COMPLETE",
-        'if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then'
-        in text,
+        "triage: independent facts require DIFF_COMPLETE",
+        'if [ "$DIFF_COMPLETE" = "true" ]; then' in text
+        and "AUTOMERGE_BEHAVIOR_AVAILABLE=true" in text,
+    )
+    check(
+        "triage: vision-bound verdict additionally requires VISION_PRESENT",
+        'if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
+        in text
+        and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
     )
     # The on-disk cap is generous enough that a large-but-real PR (no-mistakes
     # #434 was ~139571 bytes of diff) is now complete-on-disk, whereas the old

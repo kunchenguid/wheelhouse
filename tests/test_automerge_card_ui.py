@@ -66,6 +66,16 @@ def verdict(**overrides):
     return value
 
 
+def independent_verdict(**overrides):
+    value = {
+        "behavior_class": "A",
+        "changes_existing_or_default_behavior": False,
+        "optin_default_off": False,
+    }
+    value.update(overrides)
+    return value
+
+
 def card_entry(**state_overrides):
     state = {
         "repo": "axi",
@@ -355,7 +365,7 @@ def test_owner_bot_and_security_exclusion_evidence_is_distinct():
     )
 
 
-def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
+def test_no_vision_complete_diff_keeps_independent_g6_facts_in_real_card_flow():
     issue_head = "f4e096532b994d7a37a1161bdeaf6214e9d6439e"
     issue_base = "b708731dc7840c088bcd8c79991b7f052f9a0096"
     issue_item = item(
@@ -378,9 +388,9 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
             "triaged_base_sha": issue_base,
             "triage_status": "succeeded",
             "triage_recommendation": {"action": "merge", "reason": ""},
+            "automerge_verdict": independent_verdict(),
         }
     )
-    state.pop("automerge_verdict", None)
     raw_card = {
         "number": 621,
         "body": render_card._replace_state_block(base_card["body"], state),
@@ -458,41 +468,37 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
         "g6_triage_available",
         "g6_triage_success",
         "g6_merge_recommendation",
-    )
-    dependent_rows = (
-        "g6_vision_alignment",
+        "g6_behavior_class",
         "g6_default_behavior",
-        "g6_verdict_merge",
         "g6_class_c_mode",
+    )
+    vision_rows = (
+        "g6_vision_alignment",
+        "g6_verdict_merge",
         "g6_vision_revision",
         "g6_base_revision",
     )
     check(
-        "issue 621: ordinary triage facts remain independently MET",
+        "no VISION: complete-diff triage facts are independently MET",
         all(criterion_rows[key]["status"] == schema.STATUS_MET for key in met_rows),
     )
     check(
-        "issue 621: behavior class is the only blocking UNMET G6 prerequisite",
-        [
-            key
-            for key in schema.CRITERIA_IDS
-            if key.startswith("g6_")
-            and criterion_rows[key]["status"] == schema.STATUS_UNMET
-        ]
-        == ["g6_behavior_class"],
+        "no VISION: independent facts are not masked as unavailable",
+        all(
+            criterion_rows[key]["status"] != schema.STATUS_UNAVAILABLE
+            for key in (
+                "g6_behavior_class",
+                "g6_default_behavior",
+                "g6_class_c_mode",
+            )
+        ),
     )
     check(
-        "issue 621: behavior class explains the absent verdict and skipped checks",
-        "structured behavior verdict absent"
-        in criterion_rows["g6_behavior_class"]["evidence"]
-        and "not evaluated" in criterion_rows["g6_behavior_class"]["evidence"],
-    )
-    check(
-        "issue 621: dependent behavior and binding rows are honestly UNAVAILABLE",
+        "no VISION: vision-bound rows clearly require VISION.md",
         all(
             criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
-            and "not evaluated" in criterion_rows[key]["evidence"]
-            for key in dependent_rows
+            and "VISION.md" in criterion_rows[key]["evidence"]
+            for key in vision_rows
         ),
     )
     rendered = render_card.render(
@@ -503,24 +509,79 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
             automerge_criteria=handoff[0]["criteria"],
         )
     )
-    g6_lines = [line for line in rendered["body"].splitlines() if "`G6 - " in line]
+    body = rendered["body"]
+    g6_lines = [line for line in body.splitlines() if "`G6 - " in line]
     check(
-        "issue 621: renderer shows one red G6 blocker",
-        sum("❌ **UNMET**" in line for line in g6_lines) == 1
-        and "`G6 - eligible behavior class`"
-        in next(line for line in g6_lines if "❌ **UNMET**" in line),
-    )
-    check(
-        "issue 621: renderer shows every dependent G6 row as unavailable",
+        "no VISION: renderer keeps independent facts at the G6 behavior level",
         all(
-            any(
-                "⚪ **UNAVAILABLE**" in line
-                and "`%s`" % schema.CRITERIA_LABELS[key] in line
+            next(
+                line
                 for line in g6_lines
+                if "`%s`" % schema.CRITERIA_LABELS[key] in line
+            ).startswith("- ")
+            for key in (
+                "g6_behavior_class",
+                "g6_default_behavior",
+                "g6_class_c_mode",
             )
-            for key in dependent_rows
         ),
     )
+    check(
+        "no VISION: renderer nests vision-bound rows under the needs-VISION root",
+        "- **VISION.md-dependent checks** - _needs VISION.md_" in body
+        and all(
+            next(
+                line
+                for line in g6_lines
+                if "`%s`" % schema.CRITERIA_LABELS[key] in line
+            ).startswith("    - ⚪ **UNAVAILABLE**")
+            for key in vision_rows
+        ),
+    )
+    check(
+        "no VISION: complete evaluation remains ineligible",
+        am.verdict_eligible(independent_verdict())[0] is False
+        and criterion_rows["g0_vision_present"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+
+def test_no_vision_independent_behavior_negatives_are_unmet_not_masked():
+    cases = (
+        ("g6_default_behavior", {"changes_existing_or_default_behavior": True}),
+        (
+            "g6_class_c_mode",
+            {"behavior_class": "C", "optin_default_off": False},
+        ),
+    )
+    for criterion, overrides in cases:
+        result = evaluate(
+            card_value=card_entry(
+                automerge_verdict=independent_verdict(**overrides)
+            ),
+            vision=(False, ""),
+        )
+        criterion_rows = rows(result)
+        check(
+            "no VISION: %s is evaluated as UNMET from real facts" % criterion,
+            criterion_rows[criterion]["status"] == schema.STATUS_UNMET,
+        )
+        check(
+            "no VISION: %s cannot grant eligibility" % criterion,
+            result["eligible"] is False,
+        )
+        check(
+            "no VISION: vision-bound rows remain UNAVAILABLE for %s" % criterion,
+            all(
+                criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
+                for key in (
+                    "g6_vision_alignment",
+                    "g6_verdict_merge",
+                    "g6_vision_revision",
+                    "g6_base_revision",
+                )
+            ),
+        )
 
 
 def test_absent_none_and_non_dictionary_whole_verdicts_are_unavailable_dependents():
@@ -868,33 +929,44 @@ def test_render_groups_every_criterion_by_id_family_and_preserves_evidence():
     )
 
 
-def test_g6_behavior_subtree_is_nested_beneath_its_root():
-    body = "\n".join(
-        render_card._automerge_criteria_section(schema.unavailable_criteria("skipped"))
+def test_g6_producer_hierarchy_splits_independent_and_vision_bound_facts():
+    result = evaluate(
+        card_value=card_entry(automerge_verdict=independent_verdict()),
+        vision=(False, ""),
     )
-    root_label = schema.CRITERIA_LABELS["g6_behavior_class"]
-    child_ids = (
-        "g6_vision_alignment",
+    body = "\n".join(render_card._automerge_criteria_section(result["criteria"]))
+    independent_ids = (
+        "g6_behavior_class",
         "g6_default_behavior",
-        "g6_verdict_merge",
         "g6_class_c_mode",
+    )
+    vision_ids = (
+        "g6_vision_alignment",
+        "g6_verdict_merge",
         "g6_vision_revision",
         "g6_base_revision",
     )
-    root_line = next(line for line in body.splitlines() if "`%s`" % root_label in line)
     check(
-        "hierarchy: behavior verdict root stays at the G6 group level",
-        root_line.startswith("- "),
-    )
-    check(
-        "hierarchy: every vision-dependent behavior criterion is one level deeper",
+        "hierarchy: complete-diff behavior facts stay at the G6 group level",
         all(
             next(
                 line
                 for line in body.splitlines()
                 if "`%s`" % schema.CRITERIA_LABELS[criterion_id] in line
+            ).startswith("- ")
+            for criterion_id in independent_ids
+        ),
+    )
+    check(
+        "hierarchy: vision-bound facts share one needs-VISION subtree",
+        "- **VISION.md-dependent checks** - _needs VISION.md_" in body
+        and all(
+            next(
+                line
+                for line in body.splitlines()
+                if "`%s`" % schema.CRITERIA_LABELS[criterion_id] in line
             ).startswith("    - ")
-            for criterion_id in child_ids
+            for criterion_id in vision_ids
         ),
     )
 
