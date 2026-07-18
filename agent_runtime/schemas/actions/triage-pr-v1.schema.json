@@ -13,7 +13,7 @@
     "automerge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["behavior_class", "aligns_with_vision", "changes_existing_or_default_behavior", "optin_default_off", "recommend_merge"],
+      "required": ["behavior_class", "changes_existing_or_default_behavior", "optin_default_off"],
       "properties": {
         "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
         "aligns_with_vision": {"type": "boolean"},

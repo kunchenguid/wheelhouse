@@ -7,6 +7,8 @@ is advisory, non-material state: auto_merge.py always re-evaluates live facts an
 never trusts a displayed or persisted row to authorize a merge.
 """
 
+import re
+
 CRITERIA_VERSION = 1
 STATUS_MET = "met"
 STATUS_UNMET = "unmet"
@@ -50,6 +52,7 @@ CRITERIA_SPECS = (
 
 CRITERIA_IDS = tuple(spec[0] for spec in CRITERIA_SPECS)
 CRITERIA_LABELS = dict(CRITERIA_SPECS)
+CRITERION_ID = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 def unavailable_criteria(reason="criterion evidence was not produced"):
@@ -66,12 +69,7 @@ def unavailable_criteria(reason="criterion evidence was not produced"):
 
 
 def normalize_criteria(rows, missing_reason="criterion evidence was not produced"):
-    """Return one strict, ordered row for every stable criterion.
-
-    Unknown, duplicate, malformed, or missing rows never become met. They
-    degrade to explicit unavailable rows so old cards and partial handoffs fail
-    closed in the UI.
-    """
+    """Return strict stable rows followed by safe, ordered future rows."""
     by_id = {}
     duplicates = set()
     if isinstance(rows, list):
@@ -79,7 +77,7 @@ def normalize_criteria(rows, missing_reason="criterion evidence was not produced
             if not isinstance(row, dict):
                 continue
             criterion_id = str(row.get("id") or "").strip()
-            if criterion_id not in CRITERIA_LABELS:
+            if not CRITERION_ID.fullmatch(criterion_id):
                 continue
             if criterion_id in by_id:
                 duplicates.add(criterion_id)
@@ -88,9 +86,12 @@ def normalize_criteria(rows, missing_reason="criterion evidence was not produced
             if status not in STATUSES:
                 status = STATUS_UNAVAILABLE
             evidence = str(row.get("evidence") or "").strip()
+            label = CRITERIA_LABELS.get(criterion_id)
+            if label is None:
+                label = str(row.get("label") or criterion_id).strip() or criterion_id
             by_id[criterion_id] = {
                 "id": criterion_id,
-                "label": CRITERIA_LABELS[criterion_id],
+                "label": label,
                 "status": status,
                 "evidence": evidence or str(missing_reason),
             }
@@ -111,4 +112,16 @@ def normalize_criteria(rows, missing_reason="criterion evidence was not produced
                 "evidence": str(reason or "criterion evidence was not produced"),
             }
         )
+    for criterion_id in sorted(set(by_id) - set(CRITERIA_LABELS)):
+        if criterion_id in duplicates:
+            normalized.append(
+                {
+                    "id": criterion_id,
+                    "label": criterion_id,
+                    "status": STATUS_UNAVAILABLE,
+                    "evidence": "duplicate criterion evidence was rejected",
+                }
+            )
+        else:
+            normalized.append(by_id[criterion_id])
     return normalized

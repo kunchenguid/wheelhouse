@@ -996,18 +996,15 @@ def test_unmet_and_unavailable_have_distinct_markers():
 
 
 def test_unknown_prefix_criterion_renders_in_other_without_being_dropped():
-    body = "\n".join(
-        render_card._automerge_criteria_section(
-            [
-                {
-                    "id": "future_policy_guard",
-                    "label": "Future - policy guard",
-                    "status": schema.STATUS_UNMET,
-                    "evidence": "future evidence remains visible",
-                }
-            ]
-        )
-    )
+    future = {
+        "id": "future_policy_guard",
+        "label": "Future - policy guard",
+        "status": schema.STATUS_UNMET,
+        "evidence": "future evidence remains visible",
+    }
+    criteria = [future]
+    normalized = schema.normalize_criteria(criteria)
+    body = "\n".join(render_card._automerge_criteria_section(criteria))
     other = body[body.index("#### Other") :]
     check(
         "group: unknown-prefix criterion falls back to Other",
@@ -1016,6 +1013,24 @@ def test_unknown_prefix_criterion_renders_in_other_without_being_dropped():
     check(
         "group: unknown-prefix criterion keeps its status and evidence",
         "❌ **UNMET**" in other and "future evidence remains visible" in other,
+    )
+    rendered = render_card.render(item(automerge_criteria=criteria))
+    state = core.parse_state_block(rendered["body"])
+    stored = state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    check(
+        "group: stable future criterion persists in card state",
+        future in stored and stored == normalized,
+    )
+    check(
+        "group: matching future criterion does not keep refreshing the card",
+        render_card.automerge_criteria_stale(item(automerge_criteria=criteria), state)
+        is False,
+    )
+    changed = [dict(future, evidence="future evidence changed")]
+    check(
+        "group: changed future criterion refreshes the existing card",
+        render_card.automerge_criteria_stale(item(automerge_criteria=changed), state)
+        is True,
     )
 
 
@@ -1083,6 +1098,14 @@ def test_displayed_met_rows_cannot_grant_eligibility():
             {"id": criterion_id, "status": schema.STATUS_MET, "evidence": "claimed met"}
             for criterion_id in schema.CRITERIA_IDS
         ]
+        + [
+            {
+                "id": "future_merge_authorization",
+                "label": "Future - merge authorization",
+                "status": schema.STATUS_MET,
+                "evidence": "forged future row",
+            }
+        ]
     )
     actual = card_entry()
     actual["state"] = dict(
@@ -1092,6 +1115,10 @@ def test_displayed_met_rows_cannot_grant_eligibility():
     check(
         "security: displayed MET rows do not grant eligibility",
         result["eligible"] is False,
+    )
+    check(
+        "security: unknown displayed MET rows remain advisory only",
+        any(row["id"] == "future_merge_authorization" for row in forged),
     )
     check(
         "security: live persisted verdict guard still holds",

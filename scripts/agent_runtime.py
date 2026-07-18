@@ -120,6 +120,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
         vision_file=args.vision_file,
+        require_vision_fields=args.require_vision_fields,
         repair_kind=args.repair_kind,
     )
     output("task", str(Path(args.out).resolve()))
@@ -317,6 +318,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")
     build.add_argument("--vision-file", default="")
+    build.add_argument("--require-vision-fields", action="store_true")
     build.add_argument("--repair-kind", choices=("issue", "pr"), default="pr")
     build.set_defaults(func=cmd_build)
     execute = commands.add_parser("run")

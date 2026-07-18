@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -787,6 +788,25 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
     raise ArtifactError("unsupported action output schema")
 
 
+def _bound_output_schema(
+    schema: dict[str, Any], action: str, repair_kind: str, require_vision_fields: bool
+) -> dict[str, Any]:
+    is_pr_triage = action.startswith("triage.pr") or (
+        action == "triage.schema-repair" and repair_kind == "pr"
+    )
+    if not is_pr_triage:
+        return schema
+    bound = deepcopy(schema)
+    automerge = bound["properties"]["automerge"]
+    vision_fields = ("aligns_with_vision", "recommend_merge")
+    if require_vision_fields:
+        automerge["required"] = list(automerge["required"]) + list(vision_fields)
+    else:
+        for field in vision_fields:
+            automerge["properties"].pop(field, None)
+    return bound
+
+
 def claude_declared_tools(action: str) -> list[str]:
     if action in SCHEMA_REPAIR_ACTIONS:
         return []
@@ -987,6 +1007,7 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    require_vision_fields: bool = False,
     repair_kind: str = "pr",
 ) -> dict[str, Any]:
     if action not in ACTION_LIMITS:
@@ -1053,10 +1074,16 @@ def build_task(
         inputs.append({"id": "vision", "artifact": artifact, "logicalPath": "vision.md", "sha256": digest, "mediaType": "text/markdown; charset=utf-8", "trust": "trusted", "mount": "read-only", "maxBytes": 40000, "bytes": size})
 
     schema_path, schema_id = _schema_for(action, repair_kind)
-    schema_value = load_json_regular(schema_path, max_bytes=65536)
+    source_schema = load_json_regular(schema_path, max_bytes=65536)
+    schema_value = _bound_output_schema(
+        source_schema,
+        action,
+        repair_kind,
+        require_vision_fields or bool(vision_file),
+    )
     schema_source = schema_path
     canonical_schema = bundle / ".canonical-output-schema"
-    if action.startswith("nl-decision"):
+    if action.startswith("nl-decision") or schema_value != source_schema:
         canonical_schema.write_bytes(canonical_json_bytes(schema_value))
         schema_source = canonical_schema
     try:

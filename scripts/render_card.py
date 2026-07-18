@@ -2164,38 +2164,10 @@ def automerge_workflow_hold_presentation_complete(body, labels, record):
 
 
 def _automerge_display_rows(rows):
-    """Normalize the stable schema and retain future IDs for safe display.
-
-    The schema normalizer deliberately rejects unknown IDs for persisted state.
-    The renderer still places a well-formed future evaluator row in ``Other``
-    rather than silently dropping its status or evidence. Displayed rows remain
-    advisory and are never consumed by the authoritative merge gate.
-    """
-    normalized = criteria_schema.normalize_criteria(
+    return criteria_schema.normalize_criteria(
         rows,
         missing_reason="not evaluated on this card generation path",
     )
-    if not isinstance(rows, list):
-        return normalized
-    for raw in rows:
-        if not isinstance(raw, dict):
-            continue
-        criterion_id = str(raw.get("id") or "").strip()
-        if not criterion_id or criterion_id in criteria_schema.CRITERIA_LABELS:
-            continue
-        status = str(raw.get("status") or "").strip().lower()
-        if status not in criteria_schema.STATUSES:
-            status = criteria_schema.STATUS_UNAVAILABLE
-        normalized.append(
-            {
-                "id": criterion_id,
-                "label": str(raw.get("label") or criterion_id).strip() or criterion_id,
-                "status": status,
-                "evidence": str(raw.get("evidence") or "").strip()
-                or "criterion evidence was not produced",
-            }
-        )
-    return normalized
 
 
 def _automerge_criterion_family(criterion_id):

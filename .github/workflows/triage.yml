@@ -1031,6 +1031,7 @@ jobs:
           NUMBER: ${{ steps.resolve.outputs.number }}
           KIND: ${{ steps.resolve.outputs.kind }}
           REVISION: ${{ steps.resolve.outputs.revision }}
+          VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1041,6 +1042,10 @@ jobs:
             repair_kind="issue"
           else
             repair_kind="pr"
+          fi
+          vision_schema_args=()
+          if [ -n "$VISION_SHA" ]; then
+            vision_schema_args=(--require-vision-fields)
           fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair \
@@ -1054,7 +1059,8 @@ jobs:
             --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" \
             --repair-kind "$repair_kind" \
-            --event-key "$EVENT_KEY"
+            --event-key "$EVENT_KEY" \
+            "${vision_schema_args[@]}"
 
       - id: agent-runtime-repair
         name: Run bounded schema repair through the Codex app-server contract
@@ -1612,6 +1618,7 @@ jobs:
           NUMBER: ${{ needs.triage.outputs.number }}
           KIND: ${{ needs.triage.outputs.kind }}
           REVISION: ${{ needs.triage.outputs.revision }}
+          VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1619,12 +1626,14 @@ jobs:
           set -euo pipefail
           printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
           if [ "$KIND" = "issue-triage" ]; then repair_kind="issue"; else repair_kind="pr"; fi
+          vision_schema_args=()
+          if [ -n "$VISION_SHA" ]; then vision_schema_args=(--require-vision-fields); fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair --prompt repair-prompt.txt \
             --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
             --repo "$REPO" --number "$NUMBER" --kind schema-repair \
             --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind" --event-key "$EVENT_KEY"
+            --repair-kind "$repair_kind" --event-key "$EVENT_KEY" "${vision_schema_args[@]}"
 
       - name: Record schema-repair task-build failure stage
         if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.claude-repair-task.outcome == 'failure' }}
