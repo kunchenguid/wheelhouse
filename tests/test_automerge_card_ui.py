@@ -809,6 +809,165 @@ def test_true_card_render_path_shows_stable_human_visible_rows():
     )
 
 
+def test_render_groups_every_criterion_by_id_family_and_preserves_evidence():
+    family_prefixes = (
+        ("Scope", ("scope_",)),
+        ("Safety", ("scan_", "safety_")),
+        ("G0 (repo)", ("g0_",)),
+        ("G1 (card)", ("g1_",)),
+        ("G2 (files)", ("g2_",)),
+        ("G3 (author)", ("g3_",)),
+        ("G4 (checks)", ("g4_",)),
+        ("G5 (size)", ("g5_",)),
+        ("G6 (triage + behavior)", ("g6_",)),
+        ("G7 (final gate)", ("g7_",)),
+    )
+    rows_with_evidence = [
+        {
+            "id": criterion_id,
+            "status": schema.STATUS_MET,
+            "evidence": "proof-%02d" % index,
+        }
+        for index, criterion_id in enumerate(schema.CRITERIA_IDS)
+    ]
+    body = "\n".join(render_card._automerge_criteria_section(rows_with_evidence))
+    headings = ["#### %s" % family for family, _ in family_prefixes] + ["#### Other"]
+
+    for index, (family, prefixes) in enumerate(family_prefixes):
+        start = body.index("#### %s" % family)
+        later = [
+            position
+            for position in (
+                body.find(heading, start + 1) for heading in headings[index + 1 :]
+            )
+            if position >= 0
+        ]
+        end = min(later) if later else len(body)
+        section = body[start:end]
+        expected_ids = [
+            criterion_id
+            for criterion_id in schema.CRITERIA_IDS
+            if criterion_id.startswith(prefixes)
+        ]
+        check(
+            "group: %s contains exactly its ID-prefix criteria" % family,
+            all(
+                "`%s`" % schema.CRITERIA_LABELS[criterion_id] in section
+                for criterion_id in expected_ids
+            )
+            and all(
+                "`%s`" % schema.CRITERIA_LABELS[criterion_id] not in section
+                for criterion_id in schema.CRITERIA_IDS
+                if criterion_id not in expected_ids
+            ),
+        )
+
+    check(
+        "render: every criterion keeps its concise evidence",
+        all("proof-%02d" % index in body for index in range(len(schema.CRITERIA_IDS))),
+    )
+
+
+def test_g6_behavior_subtree_is_nested_beneath_its_root():
+    body = "\n".join(
+        render_card._automerge_criteria_section(schema.unavailable_criteria("skipped"))
+    )
+    root_label = schema.CRITERIA_LABELS["g6_behavior_class"]
+    child_ids = (
+        "g6_vision_alignment",
+        "g6_default_behavior",
+        "g6_verdict_merge",
+        "g6_class_c_mode",
+        "g6_vision_revision",
+        "g6_base_revision",
+    )
+    root_line = next(line for line in body.splitlines() if "`%s`" % root_label in line)
+    check(
+        "hierarchy: behavior verdict root stays at the G6 group level",
+        root_line.startswith("- "),
+    )
+    check(
+        "hierarchy: every vision-dependent behavior criterion is one level deeper",
+        all(
+            next(
+                line
+                for line in body.splitlines()
+                if "`%s`" % schema.CRITERIA_LABELS[criterion_id] in line
+            ).startswith("    - ")
+            for criterion_id in child_ids
+        ),
+    )
+
+
+def test_unmet_and_unavailable_have_distinct_markers():
+    body = "\n".join(
+        render_card._automerge_criteria_section(
+            [
+                {
+                    "id": "g6_behavior_class",
+                    "status": schema.STATUS_UNMET,
+                    "evidence": "root cause",
+                },
+                {
+                    "id": "g6_vision_alignment",
+                    "status": schema.STATUS_UNAVAILABLE,
+                    "evidence": "not evaluated after root",
+                },
+            ]
+        )
+    )
+    check(
+        "markers: root UNMET is visually distinct from dependent UNAVAILABLE",
+        "❌ **UNMET** `G6 - eligible behavior class`" in body
+        and "⚪ **UNAVAILABLE** `G6 - behavior aligns with VISION.md`" in body,
+    )
+
+
+def test_unknown_prefix_criterion_renders_in_other_without_being_dropped():
+    body = "\n".join(
+        render_card._automerge_criteria_section(
+            [
+                {
+                    "id": "future_policy_guard",
+                    "label": "Future - policy guard",
+                    "status": schema.STATUS_UNMET,
+                    "evidence": "future evidence remains visible",
+                }
+            ]
+        )
+    )
+    other = body[body.index("#### Other") :]
+    check(
+        "group: unknown-prefix criterion falls back to Other",
+        "`Future - policy guard`" in other,
+    )
+    check(
+        "group: unknown-prefix criterion keeps its status and evidence",
+        "❌ **UNMET**" in other and "future evidence remains visible" in other,
+    )
+
+
+def test_render_version_bump_refreshes_existing_card_exactly_once():
+    result = evaluate()
+    current_item = item(automerge_criteria=result["criteria"])
+    current_state = core.parse_state_block(render_card.render(current_item)["body"])
+    previous_state = dict(current_state)
+    previous_state["render_version"] = render_card.CARD_RENDER_VERSION - 1
+    labels = {"needs-decision"}
+    check(
+        "refresh: previous criteria UI version triggers one display-only refresh",
+        render_card.refresh_needed(current_item, previous_state, labels=labels) is True,
+    )
+    check(
+        "refresh: regrouped current-version card is a no-op on the next pass",
+        render_card.refresh_needed(current_item, current_state, labels=labels) is False,
+    )
+    check(
+        "refresh: criteria hierarchy version remains non-material",
+        render_card.material_changed(current_item, previous_state) is False,
+    )
+
+
 def test_state_block_escapes_html_comment_terminators():
     evidence = "excluded path: docs/close-->inject.md & <tag>"
     criteria = [{"id": "g2_exclusions_clear", "status": "unmet", "evidence": evidence}]

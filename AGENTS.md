@@ -289,7 +289,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `7`: the
+  it is not a material field). `CARD_RENDER_VERSION` is currently `8`: the
+  7 -> 8 bump groups auto-merge criteria by gate family and nests G6's vision-dependent behavior checks beneath their root cause;
   6 -> 7 bump publishes the non-authoritative read-only `### Auto-merge criteria`
   section on already-open PR-review cards; the 5 -> 6 bump publishes the
   advisory read-only `### Security review` section on

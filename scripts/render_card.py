@@ -258,7 +258,32 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
-CARD_RENDER_VERSION = 7
+# Bumped 7 -> 8 to group that UI by gate family and nest the G6 behavior branch.
+CARD_RENDER_VERSION = 8
+
+AUTOMERGE_CRITERIA_GROUPS = (
+    ("Scope", ("scope_",)),
+    ("Safety", ("scan_", "safety_")),
+    ("G0 (repo)", ("g0_",)),
+    ("G1 (card)", ("g1_",)),
+    ("G2 (files)", ("g2_",)),
+    ("G3 (author)", ("g3_",)),
+    ("G4 (checks)", ("g4_",)),
+    ("G5 (size)", ("g5_",)),
+    ("G6 (triage + behavior)", ("g6_",)),
+    ("G7 (final gate)", ("g7_",)),
+)
+AUTOMERGE_BEHAVIOR_ROOT_ID = "g6_behavior_class"
+AUTOMERGE_BEHAVIOR_CHILD_IDS = frozenset(
+    {
+        "g6_vision_alignment",
+        "g6_default_behavior",
+        "g6_verdict_merge",
+        "g6_class_c_mode",
+        "g6_vision_revision",
+        "g6_base_revision",
+    }
+)
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -2122,11 +2147,61 @@ def automerge_workflow_hold_presentation_complete(body, labels, record):
     )
 
 
-def _automerge_criteria_section(rows):
+def _automerge_display_rows(rows):
+    """Normalize the stable schema and retain future IDs for safe display.
+
+    The schema normalizer deliberately rejects unknown IDs for persisted state.
+    The renderer still places a well-formed future evaluator row in ``Other``
+    rather than silently dropping its status or evidence. Displayed rows remain
+    advisory and are never consumed by the authoritative merge gate.
+    """
     normalized = criteria_schema.normalize_criteria(
         rows,
         missing_reason="not evaluated on this card generation path",
     )
+    if not isinstance(rows, list):
+        return normalized
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        criterion_id = str(raw.get("id") or "").strip()
+        if not criterion_id or criterion_id in criteria_schema.CRITERIA_LABELS:
+            continue
+        status = str(raw.get("status") or "").strip().lower()
+        if status not in criteria_schema.STATUSES:
+            status = criteria_schema.STATUS_UNAVAILABLE
+        normalized.append(
+            {
+                "id": criterion_id,
+                "label": str(raw.get("label") or criterion_id).strip() or criterion_id,
+                "status": status,
+                "evidence": str(raw.get("evidence") or "").strip()
+                or "criterion evidence was not produced",
+            }
+        )
+    return normalized
+
+
+def _automerge_criterion_family(criterion_id):
+    criterion_id = str(criterion_id or "")
+    for family, prefixes in AUTOMERGE_CRITERIA_GROUPS:
+        if criterion_id.startswith(prefixes):
+            return family
+    return "Other"
+
+
+def _automerge_criterion_line(row, icons, indent=""):
+    label = _automerge_criteria_evidence(row.get("label"))
+    return "%s- %s `%s` - %s" % (
+        indent,
+        icons[row["status"]],
+        label,
+        _automerge_criteria_evidence(row.get("evidence")),
+    )
+
+
+def _automerge_criteria_section(rows):
+    normalized = _automerge_display_rows(rows)
     icons = {
         criteria_schema.STATUS_MET: "✅ **MET**",
         criteria_schema.STATUS_UNMET: "❌ **UNMET**",
@@ -2141,15 +2216,29 @@ def _automerge_criteria_section(rows):
         "re-evaluates every gate and performs G7 immediately before acting.",
         "",
     ]
+    grouped = {family: [] for family, _ in AUTOMERGE_CRITERIA_GROUPS}
+    grouped["Other"] = []
     for row in normalized:
-        lines.append(
-            "- %s `%s` - %s"
-            % (
-                icons[row["status"]],
-                row["label"],
-                _automerge_criteria_evidence(row.get("evidence")),
+        grouped[_automerge_criterion_family(row.get("id"))].append(row)
+
+    for family in [family for family, _ in AUTOMERGE_CRITERIA_GROUPS] + ["Other"]:
+        family_rows = grouped[family]
+        if not family_rows:
+            continue
+        lines.extend(["#### %s" % family, ""])
+        behavior_root_seen = False
+        for row in family_rows:
+            indent = (
+                "    "
+                if behavior_root_seen and row.get("id") in AUTOMERGE_BEHAVIOR_CHILD_IDS
+                else ""
             )
-        )
+            lines.append(_automerge_criterion_line(row, icons, indent=indent))
+            if row.get("id") == AUTOMERGE_BEHAVIOR_ROOT_ID:
+                behavior_root_seen = True
+        lines.append("")
+    if lines[-1] == "":
+        lines.pop()
     return lines
 
 
