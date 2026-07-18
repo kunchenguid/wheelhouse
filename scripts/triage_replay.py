@@ -46,9 +46,9 @@ TRIAGE_NON_SUCCESS_FIELDS = (
 )
 MAX_RUN_NUMBER = 9_007_199_254_740_991
 
-# One incident-scoped reset capability for the captain-approved evidence-empty
-# recovery. Each entry binds the card to the exact source revision and prior
-# replay marker observed before this fix. The capability cannot follow a moved
+# Incident-scoped reset capabilities for captain-approved evidence-array
+# recoveries. Each entry binds the card to the exact source revision and prior
+# replay marker observed before its reset. A capability cannot follow a moved
 # target, admit another card, or be reused after its v2 marker is written.
 ATTEMPT_RESET_WAVE = "evidence-empty-e7-final"
 
@@ -181,6 +181,105 @@ ATTEMPT_RESET_COHORT = {
     ),
 }
 
+ARRAY_RECOVERY_ATTEMPT_RESET_WAVE = "array-recovery-g1-final"
+ARRAY_RECOVERY_ATTEMPT_RESET_COHORT = {
+    154: _attempt_reset_prior_marker(
+        "2026-07-13T19:27:04Z",
+        "canary-1",
+        224,
+        "2026-07-17T01:55:44Z",
+    ),
+    481: _attempt_reset_prior_marker(
+        "2026-07-15T03:11:28Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:10:40Z",
+    ),
+    572: _attempt_reset_prior_marker(
+        "1ccebb15df4966e1b08da1fa4825346d51cb3ac0",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:07:24Z",
+    ),
+    907: _attempt_reset_prior_marker(
+        "2026-07-14T02:54:04Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:00Z",
+    ),
+    951: _attempt_reset_prior_marker(
+        "2026-07-14T21:24:04Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:06Z",
+    ),
+    1266: _attempt_reset_prior_marker(
+        "2026-07-14T10:18:18Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:19Z",
+    ),
+    1275: _attempt_reset_prior_marker(
+        "2026-07-15T02:35:46Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:25Z",
+    ),
+    1428: _attempt_reset_prior_marker(
+        "76502958188953a3efb639ef5eb0bd0da47566b1",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:24:53Z",
+    ),
+    1430: _attempt_reset_prior_marker(
+        "5fb0cc655d02f25eba1cb0c0b37a0f2893cd9d6a",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:03Z",
+    ),
+    1435: _attempt_reset_prior_marker(
+        "57808325def6aa1ae2cd5d43d2e7d6d82b2127ad",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:12Z",
+    ),
+    1436: _attempt_reset_prior_marker(
+        "2026-07-17T13:07:28Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:20Z",
+    ),
+    1437: _attempt_reset_prior_marker(
+        "376b3cbf12cdd26a8c9b3f19a00f5370b800baed",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:29Z",
+    ),
+    1441: _attempt_reset_prior_marker(
+        "16f11d8cd07036c2ee1e54c863d274a5dbcc1a78",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:46Z",
+    ),
+    1442: _attempt_reset_prior_marker(
+        "53504c275b87880147857184cd3418a333711368",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:55Z",
+    ),
+    1443: _attempt_reset_prior_marker(
+        "2026-07-17T16:35:47Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:26:04Z",
+    ),
+}
+
+ATTEMPT_RESET_COHORTS = {
+    ATTEMPT_RESET_WAVE: ATTEMPT_RESET_COHORT,
+    ARRAY_RECOVERY_ATTEMPT_RESET_WAVE: ARRAY_RECOVERY_ATTEMPT_RESET_COHORT,
+}
+
 
 def _triage_action(kind):
     search = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN", "")
@@ -262,7 +361,8 @@ def _attempt_reset_scope(wave, value):
     text = str(value or "").strip()
     if not text:
         return {}
-    if wave != ATTEMPT_RESET_WAVE:
+    cohort = ATTEMPT_RESET_COHORTS.get(wave)
+    if cohort is None:
         raise ValueError("attempt reset requires the sanctioned replay wave")
     parts = [part.strip() for part in text.split(",")]
     if any(not re.fullmatch(r"[1-9][0-9]*", part) for part in parts):
@@ -270,9 +370,9 @@ def _attempt_reset_scope(wave, value):
     numbers = [int(part) for part in parts]
     if len(numbers) != len(set(numbers)):
         raise ValueError("attempt reset cards must not contain duplicates")
-    if set(numbers) != set(ATTEMPT_RESET_COHORT):
+    if set(numbers) != set(cohort):
         raise ValueError("attempt reset cards must exactly match the sanctioned cohort")
-    return {number: dict(ATTEMPT_RESET_COHORT[number]) for number in sorted(numbers)}
+    return {number: dict(cohort[number]) for number in sorted(numbers)}
 
 
 def _attempt_reset_count(state, kind, revision, cap):
@@ -295,6 +395,16 @@ def _attempt_reset_count(state, kind, revision, cap):
     ):
         return None
     return cap - 1
+
+
+def _attempt_reset_marker_applied(marker, wave, revision):
+    return bool(
+        _valid_marker(marker, revision)
+        and marker.get("version") == ATTEMPT_RESET_REPLAY_VERSION
+        and marker.get("wave") == wave
+        and marker.get("cleared") == "error"
+        and marker.get("attempt_reset") is True
+    )
 
 
 def _source_json(owner, repo, number, kind):
@@ -353,7 +463,7 @@ def _maintainer_logins(config, owner):
 
 
 def inspect_candidate(
-    number, config, owner, has_token, attempt_reset=None
+    number, config, owner, has_token, attempt_reset=None, attempt_reset_wave=""
 ):
     """Return an eligible replay plan or a fail-closed skip reason."""
     card = render_card.get_card(number)
@@ -443,22 +553,42 @@ def inspect_candidate(
     ):
         return None, "replay-marker-untrusted"
     status = state.get("triage_status")
+    reset_already_applied = bool(
+        attempt_reset is not None
+        and _attempt_reset_marker_applied(
+            marker, wave=attempt_reset_wave, revision=revision
+        )
+    )
     duplicate_reentry = False
     if attempt_reset is not None:
         expected_marker = attempt_reset
         expected_revision = expected_marker["revision"]
         if revision != expected_revision:
             return None, "attempt-reset-revision-mismatch"
-        if marker != expected_marker:
+        if not reset_already_applied and marker != expected_marker:
             return None, "attempt-reset-prior-marker-mismatch"
-        if state.get("held") or triaged_sha != revision or status != "error":
+        expected_statuses = {"queued", "succeeded", "error"}
+        if reset_already_applied and (
+            state.get("held")
+            or triaged_sha != revision
+            or status not in expected_statuses
+        ):
+            return None, "attempt-reset-resume-state-mismatch"
+        if not reset_already_applied and (
+            state.get("held") or triaged_sha != revision or status != "error"
+        ):
             return None, "attempt-reset-state-mismatch"
         cleared = "error"
     elif marker is not None:
-        if state.get("held") or triaged_sha != revision or status not in {
-            "queued",
-            "error",
-        }:
+        if (
+            state.get("held")
+            or triaged_sha != revision
+            or status
+            not in {
+                "queued",
+                "error",
+            }
+        ):
             return None, "already-replayed"
         try:
             duplicate_reentry = agent_claim.triage_replay_duplicate_only_evidence(
@@ -504,14 +634,28 @@ def inspect_candidate(
         "recommendation": "Needs your call.",
         **policy,
     }
-    if not render_card.should_hold(item, has_token):
-        return None, "auto-triage-disabled"
     cap = policy["triage_attempt_cap_per_revision"]
     if attempt_reset is not None:
         attempt_count = _attempt_reset_count(state, kind, revision, cap)
         if attempt_count is None:
             return None, "attempt-reset-count-mismatch"
-    else:
+        if reset_already_applied:
+            return {
+                "number": number,
+                "card": card,
+                "state": state,
+                "item": item,
+                "revision": revision,
+                "cleared": cleared,
+                "attempt_count": attempt_count,
+                "action": action,
+                "duplicate_reentry": False,
+                "attempt_reset": True,
+                "attempt_reset_applied": True,
+            }, "eligible"
+    if not render_card.should_hold(item, has_token):
+        return None, "auto-triage-disabled"
+    if attempt_reset is None:
         attempt_count = render_card.triage_attempt_count(state, kind, revision, cap)
     if duplicate_reentry:
         if attempt_count < 1:
@@ -530,6 +674,7 @@ def inspect_candidate(
         "action": action,
         "duplicate_reentry": duplicate_reentry,
         "attempt_reset": attempt_reset is not None,
+        "attempt_reset_applied": False,
     }, "eligible"
 
 
@@ -565,7 +710,9 @@ def _plans_match_for_reset(initial, reread):
     )
 
 
-def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_token):
+def _preflight_attempt_reset(
+    selected, attempt_reset_scope, wave, config, owner, has_token
+):
     if not attempt_reset_scope:
         return selected
     if len(selected) != len(attempt_reset_scope):
@@ -579,6 +726,7 @@ def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_t
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(number),
+            attempt_reset_wave=wave,
         )
         if not plan or not _plans_match_for_reset(initial, plan):
             print(
@@ -594,9 +742,7 @@ def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_t
 
 def _marker(wave, revision, cleared, run_number, attempt_reset=False):
     marker = {
-        "version": (
-            ATTEMPT_RESET_REPLAY_VERSION if attempt_reset else REPLAY_VERSION
-        ),
+        "version": (ATTEMPT_RESET_REPLAY_VERSION if attempt_reset else REPLAY_VERSION),
         "wave": wave,
         "revision": revision,
         "cleared": cleared,
@@ -682,9 +828,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
     owner, run_number = _entry(wave, limit)
     attempt_reset_scope = _attempt_reset_scope(wave, attempts_reset_cards)
     if attempt_reset_scope and limit != len(attempt_reset_scope):
-        raise ValueError(
-            "attempt reset limit must equal the sanctioned cohort size"
-        )
+        raise ValueError("attempt reset limit must equal the sanctioned cohort size")
     repo_slug = _card_repo_slug(owner)
     config = core.load_config()
     has_token = render_card.auto_triage_has_token()
@@ -702,6 +846,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(number),
+            attempt_reset_wave=wave,
         )
         if plan:
             eligible.append(plan)
@@ -720,14 +865,21 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             raise ValueError(
                 "attempt reset refused because a sanctioned card failed validation"
             )
+    if (
+        attempt_reset_scope
+        and eligible
+        and all(plan.get("attempt_reset_applied") for plan in eligible)
+    ):
+        raise ValueError("attempt reset has already consumed the sanctioned cohort")
     ceiling = config.get("triage_daily_ceiling", 0)
     remaining = render_card.triage_budget_remaining(ceiling)
-    if attempt_reset_scope and remaining < len(attempt_reset_scope):
-        raise ValueError("attempt reset requires budget for the complete cohort")
+    pending_attempt_resets = sum(
+        not plan.get("attempt_reset_applied") for plan in eligible
+    )
+    if attempt_reset_scope and remaining < pending_attempt_resets:
+        raise ValueError("attempt reset requires budget for the pending cohort")
     wave_bound = (
-        len(attempt_reset_scope)
-        if attempt_reset_scope
-        else min(limit, remaining)
+        len(attempt_reset_scope) if attempt_reset_scope else min(limit, remaining)
     )
     selected = eligible[:wave_bound]
     deferred = len(eligible) - len(selected)
@@ -754,23 +906,30 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             "written": 0,
         }
     selected = _preflight_attempt_reset(
-        selected, attempt_reset_scope, config, owner, has_token
+        selected, attempt_reset_scope, wave, config, owner, has_token
     )
     written = 0
     queued = 0
     for initial in selected:
+        if initial.get("attempt_reset_applied"):
+            continue
         plan, reason = inspect_candidate(
             initial["number"],
             config,
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(initial["number"]),
+            attempt_reset_wave=wave,
         )
         if not plan:
             print(
                 "::notice::replay skipped card #%s after re-read: %s"
                 % (initial["number"], reason)
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card changed during mutation"
+                )
             continue
         live = render_card.get_card(plan["number"])
         if _card_snapshot_identity(live) != _card_snapshot_identity(plan["card"]):
@@ -778,6 +937,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 "::warning::replay deferred card #%s: card-raced-before-queue"
                 % plan["number"]
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card changed during mutation"
+                )
             continue
         current = reconcile.current_card({"number": plan["number"]})
         try:
@@ -793,15 +956,16 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
         except Exception as error:
             print(
                 "::error::replay refused card #%s before queueing: "
-                "claim tombstone failed (%s)"
-                % (plan["number"], str(error)[:180])
+                "claim tombstone failed (%s)" % (plan["number"], str(error)[:180])
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because the cohort could not be claimed"
+                )
             continue
         if superseded["superseded"]:
-            print(
-                "replay superseded stale triage claim for card #%s"
-                % plan["number"]
-            )
+            print("replay superseded stale triage claim for card #%s" % plan["number"])
+
         def prepare_body(body, plan=plan):
             return _body_with_replay_marker(body, plan, wave, run_number)
 
@@ -820,6 +984,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 "::warning::replay queueing deferred without card unlock for card #%s"
                 % plan["number"]
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card could not be queued"
+                )
     print(
         "replay summary: listed=%s eligible=%s marked=%s queued=%s deferred=%s"
         % (len(numbers), len(eligible), written, queued, deferred)

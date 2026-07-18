@@ -189,6 +189,7 @@ def replay_environment(
         }
     )
     try:
+
         def supersede(**kwargs):
             claims.append(kwargs)
             return {
@@ -236,10 +237,11 @@ def cards_file(numbers):
     return handle.name
 
 
-def attempt_reset_fixture():
+def attempt_reset_fixture(cohort=None):
+    cohort = cohort or replay.ATTEMPT_RESET_COHORT
     cards = {}
     sources = {}
-    for card_number, prior_marker in sorted(replay.ATTEMPT_RESET_COHORT.items()):
+    for card_number, prior_marker in sorted(cohort.items()):
         revision = prior_marker["revision"]
         kind = "issue-triage" if revision.endswith("Z") else "pr-review"
         target = card_number + 10_000
@@ -346,21 +348,295 @@ def test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry():
         os.unlink(path)
 
 
+def test_array_recovery_attempt_reset_grants_exact_cohort_one_reentry():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            result = replay.run(
+                path,
+                wave,
+                len(cohort),
+                attempts_reset_cards=supplied,
+            )
+            assert result == {
+                "eligible": 15,
+                "planned": 15,
+                "deferred": 0,
+                "written": 15,
+                "queued": 15,
+            }
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 15
+            for number, value in cards.items():
+                state = rc._unique_state_block(value["body"])
+                assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+                assert state[replay.REPLAY_FIELD] == {
+                    "version": replay.ATTEMPT_RESET_REPLAY_VERSION,
+                    "wave": wave,
+                    "revision": cohort[number]["revision"],
+                    "cleared": "error",
+                    "at": state[replay.REPLAY_FIELD]["at"],
+                    "run_number": 77,
+                    "attempt_reset": True,
+                }
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("array recovery attempt reset was reusable")
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 15
+    finally:
+        os.unlink(path)
+
+
+def test_array_recovery_attempt_reset_requires_exact_wave_cohort_and_limit():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    invalid_inputs = (
+        ("wrong-wave", supplied),
+        (replay.ATTEMPT_RESET_WAVE, supplied),
+        (wave, supplied + ",9999"),
+        (wave, ",".join(supplied.split(",")[:-1])),
+        (wave, supplied + ",154"),
+    )
+    for candidate_wave, value in invalid_inputs:
+        try:
+            replay._attempt_reset_scope(candidate_wave, value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError((candidate_wave, value))
+
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort) - 1,
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset accepted a non-cohort limit")
+            assert not calls["card_reads"] and not calls["source_reads"]
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    changed = min(cards)
+    state = rc._unique_state_block(cards[changed]["body"])
+    state[replay.REPLAY_FIELD]["at"] = "2026-07-17T20:00:00Z"
+    cards[changed]["body"] = rc._replace_state_block(cards[changed]["body"], state)
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset accepted a wrong prior marker")
+            assert not calls["claims"]
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    changed = max(cards)
+
+    def race_card(number, read_count, live_cards):
+        if read_count == len(cohort) + len(live_cards):
+            state = rc._unique_state_block(live_cards[number]["body"])
+            state["triage_status"] = "queued"
+            live_cards[number]["body"] = rc._replace_state_block(
+                live_cards[number]["body"], state
+            )
+
+    path = cards_file([])
+    before = {number: value["body"] for number, value in cards.items()}
+    try:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset mutated before full preflight")
+            assert len(calls["card_reads"]) >= len(cohort) * 2
+            assert not calls["claims"]
+            assert not calls["edits"] and not calls["queued"]
+            assert not calls["dispatched"]
+            changed_only = {
+                number: value["body"]
+                for number, value in cards.items()
+                if value["body"] != before[number]
+            }
+            assert set(changed_only) == {changed}
+    finally:
+        os.unlink(path)
+
+
+def test_attempt_reset_later_race_pauses_then_resumes_exact_cohort():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    changed = max(cards)
+    race_read = len(cohort) * 2 + 3 * (len(cohort) - 1) + 1
+    raced = False
+
+    def race_card(number, read_count, live_cards):
+        nonlocal raced
+        if not raced and number == changed and read_count == race_read:
+            state = rc._unique_state_block(live_cards[number]["body"])
+            state["triage_status"] = "queued"
+            live_cards[number]["body"] = rc._replace_state_block(
+                live_cards[number]["body"], state
+            )
+            raced = True
+
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset continued after a later-card race")
+            assert raced
+            assert len(calls["queued"]) == len(cohort) - 1
+            for number, value in cards.items():
+                state = rc._unique_state_block(value["body"])
+                if number == changed:
+                    assert state[replay.REPLAY_FIELD] == cohort[number]
+                    state["triage_status"] = "error"
+                    value["body"] = rc._replace_state_block(value["body"], state)
+                else:
+                    assert state[replay.REPLAY_FIELD]["version"] == (
+                        replay.ATTEMPT_RESET_REPLAY_VERSION
+                    )
+            resumed = replay.run(
+                path,
+                wave,
+                len(cohort),
+                attempts_reset_cards=supplied,
+            )
+            assert resumed == {
+                "eligible": len(cohort),
+                "planned": len(cohort),
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert len(calls["queued"]) == len(cohort)
+            assert all(
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD]["version"]
+                == replay.ATTEMPT_RESET_REPLAY_VERSION
+                for value in cards.values()
+            )
+    finally:
+        os.unlink(path)
+
+
+def test_attempt_reset_resume_requires_only_pending_budget():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    pending = max(cards)
+    for number, value in cards.items():
+        if number == pending:
+            continue
+        state = rc._unique_state_block(value["body"])
+        revision = cohort[number]["revision"]
+        for field in replay.TRIAGE_NON_SUCCESS_FIELDS:
+            state.pop(field, None)
+        state["triaged_sha"] = revision
+        state["triage_status"] = "queued"
+        state[replay.REPLAY_FIELD] = replay._marker(
+            wave, revision, "error", 77, attempt_reset=True
+        )
+        value["body"] = rc._replace_state_block(value["body"], state)
+
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources, remaining=1) as calls:
+            result = replay.run(
+                path,
+                wave,
+                len(cohort),
+                attempts_reset_cards=supplied,
+            )
+            assert result == {
+                "eligible": len(cohort),
+                "planned": len(cohort),
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+            assert calls["queued"][0][0] == pending
+            assert all(
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD]["version"]
+                == replay.ATTEMPT_RESET_REPLAY_VERSION
+                for value in cards.values()
+            )
+    finally:
+        os.unlink(path)
+
+
 def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     _, _, supplied = attempt_reset_fixture()
-    assert replay._attempt_reset_count(
-        {
-            rc.TRIAGE_ATTEMPTS_FIELD: {
-                "version": True,
-                "kind": "pr-review",
-                "revision": "abcdef1",
-                "count": 2,
-            }
-        },
-        "pr-review",
-        "abcdef1",
-        2,
-    ) is None
+    assert (
+        replay._attempt_reset_count(
+            {
+                rc.TRIAGE_ATTEMPTS_FIELD: {
+                    "version": True,
+                    "kind": "pr-review",
+                    "revision": "abcdef1",
+                    "count": 2,
+                }
+            },
+            "pr-review",
+            "abcdef1",
+            2,
+        )
+        is None
+    )
     invalid_inputs = (
         ("wrong-wave", supplied),
         (replay.ATTEMPT_RESET_WAVE, supplied + ",9999"),
@@ -383,9 +659,7 @@ def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     state = rc._unique_state_block(cards[moved]["body"])
     old_revision = replay.ATTEMPT_RESET_COHORT[moved]["revision"]
     kind = state["kind"]
-    moved_revision = (
-        "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
-    )
+    moved_revision = "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
     state["updated_at" if kind == "issue-triage" else "head_sha"] = moved_revision
     state["triaged_sha"] = moved_revision
     state[rc.TRIAGE_ATTEMPTS_FIELD]["revision"] = moved_revision
@@ -460,9 +734,7 @@ def test_attempt_reset_second_read_mismatch_is_atomic_zero_write():
     path = cards_file([])
     before = {number: value["body"] for number, value in cards.items()}
     try:
-        with replay_environment(
-            cards, sources, card_read_hook=race_card
-        ) as calls:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
             try:
                 replay.run(
                     path,
@@ -499,7 +771,7 @@ def test_v2_reset_marker_is_never_ordinary_replay_evidence():
     }
     state[replay.REPLAY_FIELD] = {
         "version": replay.ATTEMPT_RESET_REPLAY_VERSION,
-        "wave": replay.ATTEMPT_RESET_WAVE,
+        "wave": replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE,
         "revision": "abcdef1",
         "cleared": "error",
         "at": "2026-07-17T20:00:00Z",
@@ -563,9 +835,7 @@ def test_queue_failure_does_not_unlock_card_for_later_schedule():
             assert replay.REPLAY_FIELD not in state
             assert state["triage_status"] == "error"
             assert (
-                not calls["edits"]
-                and not calls["queued"]
-                and not calls["dispatched"]
+                not calls["edits"] and not calls["queued"] and not calls["dispatched"]
             )
     finally:
         os.unlink(path)
@@ -905,8 +1175,7 @@ def test_duplicate_only_evidence_requires_a_terminal_pre_replay_claim_and_record
     fake.comments.append(
         {
             "id": 1,
-            "body": "Agent triage event finished with consumer.committed. %s"
-            % marker,
+            "body": "Agent triage event finished with consumer.committed. %s" % marker,
             "user": {"login": "github-actions[bot]"},
             "created_at": "2026-07-16T09:00:00Z",
             "updated_at": "2026-07-16T09:00:00Z",
@@ -1271,10 +1540,36 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert replay.REPLAY_LIMIT_MAX == 25
     assert len(replay.ATTEMPT_RESET_COHORT) == 19
     assert replay.ATTEMPT_RESET_WAVE == "evidence-empty-e7-final"
+    assert len(replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT) == 15
+    assert set(replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT) == {
+        154,
+        481,
+        572,
+        907,
+        951,
+        1266,
+        1275,
+        1428,
+        1430,
+        1435,
+        1436,
+        1437,
+        1441,
+        1442,
+        1443,
+    }
+    assert replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE == "array-recovery-g1-final"
+    assert replay.ATTEMPT_RESET_COHORTS == {
+        replay.ATTEMPT_RESET_WAVE: replay.ATTEMPT_RESET_COHORT,
+        replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE: (
+            replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+        ),
+    }
     wheelhouse_config = yaml.safe_load(
         (ROOT / "wheelhouse.config.yml").read_text(encoding="utf-8")
     )
     assert wheelhouse_config["triage_attempt_cap_per_revision"] == 2
+    assert wheelhouse_config["triage_daily_ceiling"] == 1200
     assert "reconcile.maybe_queue_auto_triage" in replay_text
     assert "dispatch_triage_workflow" not in replay_text
     assert replay.REPLAY_FIELD not in rc.MATERIAL_FIELDS
@@ -1299,6 +1594,11 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
 TESTS = [
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry,
+    test_array_recovery_attempt_reset_grants_exact_cohort_one_reentry,
+    test_array_recovery_attempt_reset_requires_exact_wave_cohort_and_limit,
+    test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write,
+    test_attempt_reset_later_race_pauses_then_resumes_exact_cohort,
+    test_attempt_reset_resume_requires_only_pending_budget,
     test_attempt_reset_refuses_outside_scope_and_any_state_mismatch,
     test_attempt_reset_binds_complete_prior_marker_identity,
     test_attempt_reset_second_read_mismatch_is_atomic_zero_write,
