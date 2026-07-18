@@ -1739,7 +1739,7 @@ def decide_nl_apply(
         return {"outcome": "success", "result": primary, "reason": ""}
     if primary is not None:
         reason = "native structured output was absent or failed trusted validation"
-    if not (result_text or "").strip():
+    if not (result_text or "").strip() and repair_claim_admitted is None:
         return {"outcome": "no-result", "result": None, "reason": ""}
     if repaired_text:
         repaired, repaired_reason = _nl_parse_with_reason(repaired_text)

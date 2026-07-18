@@ -262,6 +262,33 @@ def test_native_bridge_and_portable_fallback():
                 and prep_outputs.get("repair_needed") == "true"
                 and repair_prompt.is_file(),
             )
+            repair_root = root / ("invalid-" + label + "-repair")
+            run_fake(repair_root, "nl-decision.schema-repair", final=VALID_ANSWER)
+            repaired_outputs = route_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                repair_root / "bundle" / "result.json",
+                root / ("invalid-" + label + "-route.txt"),
+                repair_claim_admitted="true",
+            )
+            missing_repair_outputs = route_cli(
+                invalid_bundle / ("result-invalid-" + label + ".json"),
+                root / ("invalid-" + label + "-missing-repair.json"),
+                root / ("invalid-" + label + "-missing-route.txt"),
+                repair_claim_admitted="true",
+            )
+            check(
+                "fallback: invalid native %s carrier consumes trusted repair" % label,
+                repaired_outputs.get("result_valid") == "true"
+                and repaired_outputs.get("repair_status") == "repaired"
+                and repaired_outputs.get("answer") == VALID_ANSWER["answer"],
+            )
+            check(
+                "fallback: invalid native %s missing repair keeps retry projection" % label,
+                missing_repair_outputs.get("result_valid") == "false"
+                and missing_repair_outputs.get("failure_code") == "output.schema_invalid"
+                and "single bounded repair attempt"
+                in missing_repair_outputs.get("failure_message", ""),
+            )
 
         _, absent_bundle = make_bundle(
             root / "absent", action="nl-decision.local"
@@ -404,7 +431,12 @@ def test_bound_schema_is_passed_to_action():
     )
 
 
-def route_cli(primary: Path, repair: Path, output: Path) -> dict[str, str]:
+def route_cli(
+    primary: Path,
+    repair: Path,
+    output: Path,
+    repair_claim_admitted="",
+) -> dict[str, str]:
     state = {
         "repo": "firstmate",
         "number": 423,
@@ -417,6 +449,7 @@ def route_cli(primary: Path, repair: Path, output: Path) -> dict[str, str]:
         GITHUB_OUTPUT=str(output),
         NL_EXECUTION_FILE=str(primary),
         NL_REPAIR_EXECUTION_FILE=str(repair),
+        NL_REPAIR_CLAIM_ADMITTED=repair_claim_admitted,
         ISSUE_BODY=body,
         KIND="pr-review",
         GITHUB_REPOSITORY_OWNER="owner",
