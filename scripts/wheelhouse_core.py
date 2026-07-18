@@ -19,9 +19,8 @@ contributor rebase nudge per head SHA.
 Approval verifies each awaiting run against the target PR: populated
 workflow_run.pull_requests must name that PR, while fork-originated empty
 associations must match the PR head SHA and branch.
-Verified duplicate pending runs sharing a stable workflowDatabaseId are deduped
-to the highest/newest run before approval; runs without that stable workflow
-identity are left distinct.
+Every verified current-head pending run is approved, including same-workflow
+duplicates that GitHub still exposes as independently actionable.
 Incomplete PR, issue, or closing-reference pagination is reported as a warning
 and marks the repo result as truncated, so reconcile will not self-heal close
 cards from an incomplete view of the repo.
@@ -92,6 +91,7 @@ ISSUE_PAGE_SIZE = 50
 PR_LABELS_PAGE_SIZE = 20
 CLOSING_REFS_PAGE_SIZE = 20
 STATUS_CONTEXTS_PAGE_SIZE = 100
+ACTION_REQUIRED_RUN_LIMIT = 30
 
 _PR_NODE_FIELDS = """
         number title isDraft updatedAt changedFiles isCrossRepository mergeable
@@ -2937,8 +2937,11 @@ def build_repo(
     whose `ci_safety` verdict is provably safe is approved here (in the
     FLEET_TOKEN scan context), or verified as having no pending run, and emits NO
     card; risky/uncertain contributor PRs still become cards while excluded-author
-    PRs only log suppressed-card warnings. Each handled ci-approval PR also emits
-    exactly one stderr notice/warning outcome line. When the handled path is a
+    PRs only log suppressed-card warnings. Before bucket resolution, every
+    non-draft known-fork PR gets an exact-head action_required probe so completed
+    rollup contexts cannot mask a separate pending suite; a probe error fails the
+    repo scan closed before any acting path. Each handled ci-approval PR also
+    emits exactly one stderr notice/warning outcome line. When the handled path is a
     verified `approve_ci` noop and settled mergeability is CONFLICTING, the same
     fire-once-per-head rebase nudge used for `needs-rebase` is posted before the
     PR is dropped from the worklist - still no decision card and no bucket rewrite
@@ -3032,20 +3035,63 @@ def build_repo(
     closing_scan_complete = True
     closing_scan_warning = ""
     pr_contexts = []
+    pending_ci_errors = {}
     settle_numbers = []
     for pr in prs:
         author = pr.get("author") or {}
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
+        pending_ci_approval = False
+        # statusCheckRollup only reflects check contexts that already exist. A
+        # separate or replayed action_required suite can coexist with completed
+        # contexts on the same head, so discover that state independently before
+        # bucket selection. Drafts stay excluded by policy, and only a provable
+        # fork is queried. The acting path below still re-lists and individually
+        # verifies every run against the live PR head before approving anything.
+        if not pr["isDraft"] and cross_repo is True:
+            pending_runs, pending_error = _list_action_required_runs(
+                slug, pr.get("headRefName"), pr.get("headRefOid")
+            )
+            if pending_error:
+                pending_ci_errors[pr["number"]] = pending_error
+            else:
+                pending_ci_approval = bool(pending_runs)
         bucket = classify(
             pr["isDraft"], comp, tests, ci, cross_repo, pr.get("mergeable")
         )
-        pr_contexts.append((pr, author, comp, tests, ci, cross_repo))
+        if pending_ci_approval:
+            bucket = "needs-ci-approval"
+        pr_contexts.append(
+            (pr, author, comp, tests, ci, cross_repo, pending_ci_approval)
+        )
         if bucket in ("merge-ready", "review-needed") and _mergeable_is_unknown(
             pr.get("mergeable")
         ):
             settle_numbers.append(pr["number"])
+
+    if pending_ci_errors:
+        failed_numbers = sorted(pending_ci_errors)
+        failed_reason = pending_ci_errors[failed_numbers[0]]
+        return (
+            {
+                "name": name,
+                "ok": False,
+                "warning": (
+                    "%s scan failed: action_required run enumeration failed for "
+                    "fork PR(s) %s: %s"
+                    % (
+                        slug,
+                        ", ".join("#%s" % number for number in failed_numbers),
+                        failed_reason[:160],
+                    )
+                ),
+                "open_pr_numbers": [pr["number"] for pr in prs],
+                "open_issue_numbers": [it["number"] for it in issues],
+                "truncated": pr_truncated or issue_truncated,
+            },
+            [],
+        )
 
     settled_mergeables, settlement_errors = _settle_mergeables(
         owner, name, settle_numbers
@@ -3065,17 +3111,21 @@ def build_repo(
             settlement_failure,
             [],
         )
-    for pr, author, comp, tests, ci, cross_repo in pr_contexts:
-        bucket = _resolve_pr_bucket(
-            owner,
-            name,
-            pr,
-            pr["isDraft"],
-            comp,
-            tests,
-            ci,
-            cross_repo,
-            settled_mergeables.get(pr["number"], _MERGEABLE_SETTLEMENT_UNSET),
+    for pr, author, comp, tests, ci, cross_repo, pending_ci_approval in pr_contexts:
+        bucket = (
+            "needs-ci-approval"
+            if pending_ci_approval
+            else _resolve_pr_bucket(
+                owner,
+                name,
+                pr,
+                pr["isDraft"],
+                comp,
+                tests,
+                ci,
+                cross_repo,
+                settled_mergeables.get(pr["number"], _MERGEABLE_SETTLEMENT_UNSET),
+            )
         )
         author_excluded = _author_excluded_from_queue(author, maintainer_logins)
         try:
@@ -5130,6 +5180,60 @@ def _workflow_run_matches_pr(slug, run_id, pr, head_sha, head_ref):
     return (True, "")
 
 
+def _list_action_required_runs(slug, head_ref, head_sha):
+    """List a complete exact-head page of pending workflow runs, or an error.
+
+    Callers must treat any error as unknown state. This helper is discovery
+    only: `approve_ci` separately fetches the live PR and verifies every listed
+    run through `_workflow_run_matches_pr` before acting.
+    """
+    head_ref = str(head_ref or "")
+    head_sha = str(head_sha or "")
+    if not head_ref or not head_sha:
+        return (None, "missing head ref/sha")
+    result = subprocess.run(
+        [
+            "gh",
+            "run",
+            "list",
+            "--branch",
+            head_ref,
+            "--commit",
+            head_sha,
+            "--status",
+            "action_required",
+            "--limit",
+            str(ACTION_REQUIRED_RUN_LIMIT),
+            "-R",
+            slug,
+            "--json",
+            "databaseId,workflowDatabaseId,workflowName,headSha,headBranch,url",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return (None, "workflow run list failed: %s" % result.stderr.strip()[:160])
+    if not result.stdout.strip():
+        return (None, "workflow run list returned no output")
+    try:
+        runs = json.loads(result.stdout)
+    except ValueError:
+        return (None, "workflow run list returned invalid JSON")
+    if not isinstance(runs, list):
+        return (None, "workflow run list returned unexpected data")
+    if len(runs) >= ACTION_REQUIRED_RUN_LIMIT:
+        return (
+            None,
+            "workflow run list returned %d runs (limit %d); refusing a possibly "
+            "truncated list" % (len(runs), ACTION_REQUIRED_RUN_LIMIT),
+        )
+    for run in runs:
+        if not isinstance(run, dict) or not run.get("databaseId"):
+            return (None, "workflow run list returned an entry without databaseId")
+    return (runs, "")
+
+
 def approve_ci(owner, repo, pr, posture=None, strict=False):
     """Approve fork-PR workflow runs awaiting maintainer approval.
 
@@ -5141,9 +5245,8 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
     Each action_required run must also verify against the PR head: populated
     pull_requests associations stay strict, while fork-originated empty
     associations are accepted only on matching head SHA plus head branch.
-    After that verification, duplicate pending runs sharing a stable
-    workflowDatabaseId are deduped to the highest/newest run. Runs without that
-    stable workflow identity remain distinct.
+    Every verified current-head run is approved, including multiple runs with
+    the same workflow identity when GitHub exposes each as actionable.
 
     Returns (status, message). status in:
       approved - one or more runs approved
@@ -5198,60 +5301,11 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
             % (pr, head_ref, head_sha[:8], verdict.get("reason") or "not safe", warn),
         )
 
-    run_list_limit = 30
-    lst = subprocess.run(
-        [
-            "gh",
-            "run",
-            "list",
-            "--branch",
-            head_ref,
-            "--commit",
-            head_sha,
-            "--status",
-            "action_required",
-            "--limit",
-            str(run_list_limit),
-            "-R",
-            slug,
-            "--json",
-            "databaseId,workflowDatabaseId,workflowName,headSha,headBranch,url",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if lst.returncode != 0:
+    runs, list_error = _list_action_required_runs(slug, head_ref, head_sha)
+    if list_error:
         return (
             "error",
-            "#%s (%s@%s): workflow run list failed: %s%s"
-            % (pr, head_ref, head_sha[:8], lst.stderr.strip()[:160], warn),
-        )
-    if not lst.stdout.strip():
-        return (
-            "error",
-            "#%s (%s@%s): workflow run list returned no output%s"
-            % (pr, head_ref, head_sha[:8], warn),
-        )
-    try:
-        runs = json.loads(lst.stdout)
-    except ValueError:
-        return (
-            "error",
-            "#%s (%s@%s): workflow run list returned invalid JSON%s"
-            % (pr, head_ref, head_sha[:8], warn),
-        )
-    if not isinstance(runs, list):
-        return (
-            "error",
-            "#%s (%s@%s): workflow run list returned unexpected data%s"
-            % (pr, head_ref, head_sha[:8], warn),
-        )
-    if len(runs) >= run_list_limit:
-        return (
-            "error",
-            "#%s (%s@%s): workflow run list returned %d runs (limit %d); "
-            "refusing to approve a possibly truncated list%s"
-            % (pr, head_ref, head_sha[:8], len(runs), run_list_limit, warn),
+            "#%s (%s@%s): %s%s" % (pr, head_ref, head_sha[:8], list_error, warn),
         )
     if not runs:
         return (
@@ -5263,12 +5317,6 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
     matching = []
     skipped = []
     for run in runs:
-        if not isinstance(run, dict) or not run.get("databaseId"):
-            return (
-                "error",
-                "#%s (%s@%s): workflow run list returned an entry without databaseId%s"
-                % (pr, head_ref, head_sha[:8], warn),
-            )
         name = run.get("workflowName", "?")
         match, reason = _workflow_run_matches_pr(
             slug, run["databaseId"], pr, head_sha, head_ref
@@ -5283,28 +5331,6 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
             matching.append(run)
         else:
             skipped.append("%s:%s" % (name, reason))
-
-    def dedup_key(run):
-        workflow_id = run.get("workflowDatabaseId")
-        if workflow_id not in (None, ""):
-            return ("workflow", str(workflow_id))
-        return ("run", str(run["databaseId"]))
-
-    by_workflow = {}
-    for run in matching:
-        key = dedup_key(run)
-        prev = by_workflow.get(key)
-        if prev is None or run["databaseId"] > prev["databaseId"]:
-            by_workflow[key] = run
-    if len(by_workflow) < len(matching):
-        winners = set(id(r) for r in by_workflow.values())
-        for run in matching:
-            if id(run) not in winners:
-                skipped.append(
-                    "%s:duplicate-pending-run-%s"
-                    % (run.get("workflowName", "?"), run["databaseId"])
-                )
-        matching = sorted(by_workflow.values(), key=lambda r: r["databaseId"])
 
     if not matching:
         msg = "#%s (%s@%s): no matching workflow runs awaiting approval" % (
