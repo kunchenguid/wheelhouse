@@ -148,7 +148,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > **Heads-up - `auto_approve_ci` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork auto-approves fork-CI runs that the security gate proves safe (no CI-file changes, the PR targets the repo default branch, no `pull_request_target` workflow, and all safety reads succeed) and only raises a card for risky or uncertain contributor-authored runs.
 > A run is approved only after Wheelhouse verifies it is the target PR's awaiting `action_required` run: GitHub-populated `workflow_run.pull_requests` must contain exactly that PR, and fork-originated empty associations must match the PR `head_sha` plus `head_branch`.
-> If multiple verified pending runs share a stable workflow identity, Wheelhouse approves only the newest run; runs without a stable workflow identity stay distinct.
+> Wheelhouse approves every independently actionable verified current-head run, including runs that share a stable workflow identity.
 > After a safe run is approved, Wheelhouse waits for its checks to finish before classifying the PR or creating a card.
 > During that wait, an existing pure PR-review card is kept open and the hourly scan refreshes it to the observed head's non-green pending state; no transient-head triage is queued.
 > If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use).
@@ -405,7 +405,7 @@ By default the scan also **auto-approves fork-CI runs it proves safe** (`auto_ap
 Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop path, but risky or uncertain cases are logged with `suppressed-card` and do not emit decision cards.
 Same-repo PRs with no CI signal are routed to normal PR review, not CI approval.
 The approval step still binds each awaiting workflow run to the target PR by PR association, or by exact head SHA plus branch for fork runs where GitHub returns an empty association list.
-Verified duplicate pending runs that share a stable workflow identity are collapsed to the newest run before approval, so Wheelhouse does not start two copies of the same workflow and let the older one cancel.
+Wheelhouse approves every independently actionable verified current-head run, including same-workflow duplicates that GitHub still exposes for approval.
 If the approval step verifies that no matching run is awaiting approval, the scan normally emits no worklist item and any stale CI-approval card enters the soft-close lifecycle described above; for a contributor fork that conclusively conflicts, it also posts the rebase nudge described above, and a later pending run re-enters the normal approve, card, or suppressed-card path.
 A mergeability-settlement error for that narrow nudge exception marks the repo scan unhealthy instead, so reconcile preserves existing cards.
 Each CI-approval candidate the auto path handles also writes exactly one scan-log line, so approved runs, no-pending runs, approval failures, and fail-closed safety reasons are visible in `scan-backstop`.
@@ -474,7 +474,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Auto-approve of provably-safe fork CI (`auto_approve_ci`, DEFAULT ON).** To kill the repetitive "approve CI" clicks, the scan applies the *same* security gate *before* surfacing a card and auto-approves the runs it proves safe - so only risky or uncertain contributor PRs still raise a card.
   Auto-approve is a strict **subset** of the manual gate: a run emits no card only when there are **no** CI-execution file changes (above), the PR targets the repo default branch, the target repo's default branch runs **no** `pull_request_target` workflow, all safety reads succeed, and the approval call either approves the matching run or verifies that none is awaiting approval.
   After that safety verdict passes, the approval call approves only `action_required` runs for the PR head: when GitHub populates `workflow_run.pull_requests`, it must contain exactly that PR; when fork-originated runs leave that list empty, the run detail must match the PR's head SHA and branch.
-  Verified runs are deduped by stable `workflowDatabaseId` when GitHub exposes it, keeping the highest run ID for that workflow; same-named distinct workflows and runs without that identity are not collapsed.
+  Every independently actionable verified current-head run is approved, including duplicate runs that share a stable `workflowDatabaseId`.
   If no matching run is awaiting approval, Wheelhouse normally emits no worklist item and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use); a later pending run re-enters the normal approve, card, or suppressed-card path.
   For a contributor fork whose no-op PR is conclusively `CONFLICTING`, that no-card path also posts the existing fire-once-per-head rebase nudge before it drops the PR from the worklist.
   It does not change the CI-approval bucket, affect an `approved` path with real workflows, or write the structured pending-contributor cleanup state.
@@ -630,7 +630,7 @@ tests/test_reconcile.py        offline unit test for reconcile routing, activity
 tests/test_card_reuse.py       offline end-to-end card soft-close, trusted reuse, ambiguity, and lifecycle serialization tests
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
-tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run dedup, and logging
+tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run approval, and logging
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, evidence normalization/anchoring, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
