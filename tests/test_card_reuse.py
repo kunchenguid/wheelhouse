@@ -605,6 +605,7 @@ def add_triage_and_verdict(issue, current_item):
         triage=valid_triage(),
         base_sha=current_item["base_sha"],
         vision_sha=current_item["automerge_vision_sha"],
+        automerge_behavior_available=True,
     )
 
 
