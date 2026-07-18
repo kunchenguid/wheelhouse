@@ -53,6 +53,7 @@ def main():
     check("production: verified handoff becomes a bounded no-fetch repository", repository >= 0 and all(repository < index for index in direct) and "git init" in model_steps[repository]["run"] and "git remote" in model_steps[repository]["run"] and "fetch" not in model_steps[repository]["run"])
     checkpoint = next((index for index, step in enumerate(model_steps) if step.get("name") == "Write conservative pre-invocation checkpoint"), -1)
     checkpoint_upload = next((index for index, step in enumerate(model_steps) if step.get("name") == "Upload durable pre-invocation checkpoint"), -1)
+    checkpoint_stage = next((index for index, step in enumerate(model_steps) if step.get("name") == "Record durable checkpoint stage"), -1)
     check("production: durable spend checkpoint precedes every direct action", repository < checkpoint < checkpoint_upload < min(direct) and '"spendStarted": True' in model_steps[checkpoint]["run"] and "-attempt" in str(model_steps[checkpoint_upload]))
     check(
         "production: provider checkpoint rebinds the hydrated task to the caller commit",
@@ -197,6 +198,8 @@ def main():
         == "${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}"
         and model_steps[checkpoint_upload].get("if")
         == "${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}"
+        and model_steps[checkpoint_stage].get("if")
+        == model_steps[checkpoint_upload].get("if")
         and "steps.source.outputs.match == 'true'" in str(capture.get("if", "")),
     )
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))

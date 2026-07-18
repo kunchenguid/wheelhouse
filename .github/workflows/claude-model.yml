@@ -279,7 +279,7 @@ jobs:
           retention-days: 1
 
       - name: Record durable checkpoint stage
-        if: ${{ steps.hydrate.outcome == 'success' }}
+        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
