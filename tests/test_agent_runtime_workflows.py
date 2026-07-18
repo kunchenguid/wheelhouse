@@ -34,7 +34,7 @@ def main():
     docs = {name: yaml.safe_load(path.read_text()) for name, path in WORKFLOWS.items()}
     all_steps = [(name, step) for name, doc in docs.items() for step in steps(doc)]
     claude = [(name, step) for name, step in all_steps if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
-    check("production: exactly seven inventoried direct Claude steps remain", len(claude) == 7)
+    check("production: exactly eight inventoried direct Claude steps remain", len(claude) == 8)
     check("production: every direct step keeps exact action pin", all(step["uses"] == PIN for _, step in claude))
     check("production: every direct step is selected by immutable task action", all("steps.hydrate.outputs.action" in str(step.get("if", "")) for _, step in claude))
     check("production: direct Claude is never a failure fallback", all("failure()" not in str(step.get("if", "")) and "agent-runtime.outcome" not in str(step.get("if", "")) for _, step in claude))
@@ -150,6 +150,7 @@ def main():
         "deep-review.search",
         "nl-decision.local",
         "nl-decision.search",
+        "nl-decision.schema-repair",
     ):
         # Main dual variants are assembled as a trusted prefix plus .local/.search.
         if action.startswith("triage.issue") or action.startswith("triage.pr") or action.startswith("deep-review") or action.startswith("nl-decision"):
@@ -160,20 +161,20 @@ def main():
         check("runtime path represented: %s" % action, represented)
 
     runtime_runs = [step for _, step in all_steps if "scripts/agent_runtime.py run" in str(step.get("run", ""))]
-    check("runtime: triage, repair, deep review, and NL all invoke one CLI", len(runtime_runs) == 4)
+    check("runtime: primary and repair paths all invoke one CLI", len(runtime_runs) == 5)
     check("runtime: every invocation consumes AgentTask plus bundle", all("--task" in step["run"] and "--bundle" in step["run"] for step in runtime_runs))
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
     claude_build_steps = [step for step in build_steps if "claude" in str(step.get("id", ""))]
     codex_build_steps = [step for step in build_steps if step not in claude_build_steps]
     model_calls = [step for _, step in all_steps if step.get("uses") == "./.github/actions/claude-model-call"]
-    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 4 and len(codex_build_steps) == 4)
-    check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 4)
+    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 5 and len(codex_build_steps) == 5)
+    check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 5)
     model_text = WORKFLOWS["model"].read_text()
     check("runtime: trusted bridge requires observed enforcement proof", "from agent_runtime.claude_bridge import bridge" in model_text and 'proof="$RAW/enforcement.json"' in model_text)
     check("runtime: handoff has byte and file bounds plus complete digest verification", "MAX_HANDOFF_BYTES" in handoff and "MAX_HANDOFF_FILES" in handoff and "_verify_bundle" in handoff and "manifest verification failed" in handoff)
     check("runtime: model job receives a trusted manifest identity", "handoff_sha256" in WORKFLOWS["model"].read_text() and "steps.pack.outputs.manifestSha256" in component)
     reusable_calls = [job for doc in docs.values() for job in doc.get("jobs", {}).values() if job.get("uses") == "./.github/workflows/claude-model.yml"]
-    check("runtime: caller binds reusable model job to its own commit", len(reusable_calls) == 4 and all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for job in reusable_calls))
+    check("runtime: caller binds reusable model job to its own commit", len(reusable_calls) == 5 and all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for job in reusable_calls))
     check("runtime: local workflow reference eliminates mutable branch resolution", all(job.get("uses") == "./.github/workflows/claude-model.yml" for job in reusable_calls) and "github.ref_name" not in text and "gh workflow run" not in component)
     check(
         "runtime: source validation remains distinct from job binding",
@@ -228,7 +229,7 @@ def main():
     check("deep selection: target resolves before repository-aware gate", deep_ids.index("resolve") < deep_ids.index("gate"))
     check("deep selection: gate uses validated resolved repository", (deep_gate.get("env") or {}).get("TARGET_REPO") == "${{ steps.resolve.outputs.repo }}" and '--repo "$TARGET_REPO"' in deep_gate["run"])
     nl_result = next(step for step in steps(docs["decision"]) if step.get("id") == "nl-result")
-    check("NL consumer: runtime final exported before deterministic route", "agent_runtime.py export-final" in nl_result["run"])
+    check("NL consumer: trusted AgentResult is bound before deterministic route", 'echo "path=${RUNTIME_RESULT:-}"' in nl_result["run"] and "export-final" not in nl_result["run"])
     nl_consume_steps = docs["decision"]["jobs"]["nl-claude-consume"]["steps"]
     nl_export = next(step for step in nl_consume_steps if step.get("id") == "nl-result")
     nl_failure = next(
@@ -240,9 +241,8 @@ def main():
         if step.get("name") == "Record natural-language consumer stage"
     )
     check(
-        "NL projection: trusted result export runs under always for admitted Claude work",
+        "NL projection: trusted result binding runs under always for admitted Claude work",
         "always()" in str(nl_export.get("if", ""))
-        and nl_export.get("continue-on-error") is True
         and "steps.nl-claude-result.outputs.result"
         in str((nl_export.get("env") or {}).get("RUNTIME_RESULT", "")),
     )

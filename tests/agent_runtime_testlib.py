@@ -78,16 +78,16 @@ def make_task(root: Path, action: str, final: Any | None = None, script: dict[st
     kind = "issue-triage"
     repair_kind = "issue"
     target_file = str(target)
-    if action.startswith("triage.pr"):
+    if action.endswith(".schema-repair"):
+        kind = "schema-repair"
+        target_file = ""
+    elif action.startswith("triage.pr"):
         kind = "pr-review"
         repair_kind = "pr"
     elif action.startswith("deep-review"):
         kind = "pr-review"
     elif action.startswith("nl-decision"):
         kind = "pr-review"
-    elif action == "triage.schema-repair":
-        kind = "schema-repair"
-        target_file = ""
     task = build_task(
         action=action,
         selection=codex_selection(),

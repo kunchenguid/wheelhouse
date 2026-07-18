@@ -10,7 +10,7 @@ from typing import Any
 
 from .contract import ContractError, canonical_json_bytes, load_json_regular, validate_contract
 
-ACTION = re.compile(r"^(?:triage\.(?:pr|issue)\.(?:local|search)|triage\.schema-repair|deep-review\.(?:local|search)|nl-decision\.(?:local|search))$")
+ACTION = re.compile(r"^(?:triage\.(?:pr|issue)\.(?:local|search)|triage\.schema-repair|deep-review\.(?:local|search)|nl-decision\.(?:local|search|schema-repair))$")
 REVISION = re.compile(r"^[A-Za-z0-9:._+-]{1,160}$")
 EVENT_ID = re.compile(r"^[A-Za-z0-9:._+-]{1,200}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")

@@ -35,6 +35,7 @@ def main():
         "deep-review.search",
         "nl-decision.local",
         "nl-decision.search",
+        "nl-decision.schema-repair",
     ]
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

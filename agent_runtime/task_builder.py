@@ -51,7 +51,12 @@ ACTION_LIMITS = {
     "deep-review.search": (540_000, 600_000, 64, 160, 131_072),
     "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
+    "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
 }
+
+SCHEMA_REPAIR_ACTIONS = frozenset(
+    {"triage.schema-repair", "nl-decision.schema-repair"}
+)
 
 
 def _artifact_path(bundle: Path, digest: str) -> Path:
@@ -782,7 +787,7 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
 
 
 def claude_declared_tools(action: str) -> list[str]:
-    if action == "triage.schema-repair":
+    if action in SCHEMA_REPAIR_ACTIONS:
         return []
     tools = ["Read", "Grep", "Glob"]
     if action.startswith("nl-decision") or action.endswith(".search"):
@@ -794,7 +799,7 @@ def claude_declared_tools(action: str) -> list[str]:
 
 def claude_declared_outputs(action: str) -> list[str]:
     outputs = ["search-request.json"] if action.endswith(".search") else []
-    if action.startswith("nl-decision"):
+    if action.startswith("nl-decision") and action not in SCHEMA_REPAIR_ACTIONS:
         outputs.append("decision.json")
     return outputs
 
@@ -869,7 +874,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
         {"name": "provenance.actual-provider", "constraints": {}},
         {"name": "isolation.external", "constraints": {"worker": "sandboxed-adapter-worker"}},
     ]
-    if action != "triage.schema-repair":
+    if action not in SCHEMA_REPAIR_ACTIONS:
         required.extend(
             [
                 {"name": "fs.read", "constraints": {"roots": ["target.txt", "target-src"], "writes": False}},
@@ -894,7 +899,7 @@ def _tools(action: str, adapter: str) -> dict[str, Any]:
     if adapter == "claude-action-compat":
         return {"default": "deny", "parallel": False, "tools": []}
     names: list[str] = []
-    if action != "triage.schema-repair":
+    if action not in SCHEMA_REPAIR_ACTIONS:
         names = ["fs.read", "fs.grep", "fs.glob"]
     if action.endswith(".search"):
         names.append("github.search.readonly")
@@ -945,10 +950,10 @@ def _trust_segments(action: str, prompt_digest: str, prompt_bytes: int, inputs: 
     ]
     if action.startswith("deep-review"):
         segments.append({"name": "decision-card", "trust": "untrusted", "origin": "card-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
+    elif action in SCHEMA_REPAIR_ACTIONS:
+        segments.append({"name": "prior-candidate", "trust": "untrusted", "origin": "delivered-model-result-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
     elif action.startswith("nl-decision"):
         segments.append({"name": "maintainer-context", "trust": "trusted", "origin": "authorized-card-thread-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
-    elif action == "triage.schema-repair":
-        segments.append({"name": "prior-candidate", "trust": "untrusted", "origin": "delivered-model-result-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
     for item in inputs:
         segments.append({"name": item["id"], "trust": item["trust"], "origin": "prepared-artifact", "sha256": item["sha256"], "bytes": item["bytes"], "artifact": item["artifact"]})
     return segments
@@ -993,7 +998,7 @@ def build_task(
         raise ArtifactError("prompt artifact must be bounded UTF-8 text") from error
     tool_instruction = (
         "This schema-repair task exposes no tools. Work only from the bounded candidate in the prompt."
-        if action == "triage.schema-repair"
+        if action in SCHEMA_REPAIR_ACTIONS
         else "The sandboxed adapter worker exposes only fs.read, fs.grep, fs.glob and, on search profiles, github.search.readonly. Use those typed tools directly."
     )
     shim_lines = [
@@ -1116,10 +1121,20 @@ def build_task(
                 "schemaArtifact": schema_artifact,
                 "schemaId": schema_id,
                 "schemaSha256": schema_digest,
-                "evidencePolicy": "target-anchor/v1" if action.startswith("triage.") and action != "triage.schema-repair" else "none",
+                "evidencePolicy": "target-anchor/v1" if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS else "none",
                 "allowProseFallback": False,
             },
-            "retry": {"sameCandidateMaxAttempts": 1, "retryable": [], "repairTask": "triage.schema-repair/v1" if action.startswith("triage.") and action != "triage.schema-repair" else None},
+            "retry": {
+                "sameCandidateMaxAttempts": 1,
+                "retryable": [],
+                "repairTask": (
+                    "triage.schema-repair/v1"
+                    if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS
+                    else "nl-decision.schema-repair/v1"
+                    if action.startswith("nl-decision.") and action not in SCHEMA_REPAIR_ACTIONS
+                    else None
+                ),
+            },
             "session": {"mode": "ephemeral", "resume": "forbidden"},
             "retention": {"normalizedEventsDays": 3, "rawTranscript": "transient-cross-job" if adapter == "claude-action-compat" else "discard", "finalResult": "consumer-owned", "redactionPolicy": "wheelhouse-agent/v1"},
         },

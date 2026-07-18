@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production-faithful provider-free gate for all seven agent path groups."""
+"""Production-faithful provider-free gate for all eight agent path groups."""
 
 from __future__ import annotations
 
@@ -193,6 +193,7 @@ def main():
         cases.extend([
             ("triage.schema-repair", "schema-repair", "pr", False, False),
             ("triage.schema-repair", "schema-repair", "issue", False, False),
+            ("nl-decision.schema-repair", "schema-repair", "pr", False, False),
         ])
         for action in ("deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search"):
             for kind in ("pr-review", "issue-triage"):

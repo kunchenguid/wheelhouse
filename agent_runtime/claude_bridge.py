@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +95,26 @@ def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> An
     if not isinstance(value, dict):
         raise ContractError("Claude action result was not an object")
     return value
+
+
+def _raw_delivered_file(path: str, max_bytes: int) -> str:
+    """Retain bounded malformed declared output as repair-only delivered data."""
+    if not path:
+        return ""
+    candidate = Path(path)
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                return ""
+            raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            return ""
+        return raw.decode("utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
 
 
 def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
@@ -533,7 +555,15 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                     ],
                 }
         except (ContractError, json.JSONDecodeError, OSError, RecursionError, UnicodeError, ValueError):
-            raw = _result_text(terminal)
+            # NL writes its declared output to decision.json. If that file is
+            # malformed JSON, retain its exact bounded UTF-8 bytes as delivered
+            # repair data instead of replacing the candidate with the harness's
+            # unrelated terminal prose (card #1433). It remains failed and can
+            # never become `final` until a separate repair task passes the same
+            # strict schema validation.
+            raw = _raw_delivered_file(
+                delivered_file, task["spec"]["limits"]["maxFinalBytes"]
+            ) or _result_text(terminal)
             if raw:
                 encoded = canonical_json_bytes(raw)
                 if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
