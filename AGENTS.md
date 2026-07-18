@@ -1181,7 +1181,7 @@ A source checkout may be branch-attached because `actions/checkout@v4` checks an
 See `tests/test_agent_runtime_repo_snapshot.py`.
 The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and verifies the complete handoff into a fresh workspace.
 Its finalizer re-verifies the handoff, normalizes action results or accepts only the direct supervisor's atomic result, enforces task/profile binding, then exposes only a bounded verified result artifact to the trusted caller-side consumer.
-The reusable model job owns the task-bound execution timeout and its finalizer normalizes only a task-bound transcript plus observed enforcement record.
+The reusable model job owns the task-bound execution timeout; its finalizer normalizes only a task-bound action transcript plus observed enforcement record, or accepts the direct supervisor's atomic result.
 Trusted caller-side jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary and accept only the verified normalized result artifact.
 
 The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.

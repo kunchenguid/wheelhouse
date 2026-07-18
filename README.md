@@ -44,7 +44,7 @@ All three use one provider-agnostic, versioned runtime contract and can use an o
 The disabled Codex adapter keeps that credential in a typed host broker instead of exposing it to the model worker.
 The current production selection uses the exact pinned Claude Action for eight non-repair actions and the pinned direct Claude CLI for both schema-repair actions, all inside the same separate read-only reusable model workflow from a bounded content-addressed task handoff.
 The local reusable-workflow call resolves at the caller's exact commit, and the model job independently verifies that observed source revision before hydrating inputs or admitting provider spend.
-Its runtime proof records the observed read-only job, verified artifact, exact action tools, local no-remote repository, cancellation outcome, and bounded transcript boundary without claiming the stronger disabled Codex worker sandbox.
+The action lane's runtime proof records the observed read-only job, verified artifact, exact action tools, local no-remote repository, cancellation outcome, and bounded transcript boundary without claiming the stronger disabled Codex worker sandbox; direct repair results record the verified CLI, Bubblewrap sandbox, credential isolation, and native-schema validation.
 Unenforceable Claude provider budgets and the exact end-to-end hard deadline are explicit unavailable values, while the child-job timeout plus a durable conservative spend checkpoint constrains each direct invocation.
 Claude is the named production primary across every action selection.
 Codex CLI app-server remains disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription-auth path.

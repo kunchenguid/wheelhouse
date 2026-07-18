@@ -52,7 +52,7 @@ Deep-review and natural-language decision events remain outside this automatic-t
 The model job verifies the complete handoff before hydrating a fresh workspace and initializes a local repository without a remote or network fetch.
 The action lane applies its exact action tool allowlist and leaves only a bounded transcript plus observed enforcement record for its finalizer.
 The direct repair lane verifies Claude CLI `2.1.197` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox.
-It revalidates the signed target inputs after the action and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
+The action lane revalidates the signed target inputs after invocation and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
 The reusable model workflow validates its observed `GITHUB_SHA` against the expected caller commit before hydration or provider admission.
 Its separately permissioned finalizer verifies the handoff again, binds the observed source revision into the enforcement proof, and atomically emits `AgentResult` plus content-free events as a bounded artifact for the trusted consumer.
@@ -62,9 +62,9 @@ Claude records the exact end-to-end hard deadline as unavailable because GitHub 
 The obsolete API dispatch deadline is unavailable because the model job is part of the caller's workflow graph, while the child-job execution timeout remains externally enforced.
 Trusted artifact, transcript, event, and final-output bounds remain explicit.
 The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before either invocation lane, so cancellation or a harness crash cannot downgrade a possibly spent attempt.
-The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
+The Claude Action bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
-Claude harness provenance records the pinned action source commit and a checked-out action metadata digest when the runner exposes it, while the installed Claude executable version and digest remain unavailable.
+The action lane records the pinned action source commit and a checked-out action metadata digest when the runner exposes it; a successful direct repair records its verified Claude executable version and digest instead.
 
 ## Direct Claude schema-repair production profile
 
@@ -114,7 +114,7 @@ The provider-neutral adapter interface remains the only future seam.
 Trusted Wheelhouse steps continue to authorize events, fetch immutable target inputs, bind revisions, and perform every GitHub mutation.
 The selected harness runs in a distinct disposable GitHub Actions job whose token permissions are read-only and whose workspace is hydrated only from the verified task handoff.
 
-The active Claude compatibility boundary receives only:
+The Claude Action compatibility boundary receives only:
 
 - bounded prompt and input files represented by the immutable task
 - the exact action-specific tool allowlist
@@ -123,8 +123,8 @@ The active Claude compatibility boundary receives only:
 - one fresh workspace with read-only task inputs and bounded action output
 
 The Claude model subprocess never receives `FLEET_TOKEN` or another GitHub credential with write or acting authority.
-The no-search path receives only the model job's downscoped default token because the pinned action requires a GitHub token input.
-Search-enabled paths may receive only the optional `READONLY_TOKEN` and the narrow `wheelhouse-search` command.
+The action no-search path receives only the model job's downscoped default token because the pinned action requires a GitHub token input.
+Search-enabled action paths may receive only the optional `READONLY_TOKEN` and the narrow `wheelhouse-search` command.
 Trusted card writes and target operations remain outside the model subprocess.
 
 The disabled Codex adapter keeps `READONLY_TOKEN` in a trusted host broker.
@@ -285,7 +285,7 @@ To inspect a failure:
 ## Provider changes
 
 Claude remains the production primary until the captain approves a supported, subscription-funded, secure, and behaviorally compatible alternative.
-Provider changes require an explicit reviewed plan covering credentials, billing, data boundaries, all seven action paths, and deterministic consumer parity.
+Provider changes require an explicit reviewed plan covering credentials, billing, data boundaries, every production action path, and deterministic consumer parity.
 They must preserve `fallback: none` and cannot be selected by secret presence or an environment override.
 
 Codex is not an active target or expected future primary under the current plan.

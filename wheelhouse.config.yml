@@ -195,8 +195,8 @@ maintainer: ""
 
 # Provider-agnostic agent runtime.
 # Claude is the production primary for every agent-assisted action.
-# The seven direct Claude Action steps remain the exact pinned production
-# implementation behind the shared selection boundary.
+# Eight pinned Claude Action steps remain deployable behind the shared selection
+# boundary: production for non-repair actions and rollback for schema repair.
 # Codex remains disabled adapter evidence because this public deployment has no
 # supported secure noninteractive ChatGPT Pro authentication path.
 # Deferred provider candidates are not represented here and have no adapter or
