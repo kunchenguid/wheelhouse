@@ -224,8 +224,27 @@ jobs:
           chmod 500 "$install_dir" "$install_dir/claude"
           echo "$install_dir" >> "$GITHUB_PATH"
 
+      - name: Write direct-runtime install failure result
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_install.outcome == 'failure' }}
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-direct-pycache
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT" "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          PYTHONPATH="$HANDOFF/runtime" python - "$HANDOFF/bundle/task.json" "$HANDOFF/bundle" "$OUTPUT/result.json" "$OUTPUT/events.ndjson" <<'PY'
+          import sys
+          from agent_runtime.supervisor import write_direct_install_failure_result
+          write_direct_install_failure_result(*sys.argv[1:])
+          PY
+
       - name: Write direct-runtime pre-invocation checkpoint
-        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' }}
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_install.outcome == 'success' }}
         env:
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
           TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
@@ -251,7 +270,7 @@ jobs:
           PY
 
       - name: Upload durable pre-invocation checkpoint
-        if: ${{ steps.hydrate.outcome == 'success' }}
+        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.output_artifact }}-attempt

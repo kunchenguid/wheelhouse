@@ -18,7 +18,7 @@ from agent_runtime.adapters.claude import ClaudeCliAdapter, _load_lock
 from agent_runtime.capabilities import negotiate
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, atomic_write_json, file_sha256, load_json_regular, verify_result_binding
-from agent_runtime.supervisor import _validate_worker, write_controller_failure_result
+from agent_runtime.supervisor import _validate_worker, write_controller_failure_result, write_direct_install_failure_result
 from agent_runtime.task_builder import build_task
 from agent_runtime.worker import InternalEvents, _run_claude
 
@@ -191,6 +191,18 @@ def main() -> None:
         check("failure: direct failure is durable, classified, and non-consumed", failed["status"] == "failed" and failed["error"]["code"] == "harness.crash" and failed["error"]["spendStarted"] is True and "final" not in failed)
         check("failure: action and model fallback stay disabled", failed["selection"]["fallbackUsed"] is False and failed["selection"]["profile"] == "claude-cli-pinned" and failed["proof"]["executionProfile"] == "claude-cli-pinned")
         check("failure: durable record exposes missing provider evidence honestly", failed["selection"]["actualModel"] == "" and failed["proof"]["structuredOutputMechanism"] == "unavailable-after-controller-failure")
+
+        install_failure_result = root / "install-failure-result.json"
+        install_failure_events = root / "install-failure-events.ndjson"
+        install_failed = write_direct_install_failure_result(
+            str(bundle / "task.json"),
+            str(bundle),
+            str(install_failure_result),
+            str(install_failure_events),
+        )
+        verify_result_binding(task, install_failed)
+        check("failure: direct installation failure is durable and pre-spend", install_failed["status"] == "rejected" and install_failed["error"]["code"] == "harness.install_failed" and install_failed["error"]["spendStarted"] is False and install_failed["usage"]["providerRequests"] == 0 and "final" not in install_failed)
+        check("failure: installation record never claims child runtime controls", install_failed["proof"]["sandboxImplementation"] == "direct-runtime-install-failed" and install_failed["proof"]["credentialIsolation"] == "not-materialized" and install_failed["proof"]["structuredOutputMechanism"] == "unavailable-before-negotiation")
 
         mismatched = copy.deepcopy(failed)
         mismatched["selection"]["profile"] = "claude-action-current-pinned"

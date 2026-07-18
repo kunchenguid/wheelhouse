@@ -196,7 +196,7 @@ def main():
         and model_steps[checkpoint].get("if")
         == "${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}"
         and model_steps[checkpoint_upload].get("if")
-        == "${{ steps.hydrate.outcome == 'success' }}"
+        == "${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}"
         and "steps.source.outputs.match == 'true'" in str(capture.get("if", "")),
     )
     check("runtime: every Codex step is codex-only", all("codex" in str(step.get("if", "")) for step in runtime_runs + codex_build_steps))
@@ -306,6 +306,10 @@ def main():
     check("production: direct runtime uses trusted supervisor without action fallback", "from agent_runtime.supervisor import run" in direct_step["run"] and "claude_bridge" not in direct_step["run"] and "anthropics/claude-code-action" not in direct_step["run"])
     check("production: direct OAuth handoff is private and scrubbed before supervisor", "umask 077" in direct_step["run"] and "unset CLAUDE_CODE_OAUTH_TOKEN" in direct_step["run"] and "WHEELHOUSE_CLAUDE_CREDENTIAL_FILE" in direct_step["run"])
     check("production: direct runtime retains durable controller-failure normalization", "write_controller_failure_result" in model_text and "direct.json" in model_text and "lifecycle.timeout" in model_text)
+    direct_install_failure = next(step for step in model_steps if step.get("name") == "Write direct-runtime install failure result")
+    direct_checkpoint = next(step for step in model_steps if step.get("name") == "Write direct-runtime pre-invocation checkpoint")
+    check("production: direct install failure is normalized before spend", "steps.direct_install.outcome == 'failure'" in direct_install_failure["if"] and "write_direct_install_failure_result" in direct_install_failure["run"] and "harness.install_failed" in Path("agent_runtime/schemas/v1alpha1/agent-result.schema.json").read_text())
+    check("production: direct checkpoint requires a verified runtime install", "steps.direct_install.outcome == 'success'" in direct_checkpoint["if"])
     check("production: direct binary remains exact and digest verified", "2.1.197" in model_text and "sha256sum" in model_text and "runtime.lock.json" in model_text)
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))

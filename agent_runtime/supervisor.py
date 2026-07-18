@@ -788,24 +788,25 @@ def run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> 
             raise error
 
 
-def write_controller_failure_result(
+def _write_direct_failure_result(
     task_path: str,
     bundle_dir: str,
     code: str,
     result_path: str,
     events_path: str,
+    *,
+    spend_started: bool,
 ) -> dict[str, Any]:
-    """Persist a conservative direct-run failure after the spend checkpoint."""
-
     task = load_json_regular(task_path, max_bytes=16 * 1024 * 1024)
     validate_contract(task, "AgentTask")
     _verify_artifacts(task, Path(bundle_dir).resolve())
     candidate = task["spec"]["selection"]["candidates"][0]
-    if candidate["adapter"] != "claude-cli" or code not in (
-        "lifecycle.cancelled",
-        "lifecycle.timeout",
-        "harness.crash",
-    ):
+    allowed_codes = (
+        ("lifecycle.cancelled", "lifecycle.timeout", "harness.crash")
+        if spend_started
+        else ("harness.install_failed",)
+    )
+    if candidate["adapter"] != "claude-cli" or code not in allowed_codes:
         raise ContractError("direct controller failure request is invalid")
     lock = load_json_regular(Path(__file__).resolve().parent / "runtime.lock.json")
     claude = lock["claude"]
@@ -841,16 +842,16 @@ def write_controller_failure_result(
         "contractMajor": 1,
         "executionProfile": task["spec"]["selection"]["profile"],
         "isolationLevel": "sandboxed-adapter-worker-v1",
-        "sandboxImplementation": "unavailable-after-controller-failure",
-        "credentialIsolation": "mode-0600-file-handoff-attempted",
-        "structuredOutputMechanism": "unavailable-after-controller-failure",
+        "sandboxImplementation": "unavailable-after-controller-failure" if spend_started else "direct-runtime-install-failed",
+        "credentialIsolation": "mode-0600-file-handoff-attempted" if spend_started else "not-materialized",
+        "structuredOutputMechanism": "unavailable-after-controller-failure" if spend_started else "unavailable-before-negotiation",
         "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
-        "negotiationSha256": canonical_sha256({"status": "unavailable-after-controller-failure", "code": code}),
+        "negotiationSha256": canonical_sha256({"status": "unavailable-after-controller-failure" if spend_started else "rejected-before-runtime-install", "code": code}),
         "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),
         "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
         "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
         "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
-        "sandboxPolicySha256": canonical_sha256({"status": "unavailable-after-controller-failure"}),
+        "sandboxPolicySha256": canonical_sha256({"status": "unavailable-after-controller-failure" if spend_started else "direct-runtime-install-failed"}),
         "limitEnforcement": task["spec"]["limits"]["enforcement"],
         "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
     }
@@ -859,24 +860,24 @@ def write_controller_failure_result(
         "kind": "AgentResult",
         "executionId": task["metadata"]["executionId"],
         "requestSha256": canonical_sha256(task),
-        "status": "cancelled" if code == "lifecycle.cancelled" else "failed",
+        "status": "cancelled" if code == "lifecycle.cancelled" else ("failed" if spend_started else "rejected"),
         "selection": selection,
         "proof": proof,
         "error": _error(
             code,
-            "Direct model execution ended after its conservative spend checkpoint without an atomic result.",
-            phase="cancelling" if code.startswith("lifecycle.") else "running",
-            spend_started=True,
+            "Direct model execution ended after its conservative spend checkpoint without an atomic result." if spend_started else "Direct Claude runtime installation failed before model execution started.",
+            phase="cancelling" if code.startswith("lifecycle.") else ("running" if spend_started else "sandboxing"),
+            spend_started=spend_started,
         ),
         "usage": {
             "inputTokens": None,
             "outputTokens": None,
             "cacheReadTokens": None,
             "cacheWriteTokens": None,
-            "providerRequests": None,
+            "providerRequests": None if spend_started else 0,
             "toolCalls": 0,
-            "turns": None,
-            "durationMs": None,
+            "turns": None if spend_started else 0,
+            "durationMs": None if spend_started else 0,
             "quota": {"available": False, "snapshotSha256": None, "observedAt": None, "primaryUsedPercent": None, "secondaryUsedPercent": None},
             "cost": {"amount": None, "currency": None, "quality": "unavailable"},
         },
@@ -887,10 +888,45 @@ def write_controller_failure_result(
     with EventWriter(events_path, result["executionId"], task["spec"]["limits"]["maxEventBytes"]) as events:
         events.emit("execution.accepted", {"requestSha256": result["requestSha256"]})
         events.emit("selection.resolved", {"candidateIndex": 0, "adapter": candidate["adapter"], "harness": candidate["harness"], "provider": candidate["provider"], "model": candidate["model"], "effort": candidate["effort"], "fallback": "none"})
-        events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": True})
+        events.emit("validation.completed", {"status": "failed", "errorCode": code, "spendStarted": spend_started})
         events.emit("execution.completed", {"status": result["status"], "resultSha256": result_projection_sha256(result), "projection": "agent-result-without-artifacts/v1"})
     event_file = Path(events_path)
     result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
     validate_contract(result, "AgentResult")
     atomic_write_json(result_path, result)
     return result
+
+
+def write_controller_failure_result(
+    task_path: str,
+    bundle_dir: str,
+    code: str,
+    result_path: str,
+    events_path: str,
+) -> dict[str, Any]:
+    """Persist a conservative direct-run failure after the spend checkpoint."""
+
+    return _write_direct_failure_result(
+        task_path,
+        bundle_dir,
+        code,
+        result_path,
+        events_path,
+        spend_started=True,
+    )
+
+
+def write_direct_install_failure_result(
+    task_path: str,
+    bundle_dir: str,
+    result_path: str,
+    events_path: str,
+) -> dict[str, Any]:
+    return _write_direct_failure_result(
+        task_path,
+        bundle_dir,
+        "harness.install_failed",
+        result_path,
+        events_path,
+        spend_started=False,
+    )
