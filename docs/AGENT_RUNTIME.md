@@ -1,7 +1,7 @@
 # Wheelhouse agent runtime
 
 Wheelhouse has one versioned contract for every agent-assisted task.
-The contract covers automatic PR and issue triage with and without search, bounded schema repair, deep review with and without search, and natural-language decision mapping with and without search.
+The contract covers automatic PR and issue triage with and without search, bounded triage and natural-language schema repair, deep review with and without search, and natural-language decision mapping with and without search.
 
 Claude is the production primary adapter.
 Every current action resolves to the exact pinned direct Claude Action implementation through the shared selection boundary.
@@ -27,6 +27,8 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 GitHub resolves that local reusable workflow from the caller's commit, and every caller also passes its exact `github.sha` as the expected source revision.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
+An eligible natural-language schema repair uses a distinct durable claim bound to the same authorized comment event, so a rerun cannot spend another repair turn.
+Schema-repair actions are structurally ineligible to create another repair task.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
 An operator-approved exact-revision auto-triage replay first tombstones only the matching primary-triage claim marker and directly verifies that admission can no longer discover it.
 The original claim comment remains as a bounded superseded audit record, while schema-repair, deep-review, and natural-language claim identities are outside the supersede operation.
@@ -168,7 +170,8 @@ No symlink may reach the signed handoff or hydrated model workspace.
 
 Final-result delivery is independent of transcript retention.
 A bounded Claude transcript is transferred once within the read-only reusable workflow for trusted normalization with one-day artifact retention, then only the verified normalized result artifact crosses to the trusted consumer.
-A schema-invalid but delivered triage candidate remains available to the existing one-turn repair policy.
+A schema-invalid but delivered triage or natural-language candidate remains available to its one-turn repair policy.
+Natural-language repair receives only the bounded invalid candidate in a tokenless, no-tool, single-turn task and its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
 Missing output and evidence failure do not trigger schema repair.
 Trusted code still performs normalized triage, evidence anchoring, cross-repository reference qualification, natural-language action allowlisting, card claims, revision checks, PR head checks, and auto-merge G0-G7 checks.
 
@@ -191,8 +194,8 @@ At the hard deadline it sends `SIGKILL`.
 A partial final is never accepted.
 Results are written to a temporary file, flushed, validated, and atomically renamed.
 
-Current actions permit one candidate attempt and no runtime retry.
-The existing exactly-one schema repair is a separate task, not a provider retry.
+Current actions permit one primary candidate attempt and no runtime retry.
+The exactly-one schema repair is a separate task, not a provider retry; an invalid repair result is terminal for that event.
 Fallback remains `none`.
 
 Stable error families distinguish contract, config, selection, capability, auth, quota, provider, transport, input, provenance, tool, sandbox, lifecycle, harness, output, stale-target, source-revision, consumer, and internal failures.
@@ -235,6 +238,7 @@ The retryable `source.revision_mismatch` code publishes the bounded "Wheelhouse 
 For deep review, missing output posts the existing fixed no-verdict note and leaves the card open.
 
 For natural-language mapping, missing or invalid output cannot produce an action.
+A delivered primary result that fails strict JSON or `nl-decision-v1` validation receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
 The marker-keyed failure note remains bounded and fire-once.
 A normalized `source.revision_mismatch` result uses the same precise retry explanation, while unknown failures keep the generic note.
 A successful mapped action still enters the existing card claim and deterministic executor.

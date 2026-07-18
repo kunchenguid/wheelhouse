@@ -498,6 +498,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   It cannot run arbitrary `gh` or `git` commands.
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is normalized into `AgentResult` and re-validated against the per-kind allowlist before the deterministic handler acts.
+  If a delivered plain-English result fails strict JSON or schema validation, Wheelhouse makes one separate tokenless, no-tool repair attempt and re-validates it before replying or acting.
+  If that repair is still invalid, the card stays open with a content-free retryable note.
   For deep review, the trusted workflow posts only the verdict extracted from a validated `AgentResult`; no deterministic downstream step reads raw model output or model-written files.
 - **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.
   Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
@@ -621,6 +623,7 @@ scripts/
   triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
+tests/test_nl_schema_repair.py offline unit test for bounded one-turn natural-language schema repair and retryable failure projection
 tests/test_card_refresh.py     offline unit test for refresh change detection, activity reflection, guards, labels, render-version triage ref repair, and preserved automated-status labeling
 tests/test_reconcile.py        offline unit test for reconcile routing, activity reflection, fixed-K soft-close hysteresis, race guards, and self-healing
 tests/test_card_reuse.py       offline end-to-end card soft-close, trusted reuse, ambiguity, and lifecycle serialization tests

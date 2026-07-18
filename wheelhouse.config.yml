@@ -320,6 +320,8 @@ triage_daily_ceiling: 1200
 # The LLM only proposes a structured result - the deterministic executor still
 # performs (and guards) any action. Inert until both the flag and the Claude token
 # are present.
+# A delivered strict-JSON/schema miss gets one bounded repair attempt before a
+# content-free retryable failure leaves the card open; see docs/AGENT_RUNTIME.md.
 nl_decisions: true
 
 # Whether the scheduled backstop also opens decision cards for open *issues*

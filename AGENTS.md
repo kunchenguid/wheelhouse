@@ -615,22 +615,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   atomically emits `AgentResult`; `nl-route` and `execute` consume only that
   normalized result from a read-only trusted source copy with a scrubbed
   environment.
-  A DELIVERED but strict-JSON/schema-invalid NL result gets exactly one
-  `nl-decision.schema-repair` task with a distinct durable repair claim keyed
-  to the same authorized comment event.
-  `apply_decision.plan_nl_repair` embeds only the bounded candidate in a
-  tokenless, one-turn, fail-closed no-tool prompt, and
-  `apply_decision.decide_nl_apply` re-validates the repaired candidate against
-  the unchanged `nl-decision-v1.schema.json` before `nl-route` can emit any
-  action or reply.
-  A duplicate repair claim cannot spend, and the repair task cannot name
-  another repair task, so the workflow is structurally single-attempt.
-  A missing result never triggers repair, while a still-invalid repair leaves
-  the card open with a precise, content-free, retryable schema failure note.
-  The Claude bridge retains bounded malformed `decision.json` bytes as failed
-  `delivered` repair data instead of replacing them with unrelated harness
-  terminal prose, but those bytes can never become `final` without passing the
-  same strict schema.
+  A delivered-but-schema-invalid NL result can claim only one same-comment `nl-decision.schema-repair` task; it is tokenless, one-turn/no-tool, and strictly revalidated before any reply or action.
+  A duplicate or still-invalid repair leaves the card open with a content-free, retryable failure note.
+  `docs/AGENT_RUNTIME.md` owns the detailed runtime contract.
 - Token discipline per step: scan/execute and the read-only target reads for the
   LLM (`triage` prepare + target-code checkout, `deep-review` prepare + its target-code checkout, decision-handler
   `nl-fetch`) use `FLEET_TOKEN`; all
