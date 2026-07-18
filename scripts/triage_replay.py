@@ -870,8 +870,11 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
         raise ValueError("attempt reset has already consumed the sanctioned cohort")
     ceiling = config.get("triage_daily_ceiling", 0)
     remaining = render_card.triage_budget_remaining(ceiling)
-    if attempt_reset_scope and remaining < len(attempt_reset_scope):
-        raise ValueError("attempt reset requires budget for the complete cohort")
+    pending_attempt_resets = sum(
+        not plan.get("attempt_reset_applied") for plan in eligible
+    )
+    if attempt_reset_scope and remaining < pending_attempt_resets:
+        raise ValueError("attempt reset requires budget for the pending cohort")
     wave_bound = (
         len(attempt_reset_scope)
         if attempt_reset_scope

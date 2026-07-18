@@ -578,6 +578,54 @@ def test_attempt_reset_later_race_pauses_then_resumes_exact_cohort():
         os.unlink(path)
 
 
+def test_attempt_reset_resume_requires_only_pending_budget():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    pending = max(cards)
+    for number, value in cards.items():
+        if number == pending:
+            continue
+        state = rc._unique_state_block(value["body"])
+        revision = cohort[number]["revision"]
+        for field in replay.TRIAGE_NON_SUCCESS_FIELDS:
+            state.pop(field, None)
+        state["triaged_sha"] = revision
+        state["triage_status"] = "queued"
+        state[replay.REPLAY_FIELD] = replay._marker(
+            wave, revision, "error", 77, attempt_reset=True
+        )
+        value["body"] = rc._replace_state_block(value["body"], state)
+
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources, remaining=1) as calls:
+            result = replay.run(
+                path,
+                wave,
+                len(cohort),
+                attempts_reset_cards=supplied,
+            )
+            assert result == {
+                "eligible": len(cohort),
+                "planned": len(cohort),
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+            assert calls["queued"][0][0] == pending
+            assert all(
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD][
+                    "version"
+                ]
+                == replay.ATTEMPT_RESET_REPLAY_VERSION
+                for value in cards.values()
+            )
+    finally:
+        os.unlink(path)
+
+
 def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     _, _, supplied = attempt_reset_fixture()
     assert replay._attempt_reset_count(
@@ -1561,6 +1609,7 @@ TESTS = [
     test_array_recovery_attempt_reset_requires_exact_wave_cohort_and_limit,
     test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write,
     test_attempt_reset_later_race_pauses_then_resumes_exact_cohort,
+    test_attempt_reset_resume_requires_only_pending_budget,
     test_attempt_reset_refuses_outside_scope_and_any_state_mismatch,
     test_attempt_reset_binds_complete_prior_marker_identity,
     test_attempt_reset_second_read_mismatch_is_atomic_zero_write,
