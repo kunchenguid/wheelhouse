@@ -71,6 +71,7 @@ def build_command(
             "WHEELHOUSE_BUNDLE_ROOT": str(Path(bundle)),
             "WHEELHOUSE_PROVIDER_SOCKET": provider_socket,
             "WHEELHOUSE_SEARCH_SOCKET": search_socket,
+            "WHEELHOUSE_AUTH_SOURCE": auth_source,
         }
         return worker_command, environment
 
@@ -146,6 +147,7 @@ def build_command(
             "--setenv", "WHEELHOUSE_BUNDLE_ROOT", "/run/wheelhouse",
             "--setenv", "WHEELHOUSE_PROVIDER_SOCKET", "/run/wheelhouse/provider.sock" if provider_socket else "",
             "--setenv", "WHEELHOUSE_SEARCH_SOCKET", "/run/wheelhouse/search.sock" if search_socket else "",
+            "--setenv", "WHEELHOUSE_AUTH_SOURCE", "/auth-source/credential" if auth_source else "",
             "--chdir", "/work",
             "--",
         ]

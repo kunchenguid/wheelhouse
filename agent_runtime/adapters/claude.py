@@ -30,7 +30,7 @@ PROTOCOL_FIXTURE = (
 )
 EXPECTED_MODEL = "claude-sonnet-4-6"
 AUTH_ENVIRONMENT = "CLAUDE_CODE_OAUTH_TOKEN"
-AUTH_SOURCE = "env:" + AUTH_ENVIRONMENT
+CREDENTIAL_FILE_ENVIRONMENT = "WHEELHOUSE_CLAUDE_CREDENTIAL_FILE"
 MAX_SCHEMA_BYTES = 65536
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 8 * 1024 * 1024
@@ -448,6 +448,7 @@ def _reject_ambient_credentials() -> None:
         "READONLY_TOKEN",
         "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
         "ACTIONS_ID_TOKEN_REQUEST_URL",
+        AUTH_ENVIRONMENT,
     }
     if any(os.environ.get(name) for name in forbidden):
         raise ClaudeProbeError(
@@ -455,19 +456,28 @@ def _reject_ambient_credentials() -> None:
         )
 
 
-def _oauth_available() -> None:
-    token = os.environ.get(AUTH_ENVIRONMENT, "")
-    if not token:
+def _oauth_file() -> Path:
+    raw = os.environ.get(CREDENTIAL_FILE_ENVIRONMENT, "").strip()
+    if not raw:
         raise ClaudeProbeError(
             "anthropic-subscription credential handoff is unavailable"
         )
+    path = Path(raw)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ClaudeProbeError(
+            "anthropic-subscription credential handoff is missing"
+        ) from error
     if (
-        len(token) < 16
-        or len(token) > 65536
-        or token != token.strip()
-        or "\x00" in token
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_size < 16
+        or info.st_size > 65536
+        or info.st_mode & 0o077
     ):
         raise ClaudeProbeError("anthropic-subscription credential handoff is invalid")
+    return path
 
 
 class ClaudeCliAdapter(AgentAdapterV1):
@@ -510,7 +520,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
         ):
             raise ClaudeProbeError("Claude adapter refuses model or provider fallback")
         _reject_ambient_credentials()
-        _oauth_available()
+        credential = _oauth_file()
         if schema_bytes is None:
             raise ClaudeProbeError("Claude output schema probe is unavailable")
         _, schema_text = validate_schema_subset(
@@ -567,7 +577,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
         return AdapterProbe(
             descriptor=AdapterDescriptor(descriptor),
             binary_path=resolved,
-            auth_source=AUTH_SOURCE,
+            auth_source=str(credential),
             supplemental={
                 "binaryResolved": resolved,
                 "binaryDigest": digest,
@@ -664,6 +674,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
 
 __all__ = [
     "AUTH_ENVIRONMENT",
+    "CREDENTIAL_FILE_ENVIRONMENT",
     "ClaudeCliAdapter",
     "ClaudeProbeError",
     "ClaudeProtocolError",

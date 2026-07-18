@@ -208,6 +208,13 @@ agent_runtime:
   primary_profile: claude-action-current-pinned
   target: claude
   fallback: none
+  # Schema repair is the first controlled direct-CLI production cutover.
+  # Set temporary_rollback_profile to claude-action-current-pinned and replay
+  # the durable item explicitly to restore the pinned action path.
+  production_activation:
+    triage.schema-repair: claude-cli-pinned
+    nl-decision.schema-repair: claude-cli-pinned
+  temporary_rollback_profile: null
   disabled_adapters:
     codex-app-server: unsupported-public-chatgpt-pro-auth
 
@@ -227,9 +234,7 @@ agent_runtime:
       provider_hosts:
         - api.anthropic.com
 
-    # Migration step 1 evidence only. No action below selects this profile, so
-    # the pinned action compatibility path remains production-authoritative.
-    claude-cli-unreachable-pinned:
+    claude-cli-pinned:
       adapter: claude-cli
       harness: claude-code
       provider: anthropic

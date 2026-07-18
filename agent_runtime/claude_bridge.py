@@ -350,6 +350,7 @@ def _write_parent_failure_result(
     _verify_artifacts(task, Path(bundle_dir).resolve())
     candidate = task["spec"]["selection"]["candidates"][0]
     selection = {
+        "profile": task["spec"]["selection"]["profile"],
         "candidateIndex": 0,
         "harness": candidate["harness"],
         "adapter": candidate["adapter"],
@@ -378,7 +379,11 @@ def _write_parent_failure_result(
     }
     proof = {
         "contractMajor": 1,
+        "executionProfile": task["spec"]["selection"]["profile"],
         "isolationLevel": "github-readonly-artifact-bridge-v1",
+        "sandboxImplementation": "github-readonly-artifact-bridge-v1",
+        "credentialIsolation": "action-input+subprocess-env-scrub",
+        "structuredOutputMechanism": "unavailable-after-controller-failure",
         "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
         "negotiationSha256": canonical_sha256({"status": "failed-with-possible-spend", "code": error_code}),
         "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),
@@ -615,6 +620,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
     started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["childExecutionTimeoutMs"])
     status = "succeeded" if final is not None else ("cancelled" if error and error["code"] == "lifecycle.cancelled" else "failed")
     selection = {
+        "profile": task["spec"]["selection"]["profile"],
         "candidateIndex": 0,
         "harness": candidate["harness"],
         "adapter": candidate["adapter"],
@@ -652,7 +658,13 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "selection": selection,
         "proof": {
             "contractMajor": 1,
+            "executionProfile": task["spec"]["selection"]["profile"],
             "isolationLevel": "github-readonly-artifact-bridge-v1",
+            "sandboxImplementation": "github-readonly-artifact-bridge-v1",
+            "credentialIsolation": "action-input+subprocess-env-scrub",
+            "structuredOutputMechanism": "native-schema"
+            if claude_native_structured_output(task["metadata"]["action"])
+            else "trusted-post-action-bridge",
             "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
             "negotiationSha256": canonical_sha256({"candidate": candidate, "tools": task["spec"]["tools"], "limitEnforcement": task["spec"]["limits"]["enforcement"], "fallback": "none"}),
             "policySha256": canonical_sha256({name: task["spec"][name] for name in ("isolation", "limits", "retention", "retry")}),

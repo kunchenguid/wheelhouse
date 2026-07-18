@@ -4,9 +4,9 @@ Wheelhouse has one versioned contract for every agent-assisted task.
 The contract covers automatic PR and issue triage with and without search, bounded triage and natural-language schema repair, deep review with and without search, and natural-language decision mapping with and without search.
 
 Claude is the production primary adapter.
-Every current action resolves to the exact pinned direct Claude Action implementation through the shared selection boundary.
-An exact-pin direct Claude CLI adapter and profile exist only as offline migration evidence.
-No action selects that profile, so it is unreachable from production and cannot change spend, routing, or consumer behavior.
+The two schema-repair actions resolve to the exact-pin direct Claude CLI profile through the guarded production activation.
+The other eight actions remain on the exact pinned Claude Action implementation.
+The action path remains present and deployable as the schema-repair rollback target.
 Codex CLI app-server remains implemented and tested only as disabled non-target adapter evidence because public GitHub Actions cannot securely authenticate the captain's ChatGPT Pro subscription noninteractively.
 Fallback is disabled, so no provider failure invokes a different adapter automatically.
 
@@ -18,15 +18,16 @@ The checked-in state is intentionally:
 - `target: claude`
 - `fallback: none`
 - every action `target: claude`
-- every action profile `claude-action-current-pinned`
-- `claude-cli-unreachable-pinned` selected by no action
+- every base action profile `claude-action-current-pinned`
+- `production_activation` maps only `triage.schema-repair` and `nl-decision.schema-repair` to `claude-cli-pinned`
+- `temporary_rollback_profile: null`; setting it to `claude-action-current-pinned` restores both repair actions for an explicit durable replay
 - `codex-app-server` recorded only under `disabled_adapters`
 
 This is not selected by secret presence.
 Provider environment overrides are rejected.
 The current selection cannot target Codex or reach its workflow installation branches.
 
-The Claude production path keeps the exact reviewed action commit, immutable model identifier, turn limits, token boundaries, and output behavior.
+Both Claude production lanes keep the immutable model identifier, bounded turns, token boundaries, and output behavior.
 Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bounded content-addressed handoff with signed hidden paths preserved, and invoke `claude-model.yml` through a local reusable-workflow job.
 GitHub resolves that local reusable workflow from the caller's commit, and every caller also passes its exact `github.sha` as the expected source revision.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
@@ -48,7 +49,9 @@ The finite default lets approved replay waves complete without cost throttling w
 The per-card `triage_attempt_cap_per_revision` defaults to two queued attempts for one card-kind source revision.
 Malformed cap configuration fails closed to one, while malformed ceiling or ledger state fails closed to zero new reservations.
 Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.
-The model job verifies the complete handoff before hydrating a fresh workspace, initializes a local repository without a remote or network fetch, applies the exact action tool allowlist, and leaves only a bounded transcript plus observed enforcement record for its finalizer.
+The model job verifies the complete handoff before hydrating a fresh workspace and initializes a local repository without a remote or network fetch.
+The action lane applies its exact action tool allowlist and leaves only a bounded transcript plus observed enforcement record for its finalizer.
+The direct repair lane verifies Claude CLI `2.1.197` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox.
 It revalidates the signed target inputs after the action and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
 The reusable model workflow validates its observed `GITHUB_SHA` against the expected caller commit before hydration or provider admission.
@@ -58,15 +61,15 @@ Every task limit carries provider-neutral enforcement evidence as `externally-en
 Claude records the exact end-to-end hard deadline as unavailable because GitHub can delay a reusable job.
 The obsolete API dispatch deadline is unavailable because the model job is part of the caller's workflow graph, while the child-job execution timeout remains externally enforced.
 Trusted artifact, transcript, event, and final-output bounds remain explicit.
-The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before action invocation, so cancellation or an action crash cannot downgrade a possibly spent attempt.
+The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before either invocation lane, so cancellation or a harness crash cannot downgrade a possibly spent attempt.
 The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
 Claude harness provenance records the pinned action source commit and a checked-out action metadata digest when the runner exposes it, while the installed Claude executable version and digest remain unavailable.
 
-## Offline direct Claude adapter evidence
+## Direct Claude schema-repair production profile
 
-`agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary for migration step 1 without activating it.
-It accepts only the `anthropic-subscription` profile and the `CLAUDE_CODE_OAUTH_TOKEN` credential binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.197` platform digest before spend.
+`agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary used by both schema-repair actions.
+It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.197` platform digest before spend.
 The runtime lock records the official release commit, immutable download URLs, Linux x64 and arm64 plus Darwin arm64 digests, and a checked protocol fixture digest.
 
 The adapter validates the bound action schema against the small pinned-CLI subset before exposing `output.structured: native-schema`.
@@ -74,8 +77,12 @@ It compiles one shell-free argv, keeps the prompt on standard input, and require
 Its cancellation primitive is `SIGTERM` to the Claude process group, with the runtime retaining grace and hard-kill ownership.
 The trusted core still owns the sandbox, provider proxy, deadlines, content-addressed handoff, independent schema and evidence validation, result binding, events, retention, and secret scanning.
 
-The direct profile intentionally enables no canonical tool transport yet and is therefore not eligible for production cutover.
-The pinned action, `claude_bridge.py`, all live workflow steps, and every consumer remain unchanged and authoritative.
+The direct schema-repair profile intentionally has an empty tool inventory, one turn, no shell, and no fallback model.
+Successful results must contain terminal native `structured_output`; the trusted core revalidates it and records `native-schema` plus `json-schema` validation, exact observed model, execution profile, sandbox implementation, and credential isolation in `AgentResult`.
+`verify_result_binding` rejects any result whose execution profile differs from its admitted task.
+The pinned action, `claude_bridge.py`, their workflow steps, and their tests remain present for the rollback window.
+After rollback, replay is explicit through the existing marker-versioned durable triage replay path; automatic hourly cache retry remains disabled.
+Before another profile is promoted, production observation uses the durable result and stage records for at least 20 successful or expected-failure executions over at least seven days.
 
 ## Disabled and investigated adapters
 
@@ -146,7 +153,7 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 The terminal event's `resultSha256` uses the explicit `agent-result-without-artifacts/v1` projection so the normalized-event artifact cannot create a cyclic or order-dependent digest.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
-The unreachable Claude CLI adapter is pinned separately to CLI `2.1.197`, release commit `c8fd8048f30950a21d28734718275aa7e97f5143`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
+The direct Claude CLI adapter is pinned separately to CLI `2.1.197`, release commit `c8fd8048f30950a21d28734718275aa7e97f5143`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
 Offline evidence verifies the exact wrapper and selected Linux executable tarballs against the committed SHA-512 integrity pins.
 Current production selection cannot reach the disabled Codex installation branches in workflows.

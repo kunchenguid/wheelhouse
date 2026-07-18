@@ -57,6 +57,7 @@ PACKAGED_RUNTIME_FILES = (
     "supervisor.py",
     "task_builder.py",
     "tools.py",
+    "worker.py",
     "adapters/__init__.py",
     "adapters/base.py",
     "adapters/claude.py",
@@ -214,6 +215,7 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
         _copy_artifact(source, destination)
     action = task["metadata"]["action"]
     native_schema = ""
+    adapter = task["spec"]["selection"]["candidates"][0]["adapter"]
     if claude_native_structured_output(action):
         structured_rows = [
             row["constraints"]
@@ -221,10 +223,10 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
             if row["name"] == "output.structured"
         ]
         if len(structured_rows) != 1:
-            raise ContractError("NL task structured-output capability was invalid")
+            raise ContractError("Claude task structured-output capability was invalid")
         structured = structured_rows[0]
         if structured.get("mechanismAnyOf") != ["native-schema"]:
-            raise ContractError("NL task did not negotiate native structured output")
+            raise ContractError("Claude task did not require native structured output")
         schema_path = root / "bundle" / task["spec"]["output"]["schemaArtifact"]
         schema = load_json_regular(schema_path, max_bytes=65536)
         native_schema_bytes = canonical_json_bytes(schema)
@@ -235,6 +237,8 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
             raise ContractError("native output schema exceeded its byte bound")
     return {
         "action": action,
+        "adapter": adapter,
+        "profile": task["spec"]["selection"]["profile"],
         "prompt": prompt.read_text(encoding="utf-8"),
         "nativeSchema": native_schema,
         "taskSha256": canonical_sha256(task),

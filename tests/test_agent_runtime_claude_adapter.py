@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline conformance for the unreachable direct Claude CLI adapter."""
+"""Offline conformance for the direct Claude CLI adapter."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.claude import (
     AUTH_ENVIRONMENT,
+    CREDENTIAL_FILE_ENVIRONMENT,
     ClaudeCliAdapter,
     ClaudeProbeError,
     ClaudeProtocolError,
@@ -59,7 +60,7 @@ def direct_task(root: Path):
         action="triage.schema-repair",
         selection={
             "mode": "claude",
-            "profileName": "claude-cli-unreachable-pinned",
+            "profileName": "claude-cli-pinned",
             "profile": {
                 "harness": "claude-code",
                 "adapter": "claude-cli",
@@ -141,8 +142,8 @@ def main():
         root = Path(directory)
         task, schema_bytes = direct_task(root / "task")
         check(
-            "task: unreachable direct profile compiles through the existing sandbox seam",
-            task["spec"]["selection"]["profile"] == "claude-cli-unreachable-pinned"
+            "task: production direct profile compiles through the existing sandbox seam",
+            task["spec"]["selection"]["profile"] == "claude-cli-pinned"
             and task["spec"]["prompt"]["system"]["adapterShimVersion"]
             == "claude-cli/v1"
             and task["spec"]["isolation"]["profile"] == "sandboxed-worker-v1"
@@ -204,8 +205,11 @@ def main():
             "sha256": file_sha256(binary),
         }
         adapter = ClaudeCliAdapter()
+        credential = root / "claude-oauth"
+        credential.write_text(TOKEN, encoding="utf-8")
+        credential.chmod(0o600)
         clean_environment = {
-            AUTH_ENVIRONMENT: TOKEN,
+            CREDENTIAL_FILE_ENVIRONMENT: str(credential),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
         patches = (
@@ -280,7 +284,7 @@ def main():
         check(
             "compile: OAuth secret absent from plan",
             TOKEN not in serialized_plan
-            and probe.auth_source == "env:CLAUDE_CODE_OAUTH_TOKEN",
+            and probe.auth_source == str(credential),
         )
         check(
             "compile: no model fallback",
@@ -296,19 +300,20 @@ def main():
         typed_descriptor["capabilities"]["output.structured"]["mechanism"] = (
             "typed-terminating-tool"
         )
-        typed = negotiate(
-            task,
-            typed_descriptor,
-            {
-                "externalSandbox": True,
-                "networkProxy": True,
-                "denyHostHome": True,
-                "processGroupCleanup": True,
-            },
-        )
         check(
-            "capability: proof records a non-hardcoded accepted mechanism",
-            typed.proof["structuredOutputMechanism"] == "typed-terminating-tool",
+            "capability: production task rejects non-native structured output",
+            fails(
+                lambda: negotiate(
+                    task,
+                    typed_descriptor,
+                    {
+                        "externalSandbox": True,
+                        "networkProxy": True,
+                        "denyHostHome": True,
+                        "processGroupCleanup": True,
+                    },
+                )
+            ),
         )
 
         bad_lock = copy.deepcopy(fake_lock)
@@ -394,6 +399,7 @@ def main():
             )
 
         for name in (
+            AUTH_ENVIRONMENT,
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
             "CLAUDE_CODE_USE_BEDROCK",
@@ -408,6 +414,13 @@ def main():
                     "auth: %s rejected" % name,
                     fails(lambda: adapter.probe(task, schema_bytes), ClaudeProbeError),
                 )
+        credential.chmod(0o644)
+        with mock.patch.dict(os.environ, clean_environment, clear=True):
+            check(
+                "auth: broad credential file permissions rejected",
+                fails(lambda: adapter.probe(task, schema_bytes), ClaudeProbeError),
+            )
+        credential.chmod(0o600)
         wrong_auth = copy.deepcopy(task)
         wrong_auth["spec"]["selection"]["candidates"][0]["authMechanism"] = (
             "claude-action-oauth"

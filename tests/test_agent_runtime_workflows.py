@@ -192,8 +192,9 @@ def main():
     check("runtime: source mismatch emits a trusted result without provider evidence", "write_revision_mismatch_result" in model_text and "caller-commit" in model_text and "steps.source.outputs.match == 'true'" in model_text)
     check(
         "runtime: source mismatch cannot consume the durable provider checkpoint",
-        model_steps[checkpoint].get("if")
-        == "${{ steps.hydrate.outcome == 'success' }}"
+        "steps.source.outputs.match == 'true'" in str(hydrate.get("if", ""))
+        and model_steps[checkpoint].get("if")
+        == "${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}"
         and model_steps[checkpoint_upload].get("if")
         == "${{ steps.hydrate.outcome == 'success' }}"
         and "steps.source.outputs.match == 'true'" in str(capture.get("if", "")),
@@ -297,9 +298,15 @@ def main():
     check("selection: every action explicitly targets Claude", config["target"] == "claude" and all(row["target"] == "claude" for row in config["actions"].values()))
     check("selection: fallback globally disabled", config["fallback"] == "none")
     check("selection: immutable Claude model forbids aliases", config["profiles"][config["primary_profile"]]["model"] == "claude-sonnet-4-6" and config["profiles"][config["primary_profile"]]["allow_model_alias"] is False)
-    check("selection: no activation or temporary rollback settings remain", "production_activation" not in config and "temporary_rollback_profile" not in config)
+    check("selection: schema repair is the only direct activation", config["production_activation"] == {"triage.schema-repair": "claude-cli-pinned", "nl-decision.schema-repair": "claude-cli-pinned"} and config["temporary_rollback_profile"] is None)
     check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
-    check("selection: direct Claude CLI evidence is unreachable", config["profiles"]["claude-cli-unreachable-pinned"]["adapter"] == "claude-cli" and all(row["profile"] != "claude-cli-unreachable-pinned" for row in config["actions"].values()))
+    check("selection: direct Claude CLI profile is exact", config["profiles"]["claude-cli-pinned"]["adapter"] == "claude-cli" and config["profiles"]["claude-cli-pinned"]["auth_profile"] == "anthropic-subscription")
+    direct_step = next(step for step in model_steps if step.get("id") == "direct_schema_repair")
+    check("production: direct runtime is schema-repair only", "triage.schema-repair" in direct_step["if"] and "nl-decision.schema-repair" in direct_step["if"] and "claude-cli" in direct_step["if"])
+    check("production: direct runtime uses trusted supervisor without action fallback", "from agent_runtime.supervisor import run" in direct_step["run"] and "claude_bridge" not in direct_step["run"] and "anthropics/claude-code-action" not in direct_step["run"])
+    check("production: direct OAuth handoff is private and scrubbed before supervisor", "umask 077" in direct_step["run"] and "unset CLAUDE_CODE_OAUTH_TOKEN" in direct_step["run"] and "WHEELHOUSE_CLAUDE_CREDENTIAL_FILE" in direct_step["run"])
+    check("production: direct runtime retains durable controller-failure normalization", "write_controller_failure_result" in model_text and "direct.json" in model_text and "lifecycle.timeout" in model_text)
+    check("production: direct binary remains exact and digest verified", "2.1.197" in model_text and "sha256sum" in model_text and "runtime.lock.json" in model_text)
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
     check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)

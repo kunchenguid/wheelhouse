@@ -15,8 +15,9 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
-# Every primary and repair path resolves through the shared selection boundary
-# to the exact direct Claude Action production implementation.
+# Every primary and repair path resolves through the shared selection boundary.
+# Primary triage stays on the pinned Claude Action; schema repair uses the
+# pinned direct Claude CLI, with the action step retained as rollback target.
 # Codex remains disabled non-target adapter evidence, and no runtime failure
 # automatically invokes another provider.
 #

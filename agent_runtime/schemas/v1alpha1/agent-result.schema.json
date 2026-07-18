@@ -13,8 +13,9 @@
     "status": {"type": "string", "enum": ["succeeded", "failed", "cancelled", "rejected"]},
     "selection": {
       "type": "object", "additionalProperties": false,
-      "required": ["candidateIndex", "harness", "adapter", "adapterVersion", "adapterDigest", "harnessVersion", "harnessDigest", "harnessProvenanceQuality", "harnessSourceCommit", "harnessMetadataSha256", "protocol", "protocolSchemaSha256", "provider", "actualProvider", "authProfile", "authMechanism", "expectedWorkspaceIdSha256", "requestedModel", "actualModel", "requestedEffort", "actualEffort", "costClass", "dataBoundary", "fallbackUsed", "fallbackReason"],
+      "required": ["profile", "candidateIndex", "harness", "adapter", "adapterVersion", "adapterDigest", "harnessVersion", "harnessDigest", "harnessProvenanceQuality", "harnessSourceCommit", "harnessMetadataSha256", "protocol", "protocolSchemaSha256", "provider", "actualProvider", "authProfile", "authMechanism", "expectedWorkspaceIdSha256", "requestedModel", "actualModel", "requestedEffort", "actualEffort", "costClass", "dataBoundary", "fallbackUsed", "fallbackReason"],
       "properties": {
+        "profile": {"type": "string", "minLength": 1},
         "candidateIndex": {"type": "integer", "minimum": 0},
         "harness": {"type": "string"},
         "adapter": {"type": "string"},
@@ -44,10 +45,14 @@
     },
     "proof": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractMajor", "isolationLevel", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256", "limitEnforcement", "limitEnforcementSha256"],
+      "required": ["contractMajor", "executionProfile", "isolationLevel", "sandboxImplementation", "credentialIsolation", "structuredOutputMechanism", "capabilitySnapshotSha256", "negotiationSha256", "policySha256", "compiledPromptSha256", "inputManifestSha256", "outputSchemaSha256", "sandboxPolicySha256", "limitEnforcement", "limitEnforcementSha256"],
       "properties": {
         "contractMajor": {"const": 1},
+        "executionProfile": {"type": "string", "minLength": 1},
         "isolationLevel": {"type": "string", "enum": ["sandboxed-adapter-worker-v1", "github-readonly-artifact-bridge-v1"]},
+        "sandboxImplementation": {"type": "string", "minLength": 1},
+        "credentialIsolation": {"type": "string", "minLength": 1},
+        "structuredOutputMechanism": {"type": "string", "minLength": 1},
         "capabilitySnapshotSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "negotiationSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "policySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
