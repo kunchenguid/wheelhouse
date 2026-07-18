@@ -178,7 +178,7 @@ def test_claude_steps_split_legacy_vs_search():
             "(Read/Grep/Glob added for pass-by-reference target.txt, card #555; "
             "Write kept for decision.json, still no Bash)",
             args
-            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6",
+            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
         )
         check(
             "workflow: legacy step has no GH_TOKEN env",
@@ -204,6 +204,10 @@ def test_claude_steps_split_legacy_vs_search():
         check(
             "workflow: legacy step uses immutable model",
             "--model claude-sonnet-4-6" in args,
+        )
+        check(
+            "workflow: legacy step requests the verified native NL schema",
+            "--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'" in args,
         )
 
     if search:
@@ -254,6 +258,10 @@ def test_claude_steps_split_legacy_vs_search():
         check(
             "workflow: search step uses immutable model",
             "--model claude-sonnet-4-6" in args,
+        )
+        check(
+            "workflow: search step requests the verified native NL schema",
+            "--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'" in args,
         )
         for forbidden in (
             "FLEET_TOKEN",

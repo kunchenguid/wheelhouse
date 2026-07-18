@@ -26,7 +26,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .contract import ContractError, atomic_write_json, canonical_sha256, file_sha256, load_json_regular, validate_contract
+from .contract import (
+    ContractError,
+    atomic_write_json,
+    canonical_json_bytes,
+    canonical_sha256,
+    file_sha256,
+    load_json_regular,
+    validate_contract,
+)
+from .task_builder import claude_native_structured_output
 
 MAX_HANDOFF_BYTES = 220_000_000
 MAX_HANDOFF_FILES = 32_000
@@ -201,9 +210,31 @@ def hydrate(handoff_dir: str, workspace_dir: str) -> dict[str, Any]:
         source = root / "bundle" / item["artifact"]
         destination = workspace / item["logicalPath"]
         _copy_artifact(source, destination)
+    action = task["metadata"]["action"]
+    native_schema = ""
+    if claude_native_structured_output(action):
+        structured_rows = [
+            row["constraints"]
+            for row in task["spec"]["capabilities"]["required"]
+            if row["name"] == "output.structured"
+        ]
+        if len(structured_rows) != 1:
+            raise ContractError("NL task structured-output capability was invalid")
+        structured = structured_rows[0]
+        if structured.get("mechanismAnyOf") != ["native-schema"]:
+            raise ContractError("NL task did not negotiate native structured output")
+        schema_path = root / "bundle" / task["spec"]["output"]["schemaArtifact"]
+        schema = load_json_regular(schema_path, max_bytes=65536)
+        native_schema_bytes = canonical_json_bytes(schema)
+        if schema_path.read_bytes() != native_schema_bytes:
+            raise ContractError("native output schema artifact was not canonical")
+        native_schema = native_schema_bytes.decode("utf-8")
+        if len(native_schema.encode("utf-8")) > 65536:
+            raise ContractError("native output schema exceeded its byte bound")
     return {
-        "action": task["metadata"]["action"],
+        "action": action,
         "prompt": prompt.read_text(encoding="utf-8"),
+        "nativeSchema": native_schema,
         "taskSha256": canonical_sha256(task),
         "allowedRepos": metadata["allowedRepos"],
         "dispatchDeadlineMs": task["spec"]["limits"]["dispatchDeadlineMs"],

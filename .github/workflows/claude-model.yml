@@ -300,7 +300,7 @@ jobs:
           allowed_bots: github-actions[bot]
           allowed_non_write_users: ${{ github.actor }}
           prompt: ${{ steps.hydrate.outputs.prompt }}
-          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6"
+          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
 
       - id: nl_local
         if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
@@ -313,7 +313,7 @@ jobs:
           allowed_bots: github-actions[bot]
           allowed_non_write_users: ${{ github.actor }}
           prompt: ${{ steps.hydrate.outputs.prompt }}
-          claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6"
+          claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
 
       - id: nl_repair
         if: ${{ steps.hydrate.outputs.action == 'nl-decision.schema-repair' }}
@@ -411,6 +411,8 @@ jobs:
                           if isinstance(content, list): bounded.append({"type": "assistant", "message": {"content": [{"type": "tool_use"} for item in content if isinstance(item, dict) and item.get("type") == "tool_use"]}})
                       elif row.get("type") == "result":
                           kept = {key: row.get(key) for key in ("type", "subtype", "is_error", "result", "duration_ms", "num_turns")}
+                          if os.environ["ACTION"].startswith("nl-decision.") and os.environ["ACTION"] != "nl-decision.schema-repair" and "structured_output" in row:
+                              kept["structured_output"] = row["structured_output"]
                           usage = row.get("usage")
                           if isinstance(usage, dict): kept["usage"] = {key: usage.get(key) for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
                           bounded.append(kept)

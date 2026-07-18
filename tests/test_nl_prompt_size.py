@@ -319,7 +319,7 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
         check(
             "nl: legacy step is exactly Read,Grep,Glob,Write (no shell, no Bash)",
             largs
-            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6",
+            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
         )
         check(
             "nl: legacy step still receives no GH_TOKEN (unchanged isolation)",

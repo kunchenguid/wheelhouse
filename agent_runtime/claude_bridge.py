@@ -24,7 +24,14 @@ from .contract import (
 )
 from .events import EventWriter
 from .supervisor import _anchor_ok, _error, _verify_artifacts
-from .task_builder import claude_capabilities, claude_declared_outputs, claude_declared_tools, claude_isolation, claude_limit_enforcement
+from .task_builder import (
+    claude_capabilities,
+    claude_declared_outputs,
+    claude_declared_tools,
+    claude_isolation,
+    claude_limit_enforcement,
+    claude_native_structured_output,
+)
 
 ACTION_COMMIT = "fad22eb3fa582b7357fc0ea48af6645851b884fd"
 ACTION_VERSION = "1.0.161"
@@ -80,6 +87,12 @@ def _result_text(terminal: dict[str, Any] | None) -> str:
 
 
 def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> Any:
+    if claude_native_structured_output(action):
+        if "structured_output" not in terminal:
+            raise ContractError(
+                "Claude action omitted negotiated native structured output"
+            )
+        return terminal["structured_output"]
     if delivered_file:
         return load_json_regular(delivered_file, max_bytes=131072)
     text = _result_text(terminal)
@@ -115,6 +128,27 @@ def _raw_delivered_file(path: str, max_bytes: int) -> str:
         return raw.decode("utf-8").strip()
     except (OSError, UnicodeError):
         return ""
+
+
+def _repair_candidate(
+    action: str,
+    terminal: dict[str, Any],
+    delivered_file: str,
+    max_bytes: int,
+) -> tuple[bool, Any]:
+    """Return bounded untrusted data for the separate portable repair task."""
+    if (
+        claude_native_structured_output(action)
+        and "structured_output" in terminal
+    ):
+        value = terminal["structured_output"]
+        try:
+            if len(canonical_json_bytes(value)) <= max_bytes:
+                return True, value
+        except (ContractError, RecursionError, TypeError, ValueError):
+            pass
+    raw = _raw_delivered_file(delivered_file, max_bytes) or _result_text(terminal)
+    return (bool(raw), raw)
 
 
 def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
@@ -543,31 +577,40 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             if not _anchor_ok(value, task, bundle):
                 error = _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
             else:
+                validation = []
+                if (
+                    claude_native_structured_output(task["metadata"]["action"])
+                ):
+                    validation.append({"name": "native-schema", "status": "passed"})
+                validation.extend(
+                    [
+                        {"name": "json-schema", "status": "passed"},
+                        {"name": task["spec"]["output"]["evidencePolicy"], "status": "passed" if task["spec"]["output"]["evidencePolicy"] != "none" else "not-applicable"},
+                        {"name": "observed-provenance", "status": "passed"},
+                    ]
+                )
                 final = {
                     "schemaId": task["spec"]["output"]["schemaId"],
                     "value": value,
                     "valueSha256": delivered["valueSha256"],
                     "bytes": delivered["bytes"],
-                    "validation": [
-                        {"name": "json-schema", "status": "passed"},
-                        {"name": task["spec"]["output"]["evidencePolicy"], "status": "passed" if task["spec"]["output"]["evidencePolicy"] != "none" else "not-applicable"},
-                        {"name": "observed-provenance", "status": "passed"},
-                    ],
+                    "validation": validation,
                 }
         except (ContractError, json.JSONDecodeError, OSError, RecursionError, UnicodeError, ValueError):
-            # NL writes its declared output to decision.json. If that file is
-            # malformed JSON, retain its exact bounded UTF-8 bytes as delivered
-            # repair data instead of replacing the candidate with the harness's
-            # unrelated terminal prose (card #1433). It remains failed and can
-            # never become `final` until a separate repair task passes the same
-            # strict schema validation.
-            raw = _raw_delivered_file(
-                delivered_file, task["spec"]["limits"]["maxFinalBytes"]
-            ) or _result_text(terminal)
-            if raw:
-                encoded = canonical_json_bytes(raw)
+            # Native NL failures retain the bounded structured value when one
+            # exists, then the portable decision.json carrier, then terminal
+            # prose. The candidate remains failed and can never become `final`
+            # until the separate repair task passes the same trusted validation.
+            has_candidate, repair_value = _repair_candidate(
+                task["metadata"]["action"],
+                terminal,
+                delivered_file,
+                task["spec"]["limits"]["maxFinalBytes"],
+            )
+            if has_candidate:
+                encoded = canonical_json_bytes(repair_value)
                 if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
-                    delivered = {"value": raw, "valueSha256": canonical_sha256(raw), "bytes": len(encoded)}
+                    delivered = {"value": repair_value, "valueSha256": canonical_sha256(repair_value), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
     started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["childExecutionTimeoutMs"])
     status = "succeeded" if final is not None else ("cancelled" if error and error["code"] == "lifecycle.cancelled" else "failed")
