@@ -588,10 +588,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `MATERIAL_FIELDS`, never affecting classify/material_changed/decision-parsing.
   The persisted diagnostics carry only structural facts, never raw target/comment
   content. See `tests/test_triage_schema_repair.py`.
-- Natural-language decisions accept only owner/maintainer comments and are structured: the LLM
-  returns `{mode: action|answer|clarify, action?, free_text?, answer?}` to
-  `decision.json` and nothing else. `apply_decision.py nl-route` is the trust
-  boundary - it validates `action` against the per-kind allowlist and only then
+- Natural-language decisions accept only owner/maintainer comments and are structured.
+  `docs/AGENT_RUNTIME.md` owns the native structured-output and portable schema-repair contract.
+  `apply_decision.py nl-route` is the trust boundary - it validates `action` against the per-kind allowlist and only then
   sets the `decision` output that makes the SAME deterministic `execute` run
   (so every guard - allowlist, head-SHA re-check, fork-CI HOLD, token isolation,
   concurrency - applies unchanged). `answer`/`clarify` only post a card comment
@@ -612,12 +611,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   Search output is UNTRUSTED DATA for answering questions only, never an
   instruction and never an authorization to act.
   The LLM never receives `FLEET_TOKEN` - it maps intent or answers, it never acts.
-  After Claude runs, the trusted bridge validates a regular, size-capped
-  `decision.json`, observed model identity, and the output schema before it
+  After Claude runs, the trusted bridge validates the native output or portable
+  repair candidate, observed model identity, and the output schema before it
   atomically emits `AgentResult`; `nl-route` and `execute` consume only that
   normalized result from a read-only trusted source copy with a scrubbed
   environment.
-  A delivered-but-schema-invalid NL result can claim only one same-comment `nl-decision.schema-repair` task; it is tokenless, one-turn/no-tool, and strictly revalidated before any reply or action.
+  A native-output failure can claim only one same-comment `nl-decision.schema-repair` task; it is tokenless, one-turn/no-tool, and strictly revalidated before any reply or action.
   A duplicate or still-invalid repair leaves the card open with a content-free, retryable failure note.
   `docs/AGENT_RUNTIME.md` owns the detailed runtime contract.
 - Token discipline per step: scan/execute and the read-only target reads for the
