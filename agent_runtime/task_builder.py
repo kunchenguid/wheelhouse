@@ -56,9 +56,7 @@ ACTION_LIMITS = {
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
 }
 
-SCHEMA_REPAIR_ACTIONS = frozenset(
-    {"triage.schema-repair", "nl-decision.schema-repair"}
-)
+SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
 
 
 def _artifact_path(bundle: Path, digest: str) -> Path:
@@ -126,7 +124,9 @@ def _git(repo: Path, *args: str) -> bytes:
         raise ArtifactError("repository snapshot cannot invoke git") from error
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise ArtifactError("repository snapshot git command failed: %s" % (detail or args[0]))
+        raise ArtifactError(
+            "repository snapshot git command failed: %s" % (detail or args[0])
+        )
     return completed.stdout
 
 
@@ -134,7 +134,9 @@ def _git_text(repo: Path, *args: str) -> str:
     try:
         return _git(repo, *args).decode("utf-8")
     except UnicodeDecodeError as error:
-        raise ArtifactError("repository snapshot git output is not valid UTF-8") from error
+        raise ArtifactError(
+            "repository snapshot git output is not valid UTF-8"
+        ) from error
 
 
 def _require_bound_clean_repository(repo: Path, commit: str) -> str:
@@ -145,9 +147,15 @@ def _require_bound_clean_repository(repo: Path, commit: str) -> str:
     if not (repo / ".git").exists():
         raise ArtifactError("repository input is not a git checkout")
     try:
-        full = _git_text(repo, "rev-parse", "--verify", "%s^{commit}" % commit).strip().lower()
+        full = (
+            _git_text(repo, "rev-parse", "--verify", "%s^{commit}" % commit)
+            .strip()
+            .lower()
+        )
     except ArtifactError as error:
-        raise ArtifactError("repository commit binding is not a readable commit") from error
+        raise ArtifactError(
+            "repository commit binding is not a readable commit"
+        ) from error
     if not full or any(character not in "0123456789abcdef" for character in full):
         raise ArtifactError("repository commit binding is not a readable commit")
     head = _git_text(repo, "rev-parse", "HEAD").strip().lower()
@@ -161,9 +169,16 @@ def _require_bound_clean_repository(repo: Path, commit: str) -> str:
     # Fail closed on any dirty, staged, untracked, intent-to-add, or mode mismatch.
     status = _git(repo, "status", "--porcelain=v1", "-uall", "--ignore-submodules=none")
     if status.strip():
-        raise ArtifactError("repository worktree is dirty, untracked, or mode-mismatched")
-    if _git(repo, "diff", "--raw", full).strip() or _git(repo, "diff", "--cached", "--raw", full).strip():
-        raise ArtifactError("repository worktree is dirty, untracked, or mode-mismatched")
+        raise ArtifactError(
+            "repository worktree is dirty, untracked, or mode-mismatched"
+        )
+    if (
+        _git(repo, "diff", "--raw", full).strip()
+        or _git(repo, "diff", "--cached", "--raw", full).strip()
+    ):
+        raise ArtifactError(
+            "repository worktree is dirty, untracked, or mode-mismatched"
+        )
     return full
 
 
@@ -234,12 +249,18 @@ def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]
                     raise ArtifactError("repository tree listing row exceeds its bound")
                 source_entries += 1
                 if source_entries > MAX_REPOSITORY_SOURCE_ENTRIES:
-                    raise ArtifactError("repository snapshot exceeds its source-entry bound")
+                    raise ArtifactError(
+                        "repository snapshot exceeds its source-entry bound"
+                    )
                 mode, objtype, object_id, path = _parse_ls_tree_item(item)
                 if mode == GIT_MODE_GITLINK or objtype == "commit":
-                    raise ArtifactError("repository snapshot rejects gitlinks/submodules")
+                    raise ArtifactError(
+                        "repository snapshot rejects gitlinks/submodules"
+                    )
                 if mode not in (GIT_MODE_FILE, GIT_MODE_EXEC, GIT_MODE_SYMLINK):
-                    raise ArtifactError("repository snapshot contains an unsupported git mode")
+                    raise ArtifactError(
+                        "repository snapshot contains an unsupported git mode"
+                    )
                 if objtype != "blob":
                     raise ArtifactError("repository snapshot contains a non-blob entry")
                 if path in index:
@@ -257,7 +278,9 @@ def _load_committed_index(repo: Path, commit: str) -> dict[str, tuple[str, str]]
     returncode = process.wait()
     if returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()
-        raise ArtifactError("repository snapshot git command failed: %s" % (detail or "ls-tree"))
+        raise ArtifactError(
+            "repository snapshot git command failed: %s" % (detail or "ls-tree")
+        )
     return index
 
 
@@ -291,7 +314,9 @@ class _BlobBatch:
         returncode = process.wait()
         if exc_type is None and returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
-            raise ArtifactError("repository snapshot git command failed: %s" % (detail or "cat-file"))
+            raise ArtifactError(
+                "repository snapshot git command failed: %s" % (detail or "cat-file")
+            )
 
     def read(self, object_id: str, max_bytes: int) -> bytes:
         if max_bytes < 0:
@@ -309,7 +334,9 @@ class _BlobBatch:
             process.stdin.flush()
             header = process.stdout.readline(1025)
         except (BrokenPipeError, OSError, UnicodeEncodeError) as error:
-            raise ArtifactError("repository snapshot git command failed: cat-file") from error
+            raise ArtifactError(
+                "repository snapshot git command failed: cat-file"
+            ) from error
         if not header or len(header) > 1024 or not header.endswith(b"\n"):
             raise ArtifactError("repository blob header is malformed")
         try:
@@ -318,7 +345,11 @@ class _BlobBatch:
             size = int(size_text)
         except (UnicodeDecodeError, ValueError) as error:
             raise ArtifactError("repository blob header is malformed") from error
-        if returned_id.lower() != object_id.lower() or object_type != "blob" or size < 0:
+        if (
+            returned_id.lower() != object_id.lower()
+            or object_type != "blob"
+            or size < 0
+        ):
             raise ArtifactError("repository blob header is invalid")
         if size > max_bytes:
             raise ArtifactError("repository snapshot exceeds its byte bound")
@@ -371,7 +402,11 @@ def _resolve_link_path(link_path: str, raw_target: str) -> str:
     if not raw_target or raw_target == ".":
         raise ArtifactError("repository symlink target is invalid")
     base = PurePosixPath(link_path).parent
-    combined = PurePosixPath(base) / raw_target if str(base) != "." else PurePosixPath(raw_target)
+    combined = (
+        PurePosixPath(base) / raw_target
+        if str(base) != "."
+        else PurePosixPath(raw_target)
+    )
     parts: list[str] = []
     for part in combined.parts:
         if part in ("", "."):
@@ -437,7 +472,12 @@ def _descendants(index: dict[str, tuple[str, str]], tree_path: str) -> list[str]
     return sorted(path for path in index if path.startswith(prefix))
 
 
-def _account(entries: dict[str, dict[str, Any]], path: str, data: bytes, blob_by_path: dict[str, bytes]) -> None:
+def _account(
+    entries: dict[str, dict[str, Any]],
+    path: str,
+    data: bytes,
+    blob_by_path: dict[str, bytes],
+) -> None:
     if path in entries:
         raise ArtifactError("repository snapshot path collision")
     size = len(data)
@@ -461,7 +501,9 @@ def _materialize_file(
     if count_alias:
         count = object_materializations.get(object_id, 0) + 1
         if count > MAX_OBJECT_MATERIALIZATIONS:
-            raise ArtifactError("repository snapshot exceeds its per-object alias bound")
+            raise ArtifactError(
+                "repository snapshot exceeds its per-object alias bound"
+            )
         object_materializations[object_id] = count
     data = _blob_bytes(blobs, object_id, MAX_REPOSITORY_BYTES - total[0])
     total[0] += len(data)
@@ -545,7 +587,16 @@ def _materialize_tree_alias(
         mode, object_id = index[source_path]
         if mode in (GIT_MODE_FILE, GIT_MODE_EXEC):
             before = total[0]
-            _materialize_file(blobs, entries, blob_by_path, output_path, object_id, total, object_materializations, count_alias=True)
+            _materialize_file(
+                blobs,
+                entries,
+                blob_by_path,
+                output_path,
+                object_id,
+                total,
+                object_materializations,
+                count_alias=True,
+            )
             outputs.append(output_path)
             added_files += 1
             added_bytes += total[0] - before
@@ -553,7 +604,14 @@ def _materialize_tree_alias(
         if mode == GIT_MODE_SYMLINK:
             # Propagate chain + hop budget into nested resolution (never reset).
             nested_chain = set(outer_chain)
-            resolved_path, resolved_kind, resolved_mode, resolved_object, _, nested_hops = _resolve_terminal(
+            (
+                resolved_path,
+                resolved_kind,
+                resolved_mode,
+                resolved_object,
+                _,
+                nested_hops,
+            ) = _resolve_terminal(
                 repo,
                 blobs,
                 commit,
@@ -564,7 +622,16 @@ def _materialize_tree_alias(
             )
             if resolved_kind == "file":
                 before = total[0]
-                _materialize_file(blobs, entries, blob_by_path, output_path, resolved_object, total, object_materializations, count_alias=True)
+                _materialize_file(
+                    blobs,
+                    entries,
+                    blob_by_path,
+                    output_path,
+                    resolved_object,
+                    total,
+                    object_materializations,
+                    count_alias=True,
+                )
                 outputs.append(output_path)
                 added_files += 1
                 added_bytes += total[0] - before
@@ -620,7 +687,10 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
 
     bound = _require_bound_clean_repository(source, commit)
     index = _load_committed_index(source, bound)
-    if sum(1 for mode, _object_id in index.values() if mode == GIT_MODE_SYMLINK) > MAX_REPOSITORY_SYMLINKS:
+    if (
+        sum(1 for mode, _object_id in index.values() if mode == GIT_MODE_SYMLINK)
+        > MAX_REPOSITORY_SYMLINKS
+    ):
         raise ArtifactError("repository snapshot exceeds its symlink-count bound")
     entries: dict[str, dict[str, Any]] = {}
     blob_by_path: dict[str, bytes] = {}
@@ -635,16 +705,34 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
                 if path in entries:
                     # A prior directory-link materialization already claimed this path.
                     raise ArtifactError("repository snapshot path collision")
-                _materialize_file(blobs, entries, blob_by_path, path, object_id, total, object_materializations, count_alias=False)
+                _materialize_file(
+                    blobs,
+                    entries,
+                    blob_by_path,
+                    path,
+                    object_id,
+                    total,
+                    object_materializations,
+                    count_alias=False,
+                )
                 continue
             if mode != GIT_MODE_SYMLINK:
-                raise ArtifactError("repository snapshot contains an unsupported git mode")
+                raise ArtifactError(
+                    "repository snapshot contains an unsupported git mode"
+                )
             raw = _blob_bytes(blobs, object_id, MAX_SYMLINK_TARGET_BYTES)
             raw_text = _decode_link_target(raw)
             # Validate the first hop explicitly so absolute/traversal fail before deeper resolution.
             _resolve_link_path(path, raw_text)
             resolve_chain: set[str] = set()
-            resolved_path, resolved_kind, resolved_mode, resolved_object, _, hops_used = _resolve_terminal(
+            (
+                resolved_path,
+                resolved_kind,
+                resolved_mode,
+                resolved_object,
+                _,
+                hops_used,
+            ) = _resolve_terminal(
                 source,
                 blobs,
                 bound,
@@ -657,7 +745,16 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
                 if path in entries:
                     raise ArtifactError("repository snapshot path collision")
                 before = total[0]
-                _materialize_file(blobs, entries, blob_by_path, path, resolved_object, total, object_materializations, count_alias=True)
+                _materialize_file(
+                    blobs,
+                    entries,
+                    blob_by_path,
+                    path,
+                    resolved_object,
+                    total,
+                    object_materializations,
+                    count_alias=True,
+                )
                 links.append(
                     MaterializedLinkRecord(
                         commit=bound,
@@ -704,7 +801,9 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
                         resolved_object=resolved_object,
                         output_paths=tuple(outputs),
                         file_count=file_count,
-                        byte_count=byte_count if byte_count else total[0] - before_bytes,
+                        byte_count=byte_count
+                        if byte_count
+                        else total[0] - before_bytes,
                     )
                 )
                 continue
@@ -725,7 +824,9 @@ def snapshot_repository(source: Path, commit: str) -> RepositorySnapshot:
     )
 
 
-def _copy_directory(source: Path, bundle: Path, commit: str) -> tuple[str, int, int, str, str, list[MaterializedLinkRecord]]:
+def _copy_directory(
+    source: Path, bundle: Path, commit: str
+) -> tuple[str, int, int, str, str, list[MaterializedLinkRecord]]:
     snapshot = snapshot_repository(source, commit)
     digest = snapshot.tree_sha256
     destination = _artifact_path(bundle, digest)
@@ -739,22 +840,37 @@ def _copy_directory(source: Path, bundle: Path, commit: str) -> tuple[str, int, 
             os.chmod(dst, 0o400)
             # Post-materialization hard guarantee: no live symlink may enter the handoff.
             if dst.is_symlink() or not dst.is_file():
-                raise ArtifactError("repository snapshot materialization produced a non-regular file")
+                raise ArtifactError(
+                    "repository snapshot materialization produced a non-regular file"
+                )
         for base, dirs, names in os.walk(destination, topdown=False, followlinks=False):
             for name in names:
                 child = Path(base) / name
                 if child.is_symlink() or not child.is_file():
-                    raise ArtifactError("repository snapshot materialization produced a non-regular file")
+                    raise ArtifactError(
+                        "repository snapshot materialization produced a non-regular file"
+                    )
             for name in dirs:
                 child = Path(base) / name
                 if child.is_symlink():
-                    raise ArtifactError("repository snapshot materialization produced a symlink")
+                    raise ArtifactError(
+                        "repository snapshot materialization produced a symlink"
+                    )
                 os.chmod(child, 0o500)
         os.chmod(destination, 0o500)
-    return digest, snapshot.total_bytes, snapshot.file_count, "artifacts/sha256/%s" % digest, snapshot.commit, snapshot.links
+    return (
+        digest,
+        snapshot.total_bytes,
+        snapshot.file_count,
+        "artifacts/sha256/%s" % digest,
+        snapshot.commit,
+        snapshot.links,
+    )
 
 
-def _link_provenance_value(commit: str, links: list[MaterializedLinkRecord]) -> dict[str, Any]:
+def _link_provenance_value(
+    commit: str, links: list[MaterializedLinkRecord]
+) -> dict[str, Any]:
     return {
         "version": 1,
         "commit": commit,
@@ -777,14 +893,25 @@ def _link_provenance_value(commit: str, links: list[MaterializedLinkRecord]) -> 
 
 
 def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
-    if action.startswith("triage.issue") or (action == "triage.schema-repair" and repair_kind == "issue"):
-        return ACTION_SCHEMAS / "triage-issue-v1.schema.json", "wheelhouse/triage-issue/v1"
+    if action.startswith("triage.issue") or (
+        action == "triage.schema-repair" and repair_kind == "issue"
+    ):
+        return (
+            ACTION_SCHEMAS / "triage-issue-v1.schema.json",
+            "wheelhouse/triage-issue/v1",
+        )
     if action.startswith("triage.pr") or action == "triage.schema-repair":
         return ACTION_SCHEMAS / "triage-pr-v1.schema.json", "wheelhouse/triage-pr/v1"
     if action.startswith("deep-review"):
-        return ACTION_SCHEMAS / "deep-review-text-v1.schema.json", "wheelhouse/deep-review-text/v1"
+        return (
+            ACTION_SCHEMAS / "deep-review-text-v1.schema.json",
+            "wheelhouse/deep-review-text/v1",
+        )
     if action.startswith("nl-decision"):
-        return ACTION_SCHEMAS / "nl-decision-v1.schema.json", "wheelhouse/nl-decision/v1"
+        return (
+            ACTION_SCHEMAS / "nl-decision-v1.schema.json",
+            "wheelhouse/nl-decision/v1",
+        )
     raise ArtifactError("unsupported action output schema")
 
 
@@ -856,7 +983,9 @@ def claude_isolation(action: str) -> dict[str, Any]:
         "rootFilesystem": "verified-artifact-workspace",
         "writableRoots": ["/github/workspace", "/tmp"],
         "modelNetwork": {"mode": "runner-default", "allowedHosts": []},
-        "toolNetwork": {"mode": "broker-only" if action.endswith(".search") else "none"},
+        "toolNetwork": {
+            "mode": "broker-only" if action.endswith(".search") else "none"
+        },
         "inheritEnvironment": True,
         "dropCapabilities": False,
         "noNewPrivileges": False,
@@ -875,17 +1004,68 @@ def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
         else ["trusted-post-action-bridge"]
     )
     required = [
-        {"name": "input.text", "constraints": {"handoff": "content-addressed-bounded", "mount": "read-only"}},
-        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": structured_mechanisms}},
-        {"name": "lifecycle.cancel", "constraints": {"mechanism": "parent-workflow-cancel"}},
+        {
+            "name": "input.text",
+            "constraints": {
+                "handoff": "content-addressed-bounded",
+                "mount": "read-only",
+            },
+        },
+        {
+            "name": "output.structured",
+            "constraints": {
+                "schemaSha256": schema_digest,
+                "strict": True,
+                "mechanismAnyOf": structured_mechanisms,
+            },
+        },
+        {
+            "name": "lifecycle.cancel",
+            "constraints": {"mechanism": "parent-workflow-cancel"},
+        },
         {"name": "provenance.actual-model", "constraints": {}},
         {"name": "provenance.actual-provider", "constraints": {}},
-        {"name": "isolation.external", "constraints": {"worker": "separate-read-only-github-job", "profile": "claude-artifact-bridge-v1"}},
-        {"name": "github.permissions", "constraints": {"actions": "read", "contents": "read", "issues": "none", "actingToken": False}},
-        {"name": "credentials.isolated", "constraints": {"fleetToken": "absent", "readonlyToken": "broker-only" if action.endswith(".search") else "absent"}},
-        {"name": "tools.declared", "constraints": {"exact": claude_declared_tools(action)}},
-        {"name": "target.inputs", "constraints": {"mount": "read-only", "writes": False, "declaredOutputPaths": claude_declared_outputs(action)}},
-        {"name": "transcript.bounded", "constraints": {"maxBytes": 8388608, "reduced": True}},
+        {
+            "name": "isolation.external",
+            "constraints": {
+                "worker": "separate-read-only-github-job",
+                "profile": "claude-artifact-bridge-v1",
+            },
+        },
+        {
+            "name": "github.permissions",
+            "constraints": {
+                "actions": "read",
+                "contents": "read",
+                "issues": "none",
+                "actingToken": False,
+            },
+        },
+        {
+            "name": "credentials.isolated",
+            "constraints": {
+                "fleetToken": "absent",
+                "readonlyToken": "broker-only"
+                if action.endswith(".search")
+                else "absent",
+            },
+        },
+        {
+            "name": "tools.declared",
+            "constraints": {"exact": claude_declared_tools(action)},
+        },
+        {
+            "name": "target.inputs",
+            "constraints": {
+                "mount": "read-only",
+                "writes": False,
+                "declaredOutputPaths": claude_declared_outputs(action),
+            },
+        },
+        {
+            "name": "transcript.bounded",
+            "constraints": {"maxBytes": 8388608, "reduced": True},
+        },
     ]
     return {
         "required": required,
@@ -904,23 +1084,52 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
     required = [
         {"name": "input.text", "constraints": {}},
         {"name": "process.exec", "constraints": {"mode": "none"}},
-        {"name": "tool.network", "constraints": {"mode": "broker-only" if action.endswith(".search") else "none"}},
-        {"name": "output.structured", "constraints": {"schemaSha256": schema_digest, "strict": True, "mechanismAnyOf": ["native-schema", "typed-terminating-tool"]}},
-        {"name": "lifecycle.cancel", "constraints": {"ackMs": 10000, "mechanism": "adapter-interrupt"}},
+        {
+            "name": "tool.network",
+            "constraints": {
+                "mode": "broker-only" if action.endswith(".search") else "none"
+            },
+        },
+        {
+            "name": "output.structured",
+            "constraints": {
+                "schemaSha256": schema_digest,
+                "strict": True,
+                "mechanismAnyOf": ["native-schema", "typed-terminating-tool"],
+            },
+        },
+        {
+            "name": "lifecycle.cancel",
+            "constraints": {"ackMs": 10000, "mechanism": "adapter-interrupt"},
+        },
         {"name": "provenance.actual-model", "constraints": {}},
         {"name": "provenance.actual-provider", "constraints": {}},
-        {"name": "isolation.external", "constraints": {"worker": "sandboxed-adapter-worker"}},
+        {
+            "name": "isolation.external",
+            "constraints": {"worker": "sandboxed-adapter-worker"},
+        },
     ]
     if action not in SCHEMA_REPAIR_ACTIONS:
         required.extend(
             [
-                {"name": "fs.read", "constraints": {"roots": ["target.txt", "target-src"], "writes": False}},
-                {"name": "fs.grep", "constraints": {"roots": ["target.txt", "target-src"]}},
+                {
+                    "name": "fs.read",
+                    "constraints": {
+                        "roots": ["target.txt", "target-src"],
+                        "writes": False,
+                    },
+                },
+                {
+                    "name": "fs.grep",
+                    "constraints": {"roots": ["target.txt", "target-src"]},
+                },
                 {"name": "fs.glob", "constraints": {"roots": ["target-src"]}},
             ]
         )
     if action.endswith(".search"):
-        required.append({"name": "github.search.readonly", "constraints": {"broker": True}})
+        required.append(
+            {"name": "github.search.readonly", "constraints": {"broker": True}}
+        )
     return {
         "required": required,
         "optional": [
@@ -940,7 +1149,12 @@ def _tools(action: str, adapter: str) -> dict[str, Any]:
         names = ["fs.read", "fs.grep", "fs.glob"]
     if action.endswith(".search"):
         names.append("github.search.readonly")
-    bounds = {"fs.read": 65536, "fs.grep": 65536, "fs.glob": 32768, "github.search.readonly": 65536}
+    bounds = {
+        "fs.read": 65536,
+        "fs.grep": 65536,
+        "fs.glob": 32768,
+        "github.search.readonly": 65536,
+    }
     return {
         "default": "deny",
         "parallel": False,
@@ -975,7 +1189,9 @@ def _limit_enforcement(adapter: str) -> dict[str, str]:
     }
 
 
-def _trust_segments(action: str, prompt_digest: str, prompt_bytes: int, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _trust_segments(
+    action: str, prompt_digest: str, prompt_bytes: int, inputs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     segments = [
         {
             "name": "runtime-instructions",
@@ -986,13 +1202,46 @@ def _trust_segments(action: str, prompt_digest: str, prompt_bytes: int, inputs: 
         }
     ]
     if action.startswith("deep-review"):
-        segments.append({"name": "decision-card", "trust": "untrusted", "origin": "card-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
+        segments.append(
+            {
+                "name": "decision-card",
+                "trust": "untrusted",
+                "origin": "card-inline-bounded",
+                "sha256": prompt_digest,
+                "bytes": prompt_bytes,
+            }
+        )
     elif action in SCHEMA_REPAIR_ACTIONS:
-        segments.append({"name": "prior-candidate", "trust": "untrusted", "origin": "delivered-model-result-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
+        segments.append(
+            {
+                "name": "prior-candidate",
+                "trust": "untrusted",
+                "origin": "delivered-model-result-inline-bounded",
+                "sha256": prompt_digest,
+                "bytes": prompt_bytes,
+            }
+        )
     elif action.startswith("nl-decision"):
-        segments.append({"name": "maintainer-context", "trust": "trusted", "origin": "authorized-card-thread-inline-bounded", "sha256": prompt_digest, "bytes": prompt_bytes})
+        segments.append(
+            {
+                "name": "maintainer-context",
+                "trust": "trusted",
+                "origin": "authorized-card-thread-inline-bounded",
+                "sha256": prompt_digest,
+                "bytes": prompt_bytes,
+            }
+        )
     for item in inputs:
-        segments.append({"name": item["id"], "trust": item["trust"], "origin": "prepared-artifact", "sha256": item["sha256"], "bytes": item["bytes"], "artifact": item["artifact"]})
+        segments.append(
+            {
+                "name": item["id"],
+                "trust": item["trust"],
+                "origin": "prepared-artifact",
+                "sha256": item["sha256"],
+                "bytes": item["bytes"],
+                "artifact": item["artifact"],
+            }
+        )
     return segments
 
 
@@ -1023,8 +1272,13 @@ def build_task(
     if not DIGEST.fullmatch(event_key):
         raise ArtifactError("agent event key binding is invalid")
     adapter = (selection.get("profile") or {}).get("adapter")
-    if (selection.get("mode"), adapter) not in (("claude", "claude-action-compat"), ("codex", "codex-app-server")):
-        raise ArtifactError("the selected adapter is not supported by the task compiler")
+    if (selection.get("mode"), adapter) not in (
+        ("claude", "claude-action-compat"),
+        ("codex", "codex-app-server"),
+    ):
+        raise ArtifactError(
+            "the selected adapter is not supported by the task compiler"
+        )
     bundle = Path(bundle_dir).resolve()
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -1042,7 +1296,7 @@ def build_task(
     )
     shim_lines = [
         "",
-        "<wheelhouse-adapter-shim trust=\"trusted\" version=\"codex-app-server/v1\">",
+        '<wheelhouse-adapter-shim trust="trusted" version="codex-app-server/v1">',
         tool_instruction,
         "Any earlier request-file, Write, Bash, wheelhouse-search command, or",
         "decision.json instruction describes the direct Claude production path and",
@@ -1051,22 +1305,44 @@ def build_task(
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]
-    compiled_prompt = prompt_text if adapter == "claude-action-compat" else prompt_text.rstrip() + "\n" + "\n".join(shim_lines) + "\n"
+    compiled_prompt = (
+        prompt_text
+        if adapter == "claude-action-compat"
+        else prompt_text.rstrip() + "\n" + "\n".join(shim_lines) + "\n"
+    )
     compiled_path = bundle / ".compiled-prompt"
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
-    prompt_digest, prompt_bytes, prompt_artifact = _copy_file(compiled_path, bundle, 262144)
+    prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
+        compiled_path, bundle, 262144
+    )
     compiled_path.unlink()
     inputs: list[dict[str, Any]] = []
     if target_file:
         digest, size, artifact = _copy_file(Path(target_file), bundle, 1_500_000 + 8192)
-        inputs.append({"id": "target", "artifact": artifact, "logicalPath": "target.txt", "sha256": digest, "mediaType": "text/plain; charset=utf-8", "trust": "untrusted", "mount": "read-only", "maxBytes": 1_508_192, "bytes": size})
+        inputs.append(
+            {
+                "id": "target",
+                "artifact": artifact,
+                "logicalPath": "target.txt",
+                "sha256": digest,
+                "mediaType": "text/plain; charset=utf-8",
+                "trust": "untrusted",
+                "mount": "read-only",
+                "maxBytes": 1_508_192,
+                "bytes": size,
+            }
+        )
     if repository_dir:
         if not repository_commit:
             raise ArtifactError("repository commit binding is required")
-        digest, size, count, artifact, bound_commit, links = _copy_directory(Path(repository_dir), bundle, repository_commit)
+        digest, size, count, artifact, bound_commit, links = _copy_directory(
+            Path(repository_dir), bundle, repository_commit
+        )
         provenance_source = bundle / ".repository-symlink-provenance.json"
-        atomic_write_json(provenance_source, _link_provenance_value(bound_commit, links))
+        atomic_write_json(
+            provenance_source, _link_provenance_value(bound_commit, links)
+        )
         try:
             provenance_digest, provenance_size, provenance_artifact = _copy_file(
                 provenance_source,
@@ -1075,11 +1351,56 @@ def build_task(
             )
         finally:
             provenance_source.unlink(missing_ok=True)
-        inputs.append({"id": "repository", "artifact": artifact, "logicalPath": "target-src", "sha256": digest, "mediaType": "application/vnd.wheelhouse.repo-snapshot", "trust": "untrusted", "mount": "read-only", "maxBytes": MAX_REPOSITORY_BYTES, "bytes": size, "git": {"commit": bound_commit, "detached": True, "fileCount": count, "treeSha256": digest, "symlinkCount": len(links), "symlinkProvenanceArtifact": provenance_artifact, "symlinkProvenanceSha256": provenance_digest}})
-        inputs.append({"id": "repository-provenance", "artifact": provenance_artifact, "logicalPath": "repository-provenance.json", "sha256": provenance_digest, "mediaType": "application/vnd.wheelhouse.repo-symlink-provenance+json", "trust": "untrusted", "mount": "read-only", "maxBytes": MAX_REPOSITORY_PROVENANCE_BYTES, "bytes": provenance_size})
+        inputs.append(
+            {
+                "id": "repository",
+                "artifact": artifact,
+                "logicalPath": "target-src",
+                "sha256": digest,
+                "mediaType": "application/vnd.wheelhouse.repo-snapshot",
+                "trust": "untrusted",
+                "mount": "read-only",
+                "maxBytes": MAX_REPOSITORY_BYTES,
+                "bytes": size,
+                "git": {
+                    "commit": bound_commit,
+                    "detached": True,
+                    "fileCount": count,
+                    "treeSha256": digest,
+                    "symlinkCount": len(links),
+                    "symlinkProvenanceArtifact": provenance_artifact,
+                    "symlinkProvenanceSha256": provenance_digest,
+                },
+            }
+        )
+        inputs.append(
+            {
+                "id": "repository-provenance",
+                "artifact": provenance_artifact,
+                "logicalPath": "repository-provenance.json",
+                "sha256": provenance_digest,
+                "mediaType": "application/vnd.wheelhouse.repo-symlink-provenance+json",
+                "trust": "untrusted",
+                "mount": "read-only",
+                "maxBytes": MAX_REPOSITORY_PROVENANCE_BYTES,
+                "bytes": provenance_size,
+            }
+        )
     if vision_file:
         digest, size, artifact = _copy_file(Path(vision_file), bundle, 40000)
-        inputs.append({"id": "vision", "artifact": artifact, "logicalPath": "vision.md", "sha256": digest, "mediaType": "text/markdown; charset=utf-8", "trust": "trusted", "mount": "read-only", "maxBytes": 40000, "bytes": size})
+        inputs.append(
+            {
+                "id": "vision",
+                "artifact": artifact,
+                "logicalPath": "vision.md",
+                "sha256": digest,
+                "mediaType": "text/markdown; charset=utf-8",
+                "trust": "trusted",
+                "mount": "read-only",
+                "maxBytes": 40000,
+                "bytes": size,
+            }
+        )
 
     schema_path, schema_id = _schema_for(action, repair_kind)
     source_schema = load_json_regular(schema_path, max_bytes=65536)
@@ -1096,20 +1417,26 @@ def build_task(
         canonical_schema.write_bytes(canonical_json_bytes(schema_value))
         schema_source = canonical_schema
     try:
-        schema_digest, _, schema_artifact = _copy_file(
-            schema_source, bundle, 65536
-        )
+        schema_digest, _, schema_artifact = _copy_file(schema_source, bundle, 65536)
     finally:
         canonical_schema.unlink(missing_ok=True)
     soft, hard, turns, tool_calls, final_bytes = ACTION_LIMITS[action]
     profile = selection["profile"]
-    shim_version = "claude-action-compat/v1" if adapter == "claude-action-compat" else "codex-app-server/v1"
+    shim_version = (
+        "claude-action-compat/v1"
+        if adapter == "claude-action-compat"
+        else "codex-app-server/v1"
+    )
     shim = {
         "adapter": adapter,
         "version": shim_version,
         "promptRole": "user",
-        "nativeDefault": "pinned-claude-code-2.1.197" if adapter == "claude-action-compat" else "pinned-codex-0.144.0",
-        "tools": "claude-action-mapped" if adapter == "claude-action-compat" else "dynamic-only",
+        "nativeDefault": "pinned-claude-code-2.1.197"
+        if adapter == "claude-action-compat"
+        else "pinned-codex-0.144.0",
+        "tools": "claude-action-mapped"
+        if adapter == "claude-action-compat"
+        else "dynamic-only",
         "output": (
             "native-schema+trusted-revalidation"
             if adapter == "claude-action-compat"
@@ -1141,25 +1468,48 @@ def build_task(
             "action": action,
             "idempotencyKey": event_key,
             "wheelhouseRevision": wheelhouse_revision,
-            "target": {"owner": owner, "repo": repo, "number": int(number), "kind": target_kind, "revision": revision},
+            "target": {
+                "owner": owner,
+                "repo": repo,
+                "number": int(number),
+                "kind": target_kind,
+                "revision": revision,
+            },
         },
         "spec": {
-            "selection": {"profile": selection["profileName"], "candidates": [candidate], "fallback": {"mode": "none"}},
+            "selection": {
+                "profile": selection["profileName"],
+                "candidates": [candidate],
+                "fallback": {"mode": "none"},
+            },
             "prompt": {
-                "system": {"mode": "native-default-plus-core", "adapterShimVersion": shim_version, "adapterShimSha256": canonical_sha256(shim)},
+                "system": {
+                    "mode": "native-default-plus-core",
+                    "adapterShimVersion": shim_version,
+                    "adapterShimSha256": canonical_sha256(shim),
+                },
                 "userArtifact": prompt_artifact,
-                "segments": _trust_segments(action, prompt_digest, prompt_bytes, inputs),
+                "segments": _trust_segments(
+                    action, prompt_digest, prompt_bytes, inputs
+                ),
             },
             "inputs": inputs,
             "capabilities": _capabilities(action, schema_digest, adapter),
             "tools": _tools(action, adapter),
-            "isolation": claude_isolation(action) if adapter == "claude-action-compat" else {
+            "isolation": claude_isolation(action)
+            if adapter == "claude-action-compat"
+            else {
                 "profile": "sandboxed-worker-v1",
                 "worker": "sandboxed-adapter-worker",
                 "rootFilesystem": "read-only",
                 "writableRoots": ["/run/wheelhouse/output", "/tmp"],
-                "modelNetwork": {"mode": "provider-only", "allowedHosts": list(profile["provider_hosts"])},
-                "toolNetwork": {"mode": "broker-only" if action.endswith(".search") else "none"},
+                "modelNetwork": {
+                    "mode": "provider-only",
+                    "allowedHosts": list(profile["provider_hosts"]),
+                },
+                "toolNetwork": {
+                    "mode": "broker-only" if action.endswith(".search") else "none"
+                },
                 "inheritEnvironment": False,
                 "dropCapabilities": True,
                 "noNewPrivileges": True,
@@ -1169,22 +1519,32 @@ def build_task(
                 "softDeadlineMs": None if adapter == "claude-action-compat" else soft,
                 "hardDeadlineMs": None if adapter == "claude-action-compat" else hard,
                 "dispatchDeadlineMs": None,
-                "childExecutionTimeoutMs": ((hard + 59_999) // 60_000) * 60_000 if adapter == "claude-action-compat" else None,
+                "childExecutionTimeoutMs": ((hard + 59_999) // 60_000) * 60_000
+                if adapter == "claude-action-compat"
+                else None,
                 "cancelGraceMs": None if adapter == "claude-action-compat" else 10000,
                 "maxTurns": None if adapter == "claude-action-compat" else turns,
-                "maxToolCalls": None if adapter == "claude-action-compat" else tool_calls,
+                "maxToolCalls": None
+                if adapter == "claude-action-compat"
+                else tool_calls,
                 "maxFinalBytes": final_bytes,
                 "maxEventBytes": 8388608,
-                "maxProviderRequests": None if adapter == "claude-action-compat" else (64 if turns > 32 else 40),
+                "maxProviderRequests": None
+                if adapter == "claude-action-compat"
+                else (64 if turns > 32 else 40),
                 "maxInputTokens": None if adapter == "claude-action-compat" else 180000,
-                "maxOutputTokens": None if adapter == "claude-action-compat" else (16000 if action.startswith("deep-review") else 8000),
+                "maxOutputTokens": None
+                if adapter == "claude-action-compat"
+                else (16000 if action.startswith("deep-review") else 8000),
                 "enforcement": _limit_enforcement(adapter),
             },
             "output": {
                 "schemaArtifact": schema_artifact,
                 "schemaId": schema_id,
                 "schemaSha256": schema_digest,
-                "evidencePolicy": "target-anchor/v1" if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS else "none",
+                "evidencePolicy": "target-anchor/v1"
+                if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS
+                else "none",
                 "allowProseFallback": False,
             },
             "retry": {
@@ -1192,14 +1552,23 @@ def build_task(
                 "retryable": [],
                 "repairTask": (
                     "triage.schema-repair/v1"
-                    if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS
+                    if action.startswith("triage.")
+                    and action not in SCHEMA_REPAIR_ACTIONS
                     else "nl-decision.schema-repair/v1"
-                    if action.startswith("nl-decision.") and action not in SCHEMA_REPAIR_ACTIONS
+                    if action.startswith("nl-decision.")
+                    and action not in SCHEMA_REPAIR_ACTIONS
                     else None
                 ),
             },
             "session": {"mode": "ephemeral", "resume": "forbidden"},
-            "retention": {"normalizedEventsDays": 3, "rawTranscript": "transient-cross-job" if adapter == "claude-action-compat" else "discard", "finalResult": "consumer-owned", "redactionPolicy": "wheelhouse-agent/v1"},
+            "retention": {
+                "normalizedEventsDays": 3,
+                "rawTranscript": "transient-cross-job"
+                if adapter == "claude-action-compat"
+                else "discard",
+                "finalResult": "consumer-owned",
+                "redactionPolicy": "wheelhouse-agent/v1",
+            },
         },
     }
     validate_contract(task, "AgentTask")

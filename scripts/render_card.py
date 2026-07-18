@@ -371,7 +371,9 @@ def normalize_automerge_workflow_hold(value):
         return None
     head_sha = value.get("head_sha")
     commit_sha = value.get("commit_sha")
-    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", head_sha):
+    if not isinstance(head_sha, str) or not re.fullmatch(
+        r"[0-9A-Fa-f]{7,64}", head_sha
+    ):
         return None
     if not isinstance(commit_sha, str) or not re.fullmatch(
         r"[0-9A-Fa-f]{7,64}", commit_sha
@@ -454,9 +456,7 @@ def automerge_workflow_hold_status(state, head_sha):
 
 def workflow_hold_maintenance_needed(item, state, labels=None):
     """Whether a full refresh must preserve, clear, add, or remove hold UI."""
-    status, _ = automerge_workflow_hold_status(
-        state, (item or {}).get("head_sha", "")
-    )
+    status, _ = automerge_workflow_hold_status(state, (item or {}).get("head_sha", ""))
     names = _label_names(labels)
     labeled = AUTOMERGE_WORKFLOW_HOLD_LABEL in names
     if status == "matching":
@@ -1171,9 +1171,7 @@ def _normalize_triage_with_reason(data):
     return triage, ""
 
 
-_EVIDENCE_QUOTE_RE = re.compile(
-    r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\''
-)
+_EVIDENCE_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\'')
 _EVIDENCE_SEGMENT_RE = re.compile(r"(?:\r?\n|\s+\|\s+)")
 _EVIDENCE_ELLIPSIS_RE = re.compile(r"(?:\u2026|\.{3})")
 _EVIDENCE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-+*]\s+|[0-9]+[.)]\s+)")
@@ -1219,9 +1217,7 @@ def _evidence_candidates(evidence):
     return quoted, fallback
 
 
-def evidence_anchor_ok(
-    evidence, target_text, min_quote_len=12, min_fallback_len=20
-):
+def evidence_anchor_ok(evidence, target_text, min_quote_len=12, min_fallback_len=20):
     """Deterministic lazy/fabrication guard for pass-by-reference triage.
 
     The prompt requires the model to return `evidence`: 2-4 short verbatim
@@ -1282,9 +1278,7 @@ def _triage_evidence_verified(data, target_file):
     if not target_text:
         return True
     evidence = (
-        _flatten_evidence(data.get(EVIDENCE_FIELD))
-        if isinstance(data, dict)
-        else None
+        _flatten_evidence(data.get(EVIDENCE_FIELD)) if isinstance(data, dict) else None
     )
     if evidence is None:
         return False
@@ -2156,9 +2150,7 @@ def automerge_workflow_hold_presentation_complete(body, labels, record):
     sections = list(_AUTOMERGE_WORKFLOW_HOLD_SECTION_RE.finditer(body or ""))
     return bool(
         state
-        and normalize_automerge_workflow_hold(
-            state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD)
-        )
+        and normalize_automerge_workflow_hold(state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD))
         == normalized
         and AUTOMERGE_WORKFLOW_HOLD_LABEL in _label_names(labels)
         and len(sections) == 1
@@ -2174,6 +2166,7 @@ def _automerge_display_rows(rows):
 
 
 def _automerge_criterion_family(criterion_id):
+    """Assign display families by stable ID prefix; future IDs stay visible under Other."""
     criterion_id = str(criterion_id or "")
     for family, prefixes in AUTOMERGE_CRITERIA_GROUPS:
         if criterion_id.startswith(prefixes):
@@ -2572,9 +2565,7 @@ def _normalize_lifecycle_issue(issue, marker="", expected_state=""):
         "body": body,
         "labels": [{"name": name} for name in labels],
         "title": (
-            issue.get("title", "")
-            if isinstance(issue.get("title", ""), str)
-            else ""
+            issue.get("title", "") if isinstance(issue.get("title", ""), str) else ""
         ),
         "state": state,
         "updatedAt": updated_at,
@@ -2587,9 +2578,9 @@ def _normalize_lifecycle_issue(issue, marker="", expected_state=""):
 
 def _list_target_issues(marker, state):
     """Completely list one target label in one issue state via REST pagination."""
-    endpoint = (
-        "repos/{owner}/{repo}/issues?state=%s&labels=%s&per_page=100"
-        % (state.lower(), url_quote(marker, safe=""))
+    endpoint = "repos/{owner}/{repo}/issues?state=%s&labels=%s&per_page=100" % (
+        state.lower(),
+        url_quote(marker, safe=""),
     )
     try:
         result = _gh(["api", "--paginate", "--slurp", endpoint])
@@ -2608,9 +2599,7 @@ def _list_target_issues(marker, state):
     seen = set()
     for page in pages:
         for raw in page:
-            row = _normalize_lifecycle_issue(
-                raw, marker=marker, expected_state=state
-            )
+            row = _normalize_lifecycle_issue(raw, marker=marker, expected_state=state)
             if row["number"] in seen:
                 raise CardLifecycleError(
                     "%s card lookup for %s returned issue #%s twice"
@@ -2653,9 +2642,10 @@ def _trusted_post_close_timeline(issue):
     events = []
     complete = False
     for page in range(1, POST_CLOSE_TIMELINE_MAX_PAGES + 1):
-        endpoint = (
-            "repos/{owner}/{repo}/issues/%s/timeline?per_page=%s&page=%s"
-            % (number, POST_CLOSE_TIMELINE_PAGE_SIZE, page)
+        endpoint = "repos/{owner}/{repo}/issues/%s/timeline?per_page=%s&page=%s" % (
+            number,
+            POST_CLOSE_TIMELINE_PAGE_SIZE,
+            page,
         )
         try:
             result = _gh(["api", endpoint])
@@ -2713,8 +2703,7 @@ def _trusted_target_state(issue, item):
         or target_number != int(item.get("number") or 0)
     ):
         raise CardLifecycleError(
-            "card #%s target state does not match %s"
-            % (number, marker_label(item))
+            "card #%s target state does not match %s" % (number, marker_label(item))
         )
     kind = state.get("kind")
     if kind not in CHECKBOX_OPTIONS:
@@ -2754,10 +2743,10 @@ def reusable_closed_card(issue, item):
     state = _trusted_target_state(issue, item)
     if str(issue.get("state") or "").upper() != "CLOSED":
         return False, "candidate is no longer closed"
-    author = ((issue.get("author") or {}).get("login") or "")
+    author = (issue.get("author") or {}).get("login") or ""
     if not _trusted_automation_login(author):
         return False, "card author is not trusted Wheelhouse automation"
-    closed_by = ((issue.get("closedBy") or {}).get("login") or "")
+    closed_by = (issue.get("closedBy") or {}).get("login") or ""
     if not _trusted_automation_login(closed_by):
         return False, "latest close actor is not trusted Wheelhouse automation"
     names = _lifecycle_label_names(issue)
@@ -2908,9 +2897,7 @@ def _prepared_lifecycle_matches(issue, body, labels, state, title=None):
         and _lifecycle_label_names(issue) == set(labels)
         and issue.get("state") == state
         and (title is None or issue.get("title") == title)
-        and _trusted_automation_login(
-            ((issue.get("author") or {}).get("login") or "")
-        )
+        and _trusted_automation_login(((issue.get("author") or {}).get("login") or ""))
     )
 
 
@@ -3015,8 +3002,7 @@ def _probe_open_list_peers(item, expected_number):
             return (
                 "duplicate",
                 rows,
-                "open cards %s"
-                % ", ".join("#%s" % row["number"] for row in rows),
+                "open cards %s" % ", ".join("#%s" % row["number"] for row in rows),
             )
         if any(row["number"] == expected for row in rows):
             return ("unique", rows, "open-list shows only card #%s" % expected)
@@ -3084,9 +3070,7 @@ def verify_unique_open_card(
         # Cannot prove uniqueness, but the direct object is valid. Callers that
         # must not destroy a valid create (admission) retain it; reopen paths
         # still force-close because they already mutated an existing card.
-        log_card_admission(
-            CARD_ADMISSION_RETAINED_DEFERRED, number, marker, detail
-        )
+        log_card_admission(CARD_ADMISSION_RETAINED_DEFERRED, number, marker, detail)
         raise CardAdmissionError(
             "post-operation uniqueness deferred for %s: %s" % (marker, detail),
             outcome=CARD_ADMISSION_RETAINED_DEFERRED,
@@ -3175,8 +3159,7 @@ def reuse_closed_card(item, candidate, has_token=False):
     eligible, reason = reusable_closed_card(current, item)
     if not eligible:
         raise CardLifecycleError(
-            "closed card #%s lost reuse eligibility: %s"
-            % (candidate["number"], reason)
+            "closed card #%s lost reuse eligibility: %s" % (candidate["number"], reason)
         )
 
     current_names = _lifecycle_label_names(current)
@@ -3231,9 +3214,9 @@ def reuse_closed_card(item, candidate, has_token=False):
     )
     if "resolved" in expected_inert_labels:
         activation_remove = sorted(set(activation_remove) | {"resolved"})
-    expected_labels = (
-        expected_inert_labels | set(activation_add)
-    ) - set(activation_remove)
+    expected_labels = (expected_inert_labels | set(activation_add)) - set(
+        activation_remove
+    )
     try:
         args = ["issue", "edit", str(current["number"])]
         for label in activation_add:
@@ -3258,9 +3241,7 @@ def reuse_closed_card(item, candidate, has_token=False):
     new_sha = item.get("head_sha", "") or ""
     if old_sha and new_sha and old_sha != new_sha:
         latest = _get_lifecycle_issue(current["number"])
-        if _prepared_lifecycle_matches(
-            latest, card["body"], expected_labels, "OPEN"
-        ):
+        if _prepared_lifecycle_matches(latest, card["body"], expected_labels, "OPEN"):
             _gh(
                 [
                     "issue",
@@ -3485,6 +3466,7 @@ def parse_triage_budget(body):
     matches = list(_TRIAGE_BUDGET_RE.finditer(body or ""))
     if len(matches) != 1:
         return None
+
     def no_duplicate_keys(pairs):
         record = {}
         for key, value in pairs:
@@ -3494,9 +3476,7 @@ def parse_triage_budget(body):
         return record
 
     try:
-        record = json.loads(
-            matches[0].group(1), object_pairs_hook=no_duplicate_keys
-        )
+        record = json.loads(matches[0].group(1), object_pairs_hook=no_duplicate_keys)
     except (TypeError, ValueError):
         return None
     if not isinstance(record, dict) or set(record) != {"version", "day", "reserved"}:
@@ -3577,9 +3557,13 @@ def _list_triage_budget_issues():
         for issue in page:
             number = issue.get("number") if isinstance(issue, dict) else None
             if isinstance(number, bool) or not isinstance(number, int) or number < 1:
-                raise RuntimeError("triage budget ledger listing contained invalid data")
+                raise RuntimeError(
+                    "triage budget ledger listing contained invalid data"
+                )
             if number in seen:
-                raise RuntimeError("triage budget ledger listing returned a duplicate issue")
+                raise RuntimeError(
+                    "triage budget ledger listing returned a duplicate issue"
+                )
             seen.add(number)
             issues.append(issue)
     return issues
@@ -3676,9 +3660,7 @@ def report_triage_attempt_exhaustion(number, item, ceiling=None):
 def _defer_triage_budget(number, item, code, message, error=False, ceiling=None):
     level = "error" if error else "warning"
     print("::%s::triage-budget %s: %s" % (level, code, message))
-    _triage_budget_event(
-        "budget.deferred", number, item, code, ceiling=ceiling
-    )
+    _triage_budget_event("budget.deferred", number, item, code, ceiling=ceiling)
     return False
 
 
@@ -3768,8 +3750,7 @@ def reserve_triage_budget(number, item, ceiling, today=None):
         if reserved >= ceiling:
             print(
                 "::warning::triage-budget exhausted: %s/%s reservations used; "
-                "card #%s deferred until the next UTC day"
-                % (reserved, ceiling, number)
+                "card #%s deferred until the next UTC day" % (reserved, ceiling, number)
             )
             _triage_budget_event(
                 "budget.exhausted",
@@ -3857,9 +3838,7 @@ def triage_budget_remaining(ceiling, today=None):
             raise RuntimeError("multiple triage budget ledger issues exist")
         if not issues:
             return ceiling
-        listed_number = (
-            issues[0].get("number") if isinstance(issues[0], dict) else None
-        )
+        listed_number = issues[0].get("number") if isinstance(issues[0], dict) else None
         if (
             isinstance(listed_number, bool)
             or not isinstance(listed_number, int)
@@ -4492,8 +4471,7 @@ def close_card(number, message, label="resolved", expected=None):
         raise CardLifecycleError("card #%s is no longer open" % number)
     if expected is not None and (
         current.get("body") != expected.get("body")
-        or _lifecycle_label_names(current)
-        != _lifecycle_label_names(expected)
+        or _lifecycle_label_names(current) != _lifecycle_label_names(expected)
         or current.get("comments") != int(expected.get("comments") or 0) + 1
     ):
         raise CardLifecycleError("card #%s changed before close" % number)
@@ -4850,7 +4828,9 @@ def decide_triage_apply(
                     "reason": reason,
                     "candidate": candidate,
                 }
-            failed_reason = "repaired field 'evidence' did not anchor to the fetched target"
+            failed_reason = (
+                "repaired field 'evidence' did not anchor to the fetched target"
+            )
         else:
             failed_reason = (
                 triage_schema_reason(repaired_text)
