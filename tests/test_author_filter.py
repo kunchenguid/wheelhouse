@@ -159,6 +159,7 @@ def run_build_repo(
         core.ci_safety,
         core.approve_ci,
         core.ci_security_summary,
+        core._list_action_required_runs,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -183,6 +184,7 @@ def run_build_repo(
         safe_verdict if ci_safety_result is None else ci_safety_result
     )
     core.approve_ci = fake_approve
+    core._list_action_required_runs = lambda slug, head_ref, head_sha: ([], "")
     os.environ["OWNER"] = "owner"
     os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
     err = io.StringIO()
@@ -199,6 +201,7 @@ def run_build_repo(
             core.ci_safety,
             core.approve_ci,
             core.ci_security_summary,
+            core._list_action_required_runs,
             old_owner,
             old_repo_owner,
         ) = save

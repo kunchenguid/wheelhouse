@@ -71,8 +71,8 @@ through the shared CI safety verdict:
 CI/action-file changes hard-hold, while non-default bases and
 `pull_request_target` posture add warnings, and each awaiting workflow run is
 bound to the PR by strict pull_requests association or fork fallback head SHA
-plus branch matching. Duplicate verified runs sharing a stable workflow identity
-are collapsed to the newest run before approval.
+plus branch matching. Every independently actionable verified current-head run
+is approved, including same-workflow duplicates.
 The LLM never receives FLEET_TOKEN.
 Without READONLY_TOKEN it never runs shell commands; with READONLY_TOKEN it may
 run the read-only search wrapper for answer context only, and can still only
@@ -91,6 +91,7 @@ sys.path.insert(0, SCRIPT_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 import wheelhouse_core as core  # noqa: E402
 import nl_readonly_search as readonly_search  # noqa: E402
+
 # nl_readonly_search places scripts/ first for its standalone CLI imports.
 # Restore the repository root before importing the agent_runtime package so the
 # sibling scripts/agent_runtime.py entrypoint cannot shadow that package.
@@ -446,7 +447,9 @@ def cmd_parse():
         set_output("target_number", state.get("number", ""))
         set_output("kind", kind)
         set_output("head_sha", state.get("head_sha", ""))
-        set_output("target_revision", state.get("head_sha") or state.get("updated_at", ""))
+        set_output(
+            "target_revision", state.get("head_sha") or state.get("updated_at", "")
+        )
         return
 
     set_output("decision", decision)
@@ -735,7 +738,9 @@ WORKFLOW_GATE_BLOCKED = "blocked"
 WORKFLOW_GATE_HISTORY_ONLY_REASON = "history-only-workflow-touch"
 
 
-def _workflow_gate_result(status, reason, message="", paths=None, commit_sha="", url=""):
+def _workflow_gate_result(
+    status, reason, message="", paths=None, commit_sha="", url=""
+):
     """One structured, denial-only result from the authoritative merge gate.
 
     Human-facing direct-decision copy is carried alongside stable machine facts,
@@ -1616,7 +1621,13 @@ def _load_llm_result(path):
         return None
 
 
-NL_SCHEMA_PATH = Path(PROJECT_ROOT) / "agent_runtime" / "schemas" / "actions" / "nl-decision-v1.schema.json"
+NL_SCHEMA_PATH = (
+    Path(PROJECT_ROOT)
+    / "agent_runtime"
+    / "schemas"
+    / "actions"
+    / "nl-decision-v1.schema.json"
+)
 NL_REPAIR_CANDIDATE_MAX_BYTES = 24000
 _NL_SCHEMA_FIELDS = ("mode", "action", "free_text", "answer")
 
@@ -1650,7 +1661,9 @@ def _nl_parse_with_reason(text):
         reason = str(error)
         for field in _NL_SCHEMA_FIELDS:
             reason = reason.replace("$.%s" % field, "field '%s'" % field)
-        reason = reason.replace("$ is", "result JSON is").replace("$ has", "result JSON has")
+        reason = reason.replace("$ is", "result JSON is").replace(
+            "$ has", "result JSON has"
+        )
         return None, reason or "result failed nl-decision-v1 schema validation"
     return value, ""
 
@@ -1661,12 +1674,17 @@ def nl_schema_reason(text):
     return reason
 
 
-def build_nl_repair_prompt(candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDATE_MAX_BYTES):
+def build_nl_repair_prompt(
+    candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDATE_MAX_BYTES
+):
     """Build the self-contained prompt for the ONE no-tool NL repair turn."""
     candidate = candidate_text or ""
     raw = candidate.encode("utf-8")
     if len(raw) > max_candidate_bytes:
-        candidate = raw[:max_candidate_bytes].decode("utf-8", "ignore") + "\n[candidate truncated]"
+        candidate = (
+            raw[:max_candidate_bytes].decode("utf-8", "ignore")
+            + "\n[candidate truncated]"
+        )
     return "\n".join(
         [
             "You previously produced a natural-language decision result whose native",
@@ -1811,7 +1829,9 @@ def cmd_nl_repair_prep():
     set_output("reason", plan["reason"])
     if plan["repair_needed"]:
         if not prompt_file:
-            raise SystemExit("nl-repair-prep requires --prompt-file when repair is needed")
+            raise SystemExit(
+                "nl-repair-prep requires --prompt-file when repair is needed"
+            )
         destination = Path(prompt_file)
         destination.write_text(plan["prompt"], encoding="utf-8")
         os.chmod(destination, 0o600)
@@ -1851,7 +1871,8 @@ def route_decision(result, kind, state, owner=""):
         "target_number": (state or {}).get("number", ""),
         "kind": kind,
         "head_sha": (state or {}).get("head_sha", ""),
-        "target_revision": (state or {}).get("head_sha") or (state or {}).get("updated_at", ""),
+        "target_revision": (state or {}).get("head_sha")
+        or (state or {}).get("updated_at", ""),
     }
 
     def finish():
@@ -1963,15 +1984,17 @@ def cmd_nl_route():
     out.update(
         result_valid="true" if valid else "false",
         repair_status="repaired" if decision["outcome"] == "repaired" else "",
-        failure_code="" if valid else (
+        failure_code=""
+        if valid
+        else (
             "output.schema_invalid"
             if decision["outcome"] == "repair-failed"
             else "output.missing"
         ),
         failure_reason="" if valid else decision["reason"],
-        failure_message="" if valid else nl_failure_projection(
-            decision["outcome"], decision["reason"]
-        ),
+        failure_message=""
+        if valid
+        else nl_failure_projection(decision["outcome"], decision["reason"]),
         retryable="false" if valid else "true",
     )
     for name in (
