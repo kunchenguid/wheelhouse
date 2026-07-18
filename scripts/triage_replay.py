@@ -46,9 +46,9 @@ TRIAGE_NON_SUCCESS_FIELDS = (
 )
 MAX_RUN_NUMBER = 9_007_199_254_740_991
 
-# One incident-scoped reset capability for the captain-approved evidence-empty
-# recovery. Each entry binds the card to the exact source revision and prior
-# replay marker observed before this fix. The capability cannot follow a moved
+# Incident-scoped reset capabilities for captain-approved evidence-array
+# recoveries. Each entry binds the card to the exact source revision and prior
+# replay marker observed before its reset. A capability cannot follow a moved
 # target, admit another card, or be reused after its v2 marker is written.
 ATTEMPT_RESET_WAVE = "evidence-empty-e7-final"
 
@@ -181,6 +181,105 @@ ATTEMPT_RESET_COHORT = {
     ),
 }
 
+ARRAY_RECOVERY_ATTEMPT_RESET_WAVE = "array-recovery-g1-final"
+ARRAY_RECOVERY_ATTEMPT_RESET_COHORT = {
+    154: _attempt_reset_prior_marker(
+        "2026-07-13T19:27:04Z",
+        "canary-1",
+        224,
+        "2026-07-17T01:55:44Z",
+    ),
+    481: _attempt_reset_prior_marker(
+        "2026-07-15T03:11:28Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:10:40Z",
+    ),
+    572: _attempt_reset_prior_marker(
+        "1ccebb15df4966e1b08da1fa4825346d51cb3ac0",
+        "cohort-rerun-1",
+        237,
+        "2026-07-17T20:07:24Z",
+    ),
+    907: _attempt_reset_prior_marker(
+        "2026-07-14T02:54:04Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:00Z",
+    ),
+    951: _attempt_reset_prior_marker(
+        "2026-07-14T21:24:04Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:06Z",
+    ),
+    1266: _attempt_reset_prior_marker(
+        "2026-07-14T10:18:18Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:19Z",
+    ),
+    1275: _attempt_reset_prior_marker(
+        "2026-07-15T02:35:46Z",
+        "recovery-wave-1",
+        225,
+        "2026-07-17T02:11:25Z",
+    ),
+    1428: _attempt_reset_prior_marker(
+        "76502958188953a3efb639ef5eb0bd0da47566b1",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:24:53Z",
+    ),
+    1430: _attempt_reset_prior_marker(
+        "5fb0cc655d02f25eba1cb0c0b37a0f2893cd9d6a",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:03Z",
+    ),
+    1435: _attempt_reset_prior_marker(
+        "57808325def6aa1ae2cd5d43d2e7d6d82b2127ad",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:12Z",
+    ),
+    1436: _attempt_reset_prior_marker(
+        "2026-07-17T13:07:28Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:20Z",
+    ),
+    1437: _attempt_reset_prior_marker(
+        "376b3cbf12cdd26a8c9b3f19a00f5370b800baed",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:29Z",
+    ),
+    1441: _attempt_reset_prior_marker(
+        "16f11d8cd07036c2ee1e54c863d274a5dbcc1a78",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:46Z",
+    ),
+    1442: _attempt_reset_prior_marker(
+        "53504c275b87880147857184cd3418a333711368",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:25:55Z",
+    ),
+    1443: _attempt_reset_prior_marker(
+        "2026-07-17T16:35:47Z",
+        "cohort-rerun-2",
+        238,
+        "2026-07-17T20:26:04Z",
+    ),
+}
+
+ATTEMPT_RESET_COHORTS = {
+    ATTEMPT_RESET_WAVE: ATTEMPT_RESET_COHORT,
+    ARRAY_RECOVERY_ATTEMPT_RESET_WAVE: ARRAY_RECOVERY_ATTEMPT_RESET_COHORT,
+}
+
 
 def _triage_action(kind):
     search = os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN", "")
@@ -262,7 +361,8 @@ def _attempt_reset_scope(wave, value):
     text = str(value or "").strip()
     if not text:
         return {}
-    if wave != ATTEMPT_RESET_WAVE:
+    cohort = ATTEMPT_RESET_COHORTS.get(wave)
+    if cohort is None:
         raise ValueError("attempt reset requires the sanctioned replay wave")
     parts = [part.strip() for part in text.split(",")]
     if any(not re.fullmatch(r"[1-9][0-9]*", part) for part in parts):
@@ -270,9 +370,9 @@ def _attempt_reset_scope(wave, value):
     numbers = [int(part) for part in parts]
     if len(numbers) != len(set(numbers)):
         raise ValueError("attempt reset cards must not contain duplicates")
-    if set(numbers) != set(ATTEMPT_RESET_COHORT):
+    if set(numbers) != set(cohort):
         raise ValueError("attempt reset cards must exactly match the sanctioned cohort")
-    return {number: dict(ATTEMPT_RESET_COHORT[number]) for number in sorted(numbers)}
+    return {number: dict(cohort[number]) for number in sorted(numbers)}
 
 
 def _attempt_reset_count(state, kind, revision, cap):
