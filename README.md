@@ -220,7 +220,7 @@ That is the only secret the deterministic machine needs.
 
 Skip this for the deterministic machine.
 The direct Claude Action is the explicit production selection behind the shared action boundary.
-Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate model workflow has read-only permissions and returns only a bounded transcript for contract normalization.
+Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate reusable model workflow has read-only permissions and returns only a verified normalized result artifact to the trusted consumer.
 Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
 Do not add credentials for disabled or deferred provider candidates.
 See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider selection.

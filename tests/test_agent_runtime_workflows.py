@@ -217,7 +217,6 @@ def main():
     check("credentials: current Claude subscription secret remains production gate", "CLAUDE_CODE_OAUTH_TOKEN" in text)
 
     triage = docs["triage"]
-    triage_steps = {step.get("id"): step for step in steps(triage) if step.get("id")}
     compact = next(step for step in steps(triage) if step.get("id") == "compact-results")
     check("triage consumer: Claude AgentResult required", "steps.primary-result.outputs.result" in str((compact.get("env") or {}).get("PRIMARY")))
     check("repair consumer: normalized repair result required", "steps.repair-result-received.outputs.result" in str((compact.get("env") or {}).get("REPAIR")))

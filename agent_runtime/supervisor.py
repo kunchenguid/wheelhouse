@@ -637,12 +637,10 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         lock_path = Path(__file__).resolve().parent / "runtime.lock.json"
         lock = load_json_regular(lock_path)
         codex = lock["codex"]
-        harness_version = codex["binaryVersion"]
         adapter_version = codex["adapterVersion"]
         protocol = codex["protocol"]
         protocol_digest = canonical_sha256(codex["protocolSchemas"])
     else:
-        harness_version = "1.0.0"
         adapter_version = "1.0.0"
         protocol = "fake-script-v1"
         protocol_digest = canonical_sha256({"fake-script": 1})
