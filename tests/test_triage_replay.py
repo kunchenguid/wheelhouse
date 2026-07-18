@@ -507,6 +507,77 @@ def test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write():
         os.unlink(path)
 
 
+def test_attempt_reset_later_race_pauses_then_resumes_exact_cohort():
+    cohort = replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT
+    wave = replay.ARRAY_RECOVERY_ATTEMPT_RESET_WAVE
+    cards, sources, supplied = attempt_reset_fixture(cohort)
+    changed = max(cards)
+    race_read = len(cohort) * 2 + 3 * (len(cohort) - 1) + 1
+    raced = False
+
+    def race_card(number, read_count, live_cards):
+        nonlocal raced
+        if not raced and number == changed and read_count == race_read:
+            state = rc._unique_state_block(live_cards[number]["body"])
+            state["triage_status"] = "queued"
+            live_cards[number]["body"] = rc._replace_state_block(
+                live_cards[number]["body"], state
+            )
+            raced = True
+
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards, sources, card_read_hook=race_card
+        ) as calls:
+            try:
+                replay.run(
+                    path,
+                    wave,
+                    len(cohort),
+                    attempts_reset_cards=supplied,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("attempt reset continued after a later-card race")
+            assert raced
+            assert len(calls["queued"]) == len(cohort) - 1
+            for number, value in cards.items():
+                state = rc._unique_state_block(value["body"])
+                if number == changed:
+                    assert state[replay.REPLAY_FIELD] == cohort[number]
+                    state["triage_status"] = "error"
+                    value["body"] = rc._replace_state_block(value["body"], state)
+                else:
+                    assert state[replay.REPLAY_FIELD]["version"] == (
+                        replay.ATTEMPT_RESET_REPLAY_VERSION
+                    )
+            resumed = replay.run(
+                path,
+                wave,
+                len(cohort),
+                attempts_reset_cards=supplied,
+            )
+            assert resumed == {
+                "eligible": len(cohort),
+                "planned": len(cohort),
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert len(calls["queued"]) == len(cohort)
+            assert all(
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD][
+                    "version"
+                ]
+                == replay.ATTEMPT_RESET_REPLAY_VERSION
+                for value in cards.values()
+            )
+    finally:
+        os.unlink(path)
+
+
 def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     _, _, supplied = attempt_reset_fixture()
     assert replay._attempt_reset_count(
@@ -1489,6 +1560,7 @@ TESTS = [
     test_array_recovery_attempt_reset_grants_exact_cohort_one_reentry,
     test_array_recovery_attempt_reset_requires_exact_wave_cohort_and_limit,
     test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write,
+    test_attempt_reset_later_race_pauses_then_resumes_exact_cohort,
     test_attempt_reset_refuses_outside_scope_and_any_state_mismatch,
     test_attempt_reset_binds_complete_prior_marker_identity,
     test_attempt_reset_second_read_mismatch_is_atomic_zero_write,

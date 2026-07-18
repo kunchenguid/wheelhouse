@@ -397,6 +397,16 @@ def _attempt_reset_count(state, kind, revision, cap):
     return cap - 1
 
 
+def _attempt_reset_marker_applied(marker, wave, revision):
+    return bool(
+        _valid_marker(marker, revision)
+        and marker.get("version") == ATTEMPT_RESET_REPLAY_VERSION
+        and marker.get("wave") == wave
+        and marker.get("cleared") == "error"
+        and marker.get("attempt_reset") is True
+    )
+
+
 def _source_json(owner, repo, number, kind):
     token = os.environ.get("FLEET_TOKEN", "")
     if not token:
@@ -453,7 +463,7 @@ def _maintainer_logins(config, owner):
 
 
 def inspect_candidate(
-    number, config, owner, has_token, attempt_reset=None
+    number, config, owner, has_token, attempt_reset=None, attempt_reset_wave=""
 ):
     """Return an eligible replay plan or a fail-closed skip reason."""
     card = render_card.get_card(number)
@@ -543,15 +553,30 @@ def inspect_candidate(
     ):
         return None, "replay-marker-untrusted"
     status = state.get("triage_status")
+    reset_already_applied = bool(
+        attempt_reset is not None
+        and _attempt_reset_marker_applied(
+            marker, wave=attempt_reset_wave, revision=revision
+        )
+    )
     duplicate_reentry = False
     if attempt_reset is not None:
         expected_marker = attempt_reset
         expected_revision = expected_marker["revision"]
         if revision != expected_revision:
             return None, "attempt-reset-revision-mismatch"
-        if marker != expected_marker:
+        if not reset_already_applied and marker != expected_marker:
             return None, "attempt-reset-prior-marker-mismatch"
-        if state.get("held") or triaged_sha != revision or status != "error":
+        expected_statuses = {"queued", "succeeded", "error"}
+        if reset_already_applied and (
+            state.get("held")
+            or triaged_sha != revision
+            or status not in expected_statuses
+        ):
+            return None, "attempt-reset-resume-state-mismatch"
+        if not reset_already_applied and (
+            state.get("held") or triaged_sha != revision or status != "error"
+        ):
             return None, "attempt-reset-state-mismatch"
         cleared = "error"
     elif marker is not None:
@@ -604,14 +629,28 @@ def inspect_candidate(
         "recommendation": "Needs your call.",
         **policy,
     }
-    if not render_card.should_hold(item, has_token):
-        return None, "auto-triage-disabled"
     cap = policy["triage_attempt_cap_per_revision"]
     if attempt_reset is not None:
         attempt_count = _attempt_reset_count(state, kind, revision, cap)
         if attempt_count is None:
             return None, "attempt-reset-count-mismatch"
-    else:
+        if reset_already_applied:
+            return {
+                "number": number,
+                "card": card,
+                "state": state,
+                "item": item,
+                "revision": revision,
+                "cleared": cleared,
+                "attempt_count": attempt_count,
+                "action": action,
+                "duplicate_reentry": False,
+                "attempt_reset": True,
+                "attempt_reset_applied": True,
+            }, "eligible"
+    if not render_card.should_hold(item, has_token):
+        return None, "auto-triage-disabled"
+    if attempt_reset is None:
         attempt_count = render_card.triage_attempt_count(state, kind, revision, cap)
     if duplicate_reentry:
         if attempt_count < 1:
@@ -630,6 +669,7 @@ def inspect_candidate(
         "action": action,
         "duplicate_reentry": duplicate_reentry,
         "attempt_reset": attempt_reset is not None,
+        "attempt_reset_applied": False,
     }, "eligible"
 
 
@@ -665,7 +705,9 @@ def _plans_match_for_reset(initial, reread):
     )
 
 
-def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_token):
+def _preflight_attempt_reset(
+    selected, attempt_reset_scope, wave, config, owner, has_token
+):
     if not attempt_reset_scope:
         return selected
     if len(selected) != len(attempt_reset_scope):
@@ -679,6 +721,7 @@ def _preflight_attempt_reset(selected, attempt_reset_scope, config, owner, has_t
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(number),
+            attempt_reset_wave=wave,
         )
         if not plan or not _plans_match_for_reset(initial, plan):
             print(
@@ -802,6 +845,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(number),
+            attempt_reset_wave=wave,
         )
         if plan:
             eligible.append(plan)
@@ -820,6 +864,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             raise ValueError(
                 "attempt reset refused because a sanctioned card failed validation"
             )
+    if attempt_reset_scope and eligible and all(
+        plan.get("attempt_reset_applied") for plan in eligible
+    ):
+        raise ValueError("attempt reset has already consumed the sanctioned cohort")
     ceiling = config.get("triage_daily_ceiling", 0)
     remaining = render_card.triage_budget_remaining(ceiling)
     if attempt_reset_scope and remaining < len(attempt_reset_scope):
@@ -854,23 +902,30 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             "written": 0,
         }
     selected = _preflight_attempt_reset(
-        selected, attempt_reset_scope, config, owner, has_token
+        selected, attempt_reset_scope, wave, config, owner, has_token
     )
     written = 0
     queued = 0
     for initial in selected:
+        if initial.get("attempt_reset_applied"):
+            continue
         plan, reason = inspect_candidate(
             initial["number"],
             config,
             owner,
             has_token,
             attempt_reset=attempt_reset_scope.get(initial["number"]),
+            attempt_reset_wave=wave,
         )
         if not plan:
             print(
                 "::notice::replay skipped card #%s after re-read: %s"
                 % (initial["number"], reason)
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card changed during mutation"
+                )
             continue
         live = render_card.get_card(plan["number"])
         if _card_snapshot_identity(live) != _card_snapshot_identity(plan["card"]):
@@ -878,6 +933,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 "::warning::replay deferred card #%s: card-raced-before-queue"
                 % plan["number"]
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card changed during mutation"
+                )
             continue
         current = reconcile.current_card({"number": plan["number"]})
         try:
@@ -896,6 +955,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 "claim tombstone failed (%s)"
                 % (plan["number"], str(error)[:180])
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because the cohort could not be claimed"
+                )
             continue
         if superseded["superseded"]:
             print(
@@ -920,6 +983,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 "::warning::replay queueing deferred without card unlock for card #%s"
                 % plan["number"]
             )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card could not be queued"
+                )
     print(
         "replay summary: listed=%s eligible=%s marked=%s queued=%s deferred=%s"
         % (len(numbers), len(eligible), written, queued, deferred)
