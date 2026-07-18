@@ -6,10 +6,12 @@ contract fixtures are reviewed.
 """
 
 from .base import AgentAdapterV1, AdapterDescriptor, AdapterProbe
+from .claude import ClaudeCliAdapter
 from .codex import CodexAppServerAdapter
 from .fake import FakeAdapter
 
 ADAPTERS = {
+    "claude-cli": ClaudeCliAdapter,
     "codex-app-server": CodexAppServerAdapter,
     "fake": FakeAdapter,
 }

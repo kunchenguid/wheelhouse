@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_runtime.adapters.claude import _protocol_fixture_digest
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
 from agent_runtime.admission import (
     event_key_sha256,
@@ -216,6 +217,11 @@ def cmd_verify_pins(_args: argparse.Namespace) -> int:
     print(
         "Codex %s protocol schemas verified: %s"
         % (lock["codex"]["binaryVersion"], digest)
+    )
+    claude_digest = _protocol_fixture_digest(lock)
+    print(
+        "Claude %s protocol fixture verified: %s"
+        % (lock["claude"]["binaryVersion"], claude_digest)
     )
     return 0
 

@@ -299,6 +299,7 @@ def main():
     check("selection: immutable Claude model forbids aliases", config["profiles"][config["primary_profile"]]["model"] == "claude-sonnet-4-6" and config["profiles"][config["primary_profile"]]["allow_model_alias"] is False)
     check("selection: no activation or temporary rollback settings remain", "production_activation" not in config and "temporary_rollback_profile" not in config)
     check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
+    check("selection: direct Claude CLI evidence is unreachable", config["profiles"]["claude-cli-unreachable-pinned"]["adapter"] == "claude-cli" and all(row["profile"] != "claude-cli-unreachable-pinned" for row in config["actions"].values()))
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
     check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)

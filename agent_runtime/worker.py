@@ -22,7 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .contract import ContractError, atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular, validate_schema
+from .adapters.claude import ClaudeProtocolError, ClaudeStreamParser
+from .contract import ContractError, atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular
 from .redaction import redact_text, sanitize_message
 from .tools import CanonicalTools, ToolError, dynamic_tool_spec
 
@@ -446,6 +447,248 @@ def _checkpoint(
             "usage": usage,
         },
     )
+
+
+def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, cancel_path: Path) -> dict[str, Any]:
+    candidate = plan["candidate"]
+    actual_model = ""
+    actual_provider = ""
+    actual_effort = candidate["effort"]
+    spend_started = False
+    usage: dict[str, Any] = {
+        "inputTokens": None,
+        "outputTokens": None,
+        "cacheReadTokens": None,
+        "cacheWriteTokens": None,
+        "providerRequests": 0,
+        "toolCalls": 0,
+        "turns": 0,
+        "quota": {"available": False, "snapshotSha256": None, "primaryUsedPercent": None, "secondaryUsedPercent": None},
+        "cost": {"amount": None, "currency": None, "quality": "unavailable"},
+    }
+    source = Path("/auth-source/credential")
+    try:
+        info = source.lstat()
+    except OSError as error:
+        raise WorkerFailure("auth.missing", "anthropic-subscription credential handoff is missing.") from error
+    if source.is_symlink() or not source.is_file() or info.st_size < 16 or info.st_size > 65536:
+        raise WorkerFailure("auth.invalid", "anthropic-subscription credential handoff is invalid.")
+    try:
+        token = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise WorkerFailure("auth.invalid", "anthropic-subscription credential handoff is invalid.") from error
+    if token != token.strip() or "\x00" in token:
+        raise WorkerFailure("auth.invalid", "anthropic-subscription credential handoff is invalid.")
+    if plan["tools"]["tools"]:
+        raise WorkerFailure("capability.unsatisfied", "Claude CLI canonical tool transport is not enabled by this offline profile.")
+    claude_plan = plan.get("claude") if isinstance(plan.get("claude"), dict) else {}
+    argv = claude_plan.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or argv[0] != "claude"
+        or not all(isinstance(value, str) for value in argv)
+        or "--fallback-model" in argv
+        or claude_plan.get("structuredOutputMechanism") != "native-schema"
+    ):
+        raise WorkerFailure("harness.protocol", "Claude adapter plan is invalid.")
+    prompt_path = Path(str(claude_plan.get("stdinArtifact") or ""))
+    try:
+        prompt_info = prompt_path.lstat()
+        if prompt_path.is_symlink() or not prompt_path.is_file() or prompt_info.st_size > 262144:
+            raise OSError("invalid prompt artifact")
+        prompt = prompt_path.read_bytes()
+        prompt.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as error:
+        raise WorkerFailure("contract.invalid", "Claude prompt artifact is unavailable or invalid.") from error
+    proxy_path = os.environ.get("WHEELHOUSE_PROVIDER_SOCKET", "")
+    if not proxy_path:
+        raise WorkerFailure("sandbox.violation", "Provider-only network proxy is unavailable.")
+    bridge = _ProxyBridge(proxy_path)
+    bridge.start()
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp/home"),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "HTTP_PROXY": bridge.url,
+        "HTTPS_PROXY": bridge.url,
+        "ALL_PROXY": bridge.url,
+        "NO_PROXY": "127.0.0.1,localhost",
+        "TZ": "UTC",
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+        "CLAUDE_CODE_OAUTH_TOKEN": token,
+        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+    }
+    process: subprocess.Popen[bytes] | None = None
+    stdout_messages: queue.Queue[bytes | None | Exception] = queue.Queue(maxsize=4)
+    stderr_matches = 0
+
+    def read_stdout() -> None:
+        assert process is not None and process.stdout is not None
+        try:
+            while True:
+                line = process.stdout.readline(1024 * 1024 + 1)
+                if not line:
+                    break
+                stdout_messages.put(line)
+        except Exception as error:
+            stdout_messages.put(error)
+        finally:
+            stdout_messages.put(None)
+
+    def read_stderr() -> None:
+        nonlocal stderr_matches
+        assert process is not None and process.stderr is not None
+        total = 0
+        while True:
+            line = process.stderr.readline(4097)
+            if not line:
+                break
+            if total >= 32768:
+                continue
+            clean = line.decode("utf-8", errors="replace")
+            exact = clean.count(token)
+            if exact:
+                clean = clean.replace(token, "[REDACTED_SECRET]")
+            _, pattern = redact_text(clean, max_chars=4096)
+            stderr_matches += exact + pattern
+            total += min(len(line), 4096)
+
+    parser = ClaudeStreamParser(expected_model=candidate["model"], require_structured_output=True)
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
+    cancelled = False
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            start_new_session=True,
+        )
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        spend_started = True
+        usage["providerRequests"] = 1
+        usage["turns"] = 1
+        _checkpoint(
+            output,
+            plan=plan,
+            spend_started=True,
+            actual_model="",
+            actual_provider="",
+            actual_effort=actual_effort,
+            usage=usage,
+        )
+        events.emit("model.request.started", {"model": candidate["model"], "provider": candidate["provider"], "effort": candidate["effort"]})
+        assert process.stdin is not None
+        process.stdin.write(prompt)
+        process.stdin.close()
+
+        stream_closed = False
+        while not stream_closed:
+            if cancel_path.exists() and not cancelled and process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                cancelled = True
+                events.emit("cancellation.requested", {"mechanism": "sigterm+process-group"})
+            try:
+                message = stdout_messages.get(timeout=0.1)
+            except queue.Empty:
+                if process.poll() is not None and stdout_thread is not None and not stdout_thread.is_alive():
+                    stream_closed = True
+                continue
+            if message is None:
+                stream_closed = True
+            elif isinstance(message, Exception):
+                raise WorkerFailure("transport.stream_interrupted", "Claude stream reader failed.", spend_started=True)
+            else:
+                try:
+                    parser.feed(message)
+                except ClaudeProtocolError as error:
+                    raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
+        try:
+            return_code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            raise WorkerFailure("harness.protocol", "Claude CLI did not exit after closing its terminal stream.", spend_started=True) from error
+        if cancelled:
+            raise WorkerFailure("lifecycle.cancelled", "Agent runtime was cancelled.", spend_started=True)
+        if return_code != 0:
+            raise WorkerFailure("provider.unavailable", "Claude CLI exited without a successful terminal result.", str(return_code), spend_started=True)
+        try:
+            outcome = parser.finish()
+        except ClaudeProtocolError as error:
+            raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
+        actual_model = outcome.model
+        actual_provider = candidate["provider"]
+        usage.update(outcome.usage)
+        usage["providerRequests"] = 1
+        usage["toolCalls"] = 0
+        if usage.get("turns") is None:
+            usage["turns"] = 1
+        final_bytes = canonical_json_bytes(outcome.structured_output)
+        if len(final_bytes) > plan["limits"]["maxFinalBytes"]:
+            raise WorkerFailure("output.schema_invalid", "Claude structured output exceeded its byte bound.", spend_started=True)
+        final_text = final_bytes.decode("utf-8")
+        if token in final_text:
+            raise WorkerFailure("sandbox.violation", "Secret scanner rejected the delivered result.", spend_started=True)
+        events.emit("adapter.claude.result.completed", {"model": actual_model, "bytes": len(final_bytes), "sha256": hashlib.sha256(final_bytes).hexdigest()})
+        events.emit("usage.updated", {"usageSha256": canonical_sha256(usage)})
+        _checkpoint(
+            output,
+            plan=plan,
+            spend_started=True,
+            actual_model=actual_model,
+            actual_provider=actual_provider,
+            actual_effort=actual_effort,
+            usage=usage,
+        )
+        return {
+            "status": "succeeded",
+            "actualModel": actual_model,
+            "actualProvider": actual_provider,
+            "actualEffort": actual_effort,
+            "final": outcome.structured_output,
+            "usage": usage,
+            "spendStarted": True,
+        }
+    except WorkerFailure as error:
+        error.spend_started = error.spend_started or spend_started
+        error.actual_model = actual_model
+        error.actual_provider = actual_provider
+        error.actual_effort = actual_effort
+        error.usage = usage
+        _checkpoint(
+            output,
+            plan=plan,
+            spend_started=error.spend_started,
+            actual_model=actual_model,
+            actual_provider=actual_provider,
+            actual_effort=actual_effort,
+            usage=usage,
+        )
+        raise
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if stdout_thread is not None:
+            stdout_thread.join(timeout=2)
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=2)
+        if stderr_matches:
+            events.emit("warning", {"code": "diagnostic.secret-redacted", "matches": stderr_matches})
+        bridge.close()
 
 
 def _run_codex(plan: dict[str, Any], output: Path, events: InternalEvents, cancel_path: Path) -> dict[str, Any]:
@@ -1011,7 +1254,9 @@ def main() -> None:
     started = time.monotonic()
     result: dict[str, Any]
     try:
-        if plan["descriptor"]["adapter"] == "codex-app-server":
+        if plan["descriptor"]["adapter"] == "claude-cli":
+            result = _run_claude(plan, output, events, cancel_path)
+        elif plan["descriptor"]["adapter"] == "codex-app-server":
             result = _run_codex(plan, output, events, cancel_path)
         elif plan["descriptor"]["adapter"] == "fake":
             result = _run_fake(plan, output, events, cancel_path)

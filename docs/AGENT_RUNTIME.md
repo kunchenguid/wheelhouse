@@ -5,6 +5,8 @@ The contract covers automatic PR and issue triage with and without search, bound
 
 Claude is the production primary adapter.
 Every current action resolves to the exact pinned direct Claude Action implementation through the shared selection boundary.
+An exact-pin direct Claude CLI adapter and profile exist only as offline migration evidence.
+No action selects that profile, so it is unreachable from production and cannot change spend, routing, or consumer behavior.
 Codex CLI app-server remains implemented and tested only as disabled non-target adapter evidence because public GitHub Actions cannot securely authenticate the captain's ChatGPT Pro subscription noninteractively.
 Fallback is disabled, so no provider failure invokes a different adapter automatically.
 
@@ -16,6 +18,8 @@ The checked-in state is intentionally:
 - `target: claude`
 - `fallback: none`
 - every action `target: claude`
+- every action profile `claude-action-current-pinned`
+- `claude-cli-unreachable-pinned` selected by no action
 - `codex-app-server` recorded only under `disabled_adapters`
 
 This is not selected by secret presence.
@@ -58,6 +62,20 @@ The model workflow uploads a content-free `spendStarted: true` checkpoint immedi
 The Claude bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
 Claude harness provenance records the pinned action source commit and a checked-out action metadata digest when the runner exposes it, while the installed Claude executable version and digest remain unavailable.
+
+## Offline direct Claude adapter evidence
+
+`agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary for migration step 1 without activating it.
+It accepts only the `anthropic-subscription` profile and the `CLAUDE_CODE_OAUTH_TOKEN` credential binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.197` platform digest before spend.
+The runtime lock records the official release commit, immutable download URLs, Linux x64 and arm64 plus Darwin arm64 digests, and a checked protocol fixture digest.
+
+The adapter validates the bound action schema against the small pinned-CLI subset before exposing `output.structured: native-schema`.
+It compiles one shell-free argv, keeps the prompt on standard input, and requires exactly one matching `system/init.model` plus one final successful `structured_output` result from a bounded UTF-8 stream.
+Its cancellation primitive is `SIGTERM` to the Claude process group, with the runtime retaining grace and hard-kill ownership.
+The trusted core still owns the sandbox, provider proxy, deadlines, content-addressed handoff, independent schema and evidence validation, result binding, events, retention, and secret scanning.
+
+The direct profile intentionally enables no canonical tool transport yet and is therefore not eligible for production cutover.
+The pinned action, `claude_bridge.py`, all live workflow steps, and every consumer remain unchanged and authoritative.
 
 ## Disabled and investigated adapters
 
@@ -128,6 +146,7 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 The terminal event's `resultSha256` uses the explicit `agent-result-without-artifacts/v1` projection so the normalized-event artifact cannot create a cyclic or order-dependent digest.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
+The unreachable Claude CLI adapter is pinned separately to CLI `2.1.197`, release commit `c8fd8048f30950a21d28734718275aa7e97f5143`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
 Offline evidence verifies the exact wrapper and selected Linux executable tarballs against the committed SHA-512 integrity pins.
 Current production selection cannot reach the disabled Codex installation branches in workflows.
@@ -302,6 +321,7 @@ Run:
 python scripts/agent_runtime.py verify-pins
 python tests/test_agent_runtime_contract.py
 python tests/test_agent_runtime_capabilities.py
+python tests/test_agent_runtime_claude_adapter.py
 python tests/test_agent_runtime_security.py
 python tests/test_agent_runtime_lifecycle.py
 python tests/test_agent_runtime_consumers.py

@@ -33,7 +33,7 @@ class AgentAdapterV1(ABC):
     supported_contract_majors: tuple[int, ...] = (1,)
 
     @abstractmethod
-    def probe(self, task: dict[str, Any]) -> AdapterProbe:
+    def probe(self, task: dict[str, Any], schema_bytes: bytes | None = None) -> AdapterProbe:
         """Prove pins, auth type, and static capabilities without generation."""
 
     @abstractmethod

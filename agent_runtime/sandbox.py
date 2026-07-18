@@ -109,7 +109,8 @@ def build_command(
         command.extend(["--ro-bind", str(prefix), "/runtime/codex-install"])
         worker_path = "/runtime/codex-install/node_modules/.bin:" + worker_path
     elif binary_path:
-        command.extend(["--ro-bind", str(binary.resolve()), "/runtime/codex"])
+        binary_name = "claude" if binary.name == "claude" else "codex"
+        command.extend(["--ro-bind", str(binary.resolve()), "/runtime/" + binary_name])
         worker_path = "/runtime:" + worker_path
     node = shutil.which("node")
     if node:
