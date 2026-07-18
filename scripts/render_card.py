@@ -1876,6 +1876,7 @@ def body_with_triage_result(
     owner="",
     vision_sha="",
     base_sha="",
+    automerge_behavior_available=False,
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
@@ -1902,7 +1903,9 @@ def body_with_triage_result(
         else None
     )
     automerge_verdict = (
-        (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
+        (normalized or {}).get("automerge_verdict")
+        if kind == "pr-review" and automerge_behavior_available is True
+        else None
     )
     if automerge_verdict:
         automerge_verdict = dict(automerge_verdict)
@@ -4165,6 +4168,7 @@ def update_card_triage(
     owner="",
     vision_sha="",
     base_sha="",
+    automerge_behavior_available=False,
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
@@ -4217,6 +4221,7 @@ def update_card_triage(
         owner=owner,
         vision_sha=vision_sha,
         base_sha=base_sha,
+        automerge_behavior_available=automerge_behavior_available,
         repair_status=repair_status,
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
@@ -4905,6 +4910,7 @@ def main():
     ta.add_argument("--execution-file", required=True)
     ta.add_argument("--vision-sha", default="")
     ta.add_argument("--base-sha", default="")
+    ta.add_argument("--automerge-behavior-available", action="store_true")
     ta.add_argument(
         "--target-file",
         default="",
@@ -5024,6 +5030,7 @@ def main():
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
+                automerge_behavior_available=args.automerge_behavior_available,
             )
             if applied:
                 print("updated auto triage on card #%s" % args.issue)
@@ -5041,6 +5048,7 @@ def main():
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
+                automerge_behavior_available=args.automerge_behavior_available,
                 repair_status="repaired",
                 repair_reason=decision["reason"],
                 repair_candidate=decision.get("candidate"),

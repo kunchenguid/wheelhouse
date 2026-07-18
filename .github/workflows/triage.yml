@@ -112,6 +112,7 @@ jobs:
       claim_marker: ${{ steps.event-claim.outputs.marker }}
       vision_sha: ${{ steps.prepare.outputs.vision_sha }}
       base_sha: ${{ steps.prepare.outputs.base_sha }}
+      automerge_behavior_available: ${{ steps.prepare.outputs.automerge_behavior_available }}
       claude_ready: ${{ steps.claude-model.outcome == 'success' }}
       input_artifact: ${{ steps.claude-model.outputs.input-artifact }}
       output_artifact: ${{ steps.claude-model.outputs.output-artifact }}
@@ -726,6 +727,7 @@ jobs:
             echo "$delimiter"
             echo "vision_sha=$VISION_SHA"
             echo "base_sha=$BASE_SHA"
+            echo "automerge_behavior_available=$AUTOMERGE_BEHAVIOR_AVAILABLE"
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
@@ -746,6 +748,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage
           EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
@@ -756,13 +759,15 @@ jobs:
           repository_commit="$(git -C target-src rev-parse HEAD)"
           vision_args=()
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then vision_args=(--vision-file vision.md); fi
+          behavior_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--allow-automerge-behavior); fi
           python scripts/agent_runtime.py build-task \
             --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit" \
-            --event-key "$EVENT_KEY" "${vision_args[@]}"
+            --event-key "$EVENT_KEY" "${vision_args[@]}" "${behavior_args[@]}"
 
       - name: Record triage task-build failure stage
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.gate.outputs.mode == 'claude' && steps.claude-task.outcome == 'failure' }}
@@ -822,6 +827,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage
           EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
@@ -842,6 +848,10 @@ jobs:
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then
             vision_args=(--vision-file vision.md)
           fi
+          behavior_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+            behavior_args=(--allow-automerge-behavior)
+          fi
           python scripts/agent_runtime.py build-task \
             --action "$action" \
             --prompt prompt.txt \
@@ -857,7 +867,8 @@ jobs:
             --repository-dir target-src \
             --repository-commit "$repository_commit" \
             --event-key "$EVENT_KEY" \
-            "${vision_args[@]}"
+            "${vision_args[@]}" \
+            "${behavior_args[@]}"
 
       - id: agent-runtime
         name: Run triage through the Codex app-server contract
@@ -1032,6 +1043,7 @@ jobs:
           KIND: ${{ steps.resolve.outputs.kind }}
           REVISION: ${{ steps.resolve.outputs.revision }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1047,6 +1059,10 @@ jobs:
           if [ -n "$VISION_SHA" ]; then
             vision_schema_args=(--require-vision-fields)
           fi
+          behavior_schema_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+            behavior_schema_args=(--allow-automerge-behavior)
+          fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair \
             --prompt repair-prompt.txt \
@@ -1060,7 +1076,8 @@ jobs:
             --wheelhouse-revision "$WHEELHOUSE_REVISION" \
             --repair-kind "$repair_kind" \
             --event-key "$EVENT_KEY" \
-            "${vision_schema_args[@]}"
+            "${vision_schema_args[@]}" \
+            "${behavior_schema_args[@]}"
 
       - id: agent-runtime-repair
         name: Run bounded schema repair through the Codex app-server contract
@@ -1162,6 +1179,7 @@ jobs:
           REPAIR_CLAIM_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           # The prepare step writes target.txt in the workspace root (it has no
           # working-directory). triage-apply anchor-checks the model's evidence
           # quotes against it (pass-by-reference lazy/fabrication guard). It is
@@ -1200,6 +1218,8 @@ jobs:
                 --revision "$REVISION" \
                 --message "${HEAD_MESSAGE:-Auto triage did not run because the target PR head moved.}"
           else
+            behavior_args=()
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--automerge-behavior-available); fi
             env -i \
               PATH="$TRUSTED_PATH" \
               PYTHONDONTWRITEBYTECODE=1 \
@@ -1215,6 +1235,7 @@ jobs:
                 --revision "$REVISION" \
                 --vision-sha "$VISION_SHA" \
                 --base-sha "$BASE_SHA" \
+                "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
@@ -1619,6 +1640,7 @@ jobs:
           KIND: ${{ needs.triage.outputs.kind }}
           REVISION: ${{ needs.triage.outputs.revision }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1628,12 +1650,14 @@ jobs:
           if [ "$KIND" = "issue-triage" ]; then repair_kind="issue"; else repair_kind="pr"; fi
           vision_schema_args=()
           if [ -n "$VISION_SHA" ]; then vision_schema_args=(--require-vision-fields); fi
+          behavior_schema_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_schema_args=(--allow-automerge-behavior); fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair --prompt repair-prompt.txt \
             --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
             --repo "$REPO" --number "$NUMBER" --kind schema-repair \
             --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind" --event-key "$EVENT_KEY" "${vision_schema_args[@]}"
+            --repair-kind "$repair_kind" --event-key "$EVENT_KEY" "${vision_schema_args[@]}" "${behavior_schema_args[@]}"
 
       - name: Record schema-repair task-build failure stage
         if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.claude-repair-task.outcome == 'failure' }}
@@ -1809,6 +1833,7 @@ jobs:
           REPAIR_ERROR_CODE: ${{ steps.repair-result-received.outputs.error-code }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -1833,9 +1858,12 @@ jobs:
               --issue "$ISSUE" --revision "$REVISION" \
               --message "${HEAD_MESSAGE:-Auto triage did not run because the target PR head moved.}"
           else
+            behavior_args=()
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--automerge-behavior-available); fi
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
               --issue "$ISSUE" --revision "$REVISION" \
               --vision-sha "$VISION_SHA" --base-sha "$BASE_SHA" \
+              "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
               --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \

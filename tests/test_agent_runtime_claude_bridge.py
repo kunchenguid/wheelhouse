@@ -35,7 +35,10 @@ def cancellation(conclusion="cancelled", request_status="accepted", return_code=
 
 
 def make_bundle(
-    root: Path, action: str = "deep-review.local", include_vision: bool = False
+    root: Path,
+    action: str = "deep-review.local",
+    include_vision: bool = False,
+    allow_automerge_behavior: bool = False,
 ):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
@@ -61,6 +64,7 @@ def make_bundle(
         event_key="a" * 64,
         target_file=str(target),
         vision_file=str(vision) if include_vision else "",
+        allow_automerge_behavior=allow_automerge_behavior,
     )
     return task, bundle
 
@@ -98,7 +102,9 @@ def main():
     check("bridge: action and harness pins match the runtime lock", lock["actionCommit"] == ACTION_COMMIT and lock["actionRelease"] == "v" + ACTION_VERSION and lock["claudeCodeVersion"] == CLAUDE_CODE_VERSION and lock["model"] == IMMUTABLE_MODEL and lock["allowModelAlias"] is False)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        def triage_value(include_vision: bool = False):
+        def triage_value(
+            include_vision: bool = False, include_automerge: bool = True
+        ):
             value = {
                 "summary": "A narrow internal change.",
                 "product_implications": "Routine maintenance.",
@@ -111,14 +117,49 @@ def main():
                     "optin_default_off": False,
                 },
             }
-            if include_vision:
+            if not include_automerge:
+                value.pop("automerge")
+            elif include_vision:
                 value["automerge"].update(
                     aligns_with_vision=True, recommend_merge=True
                 )
             return value
 
+        _, incomplete_bundle = make_bundle(
+            root / "triage-incomplete", action="triage.pr.local"
+        )
+        incomplete_execution = root / "triage-incomplete.json"
+        transcript(incomplete_execution, IMMUTABLE_MODEL, json.dumps(triage_value()))
+        incomplete_result, _ = run_bridge(
+            incomplete_bundle, incomplete_execution, "triage-incomplete"
+        )
+        check(
+            "bridge: incomplete-diff triage rejects behavior facts",
+            incomplete_result["status"] == "failed"
+            and incomplete_result["error"]["code"] == "output.schema_invalid",
+        )
+        _, incomplete_plain_bundle = make_bundle(
+            root / "triage-incomplete-plain", action="triage.pr.local"
+        )
+        incomplete_plain_execution = root / "triage-incomplete-plain.json"
+        transcript(
+            incomplete_plain_execution,
+            IMMUTABLE_MODEL,
+            json.dumps(triage_value(include_automerge=False)),
+        )
+        incomplete_plain_result, _ = run_bridge(
+            incomplete_plain_bundle,
+            incomplete_plain_execution,
+            "triage-incomplete-plain",
+        )
+        check(
+            "bridge: incomplete-diff triage accepts no behavior object",
+            incomplete_plain_result["status"] == "succeeded",
+        )
         _, no_vision_bundle = make_bundle(
-            root / "triage-no-vision", action="triage.pr.local"
+            root / "triage-no-vision",
+            action="triage.pr.local",
+            allow_automerge_behavior=True,
         )
         no_vision_execution = root / "triage-no-vision.json"
         transcript(no_vision_execution, IMMUTABLE_MODEL, json.dumps(triage_value()))
@@ -126,11 +167,13 @@ def main():
             no_vision_bundle, no_vision_execution, "triage-no-vision"
         )
         check(
-            "bridge: no-VISION triage accepts complete-diff independent facts",
+            "bridge: complete no-VISION triage accepts independent facts",
             no_vision_result["status"] == "succeeded",
         )
         _, no_vision_extra_bundle = make_bundle(
-            root / "triage-no-vision-extra", action="triage.pr.local"
+            root / "triage-no-vision-extra",
+            action="triage.pr.local",
+            allow_automerge_behavior=True,
         )
         no_vision_extra_execution = root / "triage-no-vision-extra.json"
         transcript(
@@ -144,12 +187,15 @@ def main():
             "triage-no-vision-extra",
         )
         check(
-            "bridge: no-VISION triage rejects vision-bound fields",
+            "bridge: complete no-VISION triage rejects vision-bound fields",
             no_vision_extra_result["status"] == "failed"
             and no_vision_extra_result["error"]["code"] == "output.schema_invalid",
         )
         _, vision_bundle = make_bundle(
-            root / "triage-vision", action="triage.pr.local", include_vision=True
+            root / "triage-vision",
+            action="triage.pr.local",
+            include_vision=True,
+            allow_automerge_behavior=True,
         )
         vision_missing_execution = root / "triage-vision-missing.json"
         transcript(vision_missing_execution, IMMUTABLE_MODEL, json.dumps(triage_value()))

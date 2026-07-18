@@ -789,7 +789,11 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
 
 
 def _bound_output_schema(
-    schema: dict[str, Any], action: str, repair_kind: str, require_vision_fields: bool
+    schema: dict[str, Any],
+    action: str,
+    repair_kind: str,
+    allow_automerge_behavior: bool,
+    require_vision_fields: bool,
 ) -> dict[str, Any]:
     is_pr_triage = action.startswith("triage.pr") or (
         action == "triage.schema-repair" and repair_kind == "pr"
@@ -797,6 +801,9 @@ def _bound_output_schema(
     if not is_pr_triage:
         return schema
     bound = deepcopy(schema)
+    if not allow_automerge_behavior:
+        bound["properties"].pop("automerge", None)
+        return bound
     automerge = bound["properties"]["automerge"]
     vision_fields = ("aligns_with_vision", "recommend_merge")
     if require_vision_fields:
@@ -1007,6 +1014,7 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    allow_automerge_behavior: bool = False,
     require_vision_fields: bool = False,
     repair_kind: str = "pr",
 ) -> dict[str, Any]:
@@ -1079,6 +1087,7 @@ def build_task(
         source_schema,
         action,
         repair_kind,
+        allow_automerge_behavior,
         require_vision_fields or bool(vision_file),
     )
     schema_source = schema_path
