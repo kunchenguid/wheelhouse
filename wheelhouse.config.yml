@@ -386,8 +386,7 @@ pending_contributor_cleanup_targets: ["pr"]
 # The approval call also verifies each action_required workflow run against the
 # target PR: GitHub-populated pull_requests must name exactly that PR, and
 # fork-originated empty associations must match the PR head SHA plus head branch.
-# Every independently actionable verified current-head run is approved,
-# including duplicate runs that share a stable workflowDatabaseId.
+# The exact per-run approval contract lives in README.md's Security notes.
 # Caveat: this gates the fork `pull_request` run only. A `pull_request_target`
 # workflow runs automatically with repo secrets and is NOT gated by any approval,
 # so the posture check is a "don't silently auto-clear + warn me" signal plus a

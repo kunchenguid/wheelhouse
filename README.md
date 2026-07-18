@@ -148,7 +148,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > **Heads-up - `auto_approve_ci` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork auto-approves fork-CI runs that the security gate proves safe (no CI-file changes, the PR targets the repo default branch, no `pull_request_target` workflow, and all safety reads succeed) and only raises a card for risky or uncertain contributor-authored runs.
 > A run is approved only after Wheelhouse verifies it is the target PR's awaiting `action_required` run: GitHub-populated `workflow_run.pull_requests` must contain exactly that PR, and fork-originated empty associations must match the PR `head_sha` plus `head_branch`.
-> Wheelhouse approves every independently actionable verified current-head run, including runs that share a stable workflow identity.
+> See [Security notes](#security-notes) for the exact per-run approval contract.
 > After a safe run is approved, Wheelhouse waits for its checks to finish before classifying the PR or creating a card.
 > During that wait, an existing pure PR-review card is kept open and the hourly scan refreshes it to the observed head's non-green pending state; no transient-head triage is queued.
 > If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use).
@@ -405,7 +405,7 @@ By default the scan also **auto-approves fork-CI runs it proves safe** (`auto_ap
 Owner, maintainer, and bot-authored fork PRs follow the same safe approve/noop path, but risky or uncertain cases are logged with `suppressed-card` and do not emit decision cards.
 Same-repo PRs with no CI signal are routed to normal PR review, not CI approval.
 The approval step still binds each awaiting workflow run to the target PR by PR association, or by exact head SHA plus branch for fork runs where GitHub returns an empty association list.
-Wheelhouse approves every independently actionable verified current-head run, including same-workflow duplicates that GitHub still exposes for approval.
+For the exact per-run approval contract, see [Security notes](#security-notes).
 If the approval step verifies that no matching run is awaiting approval, the scan normally emits no worklist item and any stale CI-approval card enters the soft-close lifecycle described above; for a contributor fork that conclusively conflicts, it also posts the rebase nudge described above, and a later pending run re-enters the normal approve, card, or suppressed-card path.
 A mergeability-settlement error for that narrow nudge exception marks the repo scan unhealthy instead, so reconcile preserves existing cards.
 Each CI-approval candidate the auto path handles also writes exactly one scan-log line, so approved runs, no-pending runs, approval failures, and fail-closed safety reasons are visible in `scan-backstop`.

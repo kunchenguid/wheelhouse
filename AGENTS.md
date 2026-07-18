@@ -220,8 +220,6 @@ still appears where it's plain English, e.g. "triage the queue".)
   not. `classify()` is correct given correct inputs and was not touched; the
   defect was entirely in how `check_status()` derived those inputs. See
   `tests/test_check_status.py`.
-  Relatedly, `approve_ci()` intentionally approves every individually verified current-head `action_required` run, including same-workflow duplicates, because GitHub exposes lower run IDs as independently actionable and deduping them strands them once the winner creates rollup contexts.
-  Every run still passes the unchanged risky-files/posture HOLD and exact head verification before approval.
 - **Failed decision = durable open `blocked`, never pure `needs-decision`
   (card #447).** `decision-handler.yml` maps `terminal_state == 'error'` onto
   the same label path as `blocked` (add `blocked`, drop `needs-decision`; do
@@ -915,9 +913,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   `review-needed`, while unknown fork status fails safe by raising a manual
   `ci-approval` card with no auto-approve attempt for contributor-authored PRs
   and by logging `suppressed-card` for owner, maintainer, and bot-authored PRs.
-  Before bucket resolution, `build_repo` enumerates exact-current-head `action_required` runs for every open, non-draft, known-fork PR, so an existing completed rollup context cannot mask a separate pending suite.
-  A discovered run forces the existing `needs-ci-approval` handling path, while an unreadable or incomplete enumeration fails the repo scan closed before any action.
-  `approve_ci` then re-lists the live head and individually applies the unchanged `ci_safety` and run-to-PR verification gates before any approval.
+  The exact-current-head discovery and per-run approval contract lives in [README.md's Security notes](README.md#security-notes); `tests/test_ci_autoapprove.py` guards the masked-context, duplicate-run, and unchanged safety-boundary regressions.
   An `approve_ci` `noop` is a verified "nothing awaiting approval" state, so the
   scan emits no worklist item and reconcile starts the fixed soft-close lifecycle documented in the state-block contract above for any stale card; if a real
   pending run appears on a later scan, the normal approve/card/suppressed-card
@@ -935,8 +931,6 @@ still appears where it's plain English, e.g. "triage the queue".)
   so reconcile preserves existing cards instead. This exception deliberately
   passes `arm_cleanup=False`, so it never arms pending-contributor cleanup.
   Fork-originated `action_required` workflow runs are expected to have an empty `workflow_run.pull_requests` list, so `approve_ci` verifies that fork case with the already-filtered run's exact `head_sha` plus `head_branch`; non-empty `pull_requests` stays strict and must contain exactly the target PR.
-  After verification, `approve_ci` approves every matching pending run that GitHub still exposes as independently actionable, including same-workflow duplicates.
-  The risky-files/posture safety gate still runs before enumeration and exact run-to-PR head verification still runs before every approval, so broader coverage never weakens the HOLD path.
   **Observability (every outcome is logged, never silent).** `_auto_approve_or_card`
   returns `(handled, card_note, log_note, approve_status)` and `build_repo` emits exactly ONE
   stderr line per `needs-ci-approval` PR the auto path handles: a `::notice::`

@@ -165,7 +165,7 @@ jobs:
   Warnings include the safety or uncertainty reason and any approval status/message.
   When you do approve a card, the hub still applies the same gate: CI/action-file changes are held, and non-default bases or `pull_request_target` posture are surfaced as warnings.
   It also approves only `action_required` workflow runs bound to the target PR: populated `workflow_run.pull_requests` must name exactly that PR, while fork-originated empty associations must match the PR head SHA plus head branch.
-  Every independently actionable verified current-head run is approved, including duplicate runs that share a stable `workflowDatabaseId`.
+  For the exact per-run approval contract, see the [Security notes](../README.md#security-notes).
 - **Conflicting ci-noop fork PRs.** This is a scheduled-scan cleanup exception, not a dispatch behavior.
   When stale pending-contributor cleanup is enabled, a cross-repo PR in the `needs-ci-approval` ci-noop route can follow the stale rebase-nudge lifecycle only when a trusted rebase nudge is proven and GitHub currently reports it as `CONFLICTING`.
   The scan reads mergeability again immediately before it posts a reminder or closes the PR, so non-conflicting, `UNKNOWN`, or unreadable targets stay out of cleanup.
