@@ -18,6 +18,34 @@ class Negotiation:
     proof: dict[str, Any]
 
 
+def claude_descriptor(binary_version: str, binary_digest: str, protocol_fixture_sha256: str) -> dict[str, Any]:
+    return {
+        "adapter": "claude-cli",
+        "adapterVersion": "1.0.0",
+        "harness": "claude-code",
+        "harnessVersion": binary_version,
+        "harnessDigest": binary_digest,
+        "protocol": "stream-json-v2.1.197",
+        "protocolSchemaSha256": protocol_fixture_sha256,
+        "capabilities": {
+            "input.text": {"mechanism": "stdin", "maxBytes": 262144},
+            "process.exec": {"mechanism": "external-deny", "mode": "none"},
+            "tool.network": {"mechanism": "external-deny", "modes": ["none", "broker-only"]},
+            "output.structured": {
+                "mechanism": "native-schema",
+                "strict": True,
+                "maxSchemaBytes": 65536,
+                "schemaDialect": "wheelhouse-claude-2.1.197-subset",
+            },
+            "lifecycle.cancel": {"mechanism": "sigterm+process-group", "ackMs": 10000},
+            "provenance.actual-model": {"mechanism": "stream-json-system-init+exact-match"},
+            "provenance.actual-provider": {"mechanism": "exact-cli+subscription-auth+provider-endpoint"},
+            "usage.tokens": {"mechanism": "stream-json-result-usage"},
+            "isolation.external": {"mechanism": "bubblewrap+network-proxy", "worker": "sandboxed-adapter-worker"},
+        },
+    }
+
+
 def codex_descriptor(binary_version: str, binary_digest: str, protocol_schema_sha256: str) -> dict[str, Any]:
     return {
         "adapter": "codex-app-server",
@@ -59,7 +87,7 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
     _require(candidate["adapter"] == descriptor["adapter"], "adapter does not match the selected plan")
     _require(candidate["harness"] == descriptor["harness"], "harness does not match the selected plan")
     _require(candidate["allowModelAlias"] is False, "model aliases are forbidden")
-    _require(candidate["costClass"] == "subscription", "Codex must not change the billing class")
+    _require(candidate["costClass"] == "subscription", "adapter must not change the billing class")
     _require(host_proof.get("externalSandbox") is True, "external sandbox is unavailable")
     _require(host_proof.get("networkProxy") is True, "provider-only network enforcement is unavailable")
     _require(host_proof.get("denyHostHome") is True, "host home denial is unavailable")
@@ -67,6 +95,7 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
 
     available = descriptor["capabilities"]
     proven_optional = []
+    structured_output_mechanism = ""
     for requirement in task["spec"]["capabilities"]["required"]:
         name = requirement["name"]
         constraints = requirement.get("constraints") or {}
@@ -80,6 +109,7 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
             mechanisms = constraints.get("mechanismAnyOf") or []
             _require(capability.get("mechanism") in mechanisms, "structured output mechanism is not accepted")
             _require(capability.get("strict") is True, "strict structured output is unavailable")
+            structured_output_mechanism = str(capability.get("mechanism") or "")
         elif name == "lifecycle.cancel":
             _require(capability.get("ackMs", 10**9) <= constraints.get("ackMs", 0), "cancel acknowledgement bound is too weak")
         elif name == "fs.read":
@@ -103,7 +133,7 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
         "required": [item["name"] for item in task["spec"]["capabilities"]["required"]],
         "optionalProven": proven_optional,
         "exactTools": requested_tools,
-        "structuredOutputMechanism": "native-schema",
+        "structuredOutputMechanism": structured_output_mechanism,
         "fallback": "none",
         "limitEnforcement": task["spec"]["limits"]["enforcement"],
     }

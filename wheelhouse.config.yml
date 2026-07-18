@@ -227,6 +227,23 @@ agent_runtime:
       provider_hosts:
         - api.anthropic.com
 
+    # Migration step 1 evidence only. No action below selects this profile, so
+    # the pinned action compatibility path remains production-authoritative.
+    claude-cli-unreachable-pinned:
+      adapter: claude-cli
+      harness: claude-code
+      provider: anthropic
+      auth_profile: anthropic-subscription
+      auth_mechanism: claude-code-oauth-token
+      expected_workspace_id: ""
+      model: claude-sonnet-4-6
+      effort: provider-default
+      cost_class: subscription
+      data_boundary: anthropic-subscription
+      allow_model_alias: false
+      provider_hosts:
+        - api.anthropic.com
+
   actions:
     triage.issue.local: {target: claude, profile: claude-action-current-pinned}
     triage.issue.search: {target: claude, profile: claude-action-current-pinned}

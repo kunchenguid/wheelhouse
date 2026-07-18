@@ -70,7 +70,7 @@ class CodexAppServerAdapter(AgentAdapterV1):
     id = "codex-app-server"
     adapter_version = "1.0.0"
 
-    def probe(self, task: dict[str, Any]) -> AdapterProbe:
+    def probe(self, task: dict[str, Any], schema_bytes: bytes | None = None) -> AdapterProbe:
         candidate = task["spec"]["selection"]["candidates"][0]
         if candidate.get("authProfile") != "codex-subscription":
             raise CodexProbeError("Codex adapter requires the codex-subscription auth profile")

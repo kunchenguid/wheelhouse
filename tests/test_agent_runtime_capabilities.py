@@ -7,7 +7,6 @@ import copy
 import base64
 import hashlib
 import io
-import json
 import os
 import tarfile
 import tempfile
@@ -22,7 +21,6 @@ from agent_runtime.adapters.codex import CodexAppServerAdapter, CodexProbeError,
 from agent_runtime.capabilities import CapabilityError, codex_descriptor, negotiate
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.supervisor import _error, _preflight_code
-from agent_runtime.contract import canonical_sha256
 from agent_runtime_testlib import make_task
 from scripts.agent_runtime import _verify_package_tarball
 
@@ -53,6 +51,7 @@ def main():
     check("selection: unsupported emergency provider override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="codex"), ConfigError))
     check("selection: former legacy override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="legacy"), ConfigError))
     check("selection: Codex absent from active profiles", "codex-subscription-pinned" not in runtime["profiles"])
+    check("selection: direct Claude CLI profile is present but unreachable", runtime["profiles"]["claude-cli-unreachable-pinned"]["adapter"] == "claude-cli" and all(row["profile"] != "claude-cli-unreachable-pinned" for row in runtime["actions"].values()))
     check("selection: Codex recorded only as disabled adapter evidence", runtime["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"})
     check("selection: no production activation promise remains", "production_activation" not in runtime and "codex_auth_gate" not in runtime)
     check("selection: every action remains on Claude", all(row["target"] == "claude" for row in runtime["actions"].values()))
@@ -62,6 +61,10 @@ def main():
     invalid_target["actions"]["triage.issue.local"]["target"] = "codex"
     with mock.patch.object(runtime_config, "load_runtime_config", return_value=invalid_target):
         check("selection: any Codex-targeted action invalidates configuration", fails(lambda: resolve_selection("triage.issue.local"), ConfigError))
+    reachable_direct = copy.deepcopy(runtime)
+    reachable_direct["actions"]["triage.schema-repair"]["profile"] = "claude-cli-unreachable-pinned"
+    with mock.patch.object(runtime_config, "load_runtime_config", return_value=reachable_direct):
+        check("selection: direct Claude CLI profile cannot become production-reachable", fails(lambda: resolve_selection("triage.schema-repair"), ConfigError))
 
     with tempfile.TemporaryDirectory() as directory:
         task, _, _ = make_task(Path(directory), "triage.issue.local")

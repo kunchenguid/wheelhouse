@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import Any
 
 from ..contract import canonical_sha256, load_json_regular
@@ -15,7 +13,7 @@ class FakeAdapter(AgentAdapterV1):
     id = "fake"
     adapter_version = "1.0.0"
 
-    def probe(self, task: dict[str, Any]) -> AdapterProbe:
+    def probe(self, task: dict[str, Any], schema_bytes: bytes | None = None) -> AdapterProbe:
         script_path = os.environ.get("WHEELHOUSE_FAKE_ADAPTER_SCRIPT", "")
         if not script_path:
             raise ValueError("fake adapter script is missing")

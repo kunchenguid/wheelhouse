@@ -94,6 +94,25 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
         raise ConfigError("only the captain-approved Claude production target is selectable")
     profile_name = str(action_config.get("profile") or "")
     profiles = runtime.get("profiles") or {}
+    direct_profile = profiles.get("claude-cli-unreachable-pinned")
+    if not isinstance(direct_profile, dict):
+        raise ConfigError("unreachable direct Claude profile evidence is missing")
+    expected_direct = {
+        "adapter": "claude-cli",
+        "harness": "claude-code",
+        "provider": "anthropic",
+        "auth_profile": "anthropic-subscription",
+        "auth_mechanism": "claude-code-oauth-token",
+        "expected_workspace_id": "",
+        "model": "claude-sonnet-4-6",
+        "effort": "provider-default",
+        "cost_class": "subscription",
+        "data_boundary": "anthropic-subscription",
+        "allow_model_alias": False,
+        "provider_hosts": ["api.anthropic.com"],
+    }
+    if direct_profile != expected_direct or any(row.get("profile") == "claude-cli-unreachable-pinned" for row in actions.values()):
+        raise ConfigError("direct Claude profile must remain exact and unreachable")
     profile = profiles.get(profile_name)
     if not isinstance(profile, dict):
         raise ConfigError("selected agent runtime profile is missing")

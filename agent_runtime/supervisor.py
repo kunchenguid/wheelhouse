@@ -153,7 +153,15 @@ def _materialize_fake_work(task: dict[str, Any], bundle: Path) -> None:
 
 def _adapter_digest(adapter_id: str) -> str:
     root = Path(__file__).resolve().parent
-    files = [root / "adapters" / "base.py", root / "adapters" / ("codex.py" if adapter_id == "codex-app-server" else "fake.py"), root / "worker.py"]
+    adapter_files = {
+        "claude-cli": "claude.py",
+        "codex-app-server": "codex.py",
+        "fake": "fake.py",
+    }
+    name = adapter_files.get(adapter_id)
+    if name is None:
+        return canonical_sha256({"adapter": adapter_id, "status": "not-allowlisted"})
+    files = [root / "adapters" / "base.py", root / "adapters" / name, root / "worker.py"]
     return canonical_sha256({path.name: file_sha256(path) for path in files})
 
 
@@ -170,7 +178,7 @@ def _selection(task: dict[str, Any], probe: Any, worker: dict[str, Any] | None =
         "harnessVersion": descriptor["harnessVersion"],
         "harnessDigest": descriptor["harnessDigest"],
         "harnessProvenanceQuality": "test-fixture" if candidate["adapter"] == "fake" else "verified-executable",
-        "harnessSourceCommit": None,
+        "harnessSourceCommit": probe.supplemental.get("sourceCommit"),
         "harnessMetadataSha256": None,
         "protocol": descriptor["protocol"],
         "protocolSchemaSha256": descriptor["protocolSchemaSha256"],
@@ -419,7 +427,12 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
         raise RuntimeFailure("selection.no_candidate", "selecting", "Selected adapter is not in the trusted allowlist.")
     adapter = adapter_class()
     host = host_proof(adapter.id)
-    probe = adapter.probe(task)
+    schema_path = bundle / task["spec"]["output"]["schemaArtifact"]
+    try:
+        schema_bytes = schema_path.read_bytes()
+    except OSError as error:
+        raise RuntimeFailure("contract.invalid", "validating", "Bound output schema is unavailable.") from error
+    probe = adapter.probe(task, schema_bytes)
     negotiated = negotiate(task, probe.descriptor.value, host)
     plan = adapter.compile(task, negotiated.proof, probe)
     attempt_id = secrets.token_hex(16)
@@ -435,7 +448,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
     search_socket = ""
     broker_dir = Path(tempfile.mkdtemp(prefix="wha-"))
     try:
-        if adapter.id == "codex-app-server":
+        if adapter.id in ("claude-cli", "codex-app-server"):
             provider_socket = str(broker_dir / "provider.sock")
             provider_proxy = ProviderProxy(provider_socket, task["spec"]["isolation"]["modelNetwork"]["allowedHosts"])
             provider_proxy.start()
@@ -449,13 +462,30 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             search_broker = SearchBroker(search_socket, task["metadata"]["target"]["owner"], task["metadata"]["target"]["repo"], token, wheelhouse_core.load_config())
             search_broker.start()
 
+        auth_source = probe.auth_source
+        if auth_source == "env:CLAUDE_CODE_OAUTH_TOKEN":
+            token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+            if not token:
+                raise RuntimeFailure("auth.missing", "probing", "anthropic-subscription credential handoff is unavailable")
+            credential_path = broker_dir / "claude-oauth"
+            descriptor = os.open(credential_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(token)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                credential_path.unlink(missing_ok=True)
+                raise
+            auth_source = str(credential_path)
+
         worker_command = adapter.worker_command(str(plan_path), str(output_dir))
         command, environment = build_command(
             task=task,
             bundle=str(bundle),
             plan_path=str(plan_path),
             output_dir=str(output_dir),
-            auth_source=probe.auth_source,
+            auth_source=auth_source,
             binary_path=probe.binary_path,
             provider_socket=provider_socket,
             search_socket=search_socket,
@@ -594,7 +624,7 @@ def _preflight_code(error: Exception) -> tuple[str, str]:
         return "capability.unsatisfied", "probing"
     if isinstance(error, RuntimeFailure):
         return error.code, error.phase
-    if name == "CodexProbeError":
+    if name in ("ClaudeProbeError", "CodexProbeError"):
         if "missing" in lowered or "unavailable" in lowered or "not configured" in lowered:
             return "auth.missing", "probing"
         if "credential" in lowered or "auth" in lowered or "api-key" in lowered:
@@ -633,13 +663,19 @@ def _write_rejected(task_path: str, bundle_dir: str, result_path: str, events_pa
         phase = "running"
     started = recovery.get("startedAt") if spend_started and isinstance(recovery.get("startedAt"), str) else _now()
     adapter_id = candidate["adapter"]
-    if adapter_id == "codex-app-server":
+    if adapter_id in ("claude-cli", "codex-app-server"):
         lock_path = Path(__file__).resolve().parent / "runtime.lock.json"
         lock = load_json_regular(lock_path)
-        codex = lock["codex"]
-        adapter_version = codex["adapterVersion"]
-        protocol = codex["protocol"]
-        protocol_digest = canonical_sha256(codex["protocolSchemas"])
+        if adapter_id == "claude-cli":
+            claude = lock["claude"]
+            adapter_version = claude["adapterVersion"]
+            protocol = claude["protocol"]
+            protocol_digest = claude["protocolFixtureSha256"]
+        else:
+            codex = lock["codex"]
+            adapter_version = codex["adapterVersion"]
+            protocol = codex["protocol"]
+            protocol_digest = canonical_sha256(codex["protocolSchemas"])
     else:
         adapter_version = "1.0.0"
         protocol = "fake-script-v1"

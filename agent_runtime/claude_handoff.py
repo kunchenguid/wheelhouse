@@ -59,8 +59,10 @@ PACKAGED_RUNTIME_FILES = (
     "tools.py",
     "adapters/__init__.py",
     "adapters/base.py",
+    "adapters/claude.py",
     "adapters/codex.py",
     "adapters/fake.py",
+    "vendor/claude-stream-json-2.1.197/protocol-fixture.ndjson",
 )
 
 

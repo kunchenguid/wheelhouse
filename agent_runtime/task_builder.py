@@ -1109,7 +1109,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
             "constraints": {"worker": "sandboxed-adapter-worker"},
         },
     ]
-    if action not in SCHEMA_REPAIR_ACTIONS:
+    if action not in SCHEMA_REPAIR_ACTIONS and adapter != "claude-cli":
         required.extend(
             [
                 {
@@ -1126,7 +1126,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
                 {"name": "fs.glob", "constraints": {"roots": ["target-src"]}},
             ]
         )
-    if action.endswith(".search"):
+    if action.endswith(".search") and adapter != "claude-cli":
         required.append(
             {"name": "github.search.readonly", "constraints": {"broker": True}}
         )
@@ -1142,7 +1142,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
 
 
 def _tools(action: str, adapter: str) -> dict[str, Any]:
-    if adapter == "claude-action-compat":
+    if adapter in ("claude-action-compat", "claude-cli"):
         return {"default": "deny", "parallel": False, "tools": []}
     names: list[str] = []
     if action not in SCHEMA_REPAIR_ACTIONS:
@@ -1274,6 +1274,7 @@ def build_task(
     adapter = (selection.get("profile") or {}).get("adapter")
     if (selection.get("mode"), adapter) not in (
         ("claude", "claude-action-compat"),
+        ("claude", "claude-cli"),
         ("codex", "codex-app-server"),
     ):
         raise ArtifactError(
@@ -1290,16 +1291,21 @@ def build_task(
     except (OSError, UnicodeDecodeError) as error:
         raise ArtifactError("prompt artifact must be bounded UTF-8 text") from error
     tool_instruction = (
-        "This schema-repair task exposes no tools. Work only from the bounded candidate in the prompt."
+        "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."
+        if adapter == "claude-cli"
+        else "This schema-repair task exposes no tools. Work only from the bounded candidate in the prompt."
         if action in SCHEMA_REPAIR_ACTIONS
         else "The sandboxed adapter worker exposes only fs.read, fs.grep, fs.glob and, on search profiles, github.search.readonly. Use those typed tools directly."
     )
+    direct_shim_version = (
+        "claude-cli/v1" if adapter == "claude-cli" else "codex-app-server/v1"
+    )
     shim_lines = [
         "",
-        '<wheelhouse-adapter-shim trust="trusted" version="codex-app-server/v1">',
+        '<wheelhouse-adapter-shim trust="trusted" version="%s">' % direct_shim_version,
         tool_instruction,
         "Any earlier request-file, Write, Bash, wheelhouse-search command, or",
-        "decision.json instruction describes the direct Claude production path and",
+        "decision.json instruction describes the action compatibility path and",
         "is superseded for this adapter task. You have no shell or file-write tool.",
         "Submit the final value through the native strict output schema.",
         "Do not add Markdown fences or prose outside that schema.",
@@ -1425,24 +1431,32 @@ def build_task(
     shim_version = (
         "claude-action-compat/v1"
         if adapter == "claude-action-compat"
-        else "codex-app-server/v1"
+        else direct_shim_version
     )
     shim = {
         "adapter": adapter,
         "version": shim_version,
         "promptRole": "user",
-        "nativeDefault": "pinned-claude-code-2.1.197"
-        if adapter == "claude-action-compat"
-        else "pinned-codex-0.144.0",
-        "tools": "claude-action-mapped"
-        if adapter == "claude-action-compat"
-        else "dynamic-only",
+        "nativeDefault": (
+            "pinned-claude-code-2.1.197"
+            if adapter in ("claude-action-compat", "claude-cli")
+            else "pinned-codex-0.144.0"
+        ),
+        "tools": (
+            "claude-action-mapped"
+            if adapter == "claude-action-compat"
+            else "none"
+            if adapter == "claude-cli"
+            else "dynamic-only"
+        ),
         "output": (
             "native-schema+trusted-revalidation"
             if adapter == "claude-action-compat"
             and claude_native_structured_output(action)
             else "trusted-post-action-bridge"
             if adapter == "claude-action-compat"
+            else "claude --json-schema"
+            if adapter == "claude-cli"
             else "turn/start.outputSchema"
         ),
     }
