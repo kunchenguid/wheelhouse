@@ -580,10 +580,15 @@ def inspect_candidate(
             return None, "attempt-reset-state-mismatch"
         cleared = "error"
     elif marker is not None:
-        if state.get("held") or triaged_sha != revision or status not in {
-            "queued",
-            "error",
-        }:
+        if (
+            state.get("held")
+            or triaged_sha != revision
+            or status
+            not in {
+                "queued",
+                "error",
+            }
+        ):
             return None, "already-replayed"
         try:
             duplicate_reentry = agent_claim.triage_replay_duplicate_only_evidence(
@@ -737,9 +742,7 @@ def _preflight_attempt_reset(
 
 def _marker(wave, revision, cleared, run_number, attempt_reset=False):
     marker = {
-        "version": (
-            ATTEMPT_RESET_REPLAY_VERSION if attempt_reset else REPLAY_VERSION
-        ),
+        "version": (ATTEMPT_RESET_REPLAY_VERSION if attempt_reset else REPLAY_VERSION),
         "wave": wave,
         "revision": revision,
         "cleared": cleared,
@@ -825,9 +828,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
     owner, run_number = _entry(wave, limit)
     attempt_reset_scope = _attempt_reset_scope(wave, attempts_reset_cards)
     if attempt_reset_scope and limit != len(attempt_reset_scope):
-        raise ValueError(
-            "attempt reset limit must equal the sanctioned cohort size"
-        )
+        raise ValueError("attempt reset limit must equal the sanctioned cohort size")
     repo_slug = _card_repo_slug(owner)
     config = core.load_config()
     has_token = render_card.auto_triage_has_token()
@@ -864,8 +865,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             raise ValueError(
                 "attempt reset refused because a sanctioned card failed validation"
             )
-    if attempt_reset_scope and eligible and all(
-        plan.get("attempt_reset_applied") for plan in eligible
+    if (
+        attempt_reset_scope
+        and eligible
+        and all(plan.get("attempt_reset_applied") for plan in eligible)
     ):
         raise ValueError("attempt reset has already consumed the sanctioned cohort")
     ceiling = config.get("triage_daily_ceiling", 0)
@@ -876,9 +879,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
     if attempt_reset_scope and remaining < pending_attempt_resets:
         raise ValueError("attempt reset requires budget for the pending cohort")
     wave_bound = (
-        len(attempt_reset_scope)
-        if attempt_reset_scope
-        else min(limit, remaining)
+        len(attempt_reset_scope) if attempt_reset_scope else min(limit, remaining)
     )
     selected = eligible[:wave_bound]
     deferred = len(eligible) - len(selected)
@@ -955,8 +956,7 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
         except Exception as error:
             print(
                 "::error::replay refused card #%s before queueing: "
-                "claim tombstone failed (%s)"
-                % (plan["number"], str(error)[:180])
+                "claim tombstone failed (%s)" % (plan["number"], str(error)[:180])
             )
             if attempt_reset_scope:
                 raise ValueError(
@@ -964,10 +964,8 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 )
             continue
         if superseded["superseded"]:
-            print(
-                "replay superseded stale triage claim for card #%s"
-                % plan["number"]
-            )
+            print("replay superseded stale triage claim for card #%s" % plan["number"])
+
         def prepare_body(body, plan=plan):
             return _body_with_replay_marker(body, plan, wave, run_number)
 

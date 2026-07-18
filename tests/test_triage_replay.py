@@ -189,6 +189,7 @@ def replay_environment(
         }
     )
     try:
+
         def supersede(**kwargs):
             claims.append(kwargs)
             return {
@@ -479,9 +480,7 @@ def test_array_recovery_attempt_reset_mismatches_are_atomic_zero_write():
     path = cards_file([])
     before = {number: value["body"] for number, value in cards.items()}
     try:
-        with replay_environment(
-            cards, sources, card_read_hook=race_card
-        ) as calls:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
             try:
                 replay.run(
                     path,
@@ -527,9 +526,7 @@ def test_attempt_reset_later_race_pauses_then_resumes_exact_cohort():
 
     path = cards_file([])
     try:
-        with replay_environment(
-            cards, sources, card_read_hook=race_card
-        ) as calls:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
             try:
                 replay.run(
                     path,
@@ -568,9 +565,7 @@ def test_attempt_reset_later_race_pauses_then_resumes_exact_cohort():
             }
             assert len(calls["queued"]) == len(cohort)
             assert all(
-                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD][
-                    "version"
-                ]
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD]["version"]
                 == replay.ATTEMPT_RESET_REPLAY_VERSION
                 for value in cards.values()
             )
@@ -616,9 +611,7 @@ def test_attempt_reset_resume_requires_only_pending_budget():
             assert len(calls["queued"]) == len(calls["dispatched"]) == 1
             assert calls["queued"][0][0] == pending
             assert all(
-                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD][
-                    "version"
-                ]
+                rc._unique_state_block(value["body"])[replay.REPLAY_FIELD]["version"]
                 == replay.ATTEMPT_RESET_REPLAY_VERSION
                 for value in cards.values()
             )
@@ -628,19 +621,22 @@ def test_attempt_reset_resume_requires_only_pending_budget():
 
 def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     _, _, supplied = attempt_reset_fixture()
-    assert replay._attempt_reset_count(
-        {
-            rc.TRIAGE_ATTEMPTS_FIELD: {
-                "version": True,
-                "kind": "pr-review",
-                "revision": "abcdef1",
-                "count": 2,
-            }
-        },
-        "pr-review",
-        "abcdef1",
-        2,
-    ) is None
+    assert (
+        replay._attempt_reset_count(
+            {
+                rc.TRIAGE_ATTEMPTS_FIELD: {
+                    "version": True,
+                    "kind": "pr-review",
+                    "revision": "abcdef1",
+                    "count": 2,
+                }
+            },
+            "pr-review",
+            "abcdef1",
+            2,
+        )
+        is None
+    )
     invalid_inputs = (
         ("wrong-wave", supplied),
         (replay.ATTEMPT_RESET_WAVE, supplied + ",9999"),
@@ -663,9 +659,7 @@ def test_attempt_reset_refuses_outside_scope_and_any_state_mismatch():
     state = rc._unique_state_block(cards[moved]["body"])
     old_revision = replay.ATTEMPT_RESET_COHORT[moved]["revision"]
     kind = state["kind"]
-    moved_revision = (
-        "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
-    )
+    moved_revision = "2026-07-18T00:00:00Z" if kind == "issue-triage" else "f" * 40
     state["updated_at" if kind == "issue-triage" else "head_sha"] = moved_revision
     state["triaged_sha"] = moved_revision
     state[rc.TRIAGE_ATTEMPTS_FIELD]["revision"] = moved_revision
@@ -740,9 +734,7 @@ def test_attempt_reset_second_read_mismatch_is_atomic_zero_write():
     path = cards_file([])
     before = {number: value["body"] for number, value in cards.items()}
     try:
-        with replay_environment(
-            cards, sources, card_read_hook=race_card
-        ) as calls:
+        with replay_environment(cards, sources, card_read_hook=race_card) as calls:
             try:
                 replay.run(
                     path,
@@ -843,9 +835,7 @@ def test_queue_failure_does_not_unlock_card_for_later_schedule():
             assert replay.REPLAY_FIELD not in state
             assert state["triage_status"] == "error"
             assert (
-                not calls["edits"]
-                and not calls["queued"]
-                and not calls["dispatched"]
+                not calls["edits"] and not calls["queued"] and not calls["dispatched"]
             )
     finally:
         os.unlink(path)
@@ -1185,8 +1175,7 @@ def test_duplicate_only_evidence_requires_a_terminal_pre_replay_claim_and_record
     fake.comments.append(
         {
             "id": 1,
-            "body": "Agent triage event finished with consumer.committed. %s"
-            % marker,
+            "body": "Agent triage event finished with consumer.committed. %s" % marker,
             "user": {"login": "github-actions[bot]"},
             "created_at": "2026-07-16T09:00:00Z",
             "updated_at": "2026-07-16T09:00:00Z",
