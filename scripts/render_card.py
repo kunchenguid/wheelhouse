@@ -258,7 +258,30 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
-CARD_RENDER_VERSION = 7
+# Bumped 7 -> 8 to group criteria by gate family and split G6's complete-diff
+# behavior facts from its VISION.md-dependent subtree.
+CARD_RENDER_VERSION = 8
+
+AUTOMERGE_CRITERIA_GROUPS = (
+    ("Scope", ("scope_",)),
+    ("Safety", ("scan_", "safety_")),
+    ("G0 (repo)", ("g0_",)),
+    ("G1 (card)", ("g1_",)),
+    ("G2 (files)", ("g2_",)),
+    ("G3 (author)", ("g3_",)),
+    ("G4 (checks)", ("g4_",)),
+    ("G5 (size)", ("g5_",)),
+    ("G6 (triage + behavior)", ("g6_",)),
+    ("G7 (final gate)", ("g7_",)),
+)
+AUTOMERGE_VISION_CHILD_IDS = frozenset(
+    {
+        "g6_vision_alignment",
+        "g6_verdict_merge",
+        "g6_vision_revision",
+        "g6_base_revision",
+    }
+)
 
 ACCEPT_ALLOWED_BY_KIND = {
     "pr-review": {
@@ -348,7 +371,9 @@ def normalize_automerge_workflow_hold(value):
         return None
     head_sha = value.get("head_sha")
     commit_sha = value.get("commit_sha")
-    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", head_sha):
+    if not isinstance(head_sha, str) or not re.fullmatch(
+        r"[0-9A-Fa-f]{7,64}", head_sha
+    ):
         return None
     if not isinstance(commit_sha, str) or not re.fullmatch(
         r"[0-9A-Fa-f]{7,64}", commit_sha
@@ -431,9 +456,7 @@ def automerge_workflow_hold_status(state, head_sha):
 
 def workflow_hold_maintenance_needed(item, state, labels=None):
     """Whether a full refresh must preserve, clear, add, or remove hold UI."""
-    status, _ = automerge_workflow_hold_status(
-        state, (item or {}).get("head_sha", "")
-    )
+    status, _ = automerge_workflow_hold_status(state, (item or {}).get("head_sha", ""))
     names = _label_names(labels)
     labeled = AUTOMERGE_WORKFLOW_HOLD_LABEL in names
     if status == "matching":
@@ -1137,18 +1160,18 @@ def _normalize_triage_with_reason(data):
         triage["recommended_next_step"] = (
             rec if rec.lower().startswith(allowed) else "look closer - " + rec
         )
-    # Optional auto-merge behavior verdict (pr-review only; asked by triage.yml
-    # only when the target's base branch carries a VISION.md). Non-material and
-    # advisory - auto_merge.py re-validates it and holds on any doubt.
+    # Optional auto-merge behavior facts (pr-review only). Complete-diff triage
+    # always asks for the VISION-independent fields; alignment and the final
+    # merge recommendation are included only with trusted base-branch VISION.md.
+    # Non-material and advisory - auto_merge.py re-validates every field and
+    # holds on any doubt.
     am = normalize_automerge_verdict(data.get("automerge"))
     if am:
         triage["automerge_verdict"] = am
     return triage, ""
 
 
-_EVIDENCE_QUOTE_RE = re.compile(
-    r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\''
-)
+_EVIDENCE_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\'')
 _EVIDENCE_SEGMENT_RE = re.compile(r"(?:\r?\n|\s+\|\s+)")
 _EVIDENCE_ELLIPSIS_RE = re.compile(r"(?:\u2026|\.{3})")
 _EVIDENCE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-+*]\s+|[0-9]+[.)]\s+)")
@@ -1194,9 +1217,7 @@ def _evidence_candidates(evidence):
     return quoted, fallback
 
 
-def evidence_anchor_ok(
-    evidence, target_text, min_quote_len=12, min_fallback_len=20
-):
+def evidence_anchor_ok(evidence, target_text, min_quote_len=12, min_fallback_len=20):
     """Deterministic lazy/fabrication guard for pass-by-reference triage.
 
     The prompt requires the model to return `evidence`: 2-4 short verbatim
@@ -1257,9 +1278,7 @@ def _triage_evidence_verified(data, target_file):
     if not target_text:
         return True
     evidence = (
-        _flatten_evidence(data.get(EVIDENCE_FIELD))
-        if isinstance(data, dict)
-        else None
+        _flatten_evidence(data.get(EVIDENCE_FIELD)) if isinstance(data, dict) else None
     )
     if evidence is None:
         return False
@@ -1284,10 +1303,14 @@ def _coerce_verdict_bool(value):
 def normalize_automerge_verdict(data):
     """Parse the OPTIONAL `automerge` sub-object of the pr-review triage JSON into
     the structured `automerge_verdict` persisted in card state and later consumed
-    by auto_merge.py (the deterministic auto-merge executor). Fail-closed: a
-    missing sub-object, a non-dict, a blank behavior class, or a required boolean
-    that is not coercible returns None, so no verdict is persisted and the
-    executor holds.
+    by auto_merge.py (the deterministic auto-merge executor).
+
+    A complete diff always produces the VISION-independent behavior class,
+    existing/default-behavior, and class-C mode facts. The alignment and final
+    merge recommendation are an optional all-or-nothing extension produced only
+    when trusted default-branch VISION.md input is available. Missing or malformed
+    vision fields therefore retain the independent facts but can never make the
+    verdict eligible.
 
     `optin_default_off` is only required for class C, so it defaults to False when
     absent (which itself disqualifies a class-C PR at the executor). This is
@@ -1298,12 +1321,7 @@ def normalize_automerge_verdict(data):
     if not cls:
         return None
     verdict = {"behavior_class": cls}
-    for field in (
-        "aligns_with_vision",
-        "changes_existing_or_default_behavior",
-        "recommend_merge",
-        "optin_default_off",
-    ):
+    for field in ("changes_existing_or_default_behavior", "optin_default_off"):
         b = _coerce_verdict_bool(data.get(field))
         if b is None:
             if field == "optin_default_off":
@@ -1311,6 +1329,12 @@ def normalize_automerge_verdict(data):
             else:
                 return None
         verdict[field] = b
+    vision_fields = {
+        field: _coerce_verdict_bool(data.get(field))
+        for field in ("aligns_with_vision", "recommend_merge")
+    }
+    if all(value is not None for value in vision_fields.values()):
+        verdict.update(vision_fields)
     return verdict
 
 
@@ -1846,6 +1870,7 @@ def body_with_triage_result(
     owner="",
     vision_sha="",
     base_sha="",
+    automerge_behavior_available=False,
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
@@ -1872,18 +1897,31 @@ def body_with_triage_result(
         else None
     )
     automerge_verdict = (
-        (normalized or {}).get("automerge_verdict") if kind == "pr-review" else None
+        (normalized or {}).get("automerge_verdict")
+        if kind == "pr-review" and automerge_behavior_available is True
+        else None
     )
-    if (
-        automerge_verdict
-        and vision_sha
-        and re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or ""))
-    ):
+    if automerge_verdict:
         automerge_verdict = dict(automerge_verdict)
-        automerge_verdict["vision_sha"] = vision_sha
-        automerge_verdict["base_sha"] = base_sha
-    else:
-        automerge_verdict = None
+        vision_facts_complete = all(
+            isinstance(automerge_verdict.get(field), bool)
+            for field in ("aligns_with_vision", "recommend_merge")
+        )
+        if (
+            vision_facts_complete
+            and vision_sha
+            and re.fullmatch(r"[0-9A-Fa-f]{7,64}", str(base_sha or ""))
+        ):
+            automerge_verdict["vision_sha"] = vision_sha
+            automerge_verdict["base_sha"] = base_sha
+        else:
+            for field in (
+                "aligns_with_vision",
+                "recommend_merge",
+                "vision_sha",
+                "base_sha",
+            ):
+                automerge_verdict.pop(field, None)
     if not base_sha:
         base_sha = state.get("triaged_base_sha", "")
     if not vision_sha:
@@ -2112,9 +2150,7 @@ def automerge_workflow_hold_presentation_complete(body, labels, record):
     sections = list(_AUTOMERGE_WORKFLOW_HOLD_SECTION_RE.finditer(body or ""))
     return bool(
         state
-        and normalize_automerge_workflow_hold(
-            state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD)
-        )
+        and normalize_automerge_workflow_hold(state.get(AUTOMERGE_WORKFLOW_HOLD_FIELD))
         == normalized
         and AUTOMERGE_WORKFLOW_HOLD_LABEL in _label_names(labels)
         and len(sections) == 1
@@ -2122,11 +2158,34 @@ def automerge_workflow_hold_presentation_complete(body, labels, record):
     )
 
 
-def _automerge_criteria_section(rows):
-    normalized = criteria_schema.normalize_criteria(
+def _automerge_display_rows(rows):
+    return criteria_schema.normalize_criteria(
         rows,
         missing_reason="not evaluated on this card generation path",
     )
+
+
+def _automerge_criterion_family(criterion_id):
+    """Assign display families by stable ID prefix; future IDs stay visible under Other."""
+    criterion_id = str(criterion_id or "")
+    for family, prefixes in AUTOMERGE_CRITERIA_GROUPS:
+        if criterion_id.startswith(prefixes):
+            return family
+    return "Other"
+
+
+def _automerge_criterion_line(row, icons, indent=""):
+    label = _automerge_criteria_evidence(row.get("label"))
+    return "%s- %s `%s` - %s" % (
+        indent,
+        icons[row["status"]],
+        label,
+        _automerge_criteria_evidence(row.get("evidence")),
+    )
+
+
+def _automerge_criteria_section(rows):
+    normalized = _automerge_display_rows(rows)
     icons = {
         criteria_schema.STATUS_MET: "✅ **MET**",
         criteria_schema.STATUS_UNMET: "❌ **UNMET**",
@@ -2141,15 +2200,48 @@ def _automerge_criteria_section(rows):
         "re-evaluates every gate and performs G7 immediately before acting.",
         "",
     ]
+    grouped = {family: [] for family, _ in AUTOMERGE_CRITERIA_GROUPS}
+    grouped["Other"] = []
     for row in normalized:
-        lines.append(
-            "- %s `%s` - %s"
-            % (
-                icons[row["status"]],
-                row["label"],
-                _automerge_criteria_evidence(row.get("evidence")),
-            )
-        )
+        grouped[_automerge_criterion_family(row.get("id"))].append(row)
+
+    for family in [family for family, _ in AUTOMERGE_CRITERIA_GROUPS] + ["Other"]:
+        family_rows = grouped[family]
+        if not family_rows:
+            continue
+        lines.extend(["#### %s" % family, ""])
+        if family == "G6 (triage + behavior)":
+            independent_rows = [
+                row
+                for row in family_rows
+                if row.get("id") not in AUTOMERGE_VISION_CHILD_IDS
+            ]
+            vision_rows = [
+                row
+                for row in family_rows
+                if row.get("id") in AUTOMERGE_VISION_CHILD_IDS
+            ]
+            for row in independent_rows:
+                lines.append(_automerge_criterion_line(row, icons))
+            if vision_rows:
+                needs_vision = any(
+                    row.get("status") == criteria_schema.STATUS_UNAVAILABLE
+                    and "VISION.md" in str(row.get("evidence") or "")
+                    for row in vision_rows
+                )
+                parent = "- **VISION.md-dependent checks**"
+                if needs_vision:
+                    parent += " - _needs VISION.md_"
+                lines.append(parent)
+                for row in vision_rows:
+                    lines.append(_automerge_criterion_line(row, icons, indent="    "))
+            lines.append("")
+            continue
+        for row in family_rows:
+            lines.append(_automerge_criterion_line(row, icons))
+        lines.append("")
+    if lines[-1] == "":
+        lines.pop()
     return lines
 
 
@@ -2473,9 +2565,7 @@ def _normalize_lifecycle_issue(issue, marker="", expected_state=""):
         "body": body,
         "labels": [{"name": name} for name in labels],
         "title": (
-            issue.get("title", "")
-            if isinstance(issue.get("title", ""), str)
-            else ""
+            issue.get("title", "") if isinstance(issue.get("title", ""), str) else ""
         ),
         "state": state,
         "updatedAt": updated_at,
@@ -2488,9 +2578,9 @@ def _normalize_lifecycle_issue(issue, marker="", expected_state=""):
 
 def _list_target_issues(marker, state):
     """Completely list one target label in one issue state via REST pagination."""
-    endpoint = (
-        "repos/{owner}/{repo}/issues?state=%s&labels=%s&per_page=100"
-        % (state.lower(), url_quote(marker, safe=""))
+    endpoint = "repos/{owner}/{repo}/issues?state=%s&labels=%s&per_page=100" % (
+        state.lower(),
+        url_quote(marker, safe=""),
     )
     try:
         result = _gh(["api", "--paginate", "--slurp", endpoint])
@@ -2509,9 +2599,7 @@ def _list_target_issues(marker, state):
     seen = set()
     for page in pages:
         for raw in page:
-            row = _normalize_lifecycle_issue(
-                raw, marker=marker, expected_state=state
-            )
+            row = _normalize_lifecycle_issue(raw, marker=marker, expected_state=state)
             if row["number"] in seen:
                 raise CardLifecycleError(
                     "%s card lookup for %s returned issue #%s twice"
@@ -2554,9 +2642,10 @@ def _trusted_post_close_timeline(issue):
     events = []
     complete = False
     for page in range(1, POST_CLOSE_TIMELINE_MAX_PAGES + 1):
-        endpoint = (
-            "repos/{owner}/{repo}/issues/%s/timeline?per_page=%s&page=%s"
-            % (number, POST_CLOSE_TIMELINE_PAGE_SIZE, page)
+        endpoint = "repos/{owner}/{repo}/issues/%s/timeline?per_page=%s&page=%s" % (
+            number,
+            POST_CLOSE_TIMELINE_PAGE_SIZE,
+            page,
         )
         try:
             result = _gh(["api", endpoint])
@@ -2614,8 +2703,7 @@ def _trusted_target_state(issue, item):
         or target_number != int(item.get("number") or 0)
     ):
         raise CardLifecycleError(
-            "card #%s target state does not match %s"
-            % (number, marker_label(item))
+            "card #%s target state does not match %s" % (number, marker_label(item))
         )
     kind = state.get("kind")
     if kind not in CHECKBOX_OPTIONS:
@@ -2655,10 +2743,10 @@ def reusable_closed_card(issue, item):
     state = _trusted_target_state(issue, item)
     if str(issue.get("state") or "").upper() != "CLOSED":
         return False, "candidate is no longer closed"
-    author = ((issue.get("author") or {}).get("login") or "")
+    author = (issue.get("author") or {}).get("login") or ""
     if not _trusted_automation_login(author):
         return False, "card author is not trusted Wheelhouse automation"
-    closed_by = ((issue.get("closedBy") or {}).get("login") or "")
+    closed_by = (issue.get("closedBy") or {}).get("login") or ""
     if not _trusted_automation_login(closed_by):
         return False, "latest close actor is not trusted Wheelhouse automation"
     names = _lifecycle_label_names(issue)
@@ -2809,9 +2897,7 @@ def _prepared_lifecycle_matches(issue, body, labels, state, title=None):
         and _lifecycle_label_names(issue) == set(labels)
         and issue.get("state") == state
         and (title is None or issue.get("title") == title)
-        and _trusted_automation_login(
-            ((issue.get("author") or {}).get("login") or "")
-        )
+        and _trusted_automation_login(((issue.get("author") or {}).get("login") or ""))
     )
 
 
@@ -2916,8 +3002,7 @@ def _probe_open_list_peers(item, expected_number):
             return (
                 "duplicate",
                 rows,
-                "open cards %s"
-                % ", ".join("#%s" % row["number"] for row in rows),
+                "open cards %s" % ", ".join("#%s" % row["number"] for row in rows),
             )
         if any(row["number"] == expected for row in rows):
             return ("unique", rows, "open-list shows only card #%s" % expected)
@@ -2985,9 +3070,7 @@ def verify_unique_open_card(
         # Cannot prove uniqueness, but the direct object is valid. Callers that
         # must not destroy a valid create (admission) retain it; reopen paths
         # still force-close because they already mutated an existing card.
-        log_card_admission(
-            CARD_ADMISSION_RETAINED_DEFERRED, number, marker, detail
-        )
+        log_card_admission(CARD_ADMISSION_RETAINED_DEFERRED, number, marker, detail)
         raise CardAdmissionError(
             "post-operation uniqueness deferred for %s: %s" % (marker, detail),
             outcome=CARD_ADMISSION_RETAINED_DEFERRED,
@@ -3076,8 +3159,7 @@ def reuse_closed_card(item, candidate, has_token=False):
     eligible, reason = reusable_closed_card(current, item)
     if not eligible:
         raise CardLifecycleError(
-            "closed card #%s lost reuse eligibility: %s"
-            % (candidate["number"], reason)
+            "closed card #%s lost reuse eligibility: %s" % (candidate["number"], reason)
         )
 
     current_names = _lifecycle_label_names(current)
@@ -3132,9 +3214,9 @@ def reuse_closed_card(item, candidate, has_token=False):
     )
     if "resolved" in expected_inert_labels:
         activation_remove = sorted(set(activation_remove) | {"resolved"})
-    expected_labels = (
-        expected_inert_labels | set(activation_add)
-    ) - set(activation_remove)
+    expected_labels = (expected_inert_labels | set(activation_add)) - set(
+        activation_remove
+    )
     try:
         args = ["issue", "edit", str(current["number"])]
         for label in activation_add:
@@ -3159,9 +3241,7 @@ def reuse_closed_card(item, candidate, has_token=False):
     new_sha = item.get("head_sha", "") or ""
     if old_sha and new_sha and old_sha != new_sha:
         latest = _get_lifecycle_issue(current["number"])
-        if _prepared_lifecycle_matches(
-            latest, card["body"], expected_labels, "OPEN"
-        ):
+        if _prepared_lifecycle_matches(latest, card["body"], expected_labels, "OPEN"):
             _gh(
                 [
                     "issue",
@@ -3386,6 +3466,7 @@ def parse_triage_budget(body):
     matches = list(_TRIAGE_BUDGET_RE.finditer(body or ""))
     if len(matches) != 1:
         return None
+
     def no_duplicate_keys(pairs):
         record = {}
         for key, value in pairs:
@@ -3395,9 +3476,7 @@ def parse_triage_budget(body):
         return record
 
     try:
-        record = json.loads(
-            matches[0].group(1), object_pairs_hook=no_duplicate_keys
-        )
+        record = json.loads(matches[0].group(1), object_pairs_hook=no_duplicate_keys)
     except (TypeError, ValueError):
         return None
     if not isinstance(record, dict) or set(record) != {"version", "day", "reserved"}:
@@ -3478,9 +3557,13 @@ def _list_triage_budget_issues():
         for issue in page:
             number = issue.get("number") if isinstance(issue, dict) else None
             if isinstance(number, bool) or not isinstance(number, int) or number < 1:
-                raise RuntimeError("triage budget ledger listing contained invalid data")
+                raise RuntimeError(
+                    "triage budget ledger listing contained invalid data"
+                )
             if number in seen:
-                raise RuntimeError("triage budget ledger listing returned a duplicate issue")
+                raise RuntimeError(
+                    "triage budget ledger listing returned a duplicate issue"
+                )
             seen.add(number)
             issues.append(issue)
     return issues
@@ -3577,9 +3660,7 @@ def report_triage_attempt_exhaustion(number, item, ceiling=None):
 def _defer_triage_budget(number, item, code, message, error=False, ceiling=None):
     level = "error" if error else "warning"
     print("::%s::triage-budget %s: %s" % (level, code, message))
-    _triage_budget_event(
-        "budget.deferred", number, item, code, ceiling=ceiling
-    )
+    _triage_budget_event("budget.deferred", number, item, code, ceiling=ceiling)
     return False
 
 
@@ -3669,8 +3750,7 @@ def reserve_triage_budget(number, item, ceiling, today=None):
         if reserved >= ceiling:
             print(
                 "::warning::triage-budget exhausted: %s/%s reservations used; "
-                "card #%s deferred until the next UTC day"
-                % (reserved, ceiling, number)
+                "card #%s deferred until the next UTC day" % (reserved, ceiling, number)
             )
             _triage_budget_event(
                 "budget.exhausted",
@@ -3758,9 +3838,7 @@ def triage_budget_remaining(ceiling, today=None):
             raise RuntimeError("multiple triage budget ledger issues exist")
         if not issues:
             return ceiling
-        listed_number = (
-            issues[0].get("number") if isinstance(issues[0], dict) else None
-        )
+        listed_number = issues[0].get("number") if isinstance(issues[0], dict) else None
         if (
             isinstance(listed_number, bool)
             or not isinstance(listed_number, int)
@@ -4069,6 +4147,7 @@ def update_card_triage(
     owner="",
     vision_sha="",
     base_sha="",
+    automerge_behavior_available=False,
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
@@ -4121,6 +4200,7 @@ def update_card_triage(
         owner=owner,
         vision_sha=vision_sha,
         base_sha=base_sha,
+        automerge_behavior_available=automerge_behavior_available,
         repair_status=repair_status,
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
@@ -4391,8 +4471,7 @@ def close_card(number, message, label="resolved", expected=None):
         raise CardLifecycleError("card #%s is no longer open" % number)
     if expected is not None and (
         current.get("body") != expected.get("body")
-        or _lifecycle_label_names(current)
-        != _lifecycle_label_names(expected)
+        or _lifecycle_label_names(current) != _lifecycle_label_names(expected)
         or current.get("comments") != int(expected.get("comments") or 0) + 1
     ):
         raise CardLifecycleError("card #%s changed before close" % number)
@@ -4749,7 +4828,9 @@ def decide_triage_apply(
                     "reason": reason,
                     "candidate": candidate,
                 }
-            failed_reason = "repaired field 'evidence' did not anchor to the fetched target"
+            failed_reason = (
+                "repaired field 'evidence' did not anchor to the fetched target"
+            )
         else:
             failed_reason = (
                 triage_schema_reason(repaired_text)
@@ -4809,6 +4890,7 @@ def main():
     ta.add_argument("--execution-file", required=True)
     ta.add_argument("--vision-sha", default="")
     ta.add_argument("--base-sha", default="")
+    ta.add_argument("--automerge-behavior-available", action="store_true")
     ta.add_argument(
         "--target-file",
         default="",
@@ -4928,6 +5010,7 @@ def main():
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
+                automerge_behavior_available=args.automerge_behavior_available,
             )
             if applied:
                 print("updated auto triage on card #%s" % args.issue)
@@ -4945,6 +5028,7 @@ def main():
                 owner=owner,
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
+                automerge_behavior_available=args.automerge_behavior_available,
                 repair_status="repaired",
                 repair_reason=decision["reason"],
                 repair_candidate=decision.get("candidate"),

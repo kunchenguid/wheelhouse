@@ -112,6 +112,7 @@ jobs:
       claim_marker: ${{ steps.event-claim.outputs.marker }}
       vision_sha: ${{ steps.prepare.outputs.vision_sha }}
       base_sha: ${{ steps.prepare.outputs.base_sha }}
+      automerge_behavior_available: ${{ steps.prepare.outputs.automerge_behavior_available }}
       claude_ready: ${{ steps.claude-model.outcome == 'success' }}
       input_artifact: ${{ steps.claude-model.outputs.input-artifact }}
       output_artifact: ${{ steps.claude-model.outputs.output-artifact }}
@@ -549,10 +550,13 @@ jobs:
           # editing VISION.md must not be able to bless itself. The contents API
           # defaults to the default branch when no ?ref is given, which is exactly
           # the base-branch-only read we require. It is owner-authored TRUSTED
-          # policy (not contributor free-text). When absent, the auto-merge
-          # assessment is skipped entirely and the executor holds on G0.
+          # policy (not contributor free-text). A complete diff always gets the
+          # VISION-independent behavior classification. When VISION is absent,
+          # only alignment, revision binding, and final merge recommendation are
+          # skipped, and the executor still holds on G0.
           VISION_PRESENT=false
           VISION_SHA=""
+          AUTOMERGE_BEHAVIOR_AVAILABLE=false
           AUTOMERGE_VERDICT_AVAILABLE=false
           if [ "$KIND" = "pr-review" ]; then
             vision_limit_bytes=40000
@@ -574,7 +578,10 @@ jobs:
                 fi
               fi
             fi
-            if [ "$VISION_PRESENT" = "true" ] && [ "$DIFF_COMPLETE" = "true" ]; then
+            if [ "$DIFF_COMPLETE" = "true" ]; then
+              AUTOMERGE_BEHAVIOR_AVAILABLE=true
+            fi
+            if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
               AUTOMERGE_VERDICT_AVAILABLE=true
             else
               VISION_SHA=""
@@ -649,19 +656,24 @@ jobs:
               echo "command except wheelhouse-search."
             fi
             echo
-            if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
-              echo "The target repository has opted into automatic merging and"
-              echo "committed the TRUSTED vision.md described above (read from its"
-              echo "DEFAULT branch, so it is owner-authored policy, not the PR's own"
-              echo "content). Judge whether this PR aligns with that vision and which"
-              echo "behavior class it is, so a deterministic gate can decide"
-              echo "auto-merge:"
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+              echo "The immutable PR diff is complete. Classify its behavior so the"
+              echo "decision card can show deterministic complete-diff facts:"
               echo "  A = no product behavior change (refactor/docs/tests/chore)"
               echo "  B = a narrow corrective bug fix that RESTORES intended behavior"
               echo "  C = a NEW feature that is strictly opt-in and disabled by default"
               echo "Any change that alters existing or default behavior (and is not a"
               echo "corrective bug fix restoring intended behavior) is INELIGIBLE."
-              echo "Be conservative: when unsure, do not confirm alignment or merge."
+              echo "Be conservative when classifying these facts."
+              if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+                echo
+                echo "The target repository has also opted into automatic merging and"
+                echo "committed the TRUSTED vision.md described above (read from its"
+                echo "DEFAULT branch, so it is owner-authored policy, not the PR's own"
+                echo "content). Judge whether this PR aligns with that vision and"
+                echo "whether it should be merged automatically now. Be conservative:"
+                echo "when unsure, do not confirm alignment or merge."
+              fi
               echo
             fi
             echo "Return ONLY a compact JSON object with exactly these string keys:"
@@ -672,7 +684,7 @@ jobs:
               echo '  "recommended_action": "close | decline | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment to post or show for the recommended action",'
               echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt"'
-            elif [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+            elif [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
               echo '  "summary": "plain one-sentence summary of what the PR does",'
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
@@ -680,10 +692,14 @@ jobs:
               echo '  "evidence": "a single JSON string, not an array; include 2-4 short verbatim quotes (<=120 chars each), each prefixed with its source path (target.txt or a target-src/ file you read); copy at least one exactly from target.txt",'
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
-              echo '    "aligns_with_vision": true or false (does this PR align with the vision.md policy above),'
               echo '    "changes_existing_or_default_behavior": true or false (true if it alters existing/default behavior other than a corrective bug fix),'
-              echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default),'
-              echo '    "recommend_merge": true or false (should this be merged automatically now)'
+              if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+                echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default),'
+                echo '    "aligns_with_vision": true or false (does this PR align with the vision.md policy above),'
+                echo '    "recommend_merge": true or false (should this be merged automatically now)'
+              else
+                echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default)'
+              fi
               echo '  }'
             else
               echo '  "summary": "plain one-sentence summary of what the PR does",'
@@ -711,6 +727,7 @@ jobs:
             echo "$delimiter"
             echo "vision_sha=$VISION_SHA"
             echo "base_sha=$BASE_SHA"
+            echo "automerge_behavior_available=$AUTOMERGE_BEHAVIOR_AVAILABLE"
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
@@ -731,6 +748,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage
           EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
@@ -741,13 +759,15 @@ jobs:
           repository_commit="$(git -C target-src rev-parse HEAD)"
           vision_args=()
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then vision_args=(--vision-file vision.md); fi
+          behavior_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--allow-automerge-behavior); fi
           python scripts/agent_runtime.py build-task \
             --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit" \
-            --event-key "$EVENT_KEY" "${vision_args[@]}"
+            --event-key "$EVENT_KEY" "${vision_args[@]}" "${behavior_args[@]}"
 
       - name: Record triage task-build failure stage
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.gate.outputs.mode == 'claude' && steps.claude-task.outcome == 'failure' }}
@@ -807,6 +827,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage
           EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
@@ -827,6 +848,10 @@ jobs:
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then
             vision_args=(--vision-file vision.md)
           fi
+          behavior_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+            behavior_args=(--allow-automerge-behavior)
+          fi
           python scripts/agent_runtime.py build-task \
             --action "$action" \
             --prompt prompt.txt \
@@ -842,7 +867,8 @@ jobs:
             --repository-dir target-src \
             --repository-commit "$repository_commit" \
             --event-key "$EVENT_KEY" \
-            "${vision_args[@]}"
+            "${vision_args[@]}" \
+            "${behavior_args[@]}"
 
       - id: agent-runtime
         name: Run triage through the Codex app-server contract
@@ -1016,6 +1042,8 @@ jobs:
           NUMBER: ${{ steps.resolve.outputs.number }}
           KIND: ${{ steps.resolve.outputs.kind }}
           REVISION: ${{ steps.resolve.outputs.revision }}
+          VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1026,6 +1054,14 @@ jobs:
             repair_kind="issue"
           else
             repair_kind="pr"
+          fi
+          vision_schema_args=()
+          if [ -n "$VISION_SHA" ]; then
+            vision_schema_args=(--require-vision-fields)
+          fi
+          behavior_schema_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+            behavior_schema_args=(--allow-automerge-behavior)
           fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair \
@@ -1039,7 +1075,9 @@ jobs:
             --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" \
             --repair-kind "$repair_kind" \
-            --event-key "$EVENT_KEY"
+            --event-key "$EVENT_KEY" \
+            "${vision_schema_args[@]}" \
+            "${behavior_schema_args[@]}"
 
       - id: agent-runtime-repair
         name: Run bounded schema repair through the Codex app-server contract
@@ -1141,6 +1179,7 @@ jobs:
           REPAIR_CLAIM_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           # The prepare step writes target.txt in the workspace root (it has no
           # working-directory). triage-apply anchor-checks the model's evidence
           # quotes against it (pass-by-reference lazy/fabrication guard). It is
@@ -1179,6 +1218,8 @@ jobs:
                 --revision "$REVISION" \
                 --message "${HEAD_MESSAGE:-Auto triage did not run because the target PR head moved.}"
           else
+            behavior_args=()
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--automerge-behavior-available); fi
             env -i \
               PATH="$TRUSTED_PATH" \
               PYTHONDONTWRITEBYTECODE=1 \
@@ -1194,6 +1235,7 @@ jobs:
                 --revision "$REVISION" \
                 --vision-sha "$VISION_SHA" \
                 --base-sha "$BASE_SHA" \
+                "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
@@ -1597,6 +1639,8 @@ jobs:
           NUMBER: ${{ needs.triage.outputs.number }}
           KIND: ${{ needs.triage.outputs.kind }}
           REVISION: ${{ needs.triage.outputs.revision }}
+          VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
@@ -1604,12 +1648,16 @@ jobs:
           set -euo pipefail
           printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
           if [ "$KIND" = "issue-triage" ]; then repair_kind="issue"; else repair_kind="pr"; fi
+          vision_schema_args=()
+          if [ -n "$VISION_SHA" ]; then vision_schema_args=(--require-vision-fields); fi
+          behavior_schema_args=()
+          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_schema_args=(--allow-automerge-behavior); fi
           python scripts/agent_runtime.py build-task \
             --action triage.schema-repair --prompt repair-prompt.txt \
             --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
             --repo "$REPO" --number "$NUMBER" --kind schema-repair \
             --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind" --event-key "$EVENT_KEY"
+            --repair-kind "$repair_kind" --event-key "$EVENT_KEY" "${vision_schema_args[@]}" "${behavior_schema_args[@]}"
 
       - name: Record schema-repair task-build failure stage
         if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.claude-repair-task.outcome == 'failure' }}
@@ -1785,6 +1833,7 @@ jobs:
           REPAIR_ERROR_CODE: ${{ steps.repair-result-received.outputs.error-code }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
+          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -1809,9 +1858,12 @@ jobs:
               --issue "$ISSUE" --revision "$REVISION" \
               --message "${HEAD_MESSAGE:-Auto triage did not run because the target PR head moved.}"
           else
+            behavior_args=()
+            if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--automerge-behavior-available); fi
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
               --issue "$ISSUE" --revision "$REVISION" \
               --vision-sha "$VISION_SHA" --base-sha "$BASE_SHA" \
+              "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
               --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \

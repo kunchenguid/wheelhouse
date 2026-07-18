@@ -66,6 +66,16 @@ def verdict(**overrides):
     return value
 
 
+def independent_verdict(**overrides):
+    value = {
+        "behavior_class": "A",
+        "changes_existing_or_default_behavior": False,
+        "optin_default_off": False,
+    }
+    value.update(overrides)
+    return value
+
+
 def card_entry(**state_overrides):
     state = {
         "repo": "axi",
@@ -355,7 +365,7 @@ def test_owner_bot_and_security_exclusion_evidence_is_distinct():
     )
 
 
-def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
+def test_no_vision_complete_diff_keeps_independent_g6_facts_in_real_card_flow():
     issue_head = "f4e096532b994d7a37a1161bdeaf6214e9d6439e"
     issue_base = "b708731dc7840c088bcd8c79991b7f052f9a0096"
     issue_item = item(
@@ -378,9 +388,9 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
             "triaged_base_sha": issue_base,
             "triage_status": "succeeded",
             "triage_recommendation": {"action": "merge", "reason": ""},
+            "automerge_verdict": independent_verdict(),
         }
     )
-    state.pop("automerge_verdict", None)
     raw_card = {
         "number": 621,
         "body": render_card._replace_state_block(base_card["body"], state),
@@ -458,41 +468,37 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
         "g6_triage_available",
         "g6_triage_success",
         "g6_merge_recommendation",
-    )
-    dependent_rows = (
-        "g6_vision_alignment",
+        "g6_behavior_class",
         "g6_default_behavior",
-        "g6_verdict_merge",
         "g6_class_c_mode",
+    )
+    vision_rows = (
+        "g6_vision_alignment",
+        "g6_verdict_merge",
         "g6_vision_revision",
         "g6_base_revision",
     )
     check(
-        "issue 621: ordinary triage facts remain independently MET",
+        "no VISION: complete-diff triage facts are independently MET",
         all(criterion_rows[key]["status"] == schema.STATUS_MET for key in met_rows),
     )
     check(
-        "issue 621: behavior class is the only blocking UNMET G6 prerequisite",
-        [
-            key
-            for key in schema.CRITERIA_IDS
-            if key.startswith("g6_")
-            and criterion_rows[key]["status"] == schema.STATUS_UNMET
-        ]
-        == ["g6_behavior_class"],
+        "no VISION: independent facts are not masked as unavailable",
+        all(
+            criterion_rows[key]["status"] != schema.STATUS_UNAVAILABLE
+            for key in (
+                "g6_behavior_class",
+                "g6_default_behavior",
+                "g6_class_c_mode",
+            )
+        ),
     )
     check(
-        "issue 621: behavior class explains the absent verdict and skipped checks",
-        "structured behavior verdict absent"
-        in criterion_rows["g6_behavior_class"]["evidence"]
-        and "not evaluated" in criterion_rows["g6_behavior_class"]["evidence"],
-    )
-    check(
-        "issue 621: dependent behavior and binding rows are honestly UNAVAILABLE",
+        "no VISION: vision-bound rows clearly require VISION.md",
         all(
             criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
-            and "not evaluated" in criterion_rows[key]["evidence"]
-            for key in dependent_rows
+            and "VISION.md" in criterion_rows[key]["evidence"]
+            for key in vision_rows
         ),
     )
     rendered = render_card.render(
@@ -503,24 +509,79 @@ def test_issue_621_absent_verdict_has_one_g6_blocker_in_real_card_flow():
             automerge_criteria=handoff[0]["criteria"],
         )
     )
-    g6_lines = [line for line in rendered["body"].splitlines() if "`G6 - " in line]
+    body = rendered["body"]
+    g6_lines = [line for line in body.splitlines() if "`G6 - " in line]
     check(
-        "issue 621: renderer shows one red G6 blocker",
-        sum("❌ **UNMET**" in line for line in g6_lines) == 1
-        and "`G6 - eligible behavior class`"
-        in next(line for line in g6_lines if "❌ **UNMET**" in line),
-    )
-    check(
-        "issue 621: renderer shows every dependent G6 row as unavailable",
+        "no VISION: renderer keeps independent facts at the G6 behavior level",
         all(
-            any(
-                "⚪ **UNAVAILABLE**" in line
-                and "`%s`" % schema.CRITERIA_LABELS[key] in line
+            next(
+                line
                 for line in g6_lines
+                if "`%s`" % schema.CRITERIA_LABELS[key] in line
+            ).startswith("- ")
+            for key in (
+                "g6_behavior_class",
+                "g6_default_behavior",
+                "g6_class_c_mode",
             )
-            for key in dependent_rows
         ),
     )
+    check(
+        "no VISION: renderer nests vision-bound rows under the needs-VISION root",
+        "- **VISION.md-dependent checks** - _needs VISION.md_" in body
+        and all(
+            next(
+                line
+                for line in g6_lines
+                if "`%s`" % schema.CRITERIA_LABELS[key] in line
+            ).startswith("    - ⚪ **UNAVAILABLE**")
+            for key in vision_rows
+        ),
+    )
+    check(
+        "no VISION: complete evaluation remains ineligible",
+        am.verdict_eligible(independent_verdict())[0] is False
+        and criterion_rows["g0_vision_present"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+
+def test_no_vision_independent_behavior_negatives_are_unmet_not_masked():
+    cases = (
+        ("g6_default_behavior", {"changes_existing_or_default_behavior": True}),
+        (
+            "g6_class_c_mode",
+            {"behavior_class": "C", "optin_default_off": False},
+        ),
+    )
+    for criterion, overrides in cases:
+        result = evaluate(
+            card_value=card_entry(
+                automerge_verdict=independent_verdict(**overrides)
+            ),
+            vision=(False, ""),
+        )
+        criterion_rows = rows(result)
+        check(
+            "no VISION: %s is evaluated as UNMET from real facts" % criterion,
+            criterion_rows[criterion]["status"] == schema.STATUS_UNMET,
+        )
+        check(
+            "no VISION: %s cannot grant eligibility" % criterion,
+            result["eligible"] is False,
+        )
+        check(
+            "no VISION: vision-bound rows remain UNAVAILABLE for %s" % criterion,
+            all(
+                criterion_rows[key]["status"] == schema.STATUS_UNAVAILABLE
+                for key in (
+                    "g6_vision_alignment",
+                    "g6_verdict_merge",
+                    "g6_vision_revision",
+                    "g6_base_revision",
+                )
+            ),
+        )
 
 
 def test_absent_none_and_non_dictionary_whole_verdicts_are_unavailable_dependents():
@@ -809,6 +870,191 @@ def test_true_card_render_path_shows_stable_human_visible_rows():
     )
 
 
+def test_render_groups_every_criterion_by_id_family_and_preserves_evidence():
+    family_prefixes = (
+        ("Scope", ("scope_",)),
+        ("Safety", ("scan_", "safety_")),
+        ("G0 (repo)", ("g0_",)),
+        ("G1 (card)", ("g1_",)),
+        ("G2 (files)", ("g2_",)),
+        ("G3 (author)", ("g3_",)),
+        ("G4 (checks)", ("g4_",)),
+        ("G5 (size)", ("g5_",)),
+        ("G6 (triage + behavior)", ("g6_",)),
+        ("G7 (final gate)", ("g7_",)),
+    )
+    rows_with_evidence = [
+        {
+            "id": criterion_id,
+            "status": schema.STATUS_MET,
+            "evidence": "proof-%02d" % index,
+        }
+        for index, criterion_id in enumerate(schema.CRITERIA_IDS)
+    ]
+    body = "\n".join(render_card._automerge_criteria_section(rows_with_evidence))
+    headings = ["#### %s" % family for family, _ in family_prefixes] + ["#### Other"]
+
+    for index, (family, prefixes) in enumerate(family_prefixes):
+        start = body.index("#### %s" % family)
+        later = [
+            position
+            for position in (
+                body.find(heading, start + 1) for heading in headings[index + 1 :]
+            )
+            if position >= 0
+        ]
+        end = min(later) if later else len(body)
+        section = body[start:end]
+        expected_ids = [
+            criterion_id
+            for criterion_id in schema.CRITERIA_IDS
+            if criterion_id.startswith(prefixes)
+        ]
+        check(
+            "group: %s contains exactly its ID-prefix criteria" % family,
+            all(
+                "`%s`" % schema.CRITERIA_LABELS[criterion_id] in section
+                for criterion_id in expected_ids
+            )
+            and all(
+                "`%s`" % schema.CRITERIA_LABELS[criterion_id] not in section
+                for criterion_id in schema.CRITERIA_IDS
+                if criterion_id not in expected_ids
+            ),
+        )
+
+    check(
+        "render: every criterion keeps its concise evidence",
+        all("proof-%02d" % index in body for index in range(len(schema.CRITERIA_IDS))),
+    )
+
+
+def test_g6_producer_hierarchy_splits_independent_and_vision_bound_facts():
+    result = evaluate(
+        card_value=card_entry(automerge_verdict=independent_verdict()),
+        vision=(False, ""),
+    )
+    body = "\n".join(render_card._automerge_criteria_section(result["criteria"]))
+    independent_ids = (
+        "g6_behavior_class",
+        "g6_default_behavior",
+        "g6_class_c_mode",
+    )
+    vision_ids = (
+        "g6_vision_alignment",
+        "g6_verdict_merge",
+        "g6_vision_revision",
+        "g6_base_revision",
+    )
+    check(
+        "hierarchy: complete-diff behavior facts stay at the G6 group level",
+        all(
+            next(
+                line
+                for line in body.splitlines()
+                if "`%s`" % schema.CRITERIA_LABELS[criterion_id] in line
+            ).startswith("- ")
+            for criterion_id in independent_ids
+        ),
+    )
+    check(
+        "hierarchy: vision-bound facts share one needs-VISION subtree",
+        "- **VISION.md-dependent checks** - _needs VISION.md_" in body
+        and all(
+            next(
+                line
+                for line in body.splitlines()
+                if "`%s`" % schema.CRITERIA_LABELS[criterion_id] in line
+            ).startswith("    - ")
+            for criterion_id in vision_ids
+        ),
+    )
+
+
+def test_unmet_and_unavailable_have_distinct_markers():
+    body = "\n".join(
+        render_card._automerge_criteria_section(
+            [
+                {
+                    "id": "g6_behavior_class",
+                    "status": schema.STATUS_UNMET,
+                    "evidence": "root cause",
+                },
+                {
+                    "id": "g6_vision_alignment",
+                    "status": schema.STATUS_UNAVAILABLE,
+                    "evidence": "not evaluated after root",
+                },
+            ]
+        )
+    )
+    check(
+        "markers: root UNMET is visually distinct from dependent UNAVAILABLE",
+        "❌ **UNMET** `G6 - eligible behavior class`" in body
+        and "⚪ **UNAVAILABLE** `G6 - behavior aligns with VISION.md`" in body,
+    )
+
+
+def test_unknown_prefix_criterion_renders_in_other_without_being_dropped():
+    future = {
+        "id": "future_policy_guard",
+        "label": "Future - policy guard",
+        "status": schema.STATUS_UNMET,
+        "evidence": "future evidence remains visible",
+    }
+    criteria = [future]
+    normalized = schema.normalize_criteria(criteria)
+    body = "\n".join(render_card._automerge_criteria_section(criteria))
+    other = body[body.index("#### Other") :]
+    check(
+        "group: unknown-prefix criterion falls back to Other",
+        "`Future - policy guard`" in other,
+    )
+    check(
+        "group: unknown-prefix criterion keeps its status and evidence",
+        "❌ **UNMET**" in other and "future evidence remains visible" in other,
+    )
+    rendered = render_card.render(item(automerge_criteria=criteria))
+    state = core.parse_state_block(rendered["body"])
+    stored = state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    check(
+        "group: stable future criterion persists in card state",
+        future in stored and stored == normalized,
+    )
+    check(
+        "group: matching future criterion does not keep refreshing the card",
+        render_card.automerge_criteria_stale(item(automerge_criteria=criteria), state)
+        is False,
+    )
+    changed = [dict(future, evidence="future evidence changed")]
+    check(
+        "group: changed future criterion refreshes the existing card",
+        render_card.automerge_criteria_stale(item(automerge_criteria=changed), state)
+        is True,
+    )
+
+
+def test_render_version_bump_refreshes_existing_card_exactly_once():
+    result = evaluate()
+    current_item = item(automerge_criteria=result["criteria"])
+    current_state = core.parse_state_block(render_card.render(current_item)["body"])
+    previous_state = dict(current_state)
+    previous_state["render_version"] = render_card.CARD_RENDER_VERSION - 1
+    labels = {"needs-decision"}
+    check(
+        "refresh: previous criteria UI version triggers one display-only refresh",
+        render_card.refresh_needed(current_item, previous_state, labels=labels) is True,
+    )
+    check(
+        "refresh: regrouped current-version card is a no-op on the next pass",
+        render_card.refresh_needed(current_item, current_state, labels=labels) is False,
+    )
+    check(
+        "refresh: criteria hierarchy version remains non-material",
+        render_card.material_changed(current_item, previous_state) is False,
+    )
+
+
 def test_state_block_escapes_html_comment_terminators():
     evidence = "excluded path: docs/close-->inject.md & <tag>"
     criteria = [{"id": "g2_exclusions_clear", "status": "unmet", "evidence": evidence}]
@@ -852,6 +1098,14 @@ def test_displayed_met_rows_cannot_grant_eligibility():
             {"id": criterion_id, "status": schema.STATUS_MET, "evidence": "claimed met"}
             for criterion_id in schema.CRITERIA_IDS
         ]
+        + [
+            {
+                "id": "future_merge_authorization",
+                "label": "Future - merge authorization",
+                "status": schema.STATUS_MET,
+                "evidence": "forged future row",
+            }
+        ]
     )
     actual = card_entry()
     actual["state"] = dict(
@@ -861,6 +1115,10 @@ def test_displayed_met_rows_cannot_grant_eligibility():
     check(
         "security: displayed MET rows do not grant eligibility",
         result["eligible"] is False,
+    )
+    check(
+        "security: unknown displayed MET rows remain advisory only",
+        any(row["id"] == "future_merge_authorization" for row in forged),
     )
     check(
         "security: live persisted verdict guard still holds",

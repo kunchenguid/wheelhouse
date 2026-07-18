@@ -1151,6 +1151,72 @@ def test_triage_completion_preserves_queued_pr_context():
         )
 
 
+def test_automerge_verdict_persistence_requires_complete_diff():
+    it = item(base_sha="b" * 40)
+    queued = rc.body_with_triage_queued(rc.render(it)["body"], it)
+    verdict = {
+        "summary": "Adds lightweight context.",
+        "product_implications": "Routine internal change.",
+        "evidence": "target.txt: quoted a line from the change",
+        "recommended_action": "merge",
+        "recommended_reason": "Scope is small.",
+        "automerge": {
+            "behavior_class": "A",
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+            "aligns_with_vision": True,
+            "recommend_merge": True,
+        },
+    }
+    incomplete = core.parse_state_block(
+        rc.body_with_triage_result(queued, it["head_sha"], triage=verdict)
+    )
+    no_vision = core.parse_state_block(
+        rc.body_with_triage_result(
+            queued,
+            it["head_sha"],
+            triage=verdict,
+            automerge_behavior_available=True,
+        )
+    )
+    with_vision = core.parse_state_block(
+        rc.body_with_triage_result(
+            queued,
+            it["head_sha"],
+            triage=verdict,
+            automerge_behavior_available=True,
+            vision_sha="c" * 40,
+            base_sha=it["base_sha"],
+        )
+    )
+    check(
+        "verdict: incomplete diff persists no behavior object",
+        incomplete.get("automerge_verdict") is None,
+    )
+    check(
+        "verdict: complete no-VISION diff persists only independent facts",
+        no_vision.get("automerge_verdict")
+        == {
+            "behavior_class": "A",
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+        },
+    )
+    check(
+        "verdict: complete VISION diff persists bound verdict fields",
+        with_vision.get("automerge_verdict")
+        == {
+            "behavior_class": "A",
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+            "aligns_with_vision": True,
+            "recommend_merge": True,
+            "vision_sha": "c" * 40,
+            "base_sha": it["base_sha"],
+        },
+    )
+
+
 def test_triage_queued_for_head_requires_matching_queued_attempt():
     head = "abc1234def"
     check(

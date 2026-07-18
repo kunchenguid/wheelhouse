@@ -289,7 +289,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `7`: the
+  it is not a material field). `CARD_RENDER_VERSION` is currently `8`: the
+  7 -> 8 bump groups auto-merge criteria by gate family and separates G6's complete-diff behavior facts from its VISION.md-dependent subtree;
   6 -> 7 bump publishes the non-authoritative read-only `### Auto-merge criteria`
   section on already-open PR-review cards; the 5 -> 6 bump publishes the
   advisory read-only `### Security review` section on
@@ -1049,11 +1050,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   A target repository without GitHub's "require branches to be up to date" branch protection has an irreducible sub-second window between those final GETs and GitHub's merge PUT: GitHub's merge API accepts no base-SHA precondition.
   That residual risk is bounded by the final CLEAN state, green configured checks, blast-radius caps, and unconditional exclusions.
   Enabling "require branches to be up to date" branch protection, or using a merge queue, closes it server-side because GitHub's `mergeStateStatus` becomes `BEHIND` while auto-merge requires a CLEAN merge state.
-  The behavior verdict is PRODUCED by extending the pr-review triage
-  (`triage.yml` fetches base-branch VISION.md - the contents API with NO `?ref`,
-  never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md
-  is also a G2 exclusion - and asks for the A/B/C fields;
-  `render_card.normalize_automerge_verdict` parses them) and PERSISTED as the
+  The behavior verdict is PRODUCED by extending the pr-review triage.
+  For every complete immutable diff, `triage.yml` asks for the VISION-independent behavior class, existing/default-behavior-change, and class-C opt-in/default-off facts.
+  It fetches base-branch VISION.md through the contents API with NO `?ref`, never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md is also a G2 exclusion.
+  Only when that trusted policy exists does triage additionally ask for alignment and the final merge recommendation; `render_card.normalize_automerge_verdict` parses the independent core plus that optional all-or-nothing extension.
+  The result is PERSISTED as the
   NON-MATERIAL `automerge_verdict` state key alongside `triage_recommendation`
   (never in `MATERIAL_FIELDS`, cleared on any failed/stale attempt, carried
   through same-revision refresh). Token discipline mirrors the rest of the fleet:

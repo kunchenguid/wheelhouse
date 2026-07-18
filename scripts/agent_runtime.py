@@ -16,11 +16,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.adapters.codex import _load_lock, _protocol_digest
-from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_line, stage_record
+from agent_runtime.admission import (
+    event_key_sha256,
+    normalized_event_identity,
+    stage_line,
+    stage_record,
+)
 from agent_runtime.claude_bridge import bridge
 from agent_runtime.config import ConfigError, resolve_selection
 from agent_runtime.consumer import export_value, load_agent_result, result_text
-from agent_runtime.contract import ContractError, load_json_regular, validate_contract, verify_result_binding
+from agent_runtime.contract import (
+    ContractError,
+    load_json_regular,
+    validate_contract,
+    verify_result_binding,
+)
 from agent_runtime.events import EventError, verify_result_event_binding
 from agent_runtime.supervisor import RuntimeFailure, run
 from agent_runtime.task_builder import build_task
@@ -93,11 +103,18 @@ def cmd_auth_status(args: argparse.Namespace) -> int:
         print("agent runtime auth unavailable: %s" % error)
         return 0
     enabled = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    reason = "" if enabled else "CLAUDE_CODE_OAUTH_TOKEN is absent for the Claude production profile"
+    reason = (
+        ""
+        if enabled
+        else "CLAUDE_CODE_OAUTH_TOKEN is absent for the Claude production profile"
+    )
     output("enabled", "true" if enabled else "false")
     output("mode", selection["mode"])
     output("reason", reason)
-    print("agent runtime auth %s for %s" % ("ready" if enabled else "unavailable", selection["profile"]["auth_profile"]))
+    print(
+        "agent runtime auth %s for %s"
+        % ("ready" if enabled else "unavailable", selection["profile"]["auth_profile"])
+    )
     return 0
 
 
@@ -120,6 +137,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
         vision_file=args.vision_file,
+        allow_automerge_behavior=args.allow_automerge_behavior,
+        require_vision_fields=args.require_vision_fields,
         repair_kind=args.repair_kind,
     )
     output("task", str(Path(args.out).resolve()))
@@ -156,7 +175,16 @@ def cmd_verify_result(args: argparse.Namespace) -> int:
 
 
 def cmd_bridge_claude(args: argparse.Namespace) -> int:
-    result = bridge(args.task, args.bundle, args.execution_file, args.delivered_file, args.enforcement_file, args.handoff_sha256, args.result, args.events)
+    result = bridge(
+        args.task,
+        args.bundle,
+        args.execution_file,
+        args.delivered_file,
+        args.enforcement_file,
+        args.handoff_sha256,
+        args.result,
+        args.events,
+    )
     output("result", str(Path(args.result).resolve()))
     output("events", str(Path(args.events).resolve()))
     output("status", result["status"])
@@ -166,7 +194,9 @@ def cmd_bridge_claude(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    if not export_value(args.result, args.out, require_success=not args.allow_failed_delivered):
+    if not export_value(
+        args.result, args.out, require_success=not args.allow_failed_delivered
+    ):
         print("agent runtime result has no exportable value", file=sys.stderr)
         return 1
     return 0
@@ -183,14 +213,21 @@ def cmd_text(args: argparse.Namespace) -> int:
 def cmd_verify_pins(_args: argparse.Namespace) -> int:
     lock = _load_lock()
     digest = _protocol_digest(lock)
-    print("Codex %s protocol schemas verified: %s" % (lock["codex"]["binaryVersion"], digest))
+    print(
+        "Codex %s protocol schemas verified: %s"
+        % (lock["codex"]["binaryVersion"], digest)
+    )
     return 0
 
 
 def _verify_package_tarball(path: str, expected_integrity: str) -> bool:
     candidate = Path(path)
     try:
-        if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 512 * 1024 * 1024:
+        if (
+            candidate.is_symlink()
+            or not candidate.is_file()
+            or candidate.stat().st_size > 512 * 1024 * 1024
+        ):
             return False
         digest = hashlib.sha512()
         with candidate.open("rb") as handle:
@@ -205,7 +242,14 @@ def _verify_package_tarball(path: str, expected_integrity: str) -> bool:
                 return False
             for member in members:
                 parts = Path(member.name).parts
-                if not parts or parts[0] != "package" or any(part in ("", ".", "..") for part in parts) or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                if (
+                    not parts
+                    or parts[0] != "package"
+                    or any(part in ("", ".", "..") for part in parts)
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
                     return False
     except (OSError, tarfile.TarError):
         return False
@@ -218,20 +262,39 @@ def cmd_verify_package(args: argparse.Namespace) -> int:
         print("Codex package identity does not match the runtime lock", file=sys.stderr)
         return 1
     platforms = {
-        "linux-x64": (codex["linuxX64BinaryPackage"], codex["linuxX64BinaryPackageIntegrity"]),
-        "linux-arm64": (codex["linuxArm64BinaryPackage"], codex["linuxArm64BinaryPackageIntegrity"]),
+        "linux-x64": (
+            codex["linuxX64BinaryPackage"],
+            codex["linuxX64BinaryPackageIntegrity"],
+        ),
+        "linux-arm64": (
+            codex["linuxArm64BinaryPackage"],
+            codex["linuxArm64BinaryPackageIntegrity"],
+        ),
     }
     expected_platform = platforms.get(args.platform)
-    if expected_platform is None or not hmac.compare_digest(args.platform_package, expected_platform[0]):
-        print("Codex platform package identity does not match the runtime lock", file=sys.stderr)
+    if expected_platform is None or not hmac.compare_digest(
+        args.platform_package, expected_platform[0]
+    ):
+        print(
+            "Codex platform package identity does not match the runtime lock",
+            file=sys.stderr,
+        )
         return 1
     if not _verify_package_tarball(args.tarball, codex["npmPackageIntegrity"]):
-        print("Codex package tarball bytes do not match the runtime lock", file=sys.stderr)
+        print(
+            "Codex package tarball bytes do not match the runtime lock", file=sys.stderr
+        )
         return 1
     if not _verify_package_tarball(args.platform_tarball, expected_platform[1]):
-        print("Codex platform tarball bytes do not match the runtime lock", file=sys.stderr)
+        print(
+            "Codex platform tarball bytes do not match the runtime lock",
+            file=sys.stderr,
+        )
         return 1
-    print("Codex package integrity verified: %s and %s" % (args.package, args.platform_package))
+    print(
+        "Codex package integrity verified: %s and %s"
+        % (args.package, args.platform_package)
+    )
     return 0
 
 
@@ -243,7 +306,10 @@ def cmd_summary(args: argparse.Namespace) -> int:
     if selection["actualProvider"]:
         provider_fact = "directly observed `%s`" % selection["actualProvider"]
     elif selection["actualModel"] and selection["adapter"] == "claude-action-compat":
-        provider_fact = "inferred `%s` from the pinned Claude action and auth profile" % selection["provider"]
+        provider_fact = (
+            "inferred `%s` from the pinned Claude action and auth profile"
+            % selection["provider"]
+        )
     else:
         provider_fact = "not independently observed"
     lines = [
@@ -251,10 +317,18 @@ def cmd_summary(args: argparse.Namespace) -> int:
         "",
         "- Status: `%s`" % result["status"],
         "- Adapter: `%s` `%s`" % (selection["adapter"], selection["adapterVersion"]),
-        "- Harness: `%s` `%s` (%s)" % (selection["harness"], selection["harnessVersion"] or "unavailable", selection["harnessProvenanceQuality"]),
-        "- Provider: selected `%s`; %s (`%s`)" % (selection["provider"], provider_fact, selection["authProfile"]),
-        "- Model: selected `%s`, directly observed `%s`" % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
-        "- Effort: selected `%s`, directly observed `unavailable`" % selection["requestedEffort"],
+        "- Harness: `%s` `%s` (%s)"
+        % (
+            selection["harness"],
+            selection["harnessVersion"] or "unavailable",
+            selection["harnessProvenanceQuality"],
+        ),
+        "- Provider: selected `%s`; %s (`%s`)"
+        % (selection["provider"], provider_fact, selection["authProfile"]),
+        "- Model: selected `%s`, directly observed `%s`"
+        % (selection["requestedModel"], selection["actualModel"] or "unavailable"),
+        "- Effort: selected `%s`, directly observed `unavailable`"
+        % selection["requestedEffort"],
         "- Fallback: `disabled`",
         "- Request: `%s`" % result["requestSha256"],
     ]
@@ -317,6 +391,8 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")
     build.add_argument("--vision-file", default="")
+    build.add_argument("--allow-automerge-behavior", action="store_true")
+    build.add_argument("--require-vision-fields", action="store_true")
     build.add_argument("--repair-kind", choices=("issue", "pr"), default="pr")
     build.set_defaults(func=cmd_build)
     execute = commands.add_parser("run")
@@ -327,7 +403,9 @@ def parser() -> argparse.ArgumentParser:
     execute.set_defaults(func=cmd_run)
     validate = commands.add_parser("validate")
     validate.add_argument("--path", required=True)
-    validate.add_argument("--kind", choices=("AgentTask", "AgentEvent", "AgentResult"), default="")
+    validate.add_argument(
+        "--kind", choices=("AgentTask", "AgentEvent", "AgentResult"), default=""
+    )
     validate.set_defaults(func=cmd_validate)
     verify_result = commands.add_parser("verify-result")
     verify_result.add_argument("--task", required=True)
@@ -357,7 +435,9 @@ def parser() -> argparse.ArgumentParser:
     pins.set_defaults(func=cmd_verify_pins)
     package = commands.add_parser("verify-package")
     package.add_argument("--package", required=True)
-    package.add_argument("--platform", choices=("linux-x64", "linux-arm64"), required=True)
+    package.add_argument(
+        "--platform", choices=("linux-x64", "linux-arm64"), required=True
+    )
     package.add_argument("--platform-package", required=True)
     package.add_argument("--tarball", required=True)
     package.add_argument("--platform-tarball", required=True)
@@ -372,7 +452,13 @@ def main() -> None:
     try:
         code = parser().parse_args()
         status = code.func(code)
-    except (ConfigError, ContractError, EventError, RuntimeFailure, ValueError) as error:
+    except (
+        ConfigError,
+        ContractError,
+        EventError,
+        RuntimeFailure,
+        ValueError,
+    ) as error:
         print("agent runtime error: %s" % error, file=sys.stderr)
         status = 1
     raise SystemExit(status)
