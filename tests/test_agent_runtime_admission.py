@@ -50,6 +50,17 @@ def main():
     nl_two = event_key_sha256(identity("nl-decision.local", event_id="comment:101"))
     check("identity: duplicate NL comment is stable", nl_one == event_key_sha256(identity("nl-decision.local", event_id="comment:100")))
     check("identity: distinct same-revision NL comments remain distinct", nl_one != nl_two)
+    nl_repair = event_key_sha256(
+        identity("nl-decision.schema-repair", event_id="comment:100")
+    )
+    check(
+        "identity: NL repair has a distinct same-comment action key",
+        nl_repair != nl_one
+        and nl_repair
+        == event_key_sha256(
+            identity("nl-decision.schema-repair", event_id="comment:100")
+        ),
+    )
 
     deep_one = event_key_sha256(identity("deep-review.search", event_id="investigate:200"))
     deep_two = event_key_sha256(identity("deep-review.search", event_id="manual:201"))

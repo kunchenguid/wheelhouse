@@ -237,6 +237,7 @@ agent_runtime:
     deep-review.search: {target: claude, profile: claude-action-current-pinned}
     nl-decision.local: {target: claude, profile: claude-action-current-pinned}
     nl-decision.search: {target: claude, profile: claude-action-current-pinned}
+    nl-decision.schema-repair: {target: claude, profile: claude-action-current-pinned}
 
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review

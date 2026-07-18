@@ -14,7 +14,7 @@
       "required": ["executionId", "action", "idempotencyKey", "wheelhouseRevision", "target"],
       "properties": {
         "executionId": {"type": "string", "pattern": "^[0-9a-f-]{36}$"},
-        "action": {"type": "string", "enum": ["triage.issue.local", "triage.issue.search", "triage.pr.local", "triage.pr.search", "triage.schema-repair", "deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search"]},
+        "action": {"type": "string", "enum": ["triage.issue.local", "triage.issue.search", "triage.pr.local", "triage.pr.search", "triage.schema-repair", "deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search", "nl-decision.schema-repair"]},
         "idempotencyKey": {"type": "string", "minLength": 1, "maxLength": 512},
         "wheelhouseRevision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
         "target": {

@@ -778,6 +778,7 @@ def test_handler_investigate_wiring():
     top_perms = doc.get("permissions") or {}
     handle = doc["jobs"]["handle"]
     dispatch = doc["jobs"].get("investigate-dispatch")
+    nl_repair_prepare = doc["jobs"].get("nl-repair-prepare")
 
     check(
         "handler: workflow scope does NOT grant actions: write",
@@ -794,7 +795,12 @@ def test_handler_investigate_wiring():
     ]
     check(
         "handler: only trusted dispatching jobs have actions: write",
-        action_jobs == ["handle", "investigate-dispatch"],
+        action_jobs == ["handle", "nl-repair-prepare", "investigate-dispatch"],
+    )
+    check(
+        "handler: NL repair preparation has only dispatch, card, and read permissions",
+        (nl_repair_prepare or {}).get("permissions")
+        == {"actions": "write", "contents": "read", "issues": "write"},
     )
     check("handler: investigate dispatch job exists", dispatch is not None)
 

@@ -290,7 +290,7 @@ jobs:
           claude_args: "--allowedTools Read,Grep,Glob\n--max-turns 64\n--model claude-sonnet-4-6"
 
       - id: nl_search
-        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && endsWith(steps.hydrate.outputs.action, '.search') }}
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
@@ -303,7 +303,7 @@ jobs:
           claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6"
 
       - id: nl_local
-        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && endsWith(steps.hydrate.outputs.action, '.local') }}
+        if: ${{ startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
@@ -315,6 +315,20 @@ jobs:
           prompt: ${{ steps.hydrate.outputs.prompt }}
           claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6"
 
+      - id: nl_repair
+        if: ${{ steps.hydrate.outputs.action == 'nl-decision.schema-repair' }}
+        continue-on-error: true
+        env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: ${{ steps.hydrate.outputs.prompt }}
+          settings: '{"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}'
+          claude_args: "--allowedTools \"\"\n--max-turns 1\n--model claude-sonnet-4-6"
+
       - id: capture
         if: ${{ always() && steps.source.outputs.match == 'true' }}
         env:
@@ -322,7 +336,7 @@ jobs:
           TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
-          EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file }}
+          EXECUTION_FILE: ${{ steps.triage_search.outputs.execution_file || steps.triage_local.outputs.execution_file || steps.triage_repair.outputs.execution_file || steps.deep_search.outputs.execution_file || steps.deep_local.outputs.execution_file || steps.nl_search.outputs.execution_file || steps.nl_local.outputs.execution_file || steps.nl_repair.outputs.execution_file }}
           OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt/enforcement.json
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
@@ -333,7 +347,7 @@ jobs:
             "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
           esac
           unset PYTHONDONTWRITEBYTECODE
-          if [[ "${ACTION:-}" == nl-decision.* ]] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
+          if [[ "${ACTION:-}" == nl-decision.* ]] && [ "$ACTION" != "nl-decision.schema-repair" ] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
             cp decision.json "$OUTPUT/decision.json"
           fi
           # Pre-hydration / pre-checkpoint failures never reach the durable spend

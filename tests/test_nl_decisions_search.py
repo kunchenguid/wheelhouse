@@ -491,13 +491,13 @@ def test_claude_output_is_isolated_before_routing():
         env = preserve.get("env", {})
         run = str(preserve.get("run", ""))
         check(
-            "workflow: nl-result uses trusted shell PATH",
-            hardened_shell_env(preserve),
+            "workflow: nl-result binds only the trusted AgentResult path",
+            'echo "path=${RUNTIME_RESULT:-}"' in run,
         )
         check(
-            "workflow: nl-result exports only normalized decision.json in runner temp",
-            "${RUNNER_TEMP}/wheelhouse-nl" in run
-            and "agent_runtime.py export-final" in run
+            "workflow: nl-result never exports an unvalidated decision file",
+            "agent_runtime.py export-final" not in run
+            and "decision.json" not in run
             and "steps.nl-claude-result.outputs.result"
             in str(env.get("RUNTIME_RESULT")),
         )
@@ -529,9 +529,11 @@ def test_claude_output_is_isolated_before_routing():
             and env.get("TRUSTED_PATH") == "${{ steps.trusted-src.outputs.safe_path }}",
         )
         check(
-            "workflow: nl-route reads the isolated decision file",
-            env.get("DECISION_FILE")
-            == "${{ runner.temp }}/wheelhouse-nl/decision.json",
+            "workflow: nl-route reads primary and repair AgentResults",
+            env.get("NL_EXECUTION_FILE")
+            == "${{ steps.nl-claude-result.outputs.result }}"
+            and env.get("NL_REPAIR_EXECUTION_FILE")
+            == "${{ steps.nl-claude-repair-result.outputs.result }}",
         )
         check(
             "workflow: nl-route scrubs inherited model environment",

@@ -556,6 +556,97 @@ jobs:
         if: ${{ always() && steps.nl-agent-runtime.outputs.result != '' }}
         run: python scripts/agent_runtime.py summary --result '${{ steps.nl-agent-runtime.outputs.result }}'
 
+      # A delivered NL candidate that fails strict JSON/schema validation gets
+      # exactly one separately claimed same-event repair task. Its distinct
+      # durable action key makes a job re-run unable to admit another repair.
+      - id: nl-repair-prep
+        name: Detect an NL schema miss and prepare one bounded repair turn
+        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
+        env:
+          PRIMARY_RESULT: ${{ steps.nl-agent-runtime.outputs.result }}
+          PROMPT_FILE: ${{ runner.temp }}/wheelhouse-nl-repair-prompt.txt
+        run: |
+          set -euo pipefail
+          python scripts/apply_decision.py nl-repair-prep \
+            --execution-file "${PRIMARY_RESULT:-}" \
+            --prompt-file "$PROMPT_FILE"
+
+      - id: nl-repair-gate
+        name: Resolve the NL schema-repair runtime selection
+        if: ${{ steps.nl-repair-prep.outputs.repair_needed == 'true' }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TARGET_REPO: ${{ steps.nl-gate.outputs.repo }}
+        run: python scripts/agent_runtime.py auth-status --action nl-decision.schema-repair --repo "$TARGET_REPO"
+
+      - id: nl-repair-claim
+        name: Claim the exact NL schema-repair event before spend
+        if: ${{ steps.nl-repair-prep.outputs.repair_needed == 'true' && steps.nl-repair-gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.nl-gate.outputs.repo }}
+          NUMBER: ${{ steps.nl-gate.outputs.number }}
+          ISSUE: ${{ github.event.issue.number }}
+          REVISION: ${{ steps.nl-gate.outputs.revision }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_claim.py \
+            --action nl-decision.schema-repair --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$REVISION" \
+            --event-id "comment:$COMMENT_ID" --repo-slug "$REPO_SLUG"
+
+      - id: nl-agent-runtime-repair-task
+        name: Build the immutable NL schema-repair AgentTask
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' && steps.nl-repair-gate.outputs.mode == 'codex' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.nl-gate.outputs.repo }}
+          NUMBER: ${{ steps.nl-gate.outputs.number }}
+          REVISION: ${{ steps.nl-gate.outputs.revision }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-agent-nl-repair
+          EVENT_KEY: ${{ steps.nl-repair-claim.outputs.event_key }}
+          PROMPT_FILE: ${{ steps.nl-repair-prep.outputs.prompt_file }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py build-task \
+            --action nl-decision.schema-repair \
+            --prompt "$PROMPT_FILE" \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind schema-repair \
+            --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --event-key "$EVENT_KEY"
+
+      - id: nl-agent-runtime-repair
+        name: Run one bounded NL schema repair through the Codex contract
+        if: ${{ steps.nl-repair-gate.outputs.mode == 'codex' && steps.nl-agent-runtime-repair-task.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          BUNDLE: ${{ steps.nl-agent-runtime-repair-task.outputs.bundle }}
+          TASK: ${{ steps.nl-agent-runtime-repair-task.outputs.task }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py run \
+            --task "$TASK" \
+            --bundle "$BUNDLE" \
+            --result "$BUNDLE/result.json" \
+            --events "$BUNDLE/events.ndjson"
+
+      - name: Refresh the live-card baseline after the repair claim
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments > nl-card-baseline.json
+
       - id: nl-baseline-name
         if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' }}
         run: echo "artifact=wheelhouse-nl-baseline-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
@@ -570,24 +661,13 @@ jobs:
           retention-days: 1
 
       - id: nl-result
+        name: Bind the trusted primary NL AgentResult for projection
         if: ${{ steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' }}
         env:
-          PATH: ${{ steps.trusted-src.outputs.safe_path }}
           RUNTIME_RESULT: ${{ steps.nl-agent-runtime.outputs.result }}
-          BASH_ENV: ""
-          ENV: ""
-          LD_PRELOAD: ""
-          LD_LIBRARY_PATH: ""
         run: |
           set -euo pipefail
-          out_dir="${RUNNER_TEMP}/wheelhouse-nl"
-          out_file="${out_dir}/decision.json"
-          mkdir -p "$out_dir"
-          : > "$out_file"
-          if [ -n "${RUNTIME_RESULT:-}" ]; then
-            python scripts/agent_runtime.py export-final \
-              --result "$RUNTIME_RESULT" --out "$out_file"
-          fi
+          echo "path=${RUNTIME_RESULT:-}" >> "$GITHUB_OUTPUT"
 
       - id: nl-post-model-freshness
         name: Re-read target revision before natural-language projection
@@ -634,7 +714,9 @@ jobs:
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
-          DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
+          NL_EXECUTION_FILE: ${{ steps.nl-agent-runtime.outputs.result }}
+          NL_REPAIR_EXECUTION_FILE: ${{ steps.nl-agent-runtime-repair.outputs.result }}
+          NL_REPAIR_CLAIM_ADMITTED: ${{ steps.nl-repair-claim.outputs.admitted }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -651,7 +733,9 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 \
             PYTHONNOUSERSITE=1 \
             GITHUB_OUTPUT="$GITHUB_OUTPUT" \
-            DECISION_FILE="$DECISION_FILE" \
+            NL_EXECUTION_FILE="$NL_EXECUTION_FILE" \
+            NL_REPAIR_EXECUTION_FILE="$NL_REPAIR_EXECUTION_FILE" \
+            NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
             ISSUE_BODY="$ISSUE_BODY" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -897,13 +981,14 @@ jobs:
       # that had none.
       - id: nl-failure-consumer
         name: Note NL processing failure on card
-        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' && steps.nl-post-model-freshness.outputs.fresh == 'true' && steps.nl-prompt.outcome == 'success' && steps.route.outcome == 'skipped' }}
+        if: ${{ always() && steps.nl-claim.outputs.admitted == 'true' && steps.nl-gate.outputs.runtime_mode != 'claude' && steps.nl-post-model-freshness.outputs.fresh == 'true' && steps.nl-prompt.outcome == 'success' && (steps.route.outcome == 'skipped' || steps.route.outputs.result_valid != 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
           REPO_SLUG: ${{ github.repository }}
           CLAIM_ID: ${{ steps.nl-claim.outputs.comment_id }}
           CLAIM_MARKER: ${{ steps.nl-claim.outputs.marker }}
+          FAILURE_MESSAGE: ${{ steps.route.outputs.failure_message }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
           BASH_ENV: ""
           ENV: ""
@@ -912,7 +997,8 @@ jobs:
           GH_PROMPT_DISABLED: "1"
         run: |
           set -uo pipefail
-          body="The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code. ${CLAIM_MARKER}"
+          note="${FAILURE_MESSAGE:-The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code.}"
+          body="${note} ${CLAIM_MARKER}"
           gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
             -f "body=$body" >/dev/null
 
@@ -924,11 +1010,35 @@ jobs:
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           elif [ "${{ steps.nl-pre-model-freshness.outputs.fresh }}" = "false" ] || [ "${{ steps.nl-post-model-freshness.outputs.fresh }}" = "false" ]; then
             code="consumer.stale"
+          elif [ -n "${{ steps.route.outputs.failure_code }}" ]; then
+            code="${{ steps.route.outputs.failure_code }}"
           fi
           python scripts/agent_runtime.py stage \
             --action "${{ steps.nl-gate.outputs.action }}" \
             --source-sha "${{ github.sha }}" \
             --event-key "${{ steps.nl-claim.outputs.event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
+
+      - name: Finalize the bounded NL schema-repair claim
+        if: ${{ always() && steps.nl-repair-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          REPAIR_CLAIM_ID: ${{ steps.nl-repair-claim.outputs.comment_id }}
+          REPAIR_MARKER: ${{ steps.nl-repair-claim.outputs.marker }}
+          REPAIR_EVENT_KEY: ${{ steps.nl-repair-claim.outputs.event_key }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="${{ steps.route.outputs.failure_code || 'consumer.rejected' }}"
+          if [ "${{ steps.nl-action-consumer.outcome }}" = "success" ] || [ "${{ steps.nl-reply-consumer.outcome }}" = "success" ]; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          body="Agent NL schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          python scripts/agent_runtime.py stage \
+            --action nl-decision.schema-repair --source-sha "${{ github.sha }}" \
+            --event-key "$REPAIR_EVENT_KEY" \
             --stage "$stage" --status "$status" --code "$code"
 
   nl-model:
@@ -949,8 +1059,163 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
 
-  nl-claude-consume:
+  nl-repair-prepare:
     needs: [handle, nl-model]
+    if: ${{ always() && needs.handle.outputs.nl_admitted == 'true' && needs.handle.outputs.nl_runtime_mode == 'claude' }}
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    outputs:
+      repair_needed: ${{ steps.nl-repair-prep.outputs.repair_needed }}
+      repair_admitted: ${{ steps.nl-repair-claim.outputs.admitted }}
+      repair_event_key: ${{ steps.nl-repair-claim.outputs.event_key }}
+      repair_claim_id: ${{ steps.nl-repair-claim.outputs.comment_id }}
+      repair_claim_marker: ${{ steps.nl-repair-claim.outputs.marker }}
+      repair_ready: ${{ steps.nl-claude-repair-model.outcome == 'success' }}
+      baseline_artifact: ${{ steps.nl-repair-baseline-name.outputs.artifact }}
+      input_artifact: ${{ steps.nl-claude-repair-model.outputs.input-artifact }}
+      output_artifact: ${{ steps.nl-claude-repair-model.outputs.output-artifact }}
+      handoff_sha256: ${{ steps.nl-claude-repair-model.outputs.handoff-sha256 }}
+      correlation_id: ${{ steps.nl-claude-repair-model.outputs.correlation-id }}
+      child_timeout_minutes: ${{ steps.nl-claude-repair-model.outputs.child-timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - id: nl-primary-result
+        name: Receive the trusted primary natural-language AgentResult
+        if: ${{ needs.nl-model.outputs.result_artifact != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/claude-model-result
+        with:
+          artifact: ${{ needs.nl-model.outputs.result_artifact }}
+          invocation-id: nl-repair-primary
+
+      - id: nl-repair-prep
+        name: Detect an NL schema miss and prepare one bounded repair turn
+        if: ${{ always() }}
+        env:
+          PRIMARY_RESULT: ${{ steps.nl-primary-result.outputs.result }}
+          PROMPT_FILE: ${{ runner.temp }}/wheelhouse-nl-repair-prompt.txt
+        run: |
+          set -euo pipefail
+          python scripts/apply_decision.py nl-repair-prep \
+            --execution-file "${PRIMARY_RESULT:-}" \
+            --prompt-file "$PROMPT_FILE"
+
+      - id: nl-repair-gate
+        name: Resolve the NL schema-repair runtime selection
+        if: ${{ steps.nl-repair-prep.outputs.repair_needed == 'true' }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TARGET_REPO: ${{ needs.handle.outputs.nl_repo }}
+        run: python scripts/agent_runtime.py auth-status --action nl-decision.schema-repair --repo "$TARGET_REPO"
+
+      - id: nl-repair-claim
+        name: Claim the exact NL schema-repair event before spend
+        if: ${{ steps.nl-repair-prep.outputs.repair_needed == 'true' && steps.nl-repair-gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ needs.handle.outputs.nl_repo }}
+          NUMBER: ${{ needs.handle.outputs.nl_number }}
+          ISSUE: ${{ github.event.issue.number }}
+          REVISION: ${{ needs.handle.outputs.nl_revision }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_claim.py \
+            --action nl-decision.schema-repair --owner "$OWNER" --repo "$REPO" \
+            --number "$NUMBER" --issue "$ISSUE" --revision "$REVISION" \
+            --event-id "comment:$COMMENT_ID" --repo-slug "$REPO_SLUG"
+
+      - id: nl-claude-repair-task
+        name: Build the immutable Claude NL schema-repair AgentTask
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' && steps.nl-repair-gate.outputs.mode == 'claude' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ needs.handle.outputs.nl_repo }}
+          NUMBER: ${{ needs.handle.outputs.nl_number }}
+          REVISION: ${{ needs.handle.outputs.nl_revision }}
+          WHEELHOUSE_REVISION: ${{ github.sha }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-nl-repair
+          EVENT_KEY: ${{ steps.nl-repair-claim.outputs.event_key }}
+          PROMPT_FILE: ${{ steps.nl-repair-prep.outputs.prompt_file }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_runtime.py build-task \
+            --action nl-decision.schema-repair \
+            --prompt "$PROMPT_FILE" \
+            --bundle "$BUNDLE" \
+            --out "$BUNDLE/task.json" \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --number "$NUMBER" \
+            --kind schema-repair \
+            --revision "$REVISION" \
+            --wheelhouse-revision "$WHEELHOUSE_REVISION" \
+            --event-key "$EVENT_KEY"
+
+      - id: nl-claude-repair-model
+        name: Prepare one Claude NL schema repair for the caller-bound model job
+        if: ${{ steps.nl-claude-repair-task.outcome == 'success' }}
+        uses: ./.github/actions/claude-model-call
+        with:
+          task: ${{ steps.nl-claude-repair-task.outputs.task }}
+          bundle: ${{ steps.nl-claude-repair-task.outputs.bundle }}
+          invocation-id: nl-repair
+
+      - id: nl-repair-baseline-name
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' }}
+        run: echo "artifact=wheelhouse-nl-repair-baseline-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Capture the live-card baseline after the repair claim
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments > nl-card-baseline.json
+
+      - name: Upload the exact post-repair-claim card baseline
+        if: ${{ steps.nl-repair-claim.outputs.admitted == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.nl-repair-baseline-name.outputs.artifact }}
+          path: nl-card-baseline.json
+          if-no-files-found: error
+          retention-days: 1
+
+  nl-repair-model:
+    needs: nl-repair-prepare
+    if: ${{ needs.nl-repair-prepare.outputs.repair_ready == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/claude-model.yml
+    with:
+      input_artifact: ${{ needs.nl-repair-prepare.outputs.input_artifact }}
+      output_artifact: ${{ needs.nl-repair-prepare.outputs.output_artifact }}
+      handoff_sha256: ${{ needs.nl-repair-prepare.outputs.handoff_sha256 }}
+      expected_commit_sha: ${{ github.sha }}
+      correlation_id: ${{ needs.nl-repair-prepare.outputs.correlation_id }}
+      child_timeout_minutes: ${{ fromJSON(needs.nl-repair-prepare.outputs.child_timeout_minutes) }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      READONLY_TOKEN: ${{ secrets.READONLY_TOKEN }}
+
+  nl-claude-consume:
+    needs: [handle, nl-model, nl-repair-prepare, nl-repair-model]
     if: ${{ always() && needs.handle.outputs.nl_admitted == 'true' && needs.handle.outputs.nl_runtime_mode == 'claude' }}
     permissions:
       actions: read
@@ -992,7 +1257,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.handle.outputs.baseline_artifact }}
-          path: .
+          path: primary-baseline
+
+      - name: Download the exact post-repair-claim card baseline
+        if: ${{ needs.nl-repair-prepare.outputs.baseline_artifact != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.nl-repair-prepare.outputs.baseline_artifact }}
+          path: repair-baseline
+
+      - name: Select the latest trusted card baseline
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ -f repair-baseline/nl-card-baseline.json ]; then
+            cp repair-baseline/nl-card-baseline.json nl-card-baseline.json
+          elif [ -f primary-baseline/nl-card-baseline.json ]; then
+            cp primary-baseline/nl-card-baseline.json nl-card-baseline.json
+          fi
 
       - id: nl-claude-result
         name: Receive the trusted normalized natural-language result
@@ -1003,26 +1286,23 @@ jobs:
           artifact: ${{ needs.nl-model.outputs.result_artifact }}
           invocation-id: nl-decision
 
-      - id: nl-result
-        name: Export the trusted natural-language result
-        if: ${{ always() }}
+      - id: nl-claude-repair-result
+        name: Receive the trusted normalized NL schema-repair result
+        if: ${{ needs.nl-repair-model.outputs.result_artifact != '' }}
         continue-on-error: true
+        uses: ./.github/actions/claude-model-result
+        with:
+          artifact: ${{ needs.nl-repair-model.outputs.result_artifact }}
+          invocation-id: nl-repair
+
+      - id: nl-result
+        name: Bind the trusted primary NL AgentResult for projection
+        if: ${{ always() }}
         env:
-          PATH: ${{ steps.trusted-src.outputs.safe_path }}
           RUNTIME_RESULT: ${{ steps.nl-claude-result.outputs.result }}
-          BASH_ENV: ""
-          ENV: ""
-          LD_PRELOAD: ""
-          LD_LIBRARY_PATH: ""
         run: |
           set -euo pipefail
-          out_dir="${RUNNER_TEMP}/wheelhouse-nl"
-          out_file="${out_dir}/decision.json"
-          mkdir -p "$out_dir"
-          : > "$out_file"
-          test -n "${RUNTIME_RESULT:-}"
-          python scripts/agent_runtime.py export-final \
-            --result "$RUNTIME_RESULT" --out "$out_file"
+          echo "path=${RUNTIME_RESULT:-}" >> "$GITHUB_OUTPUT"
 
       - id: nl-post-model-freshness
         name: Re-read target revision before natural-language projection
@@ -1060,13 +1340,15 @@ jobs:
           fi
 
       - id: route
-        if: ${{ steps.nl-result.outcome == 'success' && steps.nl-post-model-freshness.outputs.fresh == 'true' }}
+        if: ${{ steps.nl-post-model-freshness.outputs.fresh == 'true' }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
-          DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
+          NL_EXECUTION_FILE: ${{ steps.nl-claude-result.outputs.result }}
+          NL_REPAIR_EXECUTION_FILE: ${{ steps.nl-claude-repair-result.outputs.result }}
+          NL_REPAIR_CLAIM_ADMITTED: ${{ needs.nl-repair-prepare.outputs.repair_admitted }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ needs.handle.outputs.nl_kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -1083,7 +1365,9 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 \
             PYTHONNOUSERSITE=1 \
             GITHUB_OUTPUT="$GITHUB_OUTPUT" \
-            DECISION_FILE="$DECISION_FILE" \
+            NL_EXECUTION_FILE="$NL_EXECUTION_FILE" \
+            NL_REPAIR_EXECUTION_FILE="$NL_REPAIR_EXECUTION_FILE" \
+            NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
             ISSUE_BODY="$ISSUE_BODY" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1260,13 +1544,14 @@ jobs:
 
       - id: nl-failure-consumer
         name: Note NL processing failure on card
-        if: ${{ always() && steps.nl-post-model-freshness.outputs.fresh == 'true' && needs.handle.outputs.nl_prompt_built == 'true' && steps.route.outcome == 'skipped' }}
+        if: ${{ always() && steps.nl-post-model-freshness.outputs.fresh == 'true' && needs.handle.outputs.nl_prompt_built == 'true' && (steps.route.outcome == 'skipped' || steps.route.outputs.result_valid != 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_SLUG: ${{ github.repository }}
           CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
           CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
           ERROR_CODE: ${{ steps.nl-claude-result.outputs.error-code }}
+          FAILURE_MESSAGE: ${{ steps.route.outputs.failure_message }}
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
           BASH_ENV: ""
           ENV: ""
@@ -1277,7 +1562,7 @@ jobs:
           if [ "$ERROR_CODE" = "source.revision_mismatch" ]; then
             note="Wheelhouse updated while this request waited; please retry."
           else
-            note="The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code."
+            note="${FAILURE_MESSAGE:-The assistant did not produce a trusted result. No target action was taken; the card remains open and deterministic checkbox or slash-command controls are still available. See the workflow run for the stable stage/error code.}"
           fi
           body="${note} ${CLAIM_MARKER}"
           gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$CLAIM_ID" \
@@ -1298,11 +1583,35 @@ jobs:
             status="ok"; stage="consumer-committed"; code="consumer.committed"
           elif [ "${{ needs.handle.outputs.nl_pre_model_fresh }}" = "false" ] || [ "${{ steps.nl-post-model-freshness.outputs.fresh }}" = "false" ]; then
             code="consumer.stale"
+          elif [ -n "${{ steps.route.outputs.failure_code }}" ]; then
+            code="${{ steps.route.outputs.failure_code }}"
           fi
           python scripts/agent_runtime.py stage \
             --action "${{ needs.handle.outputs.nl_action }}" \
             --source-sha "${{ github.sha }}" \
             --event-key "${{ needs.handle.outputs.nl_event_key }}" \
+            --stage "$stage" --status "$status" --code "$code"
+
+      - name: Finalize the bounded NL schema-repair claim
+        if: ${{ always() && needs.nl-repair-prepare.outputs.repair_admitted == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          REPAIR_CLAIM_ID: ${{ needs.nl-repair-prepare.outputs.repair_claim_id }}
+          REPAIR_MARKER: ${{ needs.nl-repair-prepare.outputs.repair_claim_marker }}
+          REPAIR_EVENT_KEY: ${{ needs.nl-repair-prepare.outputs.repair_event_key }}
+        run: |
+          set -euo pipefail
+          status="failed"; stage="consumer-rejected"; code="${{ steps.route.outputs.failure_code || 'consumer.rejected' }}"
+          if [ "${{ steps.nl-action-consumer.outcome }}" = "success" ] || [ "${{ steps.nl-reply-consumer.outcome }}" = "success" ]; then
+            status="ok"; stage="consumer-committed"; code="consumer.committed"
+          fi
+          body="Agent NL schema-repair event finished with ${code}. ${REPAIR_MARKER}"
+          gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$REPAIR_CLAIM_ID" \
+            -f "body=$body" >/dev/null
+          python scripts/agent_runtime.py stage \
+            --action nl-decision.schema-repair --source-sha "${{ github.sha }}" \
+            --event-key "$REPAIR_EVENT_KEY" \
             --stage "$stage" --status "$status" --code "$code"
 
   investigate-dispatch:
