@@ -269,6 +269,8 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
         ):
             raise ContractError("revision mismatch evidence is inconsistent")
         selection = document["selection"]
+        if document["proof"]["executionProfile"] != selection["profile"]:
+            raise ContractError("result proof execution profile does not match selection")
         quality = selection["harnessProvenanceQuality"]
         if quality == "verified-executable" and (selection["harnessVersion"] is None or selection["harnessDigest"] is None):
             raise ContractError("verified executable provenance requires an observed version and digest")
@@ -278,6 +280,16 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
             raise ContractError("pinned action provenance must not claim observed metadata")
         if quality == "unavailable" and any(selection[name] is not None for name in ("harnessVersion", "harnessDigest", "harnessSourceCommit", "harnessMetadataSha256")):
             raise ContractError("unavailable harness provenance cannot carry observed identities")
+        if selection["adapter"] == "claude-cli" and document["status"] == "succeeded":
+            validations = document.get("final", {}).get("validation", [])
+            if (
+                document["proof"]["structuredOutputMechanism"] != "native-schema"
+                or not any(
+                    row.get("name") == "native-schema" and row.get("status") == "passed"
+                    for row in validations
+                )
+            ):
+                raise ContractError("direct Claude success requires native structured output proof")
 
 
 def load_json_regular(path: os.PathLike[str] | str, max_bytes: int = 16 * 1024 * 1024) -> Any:
@@ -329,3 +341,8 @@ def verify_result_binding(task: dict[str, Any], result: dict[str, Any]) -> None:
         raise ContractError("result execution id does not match its task")
     if result["requestSha256"] != canonical_sha256(task):
         raise ContractError("result request hash does not match its task")
+    if result["selection"]["profile"] != task["spec"]["selection"]["profile"]:
+        raise ContractError("result execution profile does not match its task")
+    candidate = task["spec"]["selection"]["candidates"][0]
+    if result["selection"]["adapter"] != candidate["adapter"]:
+        raise ContractError("result adapter does not match its task")

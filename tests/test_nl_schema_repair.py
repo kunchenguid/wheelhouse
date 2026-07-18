@@ -410,9 +410,9 @@ def test_bound_schema_is_passed_to_action():
             if row["name"] == "output.structured"
         )
         check(
-            "capability: primary negotiates native while repair stays portable",
+            "capability: primary and direct repair both require native output",
             mechanisms == ["native-schema"]
-            and repair_mechanisms == ["trusted-post-action-bridge"],
+            and repair_mechanisms == ["native-schema"],
         )
 
     model = yaml.safe_load(
@@ -427,7 +427,7 @@ def test_bound_schema_is_passed_to_action():
             and "${{ steps.hydrate.outputs.nativeSchema }}" in args,
         )
     check(
-        "workflow: portable repair does not claim native enforcement",
+        "workflow: pinned rollback repair does not claim native enforcement",
         "--json-schema" not in step_by_id(steps, "nl_repair")["with"]["claude_args"],
     )
 

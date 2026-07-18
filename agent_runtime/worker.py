@@ -466,7 +466,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         "quota": {"available": False, "snapshotSha256": None, "primaryUsedPercent": None, "secondaryUsedPercent": None},
         "cost": {"amount": None, "currency": None, "quality": "unavailable"},
     }
-    source = Path("/auth-source/credential")
+    source = Path(os.environ.get("WHEELHOUSE_AUTH_SOURCE", "/auth-source/credential"))
     try:
         info = source.lstat()
     except OSError as error:

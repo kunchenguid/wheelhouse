@@ -1095,7 +1095,9 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
             "constraints": {
                 "schemaSha256": schema_digest,
                 "strict": True,
-                "mechanismAnyOf": ["native-schema", "typed-terminating-tool"],
+                "mechanismAnyOf": ["native-schema"]
+                if adapter == "claude-cli"
+                else ["native-schema", "typed-terminating-tool"],
             },
         },
         {

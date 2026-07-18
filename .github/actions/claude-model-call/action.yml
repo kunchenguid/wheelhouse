@@ -29,16 +29,30 @@ runs:
       run: |
         set -euo pipefail
         suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${INVOCATION}"
-        child_timeout_ms="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["spec"]["limits"]["childExecutionTimeoutMs"])' "$TASK")"
-        if ! [[ "$child_timeout_ms" =~ ^[1-9][0-9]*$ ]] || [ "$((child_timeout_ms % 60000))" -ne 0 ]; then
-          echo "Claude child execution timeout must use positive whole minutes" >&2
+        read -r adapter timeout_ms < <(python -c 'import json,sys; t=json.load(open(sys.argv[1], encoding="utf-8")); print(t["spec"]["selection"]["candidates"][0]["adapter"], t["spec"]["limits"]["childExecutionTimeoutMs"] if t["spec"]["limits"]["childExecutionTimeoutMs"] is not None else t["spec"]["limits"]["hardDeadlineMs"])' "$TASK")
+        if ! [[ "$timeout_ms" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Claude execution timeout must be a positive integer" >&2
+          exit 1
+        fi
+        if [ "$adapter" = "claude-action-compat" ]; then
+          if [ "$((timeout_ms % 60000))" -ne 0 ]; then
+            echo "Claude action child execution timeout must use whole minutes" >&2
+            exit 1
+          fi
+          timeout_minutes=$((timeout_ms / 60000))
+        elif [ "$adapter" = "claude-cli" ]; then
+          # The trusted supervisor owns the exact hard deadline. Keep two outer
+          # minutes for setup and durable artifact upload after its process exits.
+          timeout_minutes=$(((timeout_ms + 59999) / 60000 + 2))
+        else
+          echo "Claude model handoff selected an unsupported adapter" >&2
           exit 1
         fi
         echo "input=wheelhouse-claude-input-${suffix}" >> "$GITHUB_OUTPUT"
         echo "output=wheelhouse-claude-output-${suffix}" >> "$GITHUB_OUTPUT"
         echo "handoff=${RUNNER_TEMP}/wheelhouse-claude-handoff-${INVOCATION}" >> "$GITHUB_OUTPUT"
         echo "correlation=$(python -c 'import secrets; print(secrets.token_hex(16))')" >> "$GITHUB_OUTPUT"
-        echo "child_timeout_minutes=$((child_timeout_ms / 60000))" >> "$GITHUB_OUTPUT"
+        echo "child_timeout_minutes=$timeout_minutes" >> "$GITHUB_OUTPUT"
 
     - name: Record task-built stage
       shell: bash

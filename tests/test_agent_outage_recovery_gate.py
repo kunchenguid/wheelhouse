@@ -241,7 +241,8 @@ def main():
             )
             validate_contract(task, "AgentTask")
             candidate = task["spec"]["selection"]["candidates"][0]
-            check("gate %02d: %s exact Claude-only selection" % (index, action), candidate["adapter"] == "claude-action-compat" and candidate["provider"] == "anthropic" and candidate["model"] == "claude-sonnet-4-6" and candidate["allowModelAlias"] is False and task["spec"]["selection"]["fallback"] == {"mode": "none"})
+            expected_adapter = "claude-cli" if action in ("triage.schema-repair", "nl-decision.schema-repair") else "claude-action-compat"
+            check("gate %02d: %s exact Claude-only selection" % (index, action), candidate["adapter"] == expected_adapter and candidate["provider"] == "anthropic" and candidate["model"] == "claude-sonnet-4-6" and candidate["allowModelAlias"] is False and task["spec"]["selection"]["fallback"] == {"mode": "none"})
             check("gate %02d: event key bound into task" % index, task["metadata"]["idempotencyKey"] == event_key)
             handoff = root / ("handoff-%02d" % index)
             packed = pack(str(bundle / "task.json"), str(bundle), str(handoff), '["owner/repo"]' if action.endswith(".search") else "[]")

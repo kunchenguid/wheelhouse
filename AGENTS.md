@@ -1153,7 +1153,9 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 All agent-assisted paths now share Agent Runtime Contract `wheelhouse.agent-runtime/v1alpha1` as the provider-portability boundary.
 The contract, action schemas, pinned Codex app-server protocol, capability negotiation, canonical tools, brokers, sandbox supervisor, adapters, consumers, and tests live under `agent_runtime/`, with the trusted CLI at `scripts/agent_runtime.py` and operator runbook at `docs/AGENT_RUNTIME.md`.
-Claude is the named production primary, and every action resolves `target: claude` to the exact pinned direct Claude Action profile.
+Claude is the named production primary.
+The two schema-repair actions resolve to the direct `claude-cli-pinned` profile, while the other eight actions remain on `claude-action-current-pinned`.
+`agent_runtime/config.py` guards that exact split, and `temporary_rollback_profile` is the reviewed one-setting rollback for an explicit durable replay.
 Codex CLI `0.144.0` app-server remains implemented and tested only as disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription path.
 No Codex secret is requested, no action targets Codex, and current selection cannot reach a Codex workflow installation path.
 Provider environment overrides are rejected; secret presence cannot select a provider, model, effort, billing path, or stronger tool policy.
@@ -1165,19 +1167,21 @@ Existing workflow concurrency serializes same-event claim creation, duplicate de
 AgentTask `idempotencyKey` is the normalized event-key hash.
 Content-free `wheelhouse-agent-stage` records begin at admission and bind action, Wheelhouse source SHA, event-key hash, and execution ID when available; they never carry prompt, comment, target, search, or credential content.
 
-The seven current direct Claude Action invocations are the explicit production adapter path behind the unified selection boundary.
+The eight pinned Claude Action steps remain present and deployable behind the unified selection boundary; six serve the non-repair actions and two are the schema-repair rollback path.
+One direct supervisor step serves both schema-repair actions because they share the same one-turn, no-tool profile.
 They run only in the separately permissioned `claude-model.yml` reusable workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
 Each local reusable-workflow call resolves from the caller's exact commit and also passes that commit as `expected_commit_sha`; the model job must observe the same `GITHUB_SHA` before hydration, checkpointing, or provider execution.
-Every direct step is conditional on the resolved Claude mode, and no provider failure can trigger a different adapter.
+Every invocation step is conditional on the admitted adapter and action, and no provider failure can trigger a different adapter.
 Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
-Every production step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
+Every action step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
+The direct schema-repair lane verifies Claude CLI `2.1.197` against `runtime.lock.json`, passes the OAuth token only through a private file into the Claude child environment, and uses the existing Bubblewrap supervisor with native structured output and zero tools.
 Trusted preflight builds an immutable `AgentTask`, and the post-action bridge requires the execution transcript's observed `system/init.model` to match before it emits an atomic `AgentResult`.
 Repository inputs are packaged by `agent_runtime/task_builder.py` from the exact bound Git commit (object DB + clean index/worktree), not from live filesystem shape: ordinary `100644`/`100755` blobs are included; committed relative mode `120000` links are materialized as regular bounded content (file links copy the target blob; directory links expand committed descendants under the alias path, with alias bytes/files counted); mode `160000` gitlinks are rejected; absolute/traversal/broken/cyclic/dirty/untracked links fail closed; no live symlink may reach the handoff or model workspace (post-snapshot handoff rejection stays).
 A source checkout may be branch-attached because `actions/checkout@v4` checks an external repository's default branch out with `git checkout -B`; exact HEAD equality plus clean pre/post conditions bind that production issue-triage shape, while AgentTask `git.detached` describes the emitted content-addressed snapshot.
 See `tests/test_agent_runtime_repo_snapshot.py`.
-The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, verifies the complete handoff into a fresh workspace, and enables the pinned action's subprocess isolation.
-Its finalizer re-verifies the handoff, normalizes and binds the result, then exposes only a bounded verified result artifact to the trusted caller-side consumer.
-The reusable model job owns the task-bound execution timeout and its finalizer normalizes only a task-bound transcript plus observed enforcement record.
+The model workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and verifies the complete handoff into a fresh workspace.
+Its finalizer re-verifies the handoff, normalizes action results or accepts only the direct supervisor's atomic result, enforces task/profile binding, then exposes only a bounded verified result artifact to the trusted caller-side consumer.
+The reusable model job owns the task-bound execution timeout; its finalizer normalizes only a task-bound action transcript plus observed enforcement record, or accepts the direct supervisor's atomic result.
 Trusted caller-side jobs retain default-token card writes and `FLEET_TOKEN` target operations outside the model boundary and accept only the verified normalized result artifact.
 
 The shared injection model remains unchanged: only trusted workflow prompts and owner/maintainer-authored text are instructions; target content and optional search output are delimited untrusted data; and no model process receives `FLEET_TOKEN`.

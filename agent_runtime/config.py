@@ -25,6 +25,11 @@ ACTIONS = frozenset(
         "nl-decision.schema-repair",
     }
 )
+SCHEMA_REPAIR_ACTIONS = frozenset(
+    {"triage.schema-repair", "nl-decision.schema-repair"}
+)
+PRIMARY_PROFILE = "claude-action-current-pinned"
+DIRECT_PROFILE = "claude-cli-pinned"
 
 
 def load_runtime_config() -> dict[str, Any]:
@@ -69,9 +74,9 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
         raise ConfigError("agent runtime contract pin is invalid")
     if runtime.get("fallback") != "none":
         raise ConfigError("automatic fallback must remain disabled")
-    if runtime.get("target") != "claude" or runtime.get("primary_profile") != "claude-action-current-pinned":
+    if runtime.get("target") != "claude" or runtime.get("primary_profile") != PRIMARY_PROFILE:
         raise ConfigError("Claude must remain the captain-approved production primary")
-    if any(name in runtime for name in ("production_activation", "temporary_rollback_profile", "codex_auth_gate")):
+    if "codex_auth_gate" in runtime:
         raise ConfigError("retired provider activation settings are forbidden")
     if runtime.get("disabled_adapters") != {"codex-app-server": "unsupported-public-chatgpt-pro-auth"}:
         raise ConfigError("Codex must remain disabled non-target adapter evidence")
@@ -83,8 +88,23 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     if not isinstance(actions, dict) or set(actions) != ACTIONS:
         raise ConfigError("agent runtime actions must be explicitly and completely configured")
     primary_profile = runtime["primary_profile"]
-    if any(not isinstance(row, dict) or row.get("target") != "claude" or row.get("profile") != primary_profile for row in actions.values()):
-        raise ConfigError("every agent runtime action must target the Claude production profile")
+    if any(
+        not isinstance(row, dict)
+        or row.get("target") != "claude"
+        or row.get("profile") != primary_profile
+        for row in actions.values()
+    ):
+        raise ConfigError("every base action must retain the pinned rollback profile")
+    activation = runtime.get("production_activation")
+    if (
+        not isinstance(activation, dict)
+        or set(activation) != SCHEMA_REPAIR_ACTIONS
+        or any(value != DIRECT_PROFILE for value in activation.values())
+    ):
+        raise ConfigError("only the complete schema-repair profile may be activated")
+    rollback = runtime.get("temporary_rollback_profile")
+    if rollback not in (None, PRIMARY_PROFILE):
+        raise ConfigError("temporary rollback must select the pinned action profile")
     action_config = actions.get(action) or {}
     target = (
         _repo_override(runtime, repo, action)
@@ -92,11 +112,16 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     )
     if target != "claude":
         raise ConfigError("only the captain-approved Claude production target is selectable")
-    profile_name = str(action_config.get("profile") or "")
+    profile_name = str(
+        rollback
+        or activation.get(action)
+        or action_config.get("profile")
+        or ""
+    )
     profiles = runtime.get("profiles") or {}
-    direct_profile = profiles.get("claude-cli-unreachable-pinned")
+    direct_profile = profiles.get(DIRECT_PROFILE)
     if not isinstance(direct_profile, dict):
-        raise ConfigError("unreachable direct Claude profile evidence is missing")
+        raise ConfigError("direct Claude profile is missing")
     expected_direct = {
         "adapter": "claude-cli",
         "harness": "claude-code",
@@ -111,8 +136,8 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
         "allow_model_alias": False,
         "provider_hosts": ["api.anthropic.com"],
     }
-    if direct_profile != expected_direct or any(row.get("profile") == "claude-cli-unreachable-pinned" for row in actions.values()):
-        raise ConfigError("direct Claude profile must remain exact and unreachable")
+    if direct_profile != expected_direct:
+        raise ConfigError("direct Claude profile must remain exact")
     profile = profiles.get(profile_name)
     if not isinstance(profile, dict):
         raise ConfigError("selected agent runtime profile is missing")
@@ -132,8 +157,10 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     for field in required:
         if field not in profile:
             raise ConfigError("selected agent runtime profile is incomplete")
-    if profile_name != runtime.get("primary_profile") or profile["adapter"] != "claude-action-compat":
-        raise ConfigError("Claude production selection must use the pinned direct action profile")
+    expected_profile = DIRECT_PROFILE if action in SCHEMA_REPAIR_ACTIONS and rollback is None else PRIMARY_PROFILE
+    expected_adapter = "claude-cli" if expected_profile == DIRECT_PROFILE else "claude-action-compat"
+    if profile_name != expected_profile or profile["adapter"] != expected_adapter:
+        raise ConfigError("Claude production selection does not match the guarded action profile")
     if profile["provider"] != "anthropic" or profile["auth_profile"] != "anthropic-subscription":
         raise ConfigError("Claude production selection must use subscription authentication")
     if profile["model"] != "claude-sonnet-4-6" or profile["allow_model_alias"] is not False:
