@@ -2318,11 +2318,11 @@ def test_triage_workflow_security_wiring():
         env = yaml.safe_dump(preserve.get("env", {}))
         run = str(preserve.get("run", ""))
         check(
-            "workflow: triage result consumes normalized Claude AgentResult",
+            "workflow: in-job triage result consumes normalized Codex AgentResult",
             "EXECUTION_FILE" in env
-            and "steps.claude-model.outputs.result" in env
-            and "steps.claude_search.outputs.execution_file" not in env
-            and "steps.claude.outputs.execution_file" not in env,
+            and "steps.agent-runtime.outputs.result" in env
+            and "steps.claude-model.outputs.result" not in env
+            and "steps.claude_search.outputs.execution_file" not in env,
         )
         check(
             "workflow: triage result uses trusted shell PATH",
@@ -2470,7 +2470,8 @@ def test_triage_workflow_security_wiring():
     if recover:
         check(
             "workflow: recovery step does not depend on Claude token gate",
-            recover.get("if") == "always() && steps.trusted-src.outputs.path != ''",
+            recover.get("if")
+            == "always() && steps.trusted-src.outputs.path != '' && steps.gate.outputs.mode != 'claude'",
         )
         env = recover.get("env", {})
         check(

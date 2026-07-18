@@ -33,6 +33,26 @@ MAX_HANDOFF_FILES = 32_000
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SIGNED_TARGET_INPUT_PATHS = {"repository-provenance.json", "target-src", "target.txt"}
+PACKAGED_RUNTIME_FILES = (
+    "__init__.py",
+    "admission.py",
+    "brokers.py",
+    "capabilities.py",
+    "claude_bridge.py",
+    "claude_handoff.py",
+    "contract.py",
+    "events.py",
+    "redaction.py",
+    "runtime.lock.json",
+    "sandbox.py",
+    "supervisor.py",
+    "task_builder.py",
+    "tools.py",
+    "adapters/__init__.py",
+    "adapters/base.py",
+    "adapters/codex.py",
+    "adapters/fake.py",
+)
 
 
 def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]:
@@ -62,8 +82,10 @@ def _files(root: Path, excluded: set[str] | None = None) -> list[dict[str, Any]]
 def _copy_runtime(destination: Path) -> None:
     package = destination / "runtime" / "agent_runtime"
     package.mkdir(parents=True)
-    for name in ("__init__.py", "admission.py", "contract.py", "claude_handoff.py"):
-        shutil.copyfile(ROOT / name, package / name)
+    for name in PACKAGED_RUNTIME_FILES:
+        target = package / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
     shutil.copytree(ROOT / "schemas", package / "schemas")
     shutil.copyfile(ROOT.parent / "scripts" / "nl_readonly_search.py", destination / "runtime" / "nl_readonly_search.py")
 

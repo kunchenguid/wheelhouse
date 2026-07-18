@@ -1,0 +1,40 @@
+name: Receive Claude normalized result
+description: Downloads and verifies a task-bound result from the caller-commit-bound model job.
+inputs:
+  artifact: {required: true}
+  invocation-id: {required: true}
+outputs:
+  result:
+    value: ${{ steps.verify.outputs.result }}
+  status:
+    value: ${{ steps.verify.outputs.status }}
+  error-code:
+    value: ${{ steps.verify.outputs.error_code }}
+runs:
+  using: composite
+  steps:
+    - name: Download normalized model result
+      uses: actions/download-artifact@v4
+      with:
+          name: ${{ inputs.artifact }}
+          path: ${{ runner.temp }}/wheelhouse-claude-result-${{ inputs.invocation-id }}
+
+    - id: verify
+      name: Verify task, result, and terminal-event binding
+      shell: bash
+      env:
+        RECEIVED: ${{ runner.temp }}/wheelhouse-claude-result-${{ inputs.invocation-id }}
+      run: |
+        set -euo pipefail
+        task="$RECEIVED/task.json"
+        result="$RECEIVED/result.json"
+        events="$RECEIVED/events.ndjson"
+        python scripts/agent_runtime.py verify-result \
+          --task "$task" --result "$result" --events "$events"
+        status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
+        error_code="$(python -c 'import json,sys; print((json.load(open(sys.argv[1], encoding="utf-8")).get("error") or {}).get("code", ""))' "$result")"
+        {
+          echo "result=$result"
+          echo "status=$status"
+          echo "error_code=$error_code"
+        } >> "$GITHUB_OUTPUT"

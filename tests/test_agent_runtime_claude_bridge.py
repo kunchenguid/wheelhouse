@@ -139,7 +139,7 @@ def main():
             str(mismatch_events_path),
         )
         validate_contract(revision_mismatch, "AgentResult")
-        check("bridge: trusted revision mismatch preserves possible spend", revision_mismatch["status"] == "failed" and revision_mismatch["error"]["code"] == "target.stale" and revision_mismatch["error"]["spendStarted"] is True)
+        check("bridge: source revision mismatch is precise and retryable", revision_mismatch["status"] == "failed" and revision_mismatch["error"]["code"] == "source.revision_mismatch" and revision_mismatch["error"]["retryable"] is True and revision_mismatch["error"]["fallbackEligible"] is False and revision_mismatch["error"]["spendStarted"] is True)
         check("bridge: revision mismatch records only parent run evidence", revision_mismatch["proof"]["revisionBinding"]["expectedCommitSha"] == task["metadata"]["wheelhouseRevision"] and revision_mismatch["proof"]["revisionBinding"]["observedCommitSha"] == "c" * 40 and revision_mismatch["proof"]["revisionBinding"]["cancellationConfirmed"] is True and revision_mismatch["proof"]["revisionBinding"]["cancellationError"] is None and revision_mismatch["selection"]["actualModel"] == "" and revision_mismatch["usage"]["providerRequests"] is None and revision_mismatch["usage"]["toolCalls"] is None)
         check("bridge: revision mismatch events remain content free", "fixture target" not in mismatch_events_path.read_text(encoding="utf-8"))
 

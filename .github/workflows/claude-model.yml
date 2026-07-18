@@ -1,18 +1,30 @@
 name: claude-model
-run-name: wheelhouse-claude-${{ inputs.correlation_id }}
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      parent_run_id: {required: true}
-      parent_run_attempt: {required: true}
-      input_artifact: {required: true}
-      handoff_sha256: {required: true}
-      output_artifact: {required: true}
-      invocation_id: {required: true}
-      expected_commit_sha: {required: true}
-      correlation_id: {required: true}
-      child_timeout_minutes: {required: true}
+      input_artifact: {required: true, type: string}
+      handoff_sha256: {required: true, type: string}
+      output_artifact: {required: true, type: string}
+      expected_commit_sha: {required: true, type: string}
+      correlation_id: {required: true, type: string}
+      child_timeout_minutes: {required: true, type: number}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: {required: true}
+      READONLY_TOKEN: {required: false}
+    outputs:
+      result_artifact:
+        description: Bounded artifact containing the verified normalized result.
+        value: ${{ jobs.finalize.outputs.result_artifact }}
+      status:
+        description: Normalized AgentResult status.
+        value: ${{ jobs.finalize.outputs.status }}
+      error_code:
+        description: Stable normalized error code, empty on success.
+        value: ${{ jobs.finalize.outputs.error_code }}
+      observed_commit_sha:
+        description: Caller commit observed by the separately permissioned model job.
+        value: ${{ jobs.finalize.outputs.observed_commit_sha }}
 
 permissions:
   actions: read
@@ -21,25 +33,30 @@ permissions:
 jobs:
   model:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(inputs.child_timeout_minutes) }}
+    timeout-minutes: ${{ inputs.child_timeout_minutes }}
     steps:
-      - name: Bind the dispatched workflow revision
+      - id: source
+        name: Bind the model job to the caller workflow revision
         env:
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
         run: |
           set -euo pipefail
-          test "$GITHUB_SHA" = "$EXPECTED_COMMIT_SHA"
+          match=false
+          if [ "$GITHUB_SHA" = "$EXPECTED_COMMIT_SHA" ]; then match=true; fi
+          {
+            echo "match=$match"
+            echo "observed_sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download immutable prepared handoff
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.input_artifact }}
           path: ${{ runner.temp }}/wheelhouse-handoff
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.parent_run_id }}
 
       - id: hydrate
         name: Verify and hydrate the content-addressed workspace
+        if: ${{ steps.source.outputs.match == 'true' }}
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
@@ -90,6 +107,7 @@ jobs:
             --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - name: Initialize bounded local repository
+        if: ${{ steps.hydrate.outcome == 'success' }}
         run: |
           set -euo pipefail
           git init --quiet --initial-branch=wheelhouse-model
@@ -114,6 +132,7 @@ jobs:
           echo "WHEELHOUSE_SEARCH_ALLOWED_REPOS=$ALLOWED_REPOS" >> "$GITHUB_ENV"
 
       - name: Write conservative pre-invocation checkpoint
+        if: ${{ steps.hydrate.outcome == 'success' }}
         env:
           ACTION: ${{ steps.hydrate.outputs.action }}
           TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
@@ -121,8 +140,8 @@ jobs:
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
           ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
-          RUNNER_WORKSPACE: ${{ runner.workspace }}
           CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
         run: |
           set -euo pipefail
@@ -136,6 +155,11 @@ jobs:
           from pathlib import Path
           from agent_runtime.claude_handoff import declared_output_paths, workspace_input_observation
           task = json.loads((Path(os.environ["HANDOFF"]) / "bundle" / "task.json").read_text(encoding="utf-8"))
+          if (
+              task.get("metadata", {}).get("wheelhouseRevision") != os.environ["EXPECTED_COMMIT_SHA"]
+              or os.environ["GITHUB_SHA"] != os.environ["EXPECTED_COMMIT_SHA"]
+          ):
+              raise SystemExit("hydrated task source revision does not match the caller commit")
           child_timeout_ms = int(os.environ["CHILD_TIMEOUT_MINUTES"]) * 60000
           if child_timeout_ms != task["spec"]["limits"]["childExecutionTimeoutMs"]:
               raise SystemExit("child job timeout does not match AgentTask")
@@ -174,6 +198,7 @@ jobs:
           PY
 
       - name: Upload durable pre-invocation checkpoint
+        if: ${{ steps.hydrate.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.output_artifact }}-attempt
@@ -182,6 +207,7 @@ jobs:
           retention-days: 1
 
       - name: Record durable checkpoint stage
+        if: ${{ steps.hydrate.outcome == 'success' }}
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
@@ -290,7 +316,7 @@ jobs:
           claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6"
 
       - id: capture
-        if: ${{ always() }}
+        if: ${{ always() && steps.source.outputs.match == 'true' }}
         env:
           ACTION: ${{ steps.hydrate.outputs.action }}
           TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
@@ -404,10 +430,204 @@ jobs:
             --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - name: Upload bounded model transcript
-        if: ${{ always() }}
+        if: ${{ always() && steps.source.outputs.match == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.output_artifact }}
           path: ${{ runner.temp }}/wheelhouse-model-output
+          if-no-files-found: error
+          retention-days: 1
+
+  finalize:
+    if: ${{ always() }}
+    needs: model
+    runs-on: ubuntu-latest
+    outputs:
+      result_artifact: ${{ steps.result.outputs.result_artifact }}
+      status: ${{ steps.result.outputs.status }}
+      error_code: ${{ steps.result.outputs.error_code }}
+      observed_commit_sha: ${{ steps.result.outputs.observed_commit_sha }}
+    steps:
+      - name: Download immutable prepared handoff
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.input_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-handoff
+
+      - name: Verify the complete signed handoff before normalization
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-finalize-pycache
+        run: |
+          set -euo pipefail
+          mkdir -p "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["HANDOFF"])
+          manifest = json.loads((root / "manifest.json").read_text())
+          canonical = json.dumps(manifest["files"], sort_keys=True, separators=(",", ":")).encode()
+          if manifest.get("manifestSha256") != os.environ["HANDOFF_SHA256"] or hashlib.sha256(canonical).hexdigest() != os.environ["HANDOFF_SHA256"]:
+              raise SystemExit("handoff manifest identity mismatch")
+          expected = {row["path"]: row for row in manifest["files"]}
+          if len(expected) != len(manifest["files"]) or len(expected) > 32000 or sum(row["bytes"] for row in expected.values()) > 220000000:
+              raise SystemExit("handoff manifest bound exceeded")
+          observed = {}
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink(): raise SystemExit("handoff symlink rejected")
+              if path.is_file() and path.name != "manifest.json":
+                  rel = path.relative_to(root).as_posix()
+                  size = path.stat().st_size
+                  if rel not in expected or size != expected[rel]["bytes"]: raise SystemExit("handoff file bound mismatch")
+                  digest = hashlib.sha256()
+                  with path.open("rb") as handle:
+                      for chunk in iter(lambda: handle.read(1048576), b""): digest.update(chunk)
+                  observed[rel] = {"path": rel, "bytes": size, "sha256": digest.hexdigest()}
+          if observed != expected:
+              raise SystemExit("handoff manifest mismatch")
+          PY
+      - id: raw
+        name: Download bounded model transcript
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-model-output
+
+      - id: attempt
+        name: Download durable pre-invocation checkpoint
+        if: ${{ steps.raw.outcome != 'success' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}-attempt
+          path: ${{ runner.temp }}/wheelhouse-model-attempt
+
+      - id: result
+        name: Normalize and bind the model result
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
+          RAW: ${{ runner.temp }}/wheelhouse-model-output
+          ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
+          NORMALIZED: ${{ runner.temp }}/wheelhouse-model-result
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          MODEL_JOB_RESULT: ${{ needs.model.result }}
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-finalize-pycache
+        run: |
+          set -euo pipefail
+          mkdir -p "$NORMALIZED" "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          task="$HANDOFF/bundle/task.json"
+          result="$NORMALIZED/result.json"
+          events="$NORMALIZED/events.ndjson"
+          if [ "$GITHUB_SHA" != "$EXPECTED_COMMIT_SHA" ]; then
+            PYTHONPATH="$HANDOFF/runtime" python - "$task" "$HANDOFF/bundle" "$EXPECTED_COMMIT_SHA" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$CORRELATION_ID" "$result" "$events" <<'PY'
+          import sys
+          from agent_runtime.claude_bridge import write_revision_mismatch_result
+          cancellation = {
+              "requestStatus": "not-requested",
+              "requestReturnCode": None,
+              "terminalStatus": "",
+              "terminalConclusion": "",
+              "cancellationConfirmed": False,
+          }
+          write_revision_mismatch_result(
+              sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+              "caller-commit", sys.argv[6], cancellation, sys.argv[7], sys.argv[8]
+          )
+          PY
+          else
+            proof=""
+            execution=""
+            delivered=""
+            conclusion="failure"
+            termination="controller-failure"
+            if [ -f "$RAW/enforcement.json" ] && [ ! -L "$RAW/enforcement.json" ]; then
+              proof="$RAW/enforcement.json"
+              execution="$RAW/execution.json"
+              if [ -f "$RAW/decision.json" ] && [ ! -L "$RAW/decision.json" ]; then delivered="$RAW/decision.json"; fi
+              conclusion="success"
+              termination="completed"
+            elif [ -f "$ATTEMPT/enforcement.json" ] && [ ! -L "$ATTEMPT/enforcement.json" ]; then
+              proof="$ATTEMPT/enforcement.json"
+              if [ "$MODEL_JOB_RESULT" = "cancelled" ]; then
+                conclusion="timed_out"
+                termination="child-timeout"
+              fi
+            else
+              echo "Claude model job produced neither a final artifact nor a durable checkpoint" >&2
+              exit 1
+            fi
+            PYTHONPATH="$HANDOFF/runtime" python - "$proof" "$task" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$EXPECTED_COMMIT_SHA" "$CORRELATION_ID" "$conclusion" "$termination" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          proof_path = Path(sys.argv[1])
+          task = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          proof = json.loads(proof_path.read_text(encoding="utf-8"))
+          limits = task["spec"]["limits"]
+          proof["controller"] = {
+              "parentRunId": sys.argv[3],
+              "parentRunAttempt": sys.argv[4],
+              "modelRunId": sys.argv[3],
+              "hardDeadlineMs": None,
+              "dispatchDeadlineMs": limits["dispatchDeadlineMs"],
+              "childExecutionTimeoutMs": limits["childExecutionTimeoutMs"],
+              "enforcedLimits": {
+                  name: limits[name]
+                  for name, quality in limits["enforcement"].items()
+                  if quality == "externally-enforced"
+              },
+              "conclusion": sys.argv[7],
+              "terminationReason": sys.argv[8],
+              "dispatchRef": "caller-commit",
+              "expectedCommitSha": sys.argv[5],
+              "observedCommitSha": os.environ["GITHUB_SHA"],
+              "correlationId": sys.argv[6],
+              "cancellation": None,
+          }
+          temporary = proof_path.with_suffix(".tmp")
+          temporary.write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          temporary.replace(proof_path)
+          PY
+            PYTHONPATH="$HANDOFF/runtime" python - "$task" "$HANDOFF/bundle" "$execution" "$delivered" "$proof" "$HANDOFF_SHA256" "$result" "$events" <<'PY'
+          import sys
+          from agent_runtime.claude_bridge import bridge
+          bridge(*sys.argv[1:])
+          PY
+          fi
+          cp "$task" "$NORMALIZED/task.json"
+          PYTHONPATH="$HANDOFF/runtime" python - "$task" "$result" "$events" <<'PY'
+          import sys
+          from agent_runtime.contract import load_json_regular, verify_result_binding
+          from agent_runtime.events import verify_result_event_binding
+          task = load_json_regular(sys.argv[1])
+          result = load_json_regular(sys.argv[2])
+          verify_result_binding(task, result)
+          verify_result_event_binding(result, sys.argv[3])
+          PY
+          status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
+          error_code="$(python -c 'import json,sys; print((json.load(open(sys.argv[1], encoding="utf-8")).get("error") or {}).get("code", ""))' "$result")"
+          {
+            echo "result_artifact=${{ inputs.output_artifact }}-result"
+            echo "status=$status"
+            echo "error_code=$error_code"
+            echo "observed_commit_sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified normalized result
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.result.outputs.result_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-model-result
           if-no-files-found: error
           retention-days: 1

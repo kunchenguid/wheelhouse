@@ -212,6 +212,30 @@ def hydrate_subprocess(
     )
 
 
+def import_bridge_subprocess(python: str, handoff: Path, cwd: Path, pycache_prefix: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(handoff / "runtime")
+    env["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    pycache_prefix.mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        [
+            python,
+            "-c",
+            (
+                "from agent_runtime.claude_bridge import bridge, write_revision_mismatch_result; "
+                "from agent_runtime.contract import verify_result_binding; "
+                "print('bridge-import-ok')"
+            ),
+        ],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
 def cache_files(prefix: Path) -> list[Path]:
     if not prefix.exists():
         return []
@@ -474,6 +498,16 @@ def main():
 
         clean_cwd = root / "unrelated-cwd"
         clean_cwd.mkdir()
+        bridge_import = import_bridge_subprocess(
+            pythons[0][1],
+            source_handoff,
+            clean_cwd,
+            root / "bridge-import-cache",
+        )
+        check(
+            "handoff: packaged runtime imports finalizer bridge without checkout",
+            bridge_import.returncode == 0 and "bridge-import-ok" in (bridge_import.stdout or ""),
+        )
 
         # Without a redirected cache, a fresh interpreter self-mutates and fail-closed.
         mutated = root / "mutated-extract"

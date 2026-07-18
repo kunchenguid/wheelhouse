@@ -260,7 +260,7 @@ def validate_contract(document: dict[str, Any], kind: str | None = None) -> None
             or (revision_binding["cancellationConfirmed"] != (revision_binding["cancellationError"] is None))
             or document["proof"]["sandboxPolicySha256"] != canonical_sha256(revision_binding)
             or document["status"] != "failed"
-            or document.get("error", {}).get("code") != "target.stale"
+            or document.get("error", {}).get("code") != "source.revision_mismatch"
             or document.get("error", {}).get("spendStarted") is not True
             or document["selection"]["actualProvider"]
             or document["selection"]["actualModel"]

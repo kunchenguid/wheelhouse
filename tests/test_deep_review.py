@@ -308,6 +308,7 @@ def test_workflow_dispatch_gate_restricts_bot_reruns():
 def test_code_grounded_checkout_and_tool_isolation():
     doc = load_yaml(".github", "workflows", "deep-review.yml")
     steps = steps_of(doc, "deep-review")
+    consume_steps = steps_of(doc, "deep-review-consume")
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
     check(
@@ -470,10 +471,23 @@ def test_code_grounded_checkout_and_tool_isolation():
             and 'echo "safe_path=$safe_path"' in trusted_run,
         )
     post = next(
-        (s for s in steps if "post the verdict" in str(s.get("name", "")).lower()), None
+        (
+            s
+            for s in consume_steps
+            if "post the verdict" in str(s.get("name", "")).lower()
+        ),
+        None,
     )
     check("workflow: verdict.md handoff is gone", "verdict.md" not in dr)
     check("workflow: a trusted post step exists", post is not None)
+    post_freshness = step_by_id(consume_steps, "post-model-freshness")
+    check("workflow: post-model freshness step exists", post_freshness is not None)
+    if post_freshness:
+        check(
+            "workflow: post-model projection preserves the pre-model stale gate",
+            str(post_freshness.get("if", ""))
+            == "${{ needs.deep-review.outputs.pre_model_fresh == 'true' }}",
+        )
     if post:
         env = yaml.safe_dump(post.get("env", {}))
         run = str(post.get("run", ""))
@@ -504,7 +518,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         check(
             "workflow: post step consumes normalized Claude AgentResult",
             "EXECUTION_FILE" in env
-            and "steps.claude-model.outputs.result" in env
+            and "steps.claude-result.outputs.result" in env
             and "steps.claude_search.outputs.execution_file" not in env
             and "steps.claude.outputs.execution_file" not in env,
         )
@@ -513,15 +527,14 @@ def test_code_grounded_checkout_and_tool_isolation():
             "result_text" in run,
         )
         check(
-            "workflow: post step can fall back to last assistant text",
-            'event.get("type") == "assistant"' in run
-            and 'item.get("type") == "text"' in run,
+            "workflow: post step accepts only the normalized result",
+            'event.get("type") == "assistant"' not in run
+            and "result_text(path, require_success=True)" in run,
         )
         check(
             "workflow: no-output fallback still posts and fails clearly",
             "Deep review ran but produced no verdict (see the workflow run logs)."
             in run
-            and "json.JSONDecodeError" in run
             and "failed = True" in run
             and "sys.exit(1)" in run,
         )
@@ -535,7 +548,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         check(
             "workflow: post step carries the deterministic target slug for ref qualification",
             "TARGET_REPO" in env
-            and "steps.resolve.outputs.repo" in env
+            and "needs.deep-review.outputs.repo" in env
             and "GITHUB_REPOSITORY_OWNER" in env
             and "github.repository_owner" in env,
         )
@@ -563,7 +576,7 @@ def test_code_grounded_checkout_and_tool_isolation():
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
     claude_indexes = [step_index(steps, lambda step: step.get("id") == "claude-model")]
     post_i = step_index(
-        steps,
+        consume_steps,
         lambda s: "post the verdict" in str(s.get("name", "")).lower(),
     )
     check(
@@ -575,8 +588,9 @@ def test_code_grounded_checkout_and_tool_isolation():
     check(
         "workflow: trusted post runs after Claude",
         post_i is not None
-        and claude_indexes
-        and all(i < post_i for i in claude_indexes),
+        and doc["jobs"]["deep-model"].get("uses")
+        == "./.github/workflows/claude-model.yml"
+        and "deep-model" in doc["jobs"]["deep-review-consume"].get("needs", []),
     )
 
 

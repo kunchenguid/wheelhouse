@@ -1,63 +1,89 @@
 #!/usr/bin/env python3
-"""Deterministic controller discovery and cancellation regressions."""
+"""Caller-commit-bound Claude reusable workflow checks."""
 
 from __future__ import annotations
 
-from unittest import mock
-import json
-import subprocess
 from pathlib import Path
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import yaml
 
-import scripts.claude_model_dispatch as dispatch
-
-FAILURES = []
+FAILURES: list[str] = []
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def check(name, condition):
+def check(name: str, condition: bool) -> None:
     print(("ok   " if condition else "FAIL ") + name)
     if not condition:
         FAILURES.append(name)
 
 
-def main():
-    with mock.patch.object(dispatch, "matching_run", return_value=None), mock.patch.object(dispatch.time, "sleep"), mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 0, 31]):
-        check("dispatch: missing correlation lookup is bounded", dispatch.discover_run("owner/repo", "marker", "main", "2026-01-01T00:00:00Z", 30) is None)
+def load(path: str) -> dict:
+    return yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
 
-    with mock.patch.object(dispatch.signal, "signal"):
-        try:
-            dispatch.terminate_parent(15, None)
-        except dispatch.ParentCancelled:
-            check("dispatch: SIGTERM enters shared bounded cleanup", True)
-        else:
-            check("dispatch: SIGTERM enters shared bounded cleanup", False)
 
-    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "denied")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "success"})):
-        outcome = dispatch.cancel_and_wait("42")
-    check("dispatch: failed cancel plus natural success is not confirmed cancellation", outcome["requestStatus"] == "failed" and outcome["requestReturnCode"] == 1 and outcome["terminalConclusion"] == "success" and outcome["cancellationConfirmed"] is False)
+def triggers(document: dict) -> dict:
+    return document.get("on") or document.get(True) or {}
 
-    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "failure"})):
-        outcome = dispatch.cancel_and_wait("43")
-    check("dispatch: accepted cancel plus natural failure is not confirmed cancellation", outcome["requestStatus"] == "accepted" and outcome["terminalConclusion"] == "failure" and outcome["cancellationConfirmed"] is False)
 
-    with mock.patch.object(dispatch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), mock.patch.object(dispatch, "run", return_value=json.dumps({"status": "completed", "conclusion": "cancelled"})):
-        outcome = dispatch.cancel_and_wait("44")
-    check("dispatch: only terminal cancelled confirms cancellation", outcome["requestStatus"] == "accepted" and outcome["terminalConclusion"] == "cancelled" and outcome["cancellationConfirmed"] is True)
+def main() -> None:
+    model = load(".github/workflows/claude-model.yml")
+    model_text = (ROOT / ".github/workflows/claude-model.yml").read_text(encoding="utf-8")
+    prepare_text = (ROOT / ".github/actions/claude-model-call/action.yml").read_text(encoding="utf-8")
+    result_text = (ROOT / ".github/actions/claude-model-result/action.yml").read_text(encoding="utf-8")
+    callers = {
+        name: load(path)
+        for name, path in {
+            "triage": ".github/workflows/triage.yml",
+            "deep": ".github/workflows/deep-review.yml",
+            "decision": ".github/workflows/decision-handler.yml",
+        }.items()
+    }
+    call_jobs = [
+        (name, job)
+        for name, document in callers.items()
+        for job in document["jobs"].values()
+        if job.get("uses") == "./.github/workflows/claude-model.yml"
+    ]
 
-    source = Path("scripts/claude_model_dispatch.py").read_text(encoding="utf-8")
-    check("dispatch: end-to-end hard deadline is not claimed", '"hardDeadlineMs": None' in source)
-    check("dispatch: correlation and child timeout limits are separate", '"dispatchDeadlineMs"' in source and '"childExecutionTimeoutMs"' in source)
-    check("dispatch: command and final discovery operations are bounded", "COMMAND_TIMEOUT_SECONDS" in source and "dispatch_deadline" in source and "while not run_id" not in source)
+    on = triggers(model)
+    check("dispatch: model workflow is reusable only", set(on) == {"workflow_call"})
+    call = on.get("workflow_call") or {}
+    check("dispatch: workflow call exposes bounded scalar outputs", set((call.get("outputs") or {})) == {"result_artifact", "status", "error_code", "observed_commit_sha"})
+    check("dispatch: model workflow keeps exact read-only permissions", model.get("permissions") == {"actions": "read", "contents": "read"})
+    check("dispatch: all four Claude families use the local reusable workflow", len(call_jobs) == 4 and {name for name, _ in call_jobs} == {"triage", "deep", "decision"})
+    check("dispatch: every local call binds expected source to github.sha", all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for _, job in call_jobs))
+    check("dispatch: every local call passes only model and read-only broker secrets", all(set(job.get("secrets") or {}) == {"CLAUDE_CODE_OAUTH_TOKEN", "READONLY_TOKEN"} for _, job in call_jobs))
+    check("dispatch: no caller inherits FLEET_TOKEN into the model boundary", all("FLEET_TOKEN" not in str(job.get("secrets") or {}) and job.get("secrets") != "inherit" for _, job in call_jobs))
+    check("dispatch: mutable branch dispatch is absent", "github.ref_name" not in model_text + prepare_text and "gh workflow run" not in model_text + prepare_text and "workflow_dispatch" not in on)
+    check("dispatch: obsolete branch-polling controller is removed", not (ROOT / "scripts/claude_model_dispatch.py").exists())
+    check("dispatch: source gate still compares observed and expected SHA", 'if [ "$GITHUB_SHA" = "$EXPECTED_COMMIT_SHA" ]' in model_text and "steps.source.outputs.match == 'true'" in model_text)
+    check("dispatch: provider admission remains downstream of verified hydration", all("steps.hydrate.outputs.action" in str(step.get("if", "")) for step in model["jobs"]["model"]["steps"] if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")))
+    check("dispatch: complete handoff verification remains in model and finalizer jobs", model_text.count("handoff manifest mismatch") >= 2 and model_text.count("handoff symlink rejected") >= 2)
+    check("dispatch: job timeout and durable checkpoint retain cancellation recovery", "timeout-minutes: ${{ inputs.child_timeout_minutes }}" in model_text and "Upload durable pre-invocation checkpoint" in model_text and "Download durable pre-invocation checkpoint" in model_text)
+    check("dispatch: normalized result binding is verified at both artifact boundaries", "verify_result_binding" in model_text and "verify_result_event_binding" in model_text and "agent_runtime.py verify-result" in result_text)
+    receiver_calls = [
+        step
+        for document in callers.values()
+        for job in document["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses") == "./.github/actions/claude-model-result"
+    ]
     check(
-        "dispatch: only controller failures may accept natural late completion",
-        'termination_reason == "controller-failure"' in source,
+        "dispatch: each normalized result receiver has a disjoint static workspace",
+        len(receiver_calls) == 5
+        and len(
+            {
+                (step.get("with") or {}).get("invocation-id")
+                for step in receiver_calls
+            }
+        )
+        == 5,
     )
+    check("dispatch: preparer uploads hidden signed paths", "include-hidden-files: true" in prepare_text and "agent_runtime.claude_handoff pack" in prepare_text)
 
     if FAILURES:
-        raise SystemExit("%d Claude dispatch checks failed" % len(FAILURES))
-    print("\nall Claude dispatch tests passed")
+        raise SystemExit("%d caller-bound Claude workflow checks failed" % len(FAILURES))
+    print("\nall caller-bound Claude workflow checks passed")
 
 
 if __name__ == "__main__":

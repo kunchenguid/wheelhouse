@@ -71,9 +71,15 @@ def main():
         else:
             check("binding: missing terminal projection rejected", False)
 
-    composite = Path(".github/actions/claude-model-call/action.yml").read_text(encoding="utf-8")
-    check("binding: final composite selection verifies task/result/events", "agent_runtime.py verify-result" in composite and "--task \"$TASK\" --result \"$result\" --events \"$events\"" in composite)
-    check("binding: schema-only final selection was removed", "validate --path \"$result\" --kind AgentResult" not in composite)
+    receiver = Path(".github/actions/claude-model-result/action.yml").read_text(encoding="utf-8")
+    check("binding: receiving boundary verifies task/result/events", "agent_runtime.py verify-result" in receiver and "--task \"$task\" --result \"$result\" --events \"$events\"" in receiver)
+    check(
+        "binding: multiple results in one consumer use disjoint directories",
+        "invocation-id: {required: true}" in receiver
+        and "wheelhouse-claude-result-${{ inputs.invocation-id }}" in receiver
+        and "github.job" not in receiver,
+    )
+    check("binding: schema-only final selection was removed", "validate --path \"$result\" --kind AgentResult" not in receiver)
 
     if FAILURES:
         raise SystemExit("%d Agent Runtime result binding checks failed" % len(FAILURES))

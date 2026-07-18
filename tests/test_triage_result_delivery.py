@@ -298,14 +298,16 @@ def test_triage_yml_extracts_before_size_gate():
 
 
 def test_deep_review_reads_execution_file_without_a_size_drop():
-    # Audit: deep-review.yml already extracts its verdict directly from the
-    # execution file via json.load with NO size cap, so the delivered-drop
-    # mechanism is NOT present there. Pin that so a future change does not
-    # reintroduce a copy-cap that could discard a deep-review verdict.
+    # Audit: deep-review.yml reads only the normalized AgentResult through the
+    # shared consumer with no size cap, so the delivered-drop mechanism is not
+    # present there. Pin that so a future change does not reintroduce a copy-cap
+    # that could discard a deep-review verdict.
     text = read(".github", "workflows", "deep-review.yml")
     check(
-        "audit: deep-review reads the execution file directly",
-        "def extract_verdict(path):" in text and "json.load(f)" in text,
+        "audit: deep-review reads the normalized result directly",
+        "result_text(path, require_success=True)" in text
+        and "steps.claude-result.outputs.result" in text
+        and "json.load(f)" not in text,
     )
     check(
         "audit: deep-review has no 262144-style execution-file drop",
