@@ -717,6 +717,7 @@ jobs:
           NL_EXECUTION_FILE: ${{ steps.nl-agent-runtime.outputs.result }}
           NL_REPAIR_EXECUTION_FILE: ${{ steps.nl-agent-runtime-repair.outputs.result }}
           NL_REPAIR_CLAIM_ADMITTED: ${{ steps.nl-repair-claim.outputs.admitted }}
+          NL_REPAIR_NEEDED: ${{ steps.nl-repair-prep.outputs.repair_needed }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -736,6 +737,7 @@ jobs:
             NL_EXECUTION_FILE="$NL_EXECUTION_FILE" \
             NL_REPAIR_EXECUTION_FILE="$NL_REPAIR_EXECUTION_FILE" \
             NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
+            NL_REPAIR_NEEDED="$NL_REPAIR_NEEDED" \
             ISSUE_BODY="$ISSUE_BODY" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1349,6 +1351,7 @@ jobs:
           NL_EXECUTION_FILE: ${{ steps.nl-claude-result.outputs.result }}
           NL_REPAIR_EXECUTION_FILE: ${{ steps.nl-claude-repair-result.outputs.result }}
           NL_REPAIR_CLAIM_ADMITTED: ${{ needs.nl-repair-prepare.outputs.repair_admitted }}
+          NL_REPAIR_NEEDED: ${{ needs.nl-repair-prepare.outputs.repair_needed }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ needs.handle.outputs.nl_kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -1368,6 +1371,7 @@ jobs:
             NL_EXECUTION_FILE="$NL_EXECUTION_FILE" \
             NL_REPAIR_EXECUTION_FILE="$NL_REPAIR_EXECUTION_FILE" \
             NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
+            NL_REPAIR_NEEDED="$NL_REPAIR_NEEDED" \
             ISSUE_BODY="$ISSUE_BODY" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \

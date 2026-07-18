@@ -269,12 +269,13 @@ def test_native_bridge_and_portable_fallback():
                 repair_root / "bundle" / "result.json",
                 root / ("invalid-" + label + "-route.txt"),
                 repair_claim_admitted="true",
+                repair_needed="true",
             )
             missing_repair_outputs = route_cli(
                 invalid_bundle / ("result-invalid-" + label + ".json"),
                 root / ("invalid-" + label + "-missing-repair.json"),
                 root / ("invalid-" + label + "-missing-route.txt"),
-                repair_claim_admitted="true",
+                repair_needed="true",
             )
             check(
                 "fallback: invalid native %s carrier consumes trusted repair" % label,
@@ -436,6 +437,7 @@ def route_cli(
     repair: Path,
     output: Path,
     repair_claim_admitted="",
+    repair_needed="",
 ) -> dict[str, str]:
     state = {
         "repo": "firstmate",
@@ -450,6 +452,7 @@ def route_cli(
         NL_EXECUTION_FILE=str(primary),
         NL_REPAIR_EXECUTION_FILE=str(repair),
         NL_REPAIR_CLAIM_ADMITTED=repair_claim_admitted,
+        NL_REPAIR_NEEDED=repair_needed,
         ISSUE_BODY=body,
         KIND="pr-review",
         GITHUB_REPOSITORY_OWNER="owner",
@@ -602,6 +605,7 @@ def test_structural_single_attempt_and_token_isolation():
         "NL_EXECUTION_FILE" in route["env"]
         and "NL_REPAIR_EXECUTION_FILE" in route["env"]
         and "NL_REPAIR_CLAIM_ADMITTED" in route["env"]
+        and "NL_REPAIR_NEEDED" in route["env"]
         and "steps.route.outputs.mode == 'answer'" in str(reply.get("if", "")),
     )
     check(

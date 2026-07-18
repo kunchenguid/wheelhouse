@@ -1730,6 +1730,7 @@ def decide_nl_apply(
     result_text,
     repaired_text,
     repair_claim_admitted=None,
+    repair_needed=False,
     primary_trusted=True,
     repair_trusted=True,
 ):
@@ -1739,7 +1740,7 @@ def decide_nl_apply(
         return {"outcome": "success", "result": primary, "reason": ""}
     if primary is not None:
         reason = "native structured output was absent or failed trusted validation"
-    if not (result_text or "").strip() and repair_claim_admitted is None:
+    if not (result_text or "").strip() and not repair_needed:
         return {"outcome": "no-result", "result": None, "reason": ""}
     if repaired_text:
         repaired, repaired_reason = _nl_parse_with_reason(repaired_text)
@@ -1915,6 +1916,7 @@ def cmd_nl_route():
     repair_claim_admitted = (
         True if claim_value == "true" else False if claim_value == "false" else None
     )
+    repair_needed = os.environ.get("NL_REPAIR_NEEDED", "").strip().lower() == "true"
     if execution_file:
         primary_text = _agent_result_candidate(execution_file)
         repaired_text = _agent_result_candidate(repair_execution_file)
@@ -1938,6 +1940,7 @@ def cmd_nl_route():
         primary_text,
         repaired_text,
         repair_claim_admitted=repair_claim_admitted,
+        repair_needed=repair_needed,
         primary_trusted=primary_trusted,
         repair_trusted=repair_trusted,
     )
