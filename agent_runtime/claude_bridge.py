@@ -253,7 +253,7 @@ def _enforcement(path: str, task: dict[str, Any], execution_file: str, handoff_s
         return None
     expected_permissions = {"actions": "read", "contents": "read", "issues": "none"}
     action = task["metadata"]["action"]
-    expected_readonly_token = "broker-only" if action.endswith(".search") else "absent"
+    expected_readonly_token = "in-process" if action.endswith(".search") else "absent"
     action_metadata_sha = proof.get("actionMetadataSha256")
     action_metadata_quality = proof.get("actionMetadataQuality")
     observation_before = proof.get("preActionInputObservationSha256")

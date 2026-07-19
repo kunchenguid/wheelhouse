@@ -984,7 +984,7 @@ def claude_isolation(action: str) -> dict[str, Any]:
         "writableRoots": ["/github/workspace", "/tmp"],
         "modelNetwork": {"mode": "runner-default", "allowedHosts": []},
         "toolNetwork": {
-            "mode": "broker-only" if action.endswith(".search") else "none"
+            "mode": "runner-default" if action.endswith(".search") else "none"
         },
         "inheritEnvironment": True,
         "dropCapabilities": False,
@@ -1045,7 +1045,7 @@ def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
             "name": "credentials.isolated",
             "constraints": {
                 "fleetToken": "absent",
-                "readonlyToken": "broker-only"
+                "readonlyToken": "in-process"
                 if action.endswith(".search")
                 else "absent",
             },
