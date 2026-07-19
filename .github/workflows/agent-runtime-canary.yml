@@ -1,0 +1,41 @@
+name: Agent Runtime canary
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/agent-runtime-canary.yml"
+      - ".github/workflows/claude-model.yml"
+      - "agent_runtime/**"
+      - "tests/fixtures/claude-action-native-output.test.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  direct-runtime:
+    name: Direct runtime sandbox and install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Exercise the production Bubblewrap prerequisite
+        run: |
+          bash agent_runtime/install_direct_runtime.sh \
+            sandbox agent_runtime/runtime.lock.json
+          python - <<'PY'
+          from agent_runtime.sandbox import host_proof
+          proof = host_proof("claude-cli")
+          assert proof["implementation"] == "bubblewrap-network-namespace-v1"
+          assert proof["externalSandbox"] is True
+          assert proof["networkProxy"] is True
+          assert proof["testOnly"] is False
+          PY
+
+      - name: Verify the production Claude binary without credentials
+        run: |
+          bash agent_runtime/install_direct_runtime.sh \
+            claude agent_runtime/runtime.lock.json "$RUNNER_TEMP/wheelhouse-claude-cli"

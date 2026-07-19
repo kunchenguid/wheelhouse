@@ -1440,7 +1440,7 @@ def build_task(
         "version": shim_version,
         "promptRole": "user",
         "nativeDefault": (
-            "pinned-claude-code-2.1.197"
+            "pinned-claude-code-2.1.215"
             if adapter in ("claude-action-compat", "claude-cli")
             else "pinned-codex-0.144.0"
         ),

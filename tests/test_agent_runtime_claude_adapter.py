@@ -111,25 +111,25 @@ def main():
         ADAPTERS.get("claude-cli") is ClaudeCliAdapter,
     )
     check(
-        "pins: Claude CLI version exact", lock["claude"]["binaryVersion"] == "2.1.197"
+        "pins: Claude CLI version exact", lock["claude"]["binaryVersion"] == "2.1.215"
     )
     check(
         "pins: release commit exact",
-        lock["claude"]["sourceCommit"] == "c8fd8048f30950a21d28734718275aa7e97f5143",
+        lock["claude"]["sourceCommit"] == "316ce99628e89900bf0b1328fed3b8fec0c0c92d",
     )
     check(
         "pins: published platform digests exact",
         {name: row["sha256"] for name, row in lock["claude"]["platforms"].items()}
         == {
-            "linux-x64": "f54e69cbc89b2da61a415700af7ff52a147e862517d4f1b0eecf768448cf7f83",
-            "linux-arm64": "fb48473c467c27615ac799a754f4ef0b68c363e4596cefbb59c3815d51a0cc8a",
-            "darwin-arm64": "8cc0c4d1e4eb1dca3b0cc92ab02ee3505de764e023f8c901761c167b72041fb8",
+            "linux-x64": "c1efffaaf370aa187cb6a09dd93d4e511c646899b0078476f83791b664bde7fe",
+            "linux-arm64": "2b43a3d5b0787217e5d7381fad42c7314292546fe9db9eb8b9b379de90509b30",
+            "darwin-arm64": "90608b5c5ab504e96e77365cea6203d046e291d59b2bb42cf28dcb2ccdf9dd58",
         },
     )
     check(
         "pins: official immutable version URLs recorded",
         all(
-            "/2.1.197/" in row["url"] and row["url"].endswith("/claude")
+            "/2.1.215/" in row["url"] and row["url"].endswith("/claude")
             for row in lock["claude"]["platforms"].values()
         ),
     )
@@ -196,7 +196,7 @@ def main():
 
         binary = root / "claude"
         binary.write_text(
-            "#!/bin/sh\nprintf '2.1.197 (Claude Code)\\n'\n", encoding="utf-8"
+            "#!/bin/sh\nprintf '2.1.215 (Claude Code)\\n'\n", encoding="utf-8"
         )
         binary.chmod(0o700)
         fake_lock = copy.deepcopy(lock)
@@ -240,7 +240,7 @@ def main():
             plan = adapter.compile(task, proof.proof, probe)
         check(
             "probe: exact regular binary and protocol fixture pass",
-            probe.descriptor.value["harnessVersion"] == "2.1.197",
+            probe.descriptor.value["harnessVersion"] == "2.1.215",
         )
         check(
             "descriptor: native schema advertised only by passing direct probe",

@@ -51,6 +51,7 @@ PACKAGED_RUNTIME_FILES = (
     "claude_handoff.py",
     "contract.py",
     "events.py",
+    "install_direct_runtime.sh",
     "redaction.py",
     "runtime.lock.json",
     "sandbox.py",
@@ -63,7 +64,7 @@ PACKAGED_RUNTIME_FILES = (
     "adapters/claude.py",
     "adapters/codex.py",
     "adapters/fake.py",
-    "vendor/claude-stream-json-2.1.197/protocol-fixture.ndjson",
+    "vendor/claude-stream-json-2.1.215/protocol-fixture.ndjson",
 )
 
 

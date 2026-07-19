@@ -26,7 +26,7 @@ from .base import AdapterDescriptor, AdapterProbe, AgentAdapterV1
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "runtime.lock.json"
 PROTOCOL_FIXTURE = (
-    ROOT / "vendor" / "claude-stream-json-2.1.197" / "protocol-fixture.ndjson"
+    ROOT / "vendor" / "claude-stream-json-2.1.215" / "protocol-fixture.ndjson"
 )
 EXPECTED_MODEL = "claude-sonnet-4-6"
 AUTH_ENVIRONMENT = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -72,7 +72,7 @@ def _platform_key() -> str:
 def _protocol_fixture_digest(lock: dict[str, Any]) -> str:
     if (
         lock["claude"].get("protocolFixture")
-        != "vendor/claude-stream-json-2.1.197/protocol-fixture.ndjson"
+        != "vendor/claude-stream-json-2.1.215/protocol-fixture.ndjson"
     ):
         raise ClaudeProbeError("pinned Claude protocol fixture identity mismatch")
     expected = str(lock["claude"]["protocolFixtureSha256"])

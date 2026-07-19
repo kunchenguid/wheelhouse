@@ -51,7 +51,8 @@ Malformed cap configuration fails closed to one, while malformed ceiling or ledg
 Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.
 The model job verifies the complete handoff before hydrating a fresh workspace and initializes a local repository without a remote or network fetch.
 The action lane applies its exact action tool allowlist and leaves only a bounded transcript plus observed enforcement record for its finalizer.
-The direct repair lane verifies Claude CLI `2.1.197` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox.
+The direct repair lane pins the model job to `ubuntu-24.04`, installs and verifies Bubblewrap `0.9.0-1ubuntu0.1`, exercises a real namespace before provider admission, verifies Claude CLI `2.1.215` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox.
+Sandbox-prerequisite failure is recorded separately from Claude download or digest failure, and both remain pre-spend with zero provider requests.
 The action lane revalidates the signed target inputs after invocation and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
 The reusable model workflow validates its observed `GITHUB_SHA` against the expected caller commit before hydration or provider admission.
@@ -69,7 +70,7 @@ The action lane records the pinned action source commit and a checked-out action
 ## Direct Claude schema-repair production profile
 
 `agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary used by both schema-repair actions.
-It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.197` platform digest before spend.
+It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.215` platform digest before spend.
 The runtime lock records the official release commit, immutable download URLs, Linux x64 and arm64 plus Darwin arm64 digests, and a checked protocol fixture digest.
 
 The adapter validates the bound action schema against the small pinned-CLI subset before exposing `output.structured: native-schema`.
@@ -153,7 +154,8 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 The terminal event's `resultSha256` uses the explicit `agent-result-without-artifacts/v1` projection so the normalized-event artifact cannot create a cyclic or order-dependent digest.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
-The direct Claude CLI adapter is pinned separately to CLI `2.1.197`, release commit `c8fd8048f30950a21d28734718275aa7e97f5143`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
+The direct Claude CLI adapter is pinned separately to CLI `2.1.215`, release commit `316ce99628e89900bf0b1328fed3b8fec0c0c92d`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
+The model-free `Agent Runtime canary` job runs the same signed installer script on `ubuntu-24.04`, including the exact package preflight, a minimal Bubblewrap namespace command, binary download, digest check, and `--version` probe without any model credential.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
 Offline evidence verifies the exact wrapper and selected Linux executable tarballs against the committed SHA-512 integrity pins.
 Current production selection cannot reach the disabled Codex installation branches in workflows.
@@ -201,7 +203,7 @@ A bounded Claude transcript is transferred once within the read-only reusable wo
 A schema-invalid but delivered triage candidate remains available to its one-turn repair policy.
 Natural-language primary calls fail closed when the native carrier is missing, multiple, or invalid, including the pinned Claude CLI's pre-2.1.205 silent schema-ignore behavior.
 Those failures receive one separately claimed portable repair task, using only the bounded native candidate when available, then the bounded `decision.json` carrier, then terminal prose.
-Natural-language repair is tokenless, no-tool, and single-turn, and its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
+Natural-language repair has no GitHub or search token exposed to the model, is no-tool and single-turn, and cannot recurse. It still uses the Claude subscription credential and model tokens when it starts. Its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
 Missing triage output and evidence failure do not trigger schema repair.
 Trusted code still performs normalized triage, evidence anchoring, cross-repository reference qualification, natural-language action allowlisting, card claims, revision checks, PR head checks, and auto-merge G0-G7 checks.
 

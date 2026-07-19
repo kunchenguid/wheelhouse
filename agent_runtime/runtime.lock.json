@@ -34,26 +34,32 @@
       "TurnStartResponse.json": "7cfae42a4652fe38119d6a0a625910357c869c448c985513a4cd5966031e18bc"
     }
   },
+  "sandbox": {
+    "runnerImage": "ubuntu-24.04",
+    "ubuntuRelease": "24.04",
+    "bubblewrapPackage": "bubblewrap",
+    "bubblewrapVersion": "0.9.0-1ubuntu0.1"
+  },
   "claude": {
     "adapterVersion": "1.0.0",
     "harness": "claude-code",
-    "binaryVersion": "2.1.197",
-    "sourceCommit": "c8fd8048f30950a21d28734718275aa7e97f5143",
-    "protocol": "stream-json-v2.1.197",
-    "protocolFixture": "vendor/claude-stream-json-2.1.197/protocol-fixture.ndjson",
+    "binaryVersion": "2.1.215",
+    "sourceCommit": "316ce99628e89900bf0b1328fed3b8fec0c0c92d",
+    "protocol": "stream-json-v2.1.215",
+    "protocolFixture": "vendor/claude-stream-json-2.1.215/protocol-fixture.ndjson",
     "protocolFixtureSha256": "986213376b32bbaa334f015c2a2e775648febfda957b917c85c3139faafb2aa5",
     "platforms": {
       "linux-x64": {
-        "url": "https://downloads.claude.ai/claude-code-releases/2.1.197/linux-x64/claude",
-        "sha256": "f54e69cbc89b2da61a415700af7ff52a147e862517d4f1b0eecf768448cf7f83"
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.215/linux-x64/claude",
+        "sha256": "c1efffaaf370aa187cb6a09dd93d4e511c646899b0078476f83791b664bde7fe"
       },
       "linux-arm64": {
-        "url": "https://downloads.claude.ai/claude-code-releases/2.1.197/linux-arm64/claude",
-        "sha256": "fb48473c467c27615ac799a754f4ef0b68c363e4596cefbb59c3815d51a0cc8a"
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.215/linux-arm64/claude",
+        "sha256": "2b43a3d5b0787217e5d7381fad42c7314292546fe9db9eb8b9b379de90509b30"
       },
       "darwin-arm64": {
-        "url": "https://downloads.claude.ai/claude-code-releases/2.1.197/darwin-arm64/claude",
-        "sha256": "8cc0c4d1e4eb1dca3b0cc92ab02ee3505de764e023f8c901761c167b72041fb8"
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.215/darwin-arm64/claude",
+        "sha256": "90608b5c5ab504e96e77365cea6203d046e291d59b2bb42cf28dcb2ccdf9dd58"
       }
     }
   },
