@@ -1945,6 +1945,43 @@ def body_with_triage_result(
     return _replace_state_block(updated, new_state)
 
 
+def body_with_automerge_criteria(body, rows):
+    """Replace both projections of the code-owned auto-merge evaluation.
+
+    This helper is intentionally strict and runs after a queued, deferred,
+    cleared, failed, or completed triage state has been applied to a PR-review
+    card candidate. The visible checklist and its frozen state record are
+    replaced together before the caller's one body write.
+    """
+    state = _unique_state_block(body)
+    if not state or state.get("kind") != "pr-review":
+        raise RuntimeError("auto-merge criteria require one pr-review card state")
+    criteria_start = body.find("### Auto-merge criteria\n")
+    section_ends = [
+        index
+        for index in (
+            body.find(TRIAGE_START, criteria_start),
+            body.find("### Recommended action\n", criteria_start),
+            body.find(DECISION_START, criteria_start),
+        )
+        if index >= 0
+    ]
+    if criteria_start < 0 or not section_ends:
+        raise RuntimeError("card projection is missing criteria section boundary")
+    section_end = min(section_ends)
+    normalized = criteria_schema.normalize_criteria(rows)
+    updated = (
+        body[:criteria_start]
+        + "\n".join(_automerge_criteria_section(normalized))
+        + "\n\n"
+        + body[section_end:]
+    )
+    new_state = dict(state)
+    new_state[AUTOMERGE_CRITERIA_VERSION_FIELD] = criteria_schema.CRITERIA_VERSION
+    new_state[AUTOMERGE_CRITERIA_FIELD] = normalized
+    return _replace_state_block(updated, new_state)
+
+
 def body_with_triage_budget_deferred(body, item, message=TRIAGE_BUDGET_DEFERRED):
     state = _unique_state_block(body)
     kind = item.get("kind", "pr-review")
@@ -4011,6 +4048,11 @@ def mark_triage_queued(
             ceiling=ceiling,
         )
         return None
+    new_body = _atomic_automerge_card_body(
+        new_body,
+        current,
+        owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+    )
     _edit_issue_body(number, new_body)
     verified = get_card(number)
     if not _queue_card_snapshot_matches(verified, number, item, new_body):
@@ -4042,6 +4084,12 @@ def publish_triage_budget_deferral(number, item, body):
         return False
     state = parse_state_block(current.get("body", ""))
     remove_labels = [HOLD_LABEL] if (state or {}).get("held") else []
+    new_body = _atomic_automerge_card_body(
+        new_body,
+        current,
+        owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+        remove_labels=remove_labels,
+    )
     _edit_issue_body(number, new_body, remove_labels=remove_labels)
     return True
 
@@ -4077,6 +4125,11 @@ def clear_triage_queued(number, revision):
     new_body = _body_without_queued_triage(body, revision)
     if new_body == body:
         return False
+    new_body = _atomic_automerge_card_body(
+        new_body,
+        card,
+        owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+    )
     _edit_issue_body(number, new_body)
     return True
 
@@ -4137,6 +4190,117 @@ def publish_dispatch_failure(number, revision, message, owner=""):
             "for retry"
         )
     return False
+
+
+def _automerge_projection_item(owner, state):
+    """Reconstruct the evaluator's code-owned inputs from the candidate card.
+
+    A pr-review card can only represent ``merge-ready`` or ``review-needed``;
+    the stored compliance/test facts deterministically distinguish those two
+    scopes. Same-closing-issue evidence is re-read under the fleet token so the
+    presentation evaluator still fails closed if that live read is incomplete.
+    """
+    comp = state.get("comp", "n/a")
+    tests = state.get("tests", "none")
+    bucket = (
+        "merge-ready"
+        if comp in ("pass", "n/a") and tests == "green"
+        else "review-needed"
+    )
+    item = {
+        "repo": state.get("repo", ""),
+        "number": state.get("number"),
+        "kind": "pr-review",
+        "bucket": bucket,
+        "head_sha": state.get("head_sha", ""),
+        "comp": comp,
+        "tests": tests,
+    }
+    try:
+        complete, overlap = core.same_closing_issue_overlap(
+            owner, item["repo"], item["number"]
+        )
+    except Exception as error:
+        print(
+            "::warning::auto-merge card projection could not re-read "
+            "same-closing-issue evidence: %s" % str(error)[:160]
+        )
+    else:
+        if complete:
+            item["same_closing_issue_overlap"] = overlap
+    return item
+
+
+def _evaluate_automerge_card_projection(body, card, owner, remove_labels=None):
+    """Evaluate G0-G6 exactly once against the post-triage card candidate.
+
+    Cross-repo reads run only under ``WHEELHOUSE_FLEET_TOKEN``. This function
+    restores the default card token before returning for the sole issue-body
+    write, preserving the boundary that prevents card maintenance from
+    re-triggering itself.
+    """
+    fleet_token = os.environ.get("WHEELHOUSE_FLEET_TOKEN", "")
+    if not fleet_token:
+        raise RuntimeError("WHEELHOUSE_FLEET_TOKEN is required for card projection")
+    state = _unique_state_block(body)
+    if not state or state.get("kind") != "pr-review":
+        raise RuntimeError("atomic projection requires one pr-review card state")
+    projection_owner = owner or core.get_owner()
+    labels = _label_names(card.get("labels")) - set(remove_labels or [])
+    card_entry = {
+        "issue": card.get("number"),
+        "state": state,
+        "labels": labels,
+        "body": body,
+        "updated_at": card_updated_at(card),
+        "comment_count": _card_comment_count(card),
+    }
+    previous_token = os.environ.get("GH_TOKEN")
+    os.environ["GH_TOKEN"] = fleet_token
+    try:
+        # Lazy import avoids the module cycle: auto_merge owns the gates and
+        # imports this renderer for card/state primitives.
+        import auto_merge
+
+        cfg = core.load_config()
+        item = _automerge_projection_item(projection_owner, state)
+        result = auto_merge.evaluate_candidate(
+            projection_owner,
+            item,
+            card_entry,
+            (cfg.get("repos") or {}).get(item["repo"], {}),
+            cfg.get("auto_merge", False),
+            {login.casefold() for login in core.maintainers()},
+            full_evaluation=True,
+            require_claim=False,
+        )
+    except Exception as error:
+        print(
+            "::warning::authoritative auto-merge card projection failed: %s"
+            % str(error)[:160]
+        )
+        return criteria_schema.unavailable_criteria(
+            "authoritative evaluation failed: %s" % str(error)[:160]
+        )
+    finally:
+        if previous_token is None:
+            os.environ.pop("GH_TOKEN", None)
+        else:
+            os.environ["GH_TOKEN"] = previous_token
+    return result["criteria"]
+
+
+def _atomic_automerge_card_body(body, card, owner="", remove_labels=None):
+    """Return one PR-review body whose triage and criteria cannot diverge."""
+    state = _unique_state_block(body)
+    if state is None:
+        raise RuntimeError("atomic card projection requires one trusted state block")
+    if state.get("kind") != "pr-review":
+        return body
+    criteria = _evaluate_automerge_card_projection(
+        body, card, owner, remove_labels=remove_labels
+    )
+    return body_with_automerge_criteria(body, criteria)
 
 
 def update_card_triage(
@@ -4207,6 +4371,9 @@ def update_card_triage(
     )
     if new_body == body and not held:
         return False
+    new_body = _atomic_automerge_card_body(
+        new_body, card, owner, remove_labels=remove_labels
+    )
     _edit_issue_body(number, new_body, remove_labels=remove_labels)
     return True
 

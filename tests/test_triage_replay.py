@@ -23,6 +23,12 @@ from scripts import agent_claim  # noqa: E402
 import render_card as rc  # noqa: E402
 import triage_replay as replay  # noqa: E402
 
+# Replay tests exercise exact-revision lifecycle behavior; the atomic
+# evaluator/write integration has dedicated coverage in test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline replay fixture")
+)
+
 
 @contextmanager
 def patched(module, replacements):
@@ -1533,6 +1539,13 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "args+=(--dry-run)" in step["run"]
     assert "REPLAY_ATTEMPTS_RESET_CARDS" in step["run"]
     assert "--attempts-reset-cards" in step["run"]
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert step["env"]["FLEET_TOKEN"] == "${{ secrets.FLEET_TOKEN }}"
+    assert step["env"]["WHEELHOUSE_FLEET_TOKEN"] == "${{ secrets.FLEET_TOKEN }}"
+    assert (
+        step["env"]["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"]
+        == "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}"
+    )
     assert "--dry-run" in (ROOT / "scripts/triage_replay.py").read_text(
         encoding="utf-8"
     )

@@ -20,6 +20,12 @@ import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# Closed-card lifecycle tests use an in-memory GitHub boundary and isolate that
+# lifecycle from the cross-repo projection covered by test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline card-reuse fixture")
+)
+
 _failures = []
 
 
@@ -203,7 +209,9 @@ class LifecycleGitHub:
         held=False,
         has_token=False,
     ):
-        card = rc.render(current_item, held=held or rc.should_hold(current_item, has_token))
+        card = rc.render(
+            current_item, held=held or rc.should_hold(current_item, has_token)
+        )
         self.issues[number] = {
             "number": number,
             "body": card["body"],
@@ -286,9 +294,7 @@ class LifecycleGitHub:
     def _close(self, issue):
         issue["state"] = "CLOSED"
         provenance = rc.reconcile_soft_close_provenance(issue["body"])
-        issue["closed_at"] = (
-            provenance["at"] if provenance else "2026-07-13T13:59:59Z"
-        )
+        issue["closed_at"] = provenance["at"] if provenance else "2026-07-13T13:59:59Z"
         issue["closed_by"] = rc.CARD_AUTOMATION_AUTHOR
         issue["updated_at"] = issue["closed_at"]
         issue["timeline"].append(
@@ -337,7 +343,8 @@ class LifecycleGitHub:
                 continue
             # Open-list and search indexes lag independently of issue-by-number.
             if requested_state == "OPEN" and not (
-                self._list_visible(issue["number"]) and self._search_visible(issue["number"])
+                self._list_visible(issue["number"])
+                and self._search_visible(issue["number"])
             ):
                 continue
             rows.append(self._rest(issue))
@@ -375,9 +382,7 @@ class LifecycleGitHub:
                 per_page = int((query.get("per_page") or ["100"])[0])
                 start = (page - 1) * per_page
                 rows = self.issues[number]["timeline"][start : start + per_page]
-                return SimpleNamespace(
-                    returncode=0, stdout=json.dumps(rows), stderr=""
-                )
+                return SimpleNamespace(returncode=0, stdout=json.dumps(rows), stderr="")
             number = int(args[1].rsplit("/", 1)[-1])
             if number in self.direct_issue_overrides:
                 override = self.direct_issue_overrides[number]
@@ -412,9 +417,7 @@ class LifecycleGitHub:
             with open(args[args.index("--body-file") + 1]) as body_file:
                 body = body_file.read()
             names = [
-                args[index + 1]
-                for index, arg in enumerate(args)
-                if arg == "--label"
+                args[index + 1] for index, arg in enumerate(args) if arg == "--label"
             ]
             self.issues[number] = {
                 "number": number,
@@ -519,6 +522,7 @@ class LifecycleGitHub:
         old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
         rc._gh = self.gh
         rc._lifecycle_sleep = self._sleep
+
         # Daily-ledger behavior has its own exhaustive offline boundary suite in
         # test_triage_budget.py. This lifecycle fixture focuses on the card side
         # of the verified queue checkpoint while preserving the real permit API.
@@ -664,8 +668,7 @@ def test_new_head_reopens_and_drops_stale_analysis():
         and "automerge_audit_pending" not in state
         and not rc.reconcile_absence_needs_clear(github.issues[7]["body"])
         and all(
-            "forged" not in row
-            for row in state.get(rc.AUTOMERGE_CRITERIA_FIELD, [])
+            "forged" not in row for row in state.get(rc.AUTOMERGE_CRITERIA_FIELD, [])
         ),
     )
     check(
@@ -680,7 +683,10 @@ def test_new_head_reopens_and_drops_stale_analysis():
     )
     check(
         "new-head: target-updated warning is posted",
-        any("Target updated: head moved" in comment["body"] for comment in github.issues[7]["comments"]),
+        any(
+            "Target updated: head moved" in comment["body"]
+            for comment in github.issues[7]["comments"]
+        ),
     )
 
 
@@ -904,7 +910,9 @@ def test_forbidden_candidates_never_reopen():
             eligible, _reason = rc.reusable_closed_card(candidate, item())
         except rc.CardLifecycleError:
             eligible = False
-        all_closed = all_closed and not eligible and github.issues[7]["state"] == "CLOSED"
+        all_closed = (
+            all_closed and not eligible and github.issues[7]["state"] == "CLOSED"
+        )
     check(
         "forbidden resolved/declined/auto-merged/owner/blocked/held/audit cases stay closed",
         all_closed,
@@ -939,7 +947,9 @@ def test_legacy_card_is_not_guessed_reusable():
     )
     check(
         "legacy: current safe create behavior remains available",
-        number == 8 and github.issues[8]["state"] == "OPEN" and github.create_calls == 1,
+        number == 8
+        and github.issues[8]["state"] == "OPEN"
+        and github.create_calls == 1,
     )
 
 
@@ -1006,9 +1016,7 @@ def test_post_close_timeline_refuses_human_unreadable_and_incomplete_history():
             "created_at": incomplete.issues[7]["updated_at"],
             "actor": {"login": rc.CARD_AUTOMATION_AUTHOR},
         }
-    ] * (
-        rc.POST_CLOSE_TIMELINE_PAGE_SIZE * rc.POST_CLOSE_TIMELINE_MAX_PAGES
-    )
+    ] * (rc.POST_CLOSE_TIMELINE_PAGE_SIZE * rc.POST_CLOSE_TIMELINE_MAX_PAGES)
     outcomes.append(
         incomplete._with_boundary(
             lambda: rc.reusable_closed_card(incomplete.normalized(7), item())[0]
@@ -1267,7 +1275,10 @@ def test_full_lifecycle_wait_then_new_head():
         cross_repo=False,
         mergeable="CONFLICTING",
     )
-    check("full lifecycle: conflict enters waiting phase", waiting_bucket == "needs-rebase")
+    check(
+        "full lifecycle: conflict enters waiting phase",
+        waiting_bucket == "needs-rebase",
+    )
     github.soft_close()
     github.run_reconcile(scan_payload([]))
     check(
@@ -1296,9 +1307,7 @@ def test_full_lifecycle_wait_then_new_head():
 
     add_triage_and_verdict(issue, current)
     fresh_state = core.parse_state_block(issue["body"])
-    after_fresh = auto_merge.verdict_eligible(
-        fresh_state.get("automerge_verdict")
-    )[0]
+    after_fresh = auto_merge.verdict_eligible(fresh_state.get("automerge_verdict"))[0]
     check(
         "full lifecycle: a current-head successful triage can restore verdict eligibility",
         fresh_state.get("triaged_sha") == current["head_sha"] and after_fresh is True,
@@ -1308,7 +1317,9 @@ def test_full_lifecycle_wait_then_new_head():
 def test_list_lag_create_is_retained_and_queued_once():
     """Production shape: create response + direct read OK, open-list lag 0..30s+."""
     # Probe sleeps advance fake time by up to ~(ATTEMPTS-1)*DELAY (~0.5s).
-    probe_budget = (rc.LIFECYCLE_VERIFY_ATTEMPTS - 1) * rc.LIFECYCLE_VERIFY_DELAY_SECONDS
+    probe_budget = (
+        rc.LIFECYCLE_VERIFY_ATTEMPTS - 1
+    ) * rc.LIFECYCLE_VERIFY_DELAY_SECONDS
     for lag in (0.0, 0.5, 5.0, 30.0, 45.0):
         github = LifecycleGitHub(start_empty=True)
         github.list_index_lag_seconds = lag
@@ -1367,9 +1378,7 @@ def test_list_lag_create_is_retained_and_queued_once():
         )
 
         out = github.run_reconcile(scan_payload([current]), token=True)
-        open_numbers = [
-            n for n, iss in github.issues.items() if iss["state"] == "OPEN"
-        ]
+        open_numbers = [n for n, iss in github.issues.items() if iss["state"] == "OPEN"]
         check(
             "list-lag %.1fs: eventually one open card and no create churn" % lag,
             open_numbers == [number]
@@ -1413,7 +1422,9 @@ def test_trusted_open_duplicate_before_or_after_create_fails_closed():
     number = github.event_upsert(existing, has_token=True)
     check(
         "pre-existing open card is reused without a second create",
-        number == 7 and github.create_calls == 0 and github.issues[7]["state"] == "OPEN",
+        number == 7
+        and github.create_calls == 0
+        and github.issues[7]["state"] == "OPEN",
     )
 
     # Peer becomes list-visible after create while new card is still lagging.
@@ -1428,9 +1439,7 @@ def test_trusted_open_duplicate_before_or_after_create_fails_closed():
         failed = True
         outcome = error.outcome
         should_rollback = error.should_rollback
-    created = [
-        n for n, iss in racing.issues.items() if iss.get("body")
-    ]
+    created = [n for n, iss in racing.issues.items() if iss.get("body")]
     closed_resolved = [
         n
         for n, iss in racing.issues.items()
@@ -1549,7 +1558,9 @@ def test_malformed_direct_objects_fail_closed():
     run_case("untrusted author", wrong_author)
     run_case("wrong target", wrong_target, expect_resolved=False, expected_state="OPEN")
     run_case("wrong kind", wrong_kind, expect_resolved=False, expected_state="OPEN")
-    run_case("body mismatch", body_mismatch, expect_resolved=False, expected_state="OPEN")
+    run_case(
+        "body mismatch", body_mismatch, expect_resolved=False, expected_state="OPEN"
+    )
     check(
         "malformed direct objects preserve changed bodies and close unchanged creates",
         all(ok for _name, ok in cases),
@@ -1610,7 +1621,8 @@ def test_thirty_sequential_and_burst_creates_under_list_lag():
         github.create_calls == 60
         and github.close_calls == 0
         and all(
-            github.issues[n]["state"] == "OPEN" and "resolved" not in label_names(github.issues[n])
+            github.issues[n]["state"] == "OPEN"
+            and "resolved" not in label_names(github.issues[n])
             for n in burst_numbers
         ),
     )

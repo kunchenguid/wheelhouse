@@ -146,6 +146,8 @@ jobs:
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.replay_wave != '' && inputs.replay_dry_run) }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/reconcile.py scan.json cards.json automerge.json
@@ -162,6 +164,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN: ${{ secrets.READONLY_TOKEN != '' }}

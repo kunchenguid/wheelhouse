@@ -437,6 +437,8 @@ jobs:
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ISSUE: ${{ steps.resolve.outputs.issue }}
           REVISION: ${{ steps.resolve.outputs.revision }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -461,6 +463,8 @@ jobs:
             PYTHONNOUSERSITE=1 \
             HOME="$TRUSTED_HOME" \
             GH_TOKEN="$GH_TOKEN" \
+            WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" \
+            WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" \
             GH_REPO="$GH_REPO" \
             GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1169,6 +1173,8 @@ jobs:
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ISSUE: ${{ steps.resolve.outputs.issue }}
           REVISION: ${{ steps.resolve.outputs.revision }}
           HEAD_OK: ${{ steps.post-model-freshness.outputs.fresh == 'false' && 'false' || steps.event-freshness.outputs.fresh == 'false' && 'false' || steps.verify_head.outputs.head_ok }}
@@ -1210,6 +1216,8 @@ jobs:
               PYTHONNOUSERSITE=1 \
               HOME="$TRUSTED_HOME" \
               GH_TOKEN="$GH_TOKEN" \
+              WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" \
+              WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" \
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1227,6 +1235,8 @@ jobs:
               PYTHONNOUSERSITE=1 \
               HOME="$TRUSTED_HOME" \
               GH_TOKEN="$GH_TOKEN" \
+              WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" \
+              WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" \
               GH_REPO="$GH_REPO" \
               GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1258,6 +1268,8 @@ jobs:
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ISSUE: ${{ github.event.inputs.issue }}
           KIND: ${{ github.event.inputs.kind }}
           HEAD_SHA: ${{ github.event.inputs.head_sha }}
@@ -1315,6 +1327,8 @@ jobs:
             PYTHONNOUSERSITE=1 \
             HOME="$TRUSTED_HOME" \
             GH_TOKEN="$GH_TOKEN" \
+            WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" \
+            WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" \
             GH_REPO="$GH_REPO" \
             GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
@@ -1402,7 +1416,38 @@ jobs:
           new_state = dict(state)
           for key in ("triaged_sha", "triage_status", "triage_error"):
               new_state.pop(key, None)
-          clean = triage_re.sub("\n", body).strip() + "\n"
+          clean = triage_re.sub("\n", body).strip()
+          fallback_section = "\n".join((
+              "<!-- wheelhouse-triage:start -->",
+              "### Triage",
+              "",
+              "> [!WARNING]",
+              "> **Security fallback:** Trusted source was unavailable, so Wheelhouse cleared the queued triage cache without re-evaluating Auto-merge criteria. The checklist may temporarily reflect the prior queued state; this is intentional until trusted card maintenance runs.",
+              "<!-- wheelhouse-triage:end -->",
+          ))
+          section_marker = "\n### Recommended action"
+          section_index = clean.find(section_marker)
+          if section_index >= 0:
+              clean = (
+                  clean[:section_index].rstrip()
+                  + "\n\n"
+                  + fallback_section
+                  + "\n"
+                  + clean[section_index:]
+              )
+          else:
+              state_index = clean.rfind("<!-- wheelhouse-state:")
+              if state_index >= 0:
+                  clean = (
+                      clean[:state_index].rstrip()
+                      + "\n\n"
+                      + fallback_section
+                      + "\n\n"
+                      + clean[state_index:]
+                  )
+              else:
+                  clean = clean.rstrip() + "\n\n" + fallback_section
+          clean = clean.rstrip() + "\n"
           marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
               new_state,
               separators=(",", ":"),
@@ -1823,6 +1868,8 @@ jobs:
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ISSUE: ${{ needs.triage.outputs.issue }}
           REVISION: ${{ needs.triage.outputs.revision }}
           HEAD_OK: ${{ steps.post-model-freshness.outputs.fresh == 'false' && 'false' || needs.triage.outputs.event_fresh == 'false' && 'false' || needs.triage.outputs.head_ok }}
@@ -1845,7 +1892,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$TRUSTED_HOME"
-          common=(PATH="$TRUSTED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 HOME="$TRUSTED_HOME" GH_TOKEN="$GH_TOKEN" GH_REPO="$GH_REPO" GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" GITHUB_OUTPUT="$GITHUB_OUTPUT")
+          common=(PATH="$TRUSTED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 HOME="$TRUSTED_HOME" GH_TOKEN="$GH_TOKEN" WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" GH_REPO="$GH_REPO" GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" GITHUB_OUTPUT="$GITHUB_OUTPUT")
           if [ "$PRIMARY_ERROR_CODE" = "source.revision_mismatch" ]; then
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
               --issue "$ISSUE" --revision "$REVISION" \
@@ -1877,6 +1924,8 @@ jobs:
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ISSUE: ${{ github.event.inputs.issue }}
           KIND: ${{ github.event.inputs.kind }}
           HEAD_SHA: ${{ github.event.inputs.head_sha }}
@@ -1890,6 +1939,8 @@ jobs:
             PATH="${{ steps.trusted-src.outputs.safe_path }}" \
             PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
             HOME="$TRUSTED_HOME" GH_TOKEN="$GH_TOKEN" GH_REPO="$GH_REPO" \
+            WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN" \
+            WHEELHOUSE_AUTOMERGE_HAS_TOKEN="$WHEELHOUSE_AUTOMERGE_HAS_TOKEN" \
             GH_PROMPT_DISABLED=1 GITHUB_REPOSITORY_OWNER="${{ github.repository_owner }}" \
             GITHUB_OUTPUT="$GITHUB_OUTPUT" \
             "${{ steps.trusted-src.outputs.python }}" scripts/render_card.py triage-recover \

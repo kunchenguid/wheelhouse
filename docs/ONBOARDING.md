@@ -78,7 +78,7 @@ Cards already labeled `processing`, `resolved`, or `blocked` are left untouched 
 When auto triage is eligible, the hub reserves daily budget and writes `triaged_sha` plus `triage_attempts` for the current revision before dispatching `triage.yml`, so a failed or timed-out run does not retry every scan.
 Trusted recovery paths may clear the cache for a later retry, but the next dispatch still has to pass the per-revision attempt cap and daily ceiling.
 For a held card, any completed attempt publishes the decision boxes fail-open; if workflow dispatch itself fails after the cache write, the hub publishes the card immediately with an unavailable note.
-If `triage.yml` fails before its update step, its final recovery step publishes a genuinely stuck held card for that exact revision, or clears the queued cache when trusted source setup was unavailable so a later scan can retry.
+If `triage.yml` fails before its update step, see the [pending-triage troubleshooting guidance](../README.md#troubleshooting) for its kind-specific recovery behavior.
 For a newly created card, that queueing happens in the same ingest run, not only on the later hourly scan.
 
 > **Legacy event type.** Before the rename to Wheelhouse the event type was `triage-item`. `ingest.yml` still listens for both (`types: [wheelhouse-item, triage-item]`), so a source repo wired up before the rename keeps working - but new dispatchers should send `wheelhouse-item`.

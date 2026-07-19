@@ -25,6 +25,13 @@ import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# This suite isolates triage lifecycle mechanics from cross-repo gate reads.
+# The atomic evaluator/write integration is covered end to end in
+# test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline triage lifecycle fixture")
+)
+
 CLAUDE_ACTION_PIN = (
     "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
 )
@@ -777,8 +784,7 @@ def test_triage_requires_evidence_field():
     )
     check(
         "evidence: a list containing a non-string item is rejected",
-        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", 3]))
-        is None,
+        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", 3])) is None,
     )
     check(
         "evidence: parse_triage_json rejects a complete-but-evidence-less result",
@@ -1993,7 +1999,9 @@ def test_reconcile_refreshes_issue_updated_at_when_auto_triage_disabled():
         "reconcile(issue): disabled triage does not do a separate activity stamp",
         calls["reflect"] == [],
     )
-    refreshed_state = core.parse_state_block(card_row(calls["upsert"][0]["item"])["body"])
+    refreshed_state = core.parse_state_block(
+        card_row(calls["upsert"][0]["item"])["body"]
+    )
     check(
         "reconcile(issue): refreshed item uses the new updated_at",
         calls["upsert"][0]["item"].get("updated_at") == "2024-06-01T00:00:00Z",
@@ -2048,8 +2056,14 @@ def test_triage_workflow_issue_path_isolation():
     resolve = step_by_id(steps, "resolve")
     verify_head = step_by_id(steps, "verify_head")
     prepare = step_by_id(steps, "prepare")
-    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
-    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"][
+        "model"
+    ]["steps"]
+    claude_steps = [
+        s
+        for s in model_steps
+        if s.get("id") in ("triage_search", "triage_local", "triage_repair")
+    ]
 
     check(
         "workflow: kind input exists and is required",
@@ -2183,7 +2197,8 @@ def test_triage_workflow_issue_path_isolation():
         )
         check(
             "workflow(issue path): Claude uses immutable model",
-            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
+            "--model claude-sonnet-4-6"
+            in str((step.get("with") or {}).get("claude_args", "")),
         )
 
     check(
@@ -2268,14 +2283,18 @@ def test_triage_workflow_security_wiring():
             and "card is no longer queued for this auto-triage attempt" in run,
         )
 
-    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
-    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"][
+        "model"
+    ]["steps"]
+    claude_steps = [
+        s
+        for s in model_steps
+        if s.get("id") in ("triage_search", "triage_local", "triage_repair")
+    ]
     # Two MAIN triage branches plus the bounded schema-repair branch.
     main_claude = [s for s in claude_steps if s.get("id") != "triage_repair"]
     repair = step_by_id(model_steps, "triage_repair")
-    check(
-        "workflow: search and no-search Claude branches exist", len(main_claude) == 2
-    )
+    check("workflow: search and no-search Claude branches exist", len(main_claude) == 2)
     # Every Claude step (main triage AND repair) shares the same security posture.
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
@@ -2285,7 +2304,8 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: Claude uses immutable model",
-            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
+            "--model claude-sonnet-4-6"
+            in str((step.get("with") or {}).get("claude_args", "")),
         )
         check(
             "security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped
@@ -2479,8 +2499,10 @@ def test_triage_workflow_security_wiring():
             and "scripts/render_card.py triage-fail" in run,
         )
         check(
-            "workflow: final card update never receives FLEET_TOKEN",
-            "FLEET_TOKEN" not in dumped,
+            "workflow: final card update keeps card and fleet tokens separated",
+            env.get("GH_TOKEN") == "${{ github.token }}"
+            and env.get("WHEELHOUSE_FLEET_TOKEN") == "${{ secrets.FLEET_TOKEN }}"
+            and run.count('WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"') == 2,
         )
         check(
             "workflow: final card update carries GITHUB_REPOSITORY_OWNER for ref qualification",
@@ -2569,9 +2591,10 @@ def test_triage_workflow_security_wiring():
             "CLAUDE_CODE_OAUTH_TOKEN is absent" in run,
         )
         check(
-            "workflow: recovery step runs under the default token (no FLEET_TOKEN)",
+            "workflow: recovery keeps the default card token and passes the fleet read token separately",
             env.get("GH_TOKEN") == "${{ github.token }}"
-            and "FLEET_TOKEN" not in yaml.safe_dump(recover),
+            and env.get("WHEELHOUSE_FLEET_TOKEN") == "${{ secrets.FLEET_TOKEN }}"
+            and 'WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"' in run,
         )
     check("workflow: no-source queued-cache fallback exists", fallback is not None)
     if fallback:
@@ -2582,7 +2605,7 @@ def test_triage_workflow_security_wiring():
             fallback.get("if") == "always() && steps.trusted-src.outputs.path == ''",
         )
         check(
-            "workflow: no-source fallback reads RAW dispatch inputs",
+            "workflow: no-source fallback reads RAW dispatch inputs for both kinds",
             env.get("ISSUE") == "${{ github.event.inputs.issue }}"
             and env.get("KIND") == "${{ github.event.inputs.kind }}"
             and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
@@ -2600,6 +2623,22 @@ def test_triage_workflow_security_wiring():
             and "gh issue edit" in run
             and "future scan can retry" in run,
         )
+        check(
+            "workflow: no-source fallback retains PR-review coverage",
+            'elif [ "$KIND" = "pr-review" ]' in run and 'REVISION="$HEAD_SHA"' in run,
+        )
+        check(
+            "workflow: no-source fallback visibly marks its non-atomic exception",
+            "### Triage" in run
+            and "Security fallback" in run
+            and "without re-evaluating Auto-merge criteria" in run
+            and "until trusted card maintenance runs" in run,
+        )
+        check(
+            "workflow: no-source fallback exception is documented",
+            "no-trusted-source security fallback" in read("AGENTS.md")
+            and "visible `### Triage` security-fallback warning" in read("AGENTS.md"),
+        )
     recover_i = step_index(
         steps,
         lambda s: s.get("name")
@@ -2608,6 +2647,81 @@ def test_triage_workflow_security_wiring():
     check(
         "workflow: recovery step runs after the update step",
         None not in (update_i, recover_i) and update_i < recover_i,
+    )
+
+
+def test_no_source_pr_fallback_writes_visible_security_notice():
+    """Run the workflow's source-less transformer against a queued PR card."""
+    steps = load_yaml(".github", "workflows", "triage.yml")["jobs"]["triage"]["steps"]
+    fallback = step_by_name(
+        steps,
+        "Clear queued triage cache if trusted source is unavailable",
+    )
+    run = str((fallback or {}).get("run", ""))
+    heredoc_start = 'python3 - "$card_json" "$body_file" <<\'PY\'\n'
+    start = run.find(heredoc_start)
+    end = run.find("\nPY\n", start + len(heredoc_start))
+    check(
+        "fallback notice: inline card transformer is extractable",
+        fallback is not None and start >= 0 and end > start,
+    )
+    if fallback is None or start < 0 or end <= start:
+        return
+
+    transform = run[start + len(heredoc_start) : end]
+    candidate = item()
+    rendered = rc.render(candidate, held=True)
+    queued_body = rc.body_with_triage_queued(rendered["body"], candidate)
+    queued_state = core.parse_state_block(queued_body)
+    card = {
+        "state": "OPEN",
+        "labels": rendered["labels"],
+        "body": queued_body,
+    }
+
+    with tempfile.TemporaryDirectory() as directory:
+        card_path = os.path.join(directory, "card.json")
+        body_path = os.path.join(directory, "body.md")
+        with open(card_path, "w") as f:
+            json.dump(card, f)
+        env = dict(os.environ)
+        env.update({"KIND": "pr-review", "REVISION": candidate["head_sha"]})
+        result = subprocess.run(
+            [sys.executable, "-", card_path, body_path],
+            input=transform,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        check(
+            "fallback notice: PR-review transformer succeeds",
+            result.returncode == 0 and os.path.exists(body_path),
+        )
+        if result.returncode != 0 or not os.path.exists(body_path):
+            return
+        with open(body_path) as f:
+            written_body = f.read()
+
+    written_state = core.parse_state_block(written_body)
+    check(
+        "fallback notice: card visibly identifies the security fallback",
+        "### Triage" in written_body
+        and "> **Security fallback:** Trusted source was unavailable" in written_body
+        and "without re-evaluating Auto-merge criteria" in written_body
+        and "checklist may temporarily reflect the prior queued state" in written_body,
+    )
+    check(
+        "fallback notice: queued cache clears while frozen criteria remain explicit",
+        written_state.get("triaged_sha") is None
+        and written_state.get("triage_status") is None
+        and written_state.get(rc.AUTOMERGE_CRITERIA_FIELD)
+        == queued_state.get(rc.AUTOMERGE_CRITERIA_FIELD),
+    )
+    check(
+        "fallback notice: exactly one managed Triage notice is written",
+        written_body.count("<!-- wheelhouse-triage:start -->") == 1
+        and written_body.count("<!-- wheelhouse-triage:end -->") == 1,
     )
 
 
@@ -2983,9 +3097,7 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
     try:
         for label, scenario_item, has_token, expect_held in scenarios:
             captured = {}
-            rc._create_and_verify_card = (
-                lambda item_, card: captured.update(card) or 99
-            )
+            rc._create_and_verify_card = lambda item_, card: captured.update(card) or 99
             number = rc.upsert_card(scenario_item, has_token=has_token)
             check("create: %s" % label, number == 99)
             check(
@@ -3609,6 +3721,7 @@ def main():
     test_auto_triage_toggles_are_independent_end_to_end()
     test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()
+    test_no_source_pr_fallback_writes_visible_security_notice()
     test_scan_and_ingest_can_dispatch_with_default_token()
     test_should_hold_gates()
     test_render_held_card_placeholder_and_labels()
