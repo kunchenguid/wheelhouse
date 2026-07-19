@@ -1335,13 +1335,12 @@ jobs:
             GITHUB_OUTPUT="$GITHUB_OUTPUT" \
             "$TRUSTED_PYTHON" "${command[@]}"
 
-      - name: Clear queued triage cache if trusted source is unavailable
-        if: always() && steps.trusted-src.outputs.path == ''
+      - name: Clear queued issue-triage cache if trusted source is unavailable
+        if: always() && steps.trusted-src.outputs.path == '' && github.event.inputs.kind == 'issue-triage'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.inputs.issue }}
           KIND: ${{ github.event.inputs.kind }}
-          HEAD_SHA: ${{ github.event.inputs.head_sha }}
           REVISION_INPUT: ${{ github.event.inputs.revision }}
           GH_REPO: ${{ github.repository }}
           GH_PROMPT_DISABLED: "1"
@@ -1358,14 +1357,11 @@ jobs:
             echo "recover: no valid issue number in the dispatch inputs, nothing to clear"
             exit 0
           fi
-          if [ "$KIND" = "issue-triage" ]; then
-            REVISION="$REVISION_INPUT"
-          elif [ "$KIND" = "pr-review" ]; then
-            REVISION="$HEAD_SHA"
-          else
+          if [ "$KIND" != "issue-triage" ]; then
             echo "recover: no supported kind in the dispatch inputs, nothing to clear"
             exit 0
           fi
+          REVISION="$REVISION_INPUT"
           if [ -z "$REVISION" ]; then
             echo "recover: no revision in the dispatch inputs, nothing to clear"
             exit 0
@@ -1416,38 +1412,7 @@ jobs:
           new_state = dict(state)
           for key in ("triaged_sha", "triage_status", "triage_error"):
               new_state.pop(key, None)
-          clean = triage_re.sub("\n", body).strip()
-          fallback_section = "\n".join((
-              "<!-- wheelhouse-triage:start -->",
-              "### Triage",
-              "",
-              "> [!WARNING]",
-              "> **Security fallback:** Trusted source was unavailable, so Wheelhouse cleared the queued triage cache without re-evaluating Auto-merge criteria. The checklist may temporarily reflect the prior queued state; this is intentional until trusted card maintenance runs.",
-              "<!-- wheelhouse-triage:end -->",
-          ))
-          section_marker = "\n### Recommended action"
-          section_index = clean.find(section_marker)
-          if section_index >= 0:
-              clean = (
-                  clean[:section_index].rstrip()
-                  + "\n\n"
-                  + fallback_section
-                  + "\n"
-                  + clean[section_index:]
-              )
-          else:
-              state_index = clean.rfind("<!-- wheelhouse-state:")
-              if state_index >= 0:
-                  clean = (
-                      clean[:state_index].rstrip()
-                      + "\n\n"
-                      + fallback_section
-                      + "\n\n"
-                      + clean[state_index:]
-                  )
-              else:
-                  clean = clean.rstrip() + "\n\n" + fallback_section
-          clean = clean.rstrip() + "\n"
+          clean = triage_re.sub("\n", body).strip() + "\n"
           marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
               new_state,
               separators=(",", ":"),

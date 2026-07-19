@@ -2214,7 +2214,7 @@ def test_triage_workflow_security_wiring():
     update = step_by_name(steps, "Update the decision card")
     fallback = step_by_name(
         steps,
-        "Clear queued triage cache if trusted source is unavailable",
+        "Clear queued issue-triage cache if trusted source is unavailable",
     )
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
@@ -2591,15 +2591,16 @@ def test_triage_workflow_security_wiring():
         env = fallback.get("env", {})
         run = str(fallback.get("run", ""))
         check(
-            "workflow: no-source fallback runs only when trusted source is absent",
-            fallback.get("if") == "always() && steps.trusted-src.outputs.path == ''",
+            "workflow: no-source fallback runs only for issue-triage without trusted source",
+            fallback.get("if")
+            == "always() && steps.trusted-src.outputs.path == '' && github.event.inputs.kind == 'issue-triage'",
         )
         check(
-            "workflow: no-source fallback reads RAW dispatch inputs",
+            "workflow: no-source fallback reads the raw issue-triage dispatch inputs",
             env.get("ISSUE") == "${{ github.event.inputs.issue }}"
             and env.get("KIND") == "${{ github.event.inputs.kind }}"
-            and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
-            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
+            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}"
+            and "HEAD_SHA" not in env,
         )
         check(
             "workflow: no-source fallback uses only the card token",
@@ -2614,16 +2615,15 @@ def test_triage_workflow_security_wiring():
             and "future scan can retry" in run,
         )
         check(
-            "workflow: no-source fallback visibly marks its non-atomic exception",
-            "### Triage" in run
-            and "Security fallback" in run
-            and "without re-evaluating Auto-merge criteria" in run
-            and "until trusted card maintenance runs" in run,
+            "workflow: no-source fallback cannot write a PR-review triage exception",
+            '"pr-review"' not in run
+            and "Security fallback" not in run
+            and "without re-evaluating Auto-merge criteria" not in run,
         )
         check(
-            "workflow: no-source fallback exception is documented",
-            "no-trusted-source security fallback" in read("AGENTS.md")
-            and "visible `### Triage` security-fallback warning" in read("AGENTS.md"),
+            "workflow: source-less fallback is documented as issue-triage only",
+            "fallback is therefore limited to\n  issue-triage cards" in read("AGENTS.md")
+            and "Every PR-review triage body mutation (queued, deferred, cleared, failed, or completed)" in read("AGENTS.md"),
         )
     recover_i = step_index(
         steps,
