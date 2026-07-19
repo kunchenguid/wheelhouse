@@ -2613,6 +2613,18 @@ def test_triage_workflow_security_wiring():
             and "gh issue edit" in run
             and "future scan can retry" in run,
         )
+        check(
+            "workflow: no-source fallback visibly marks its non-atomic exception",
+            "### Triage" in run
+            and "Security fallback" in run
+            and "without re-evaluating Auto-merge criteria" in run
+            and "until trusted card maintenance runs" in run,
+        )
+        check(
+            "workflow: no-source fallback exception is documented",
+            "no-trusted-source security fallback" in read("AGENTS.md")
+            and "visible `### Triage` security-fallback warning" in read("AGENTS.md"),
+        )
     recover_i = step_index(
         steps,
         lambda s: s.get("name")

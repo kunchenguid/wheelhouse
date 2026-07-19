@@ -1416,7 +1416,38 @@ jobs:
           new_state = dict(state)
           for key in ("triaged_sha", "triage_status", "triage_error"):
               new_state.pop(key, None)
-          clean = triage_re.sub("\n", body).strip() + "\n"
+          clean = triage_re.sub("\n", body).strip()
+          fallback_section = "\n".join((
+              "<!-- wheelhouse-triage:start -->",
+              "### Triage",
+              "",
+              "> [!WARNING]",
+              "> **Security fallback:** Trusted source was unavailable, so Wheelhouse cleared the queued triage cache without re-evaluating Auto-merge criteria. The checklist may temporarily reflect the prior queued state; this is intentional until trusted card maintenance runs.",
+              "<!-- wheelhouse-triage:end -->",
+          ))
+          section_marker = "\n### Recommended action"
+          section_index = clean.find(section_marker)
+          if section_index >= 0:
+              clean = (
+                  clean[:section_index].rstrip()
+                  + "\n\n"
+                  + fallback_section
+                  + "\n"
+                  + clean[section_index:]
+              )
+          else:
+              state_index = clean.rfind("<!-- wheelhouse-state:")
+              if state_index >= 0:
+                  clean = (
+                      clean[:state_index].rstrip()
+                      + "\n\n"
+                      + fallback_section
+                      + "\n\n"
+                      + clean[state_index:]
+                  )
+              else:
+                  clean = clean.rstrip() + "\n\n" + fallback_section
+          clean = clean.rstrip() + "\n"
           marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
               new_state,
               separators=(",", ":"),
