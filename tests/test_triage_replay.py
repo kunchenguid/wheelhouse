@@ -23,6 +23,12 @@ from scripts import agent_claim  # noqa: E402
 import render_card as rc  # noqa: E402
 import triage_replay as replay  # noqa: E402
 
+# Replay tests exercise exact-revision lifecycle behavior; the atomic
+# evaluator/write integration has dedicated coverage in test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline replay fixture")
+)
+
 
 @contextmanager
 def patched(module, replacements):

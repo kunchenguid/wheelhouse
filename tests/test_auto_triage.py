@@ -25,6 +25,13 @@ import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# This suite isolates triage lifecycle mechanics from cross-repo gate reads.
+# The atomic evaluator/write integration is covered end to end in
+# test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline triage lifecycle fixture")
+)
+
 CLAUDE_ACTION_PIN = (
     "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
 )
@@ -2479,8 +2486,13 @@ def test_triage_workflow_security_wiring():
             and "scripts/render_card.py triage-fail" in run,
         )
         check(
-            "workflow: final card update never receives FLEET_TOKEN",
-            "FLEET_TOKEN" not in dumped,
+            "workflow: final card update keeps card and fleet tokens separated",
+            env.get("GH_TOKEN") == "${{ github.token }}"
+            and env.get("WHEELHOUSE_FLEET_TOKEN") == "${{ secrets.FLEET_TOKEN }}"
+            and run.count(
+                'WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"'
+            )
+            == 2,
         )
         check(
             "workflow: final card update carries GITHUB_REPOSITORY_OWNER for ref qualification",
@@ -2569,9 +2581,10 @@ def test_triage_workflow_security_wiring():
             "CLAUDE_CODE_OAUTH_TOKEN is absent" in run,
         )
         check(
-            "workflow: recovery step runs under the default token (no FLEET_TOKEN)",
+            "workflow: recovery keeps the default card token and passes the fleet read token separately",
             env.get("GH_TOKEN") == "${{ github.token }}"
-            and "FLEET_TOKEN" not in yaml.safe_dump(recover),
+            and env.get("WHEELHOUSE_FLEET_TOKEN") == "${{ secrets.FLEET_TOKEN }}"
+            and 'WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"' in run,
         )
     check("workflow: no-source queued-cache fallback exists", fallback is not None)
     if fallback:

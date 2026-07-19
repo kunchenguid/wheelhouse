@@ -20,6 +20,12 @@ import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# Closed-card lifecycle tests use an in-memory GitHub boundary and isolate that
+# lifecycle from the cross-repo projection covered by test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline card-reuse fixture")
+)
+
 _failures = []
 
 

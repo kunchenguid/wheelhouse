@@ -23,6 +23,12 @@ import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# Spend-guard tests isolate reservation ordering from cross-repo gate reads.
+# The atomic evaluator/write integration is covered in test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline spend-guard fixture")
+)
+
 
 @contextmanager
 def patched(module, replacements):

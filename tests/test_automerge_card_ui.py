@@ -4,6 +4,7 @@
 Run: python tests/test_automerge_card_ui.py
 """
 
+import inspect
 import os
 import sys
 from contextlib import ExitStack
@@ -1123,6 +1124,185 @@ def test_displayed_met_rows_cannot_grant_eligibility():
     check(
         "security: live persisted verdict guard still holds",
         result["hold_reason"].startswith("G6 no structured behavior verdict"),
+    )
+
+
+def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
+    """Reproduce #1493: triage used to leave the pre-card G6 rows frozen."""
+    stale = evaluate(card_value=None, prior=False)
+    held = render_card.render(item(automerge_criteria=stale["criteria"]), held=True)
+    held["body"] = render_card.body_with_triage_queued(held["body"], item())
+    card = {
+        "number": 623,
+        "body": held["body"],
+        "labels": held["labels"],
+        "state": "OPEN",
+        "updatedAt": "2026-07-19T12:00:00Z",
+        "comments": [],
+    }
+    stale_rows = rows(stale)
+    check(
+        "atomic setup: pre-triage checklist reproduces stale G6",
+        stale_rows["g6_triage_success"]["status"] == schema.STATUS_UNMET
+        and stale_rows["g6_merge_recommendation"]["status"]
+        == schema.STATUS_UNMET,
+    )
+
+    evaluations = []
+    writes = []
+    original_evaluate = am.evaluate_candidate
+
+    def evaluate_once(*args, **kwargs):
+        result = original_evaluate(*args, **kwargs)
+        evaluations.append(
+            {
+                "card_entry": args[2],
+                "token": os.environ.get("GH_TOKEN"),
+                "criteria": result["criteria"],
+            }
+        )
+        return result
+
+    old_env = {
+        key: os.environ.get(key)
+        for key in (
+            "GH_TOKEN",
+            "WHEELHOUSE_FLEET_TOKEN",
+            "WHEELHOUSE_AUTOMERGE_HAS_TOKEN",
+            "GITHUB_REPOSITORY_OWNER",
+        )
+    }
+    os.environ.update(
+        {
+            "GH_TOKEN": "card-token",
+            "WHEELHOUSE_FLEET_TOKEN": "fleet-token",
+            "WHEELHOUSE_AUTOMERGE_HAS_TOKEN": "true",
+            "GITHUB_REPOSITORY_OWNER": "kunchenguid",
+        }
+    )
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(render_card, "get_card", return_value=card))
+            stack.enter_context(
+                patch.object(
+                    render_card,
+                    "_edit_issue_body",
+                    side_effect=lambda number, body, remove_labels=None: writes.append(
+                        (number, body, remove_labels)
+                    ),
+                )
+            )
+            stack.enter_context(patch.object(am, "evaluate_candidate", evaluate_once))
+            stack.enter_context(
+                patch.object(core, "same_closing_issue_overlap", return_value=(True, ""))
+            )
+            stack.enter_context(
+                patch.object(
+                    core,
+                    "load_config",
+                    return_value={"auto_merge": True, "repos": {"axi": {}}},
+                )
+            )
+            stack.enter_context(
+                patch.object(core, "maintainers", return_value={"kunchenguid"})
+            )
+            stack.enter_context(
+                patch.object(am, "vision_on_default_branch", return_value=(True, VISION))
+            )
+            stack.enter_context(patch.object(am, "live_pr", return_value=live_pr()))
+            stack.enter_context(
+                patch.object(am, "has_prior_merged_pr", return_value=False)
+            )
+            stack.enter_context(
+                patch.object(
+                    am,
+                    "immutable_compare_files",
+                    return_value=(
+                        ["README.md", "catalog.yaml", "docs/index.html"],
+                        True,
+                        True,
+                    ),
+                )
+            )
+            applied = render_card.update_card_triage(
+                623,
+                HEAD,
+                triage={
+                    "summary": "Adds a verified community catalog entry.",
+                    "product_implications": "No runtime behavior changes.",
+                    "evidence": "target.txt: catalog-only changes",
+                    "recommended_action": "merge",
+                    "recommended_reason": "focused and verified",
+                    "automerge": {
+                        "behavior_class": "A",
+                        "changes_existing_or_default_behavior": False,
+                        "optin_default_off": False,
+                        "aligns_with_vision": True,
+                        "recommend_merge": True,
+                    },
+                },
+                owner="kunchenguid",
+                vision_sha=VISION,
+                base_sha=BASE,
+                automerge_behavior_available=True,
+            )
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    check("atomic: triage update is applied", applied is True)
+    check("atomic: evaluate_candidate runs exactly once", len(evaluations) == 1)
+    projected_state = evaluations[0]["card_entry"]["state"]
+    check(
+        "atomic: evaluator receives the post-triage card state",
+        projected_state.get("triage_status") == "succeeded"
+        and projected_state.get("triage_recommendation", {}).get("action") == "merge",
+    )
+    check(
+        "security: evaluator reads with fleet token and card write restores its token",
+        evaluations[0]["token"] == "fleet-token"
+        and os.environ.get("GH_TOKEN") == old_env["GH_TOKEN"],
+    )
+    check("atomic: one issue-body write carries the whole projection", len(writes) == 1)
+    written_body = writes[0][1]
+    written_state = core.parse_state_block(written_body)
+    written_rows = {
+        row["id"]: row
+        for row in written_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    }
+    check(
+        "atomic: hidden criteria are exactly the one evaluator result",
+        written_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+        == evaluations[0]["criteria"],
+    )
+    check(
+        "atomic: updated triage and G6 checklist agree",
+        "### Triage" in written_body
+        and "merge - focused and verified" in written_body
+        and written_rows["g6_triage_success"]["status"] == schema.STATUS_MET
+        and written_rows["g6_merge_recommendation"]["status"]
+        == schema.STATUS_MET
+        and "✅ **MET** `G6 - successful triage for current head`" in written_body
+        and "✅ **MET** `G6 - top-level recommendation is merge`" in written_body,
+    )
+
+
+def test_every_triage_body_writer_uses_the_atomic_projection():
+    writers = (
+        render_card.mark_triage_queued,
+        render_card.publish_triage_budget_deferral,
+        render_card.clear_triage_queued,
+        render_card.update_card_triage,
+    )
+    check(
+        "atomic: every queued, deferred, cleared, or completed triage write re-evaluates",
+        all(
+            inspect.getsource(writer).count("_atomic_automerge_card_body(") == 1
+            for writer in writers
+        ),
     )
 
 

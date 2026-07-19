@@ -122,6 +122,9 @@ jobs:
         if: steps.auto-triage-gate.outputs.has_token == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          WHEELHOUSE_FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         # --issue threads the number `upsert` just created/refreshed, so this
         # reads the card back by number (read-after-write consistent) instead
         # of relying on find_card's label-filtered listing, which can race a

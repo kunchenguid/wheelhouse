@@ -34,6 +34,12 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
+# Schema-repair tests isolate model-result normalization from cross-repo gate
+# reads. Atomic evaluator/write behavior is covered in test_automerge_card_ui.py.
+rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
+    rc.criteria_schema.unavailable_criteria("offline schema-repair fixture")
+)
+
 _failures = []
 
 
