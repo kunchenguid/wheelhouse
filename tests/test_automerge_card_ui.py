@@ -542,8 +542,7 @@ def test_no_vision_complete_diff_keeps_independent_g6_facts_in_real_card_flow():
     check(
         "no VISION: complete evaluation remains ineligible",
         am.verdict_eligible(independent_verdict())[0] is False
-        and criterion_rows["g0_vision_present"]["status"]
-        == schema.STATUS_UNAVAILABLE,
+        and criterion_rows["g0_vision_present"]["status"] == schema.STATUS_UNAVAILABLE,
     )
 
 
@@ -557,9 +556,7 @@ def test_no_vision_independent_behavior_negatives_are_unmet_not_masked():
     )
     for criterion, overrides in cases:
         result = evaluate(
-            card_value=card_entry(
-                automerge_verdict=independent_verdict(**overrides)
-            ),
+            card_value=card_entry(automerge_verdict=independent_verdict(**overrides)),
             vision=(False, ""),
         )
         criterion_rows = rows(result)
@@ -1144,8 +1141,7 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
     check(
         "atomic setup: pre-triage checklist reproduces stale G6",
         stale_rows["g6_triage_success"]["status"] == schema.STATUS_UNMET
-        and stale_rows["g6_merge_recommendation"]["status"]
-        == schema.STATUS_UNMET,
+        and stale_rows["g6_merge_recommendation"]["status"] == schema.STATUS_UNMET,
     )
 
     evaluations = []
@@ -1182,7 +1178,9 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
     )
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch.object(render_card, "get_card", return_value=card))
+            stack.enter_context(
+                patch.object(render_card, "get_card", return_value=card)
+            )
             stack.enter_context(
                 patch.object(
                     render_card,
@@ -1194,7 +1192,9 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
             )
             stack.enter_context(patch.object(am, "evaluate_candidate", evaluate_once))
             stack.enter_context(
-                patch.object(core, "same_closing_issue_overlap", return_value=(True, ""))
+                patch.object(
+                    core, "same_closing_issue_overlap", return_value=(True, "")
+                )
             )
             stack.enter_context(
                 patch.object(
@@ -1207,7 +1207,9 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
                 patch.object(core, "maintainers", return_value={"kunchenguid"})
             )
             stack.enter_context(
-                patch.object(am, "vision_on_default_branch", return_value=(True, VISION))
+                patch.object(
+                    am, "vision_on_default_branch", return_value=(True, VISION)
+                )
             )
             stack.enter_context(patch.object(am, "live_pr", return_value=live_pr()))
             stack.enter_context(
@@ -1270,8 +1272,7 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
     written_body = writes[0][1]
     written_state = core.parse_state_block(written_body)
     written_rows = {
-        row["id"]: row
-        for row in written_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+        row["id"]: row for row in written_state[render_card.AUTOMERGE_CRITERIA_FIELD]
     }
     check(
         "atomic: hidden criteria are exactly the one evaluator result",
@@ -1283,8 +1284,7 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
         "### Triage" in written_body
         and "merge - focused and verified" in written_body
         and written_rows["g6_triage_success"]["status"] == schema.STATUS_MET
-        and written_rows["g6_merge_recommendation"]["status"]
-        == schema.STATUS_MET
+        and written_rows["g6_merge_recommendation"]["status"] == schema.STATUS_MET
         and "✅ **MET** `G6 - successful triage for current head`" in written_body
         and "✅ **MET** `G6 - top-level recommendation is merge`" in written_body,
     )

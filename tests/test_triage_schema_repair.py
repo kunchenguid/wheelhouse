@@ -81,7 +81,10 @@ def write_exec(path, result_text):
     return path
 
 
-def target_file_with(d, text='<target-content>\n# add bounded stop conditions to crewmate briefs\n</target-content>'):
+def target_file_with(
+    d,
+    text="<target-content>\n# add bounded stop conditions to crewmate briefs\n</target-content>",
+):
     p = os.path.join(d, "target.txt")
     with open(p, "w", encoding="utf-8") as f:
         f.write(text)
@@ -92,7 +95,10 @@ def target_file_with(d, text='<target-content>\n# add bounded stop conditions to
 # 1. triage_schema_reason: structural, precise, LEAK-FREE
 # --------------------------------------------------------------------------- #
 def test_schema_reason_is_structural_and_leak_free():
-    check("reason: a valid result yields no reason", rc.triage_schema_reason(json.dumps(VALID)) == "")
+    check(
+        "reason: a valid result yields no reason",
+        rc.triage_schema_reason(json.dumps(VALID)) == "",
+    )
 
     # Each schema-miss variant yields a short structural reason that names the
     # FIELD and the DEFECT, never a field VALUE.
@@ -145,18 +151,36 @@ def test_redacted_candidate_shape_is_content_free():
     }
     shape = rc.redacted_candidate_shape(json.dumps(candidate))
     check("shape: never echoes a value", SECRET not in shape)
-    check("shape: reports known present fields", "summary" in shape and "product_implications" in shape)
+    check(
+        "shape: reports known present fields",
+        "summary" in shape and "product_implications" in shape,
+    )
     check("shape: counts unknown keys without naming them", "unknown_keys=1" in shape)
-    check("shape: unparseable text is labeled", rc.redacted_candidate_shape("not json at all") == "unparseable-json")
+    check(
+        "shape: unparseable text is labeled",
+        rc.redacted_candidate_shape("not json at all") == "unparseable-json",
+    )
 
     # A candidate MISSING a required field lists it under missing=[...].
-    missing_shape = rc.redacted_candidate_shape(json.dumps({k: v for k, v in VALID.items() if k != "summary"}))
-    check("shape: a missing required field is listed", "summary" in missing_shape.split("missing=[")[1])
+    missing_shape = rc.redacted_candidate_shape(
+        json.dumps({k: v for k, v in VALID.items() if k != "summary"})
+    )
+    check(
+        "shape: a missing required field is listed",
+        "summary" in missing_shape.split("missing=[")[1],
+    )
     # A complete-but-mistyped candidate still yields a content-free shape.
     complete = dict(VALID)
     complete["evidence"] = 123
     shp = rc.redacted_candidate_shape(json.dumps(complete))
-    check("shape: present list uses only allowlisted names", all(k in rc._KNOWN_TRIAGE_KEYS for k in shp.split("present=[")[1].split("]")[0].split(",") if k))
+    check(
+        "shape: present list uses only allowlisted names",
+        all(
+            k in rc._KNOWN_TRIAGE_KEYS
+            for k in shp.split("present=[")[1].split("]")[0].split(",")
+            if k
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -168,26 +192,48 @@ def test_build_repair_prompt():
         ("issue-triage", "close | decline | hold", "merge | request-changes"),
     ):
         p = rc.build_repair_prompt(json.dumps(VALID), kind)
-        for field in ("summary", "product_implications", "recommended_action", "recommended_reason", "evidence"):
+        for field in (
+            "summary",
+            "product_implications",
+            "recommended_action",
+            "recommended_reason",
+            "evidence",
+        ):
             check("prompt(%s): names required field %s" % (kind, field), field in p)
         check("prompt(%s): kind-specific action enum" % kind, enum in p)
         if absent:
-            check("prompt(%s): omits the other kind's action enum" % kind, absent not in p)
-        check("prompt(%s): embeds the candidate" % kind, VALID["summary"] in p and "<candidate>" in p)
-        check("prompt(%s): forbids reading files / re-analysis" % kind, "NO tools" in p and "re-analysis" in p.lower())
+            check(
+                "prompt(%s): omits the other kind's action enum" % kind, absent not in p
+            )
+        check(
+            "prompt(%s): embeds the candidate" % kind,
+            VALID["summary"] in p and "<candidate>" in p,
+        )
+        check(
+            "prompt(%s): forbids reading files / re-analysis" % kind,
+            "NO tools" in p and "re-analysis" in p.lower(),
+        )
         check("prompt(%s): requires verbatim evidence" % kind, "VERBATIM" in p)
         check(
             "prompt(%s): requires evidence as one string" % kind,
             "single JSON string, not an array" in p,
         )
-        check("prompt(%s): output-only-JSON instruction" % kind, "ONLY a single compact JSON object" in p)
+        check(
+            "prompt(%s): output-only-JSON instruction" % kind,
+            "ONLY a single compact JSON object" in p,
+        )
 
     # Schema lockstep: every field the repair prompt promises must be a field
     # the validator actually requires, so repair can never target a stale schema.
     prompt = rc.build_repair_prompt("{}", "pr-review")
     for field in rc.TRIAGE_FIELDS:
-        check("lockstep: validator field %s is in the repair schema" % field, field in prompt)
-    check("lockstep: evidence field is in the repair schema", rc.EVIDENCE_FIELD in prompt)
+        check(
+            "lockstep: validator field %s is in the repair schema" % field,
+            field in prompt,
+        )
+    check(
+        "lockstep: evidence field is in the repair schema", rc.EVIDENCE_FIELD in prompt
+    )
 
     # A pathological (huge) candidate is byte-bounded so the repair prompt can
     # never re-introduce the E2BIG class the pass-by-reference redesign fixed.
@@ -205,7 +251,10 @@ def test_build_repair_prompt():
 # --------------------------------------------------------------------------- #
 def test_plan_trigger_discipline():
     valid = rc.plan_triage_repair(json.dumps(VALID), "pr-review")
-    check("plan: a valid delivered result needs NO repair", valid["repair_needed"] is False)
+    check(
+        "plan: a valid delivered result needs NO repair",
+        valid["repair_needed"] is False,
+    )
     check("plan: valid result carries no prompt", valid["prompt"] == "")
 
     array_evidence = dict(
@@ -226,7 +275,10 @@ def test_plan_trigger_discipline():
     p = rc.plan_triage_repair(json.dumps(invalid), "pr-review")
     check("plan: a delivered schema-miss needs repair", p["repair_needed"] is True)
     check("plan: schema-miss carries a repair prompt", bool(p["prompt"]))
-    check("plan: schema-miss carries a structural reason", "recommended_action" in p["reason"])
+    check(
+        "plan: schema-miss carries a structural reason",
+        "recommended_action" in p["reason"],
+    )
 
     # EXCLUDED: no delivered result at all (E2BIG / missing / auth / rate-limit /
     # infra all leave nothing extractable) -> NEVER repair.
@@ -235,7 +287,10 @@ def test_plan_trigger_discipline():
         ("whitespace only", "   \n  "),
     ):
         pl = rc.plan_triage_repair(text, "pr-review")
-        check("plan(EXCLUDED %s): missing result never triggers repair" % label, pl["repair_needed"] is False)
+        check(
+            "plan(EXCLUDED %s): missing result never triggers repair" % label,
+            pl["repair_needed"] is False,
+        )
         check("plan(EXCLUDED %s): no repair prompt" % label, pl["prompt"] == "")
 
 
@@ -245,18 +300,32 @@ def test_plan_trigger_discipline():
 def test_decide_routing():
     with tempfile.TemporaryDirectory() as d:
         tf = target_file_with(d)
-        invalid = json.dumps({k: v for k, v in VALID.items() if k != "recommended_action"})
+        invalid = json.dumps(
+            {k: v for k, v in VALID.items() if k != "recommended_action"}
+        )
         valid = json.dumps(VALID)
 
         # success-on-repair (clause 6): invalid original + valid repaired.
         dec = rc.decide_triage_apply(invalid, valid, tf)
-        check("route: schema-miss + valid repair -> repaired", dec["outcome"] == "repaired")
-        check("route: repaired carries the raw repaired dict", isinstance(dec["triage"], dict))
-        check("route: repaired reason is the ORIGINAL structural failure", "recommended_action" in dec["reason"])
+        check(
+            "route: schema-miss + valid repair -> repaired",
+            dec["outcome"] == "repaired",
+        )
+        check(
+            "route: repaired carries the raw repaired dict",
+            isinstance(dec["triage"], dict),
+        )
+        check(
+            "route: repaired reason is the ORIGINAL structural failure",
+            "recommended_action" in dec["reason"],
+        )
 
         # repair-failure cap (clause 6): invalid original + still-invalid repair.
         dec2 = rc.decide_triage_apply(invalid, invalid, tf)
-        check("route: schema-miss + still-invalid repair -> repair-failed", dec2["outcome"] == "repair-failed")
+        check(
+            "route: schema-miss + still-invalid repair -> repair-failed",
+            dec2["outcome"] == "repair-failed",
+        )
         check(
             "route: repair-failed reports the repaired schema stage",
             "recommended_action" in dec2["reason"],
@@ -264,14 +333,15 @@ def test_decide_routing():
 
         # schema-miss with NO repair supplied (repair step errored / no output).
         dec3 = rc.decide_triage_apply(invalid, "", tf)
-        check("route: schema-miss + no repair output -> repair-failed", dec3["outcome"] == "repair-failed")
+        check(
+            "route: schema-miss + no repair output -> repair-failed",
+            dec3["outcome"] == "repair-failed",
+        )
         check(
             "route: missing repair output reports the actual stage",
             dec3["reason"] == "schema repair produced no result",
         )
-        duplicate = rc.decide_triage_apply(
-            invalid, "", tf, repair_claim_admitted=False
-        )
+        duplicate = rc.decide_triage_apply(invalid, "", tf, repair_claim_admitted=False)
         check(
             "route: duplicate repair claim reports the actual stage",
             duplicate["reason"] == "schema repair claim was duplicate",
@@ -279,24 +349,37 @@ def test_decide_routing():
 
         # original already valid -> success, repair never consulted.
         dec4 = rc.decide_triage_apply(valid, valid, tf)
-        check("route: valid original -> success (repair ignored)", dec4["outcome"] == "success")
+        check(
+            "route: valid original -> success (repair ignored)",
+            dec4["outcome"] == "success",
+        )
 
         # EXCLUDED: no delivered result -> no-result, never repair-* .
         dec5 = rc.decide_triage_apply("", "", tf)
-        check("route(EXCLUDED): empty result -> no-result", dec5["outcome"] == "no-result")
+        check(
+            "route(EXCLUDED): empty result -> no-result", dec5["outcome"] == "no-result"
+        )
 
         # EXCLUDED: parse-valid but fabricated evidence not anchored to target ->
         # anchor-fail, NOT repair (a repair turn can't conjure real quotes).
         fabricated = dict(VALID)
-        fabricated["evidence"] = 'target.txt: "a quote that does not appear in the fetched target at all"'
+        fabricated["evidence"] = (
+            'target.txt: "a quote that does not appear in the fetched target at all"'
+        )
         dec6 = rc.decide_triage_apply(json.dumps(fabricated), "", tf)
-        check("route(EXCLUDED): anchor-fail is not routed to repair", dec6["outcome"] == "anchor-fail")
+        check(
+            "route(EXCLUDED): anchor-fail is not routed to repair",
+            dec6["outcome"] == "anchor-fail",
+        )
 
         # The repaired output must STILL pass the evidence anchor guard: a repair
         # that dropped/fabricated evidence is rejected as repair-failed.
         repaired_fabricated = json.dumps(fabricated)
         dec7 = rc.decide_triage_apply(invalid, repaired_fabricated, tf)
-        check("route: a repair with non-anchoring evidence -> repair-failed", dec7["outcome"] == "repair-failed")
+        check(
+            "route: a repair with non-anchoring evidence -> repair-failed",
+            dec7["outcome"] == "repair-failed",
+        )
         check(
             "route: repaired anchor failure reports the actual stage",
             dec7["reason"]
@@ -310,9 +393,7 @@ def test_decide_routing():
                 "target-src/brief.py: unrelated source quote",
             ],
         )
-        array_decision = rc.decide_triage_apply(
-            json.dumps(array_valid), "", tf
-        )
+        array_decision = rc.decide_triage_apply(json.dumps(array_valid), "", tf)
         check(
             "route: array evidence anchors on the primary path",
             array_decision["outcome"] == "success",
@@ -325,11 +406,20 @@ def test_decide_routing():
 def _queued_body():
     os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
     it = {
-        "repo": "firstmate", "number": 469, "kind": "pr-review", "head_sha": "8b7547c1",
-        "title": "Add stops", "author": "stoneymarrow", "bucket": "review-needed",
-        "comp": "pass", "tests": "green", "url": "u",
-        "summary": "compliance=pass tests=green", "recommendation": "Look closer.",
-        "priority": "med", "options": ["merge", "investigate"],
+        "repo": "firstmate",
+        "number": 469,
+        "kind": "pr-review",
+        "head_sha": "8b7547c1",
+        "title": "Add stops",
+        "author": "stoneymarrow",
+        "bucket": "review-needed",
+        "comp": "pass",
+        "tests": "green",
+        "url": "u",
+        "summary": "compliance=pass tests=green",
+        "recommendation": "Look closer.",
+        "priority": "med",
+        "options": ["merge", "investigate"],
     }
     return it, rc.body_with_triage_queued(rc.render(it)["body"], it)
 
@@ -338,47 +428,97 @@ def test_repair_telemetry_and_non_materiality():
     it, queued = _queued_body()
 
     repaired = rc.body_with_triage_result(
-        queued, "8b7547c1", triage=VALID,
-        repair_status="repaired", repair_reason="field 'summary' is empty",
+        queued,
+        "8b7547c1",
+        triage=VALID,
+        repair_status="repaired",
+        repair_reason="field 'summary' is empty",
     )
     st = core.parse_state_block(repaired)
-    check("telemetry: repaired records triage_status succeeded", st.get("triage_status") == "succeeded")
-    check("telemetry: repaired records repair_status", st.get("triage_repair_status") == "repaired")
-    check("telemetry: repaired records the structural reason", st.get("triage_repair_reason") == "field 'summary' is empty")
-    check("telemetry: repaired renders the real triage section", "### Triage" in repaired and VALID["summary"] in repaired)
+    check(
+        "telemetry: repaired records triage_status succeeded",
+        st.get("triage_status") == "succeeded",
+    )
+    check(
+        "telemetry: repaired records repair_status",
+        st.get("triage_repair_status") == "repaired",
+    )
+    check(
+        "telemetry: repaired records the structural reason",
+        st.get("triage_repair_reason") == "field 'summary' is empty",
+    )
+    check(
+        "telemetry: repaired renders the real triage section",
+        "### Triage" in repaired and VALID["summary"] in repaired,
+    )
 
-    check("telemetry: repaired records the redacted candidate shape",
-          rc.body_with_triage_result(queued, "8b7547c1", triage=VALID,
-                                     repair_status="repaired", repair_reason="r",
-                                     repair_candidate="present=[summary] missing=[]").count("triage_repair_candidate") == 1)
+    check(
+        "telemetry: repaired records the redacted candidate shape",
+        rc.body_with_triage_result(
+            queued,
+            "8b7547c1",
+            triage=VALID,
+            repair_status="repaired",
+            repair_reason="r",
+            repair_candidate="present=[summary] missing=[]",
+        ).count("triage_repair_candidate")
+        == 1,
+    )
 
     failed = rc.body_with_triage_result(
-        queued, "8b7547c1",
-        error="%s (%s)" % (rc.TRIAGE_UNAVAILABLE, "field 'evidence' is missing or empty"),
-        repair_status="repair-failed", repair_reason="field 'evidence' is missing or empty",
+        queued,
+        "8b7547c1",
+        error="%s (%s)"
+        % (rc.TRIAGE_UNAVAILABLE, "field 'evidence' is missing or empty"),
+        repair_status="repair-failed",
+        repair_reason="field 'evidence' is missing or empty",
         repair_candidate="present=[summary,product_implications] missing=[evidence]",
     )
     st2 = core.parse_state_block(failed)
-    check("telemetry: repair-failed records triage_status error", st2.get("triage_status") == "error")
-    check("telemetry: repair-failed records repair_status", st2.get("triage_repair_status") == "repair-failed")
-    check("telemetry: repair-failed records the redacted candidate", "evidence" in (st2.get("triage_repair_candidate") or ""))
-    check("telemetry: repair-failed visible error carries the reason", rc.TRIAGE_UNAVAILABLE in failed and "evidence" in failed)
+    check(
+        "telemetry: repair-failed records triage_status error",
+        st2.get("triage_status") == "error",
+    )
+    check(
+        "telemetry: repair-failed records repair_status",
+        st2.get("triage_repair_status") == "repair-failed",
+    )
+    check(
+        "telemetry: repair-failed records the redacted candidate",
+        "evidence" in (st2.get("triage_repair_candidate") or ""),
+    )
+    check(
+        "telemetry: repair-failed visible error carries the reason",
+        rc.TRIAGE_UNAVAILABLE in failed and "evidence" in failed,
+    )
 
     # A normal (non-repair) write clears any stale repair telemetry.
     normal = rc.body_with_triage_result(repaired, "8b7547c1", triage=VALID)
     st3 = core.parse_state_block(normal)
-    check("telemetry: a non-repair write clears repair_status", st3.get("triage_repair_status") is None)
-    check("telemetry: a non-repair write clears repair_reason", st3.get("triage_repair_reason") is None)
+    check(
+        "telemetry: a non-repair write clears repair_status",
+        st3.get("triage_repair_status") is None,
+    )
+    check(
+        "telemetry: a non-repair write clears repair_reason",
+        st3.get("triage_repair_reason") is None,
+    )
 
     # NON-MATERIAL: the repair fields never enter material comparison.
     check(
         "material: repair fields are not MATERIAL_FIELDS",
-        all(f not in rc.MATERIAL_FIELDS for f in ("triage_repair_status", "triage_repair_reason")),
+        all(
+            f not in rc.MATERIAL_FIELDS
+            for f in ("triage_repair_status", "triage_repair_reason")
+        ),
     )
-    normal_success = core.parse_state_block(rc.body_with_triage_result(queued, "8b7547c1", triage=VALID))
+    normal_success = core.parse_state_block(
+        rc.body_with_triage_result(queued, "8b7547c1", triage=VALID)
+    )
     repaired_success = core.parse_state_block(repaired)
     diff = {
-        k for k in set(normal_success) | set(repaired_success)
+        k
+        for k in set(normal_success) | set(repaired_success)
         if normal_success.get(k) != repaired_success.get(k)
     }
     check(
@@ -404,11 +544,14 @@ def test_same_revision_refresh_preserves_repair_telemetry():
     state = core.parse_state_block(refreshed)
     check(
         "telemetry: same-revision refresh preserves all repair fields",
-        all(state.get(key) == old_state.get(key) for key in (
-            "triage_repair_status",
-            "triage_repair_reason",
-            "triage_repair_candidate",
-        )),
+        all(
+            state.get(key) == old_state.get(key)
+            for key in (
+                "triage_repair_status",
+                "triage_repair_reason",
+                "triage_repair_candidate",
+            )
+        ),
     )
 
 
@@ -423,17 +566,31 @@ def test_no_leak_in_persisted_diagnostics():
     candidate["product_implications"] = [SECRET]  # wrong type -> schema-miss
     reason = rc.triage_schema_reason(json.dumps(candidate))
     shape = rc.redacted_candidate_shape(json.dumps(candidate))
-    check("leak: the derived reason omits the candidate's content", SECRET not in reason)
-    check("leak: the redacted candidate shape omits the candidate's content", SECRET not in shape)
+    check(
+        "leak: the derived reason omits the candidate's content", SECRET not in reason
+    )
+    check(
+        "leak: the redacted candidate shape omits the candidate's content",
+        SECRET not in shape,
+    )
 
     failed = rc.body_with_triage_result(
-        queued, "8b7547c1",
+        queued,
+        "8b7547c1",
         error="%s (%s)" % (rc.TRIAGE_UNAVAILABLE, reason),
-        repair_status="repair-failed", repair_reason=reason, repair_candidate=shape,
+        repair_status="repair-failed",
+        repair_reason=reason,
+        repair_candidate=shape,
     )
-    check("leak: the persisted card body never carries the raw content", SECRET not in failed)
+    check(
+        "leak: the persisted card body never carries the raw content",
+        SECRET not in failed,
+    )
     st = core.parse_state_block(failed)
-    check("leak: the persisted repair telemetry never carries the raw content", SECRET not in json.dumps(st))
+    check(
+        "leak: the persisted repair telemetry never carries the raw content",
+        SECRET not in json.dumps(st),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -441,7 +598,10 @@ def test_no_leak_in_persisted_diagnostics():
 # --------------------------------------------------------------------------- #
 def test_cli_repair_prep():
     with tempfile.TemporaryDirectory() as d:
-        invalid = write_exec(os.path.join(d, "inv.json"), json.dumps({k: v for k, v in VALID.items() if k != "summary"}))
+        invalid = write_exec(
+            os.path.join(d, "inv.json"),
+            json.dumps({k: v for k, v in VALID.items() if k != "summary"}),
+        )
         valid = write_exec(os.path.join(d, "val.json"), json.dumps(VALID))
         missing = os.path.join(d, "empty.json")
         with open(missing, "w") as f:
@@ -451,29 +611,55 @@ def test_cli_repair_prep():
         def run(exec_file, kind):
             open(gho, "w").close()
             proc = subprocess.run(
-                [sys.executable, os.path.join(ROOT, "scripts", "render_card.py"),
-                 "triage-repair-prep", "--execution-file", exec_file, "--kind", kind],
-                env={**os.environ, "GITHUB_OUTPUT": gho}, capture_output=True, text=True,
+                [
+                    sys.executable,
+                    os.path.join(ROOT, "scripts", "render_card.py"),
+                    "triage-repair-prep",
+                    "--execution-file",
+                    exec_file,
+                    "--kind",
+                    kind,
+                ],
+                env={**os.environ, "GITHUB_OUTPUT": gho},
+                capture_output=True,
+                text=True,
             )
             return proc, open(gho).read()
 
         _, out = run(invalid, "pr-review")
         check("cli: schema-miss sets repair_needed=true", "repair_needed=true" in out)
-        check("cli: schema-miss emits a repair_prompt heredoc", "repair_prompt<<" in out)
+        check(
+            "cli: schema-miss emits a repair_prompt heredoc", "repair_prompt<<" in out
+        )
         # The heredoc must be well-formed (matching random delimiter) and embed
         # the candidate - but MUST NOT inline target.txt (pass-by-reference).
         import re
+
         m = re.search(r"repair_prompt<<(\S+)\n(.*?)\n\1\n", out, re.S)
         check("cli: repair_prompt heredoc is well-formed", bool(m))
-        check("cli: repair prompt embeds the candidate", bool(m) and VALID["product_implications"] in m.group(2))
+        check(
+            "cli: repair prompt embeds the candidate",
+            bool(m) and VALID["product_implications"] in m.group(2),
+        )
 
         _, out2 = run(valid, "pr-review")
-        check("cli: a valid result sets repair_needed=false", "repair_needed=false" in out2)
-        check("cli: a valid result emits no repair prompt", "repair_prompt<<" not in out2)
+        check(
+            "cli: a valid result sets repair_needed=false",
+            "repair_needed=false" in out2,
+        )
+        check(
+            "cli: a valid result emits no repair prompt", "repair_prompt<<" not in out2
+        )
 
         _, out3 = run(missing, "issue-triage")
-        check("cli(EXCLUDED): missing result sets repair_needed=false", "repair_needed=false" in out3)
-        check("cli(EXCLUDED): missing result emits no repair prompt", "repair_prompt<<" not in out3)
+        check(
+            "cli(EXCLUDED): missing result sets repair_needed=false",
+            "repair_needed=false" in out3,
+        )
+        check(
+            "cli(EXCLUDED): missing result emits no repair prompt",
+            "repair_prompt<<" not in out3,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -493,8 +679,10 @@ def _run_triage_apply(
     orig_get, orig_edit, orig_argv = rc.get_card, rc._edit_issue_body, sys.argv
     original_output = os.environ.get("GITHUB_OUTPUT")
     rc.get_card = lambda n: {
-        "number": int(n), "body": card_body,
-        "labels": [{"name": "needs-decision"}], "state": "OPEN",
+        "number": int(n),
+        "body": card_body,
+        "labels": [{"name": "needs-decision"}],
+        "state": "OPEN",
     }
     rc._edit_issue_body = lambda number, body, remove_labels=None: captured.update(
         {"body": body, "remove": remove_labels}
@@ -503,12 +691,20 @@ def _run_triage_apply(
         with tempfile.NamedTemporaryFile() as output:
             os.environ["GITHUB_OUTPUT"] = output.name
             sys.argv = [
-                "render_card.py", "triage-apply",
-                "--issue", str(issue), "--revision", revision,
-                "--execution-file", exec_file,
-                "--repair-execution-file", repair_file,
-                "--repair-claim-admitted", repair_claim_admitted,
-                "--target-file", target_file,
+                "render_card.py",
+                "triage-apply",
+                "--issue",
+                str(issue),
+                "--revision",
+                revision,
+                "--execution-file",
+                exec_file,
+                "--repair-execution-file",
+                repair_file,
+                "--repair-claim-admitted",
+                repair_claim_admitted,
+                "--target-file",
+                target_file,
             ]
             rc.main()
             captured["outputs"] = Path(output.name).read_text(encoding="utf-8")
@@ -526,8 +722,10 @@ def _run_triage_fail(issue, revision, card_body):
     orig_get, orig_edit, orig_argv = rc.get_card, rc._edit_issue_body, sys.argv
     original_output = os.environ.get("GITHUB_OUTPUT")
     rc.get_card = lambda n: {
-        "number": int(n), "body": card_body,
-        "labels": [{"name": "needs-decision"}], "state": "OPEN",
+        "number": int(n),
+        "body": card_body,
+        "labels": [{"name": "needs-decision"}],
+        "state": "OPEN",
     }
     rc._edit_issue_body = lambda number, body, remove_labels=None: captured.update(
         {"body": body, "remove": remove_labels}
@@ -536,9 +734,14 @@ def _run_triage_fail(issue, revision, card_body):
         with tempfile.NamedTemporaryFile() as output:
             os.environ["GITHUB_OUTPUT"] = output.name
             sys.argv = [
-                "render_card.py", "triage-fail",
-                "--issue", str(issue), "--revision", revision,
-                "--message", "bounded failure",
+                "render_card.py",
+                "triage-fail",
+                "--issue",
+                str(issue),
+                "--revision",
+                revision,
+                "--message",
+                "bounded failure",
             ]
             rc.main()
             captured["outputs"] = Path(output.name).read_text(encoding="utf-8")
@@ -555,17 +758,33 @@ def test_cli_triage_apply_repair_end_to_end():
     _, queued = _queued_body()
     with tempfile.TemporaryDirectory() as d:
         tf = target_file_with(d)
-        invalid = write_exec(os.path.join(d, "inv.json"), json.dumps({k: v for k, v in VALID.items() if k != "recommended_action"}))
+        invalid = write_exec(
+            os.path.join(d, "inv.json"),
+            json.dumps({k: v for k, v in VALID.items() if k != "recommended_action"}),
+        )
         valid = write_exec(os.path.join(d, "val.json"), json.dumps(VALID))
-        still_invalid = write_exec(os.path.join(d, "inv2.json"), json.dumps({"summary": "only this"}))
+        still_invalid = write_exec(
+            os.path.join(d, "inv2.json"), json.dumps({"summary": "only this"})
+        )
 
         # success-on-repair: invalid original + valid repair -> real triage card.
         cap = _run_triage_apply(469, "8b7547c1", queued, invalid, valid, tf)
         st = core.parse_state_block(cap.get("body", "")) or {}
-        check("e2e: repaired card gets a real triage section", "### Triage" in cap.get("body", ""))
-        check("e2e: repaired card records success", st.get("triage_status") == "succeeded")
-        check("e2e: repaired card records repair telemetry", st.get("triage_repair_status") == "repaired")
-        check("e2e: repaired card shows the model's summary", VALID["summary"] in cap.get("body", ""))
+        check(
+            "e2e: repaired card gets a real triage section",
+            "### Triage" in cap.get("body", ""),
+        )
+        check(
+            "e2e: repaired card records success", st.get("triage_status") == "succeeded"
+        )
+        check(
+            "e2e: repaired card records repair telemetry",
+            st.get("triage_repair_status") == "repaired",
+        )
+        check(
+            "e2e: repaired card shows the model's summary",
+            VALID["summary"] in cap.get("body", ""),
+        )
         check(
             "e2e: repaired card reports explicit applied output",
             cap.get("outputs") == "applied=true\ntriage_status=succeeded\n",
@@ -577,8 +796,14 @@ def test_cli_triage_apply_repair_end_to_end():
         cap2 = _run_triage_apply(469, "8b7547c1", queued, invalid, still_invalid, tf)
         st2 = core.parse_state_block(cap2.get("body", "")) or {}
         check("e2e: repair-failure records error", st2.get("triage_status") == "error")
-        check("e2e: repair-failure records repair-failed telemetry", st2.get("triage_repair_status") == "repair-failed")
-        check("e2e: repair-failure records the redacted candidate shape", bool(st2.get("triage_repair_candidate")))
+        check(
+            "e2e: repair-failure records repair-failed telemetry",
+            st2.get("triage_repair_status") == "repair-failed",
+        )
+        check(
+            "e2e: repair-failure records the redacted candidate shape",
+            bool(st2.get("triage_repair_candidate")),
+        )
         check(
             "e2e: repair-failure error carries the repaired structural reason",
             "product_implications" in (st2.get("triage_error") or ""),
@@ -590,8 +815,14 @@ def test_cli_triage_apply_repair_end_to_end():
             json.dump([{"type": "result", "is_error": True, "result": ""}], f)
         cap3 = _run_triage_apply(469, "8b7547c1", queued, empty_exec, "", tf)
         st3 = core.parse_state_block(cap3.get("body", "")) or {}
-        check("e2e(EXCLUDED): missing result records plain error", st3.get("triage_status") == "error")
-        check("e2e(EXCLUDED): missing result has NO repair telemetry", st3.get("triage_repair_status") is None)
+        check(
+            "e2e(EXCLUDED): missing result records plain error",
+            st3.get("triage_status") == "error",
+        )
+        check(
+            "e2e(EXCLUDED): missing result has NO repair telemetry",
+            st3.get("triage_repair_status") is None,
+        )
         check(
             "e2e(EXCLUDED): missing result keeps the plain unavailable text",
             st3.get("triage_error") == rc.TRIAGE_UNAVAILABLE,
@@ -600,14 +831,16 @@ def test_cli_triage_apply_repair_end_to_end():
         # A normal valid original still works unchanged, no repair telemetry.
         cap4 = _run_triage_apply(469, "8b7547c1", queued, valid, "", tf)
         st4 = core.parse_state_block(cap4.get("body", "")) or {}
-        check("e2e: a valid original succeeds with no repair telemetry",
-              st4.get("triage_status") == "succeeded" and st4.get("triage_repair_status") is None)
+        check(
+            "e2e: a valid original succeeds with no repair telemetry",
+            st4.get("triage_status") == "succeeded"
+            and st4.get("triage_repair_status") is None,
+        )
 
         skipped = _run_triage_apply(469, "newer-revision", queued, valid, "", tf)
         check(
             "e2e: stale card reports explicit rejected output",
-            skipped.get("outputs")
-            == "applied=false\ntriage_status=succeeded\n"
+            skipped.get("outputs") == "applied=false\ntriage_status=succeeded\n"
             and "body" not in skipped,
         )
         failed = _run_triage_fail(469, "8b7547c1", queued)
@@ -619,8 +852,7 @@ def test_cli_triage_apply_repair_end_to_end():
         failed_stale = _run_triage_fail(469, "newer-revision", queued)
         check(
             "e2e: stale triage-fail reports explicit rejected output",
-            failed_stale.get("outputs")
-            == "applied=false\ntriage_status=error\n"
+            failed_stale.get("outputs") == "applied=false\ntriage_status=error\n"
             and "body" not in failed_stale,
         )
 
@@ -636,9 +868,9 @@ def test_triage_yml_repair_wiring():
     consume_job = doc["jobs"]["triage-claude-consume"]
     consume_steps = consume_job["steps"]
     repair_job = doc["jobs"]["triage-repair-model"]
-    model_steps = yaml.safe_load(
-        read(".github", "workflows", "claude-model.yml")
-    )["jobs"]["model"]["steps"]
+    model_steps = yaml.safe_load(read(".github", "workflows", "claude-model.yml"))[
+        "jobs"
+    ]["model"]["steps"]
     check(
         "yaml: every primary evidence schema asks for one JSON string",
         triage_source.count("a single JSON string, not an array") == 3,
@@ -653,14 +885,10 @@ def test_triage_yml_repair_wiring():
     tr_i = idx(prepare_steps, lambda s: s.get("id") == "triage-result")
     prep_i = idx(prepare_steps, lambda s: s.get("id") == "repair-prep")
     rep_i = idx(prepare_steps, lambda s: s.get("id") == "claude-repair-model")
-    received_i = idx(
-        consume_steps, lambda s: s.get("id") == "repair-result-received"
-    )
+    received_i = idx(consume_steps, lambda s: s.get("id") == "repair-result-received")
     compact_i = idx(consume_steps, lambda s: s.get("id") == "compact-results")
     fresh_i = idx(consume_steps, lambda s: s.get("id") == "post-model-freshness")
-    upd_i = idx(
-        consume_steps, lambda s: s.get("name") == "Update the decision card"
-    )
+    upd_i = idx(consume_steps, lambda s: s.get("name") == "Update the decision card")
     target_download_i = idx(
         consume_steps, lambda s: s.get("name") == "Download exact target evidence"
     )
@@ -715,13 +943,11 @@ def test_triage_yml_repair_wiring():
     boundary = prepare_steps[rep_i]
     check(
         "yaml: Claude repair boundary follows its immutable task",
-        "steps.claude-repair-task.outcome == 'success'"
-        in str(boundary.get("if", "")),
+        "steps.claude-repair-task.outcome == 'success'" in str(boundary.get("if", "")),
     )
     check(
         "yaml: repair reusable job binds the caller commit",
-        repair_job.get("with", {}).get("expected_commit_sha")
-        == "${{ github.sha }}",
+        repair_job.get("with", {}).get("expected_commit_sha") == "${{ github.sha }}",
     )
     check(
         "yaml: claude_repair is fail-open (continue-on-error)",
@@ -729,9 +955,7 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: claude_repair uses the pinned action",
-        str(rep.get("uses", "")).endswith(
-            "fad22eb3fa582b7357fc0ea48af6645851b884fd"
-        ),
+        str(rep.get("uses", "")).endswith("fad22eb3fa582b7357fc0ea48af6645851b884fd"),
     )
     check(
         "yaml: Claude repair prompt is hydrated from its AgentTask",
@@ -748,7 +972,10 @@ def test_triage_yml_repair_wiring():
     settings = str(repw.get("settings", ""))
     check(
         "yaml: claude_repair fail-closed deny of exec/file/network tools",
-        '"deny"' in settings and all(t in settings for t in ("Bash", "Read", "Write", "WebFetch", "Grep", "Glob")),
+        '"deny"' in settings
+        and all(
+            t in settings for t in ("Bash", "Read", "Write", "WebFetch", "Grep", "Glob")
+        ),
     )
     check(
         "yaml: claude_repair is tokenless (no FLEET_TOKEN)",
@@ -812,7 +1039,8 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: card projection rejects post-model freshness loss",
-        "steps.post-model-freshness.outputs.fresh == 'false'" in str(upd.get("env", {}).get("HEAD_OK", "")),
+        "steps.post-model-freshness.outputs.fresh == 'false'"
+        in str(upd.get("env", {}).get("HEAD_OK", "")),
     )
     primary_finalize = next(
         s
@@ -849,8 +1077,10 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: each durable claim is patched before its terminal stage",
-        primary_run.index("gh api --method PATCH") < primary_run.index("agent_runtime.py stage")
-        and repair_run.index("gh api --method PATCH") < repair_run.index("agent_runtime.py stage")
+        primary_run.index("gh api --method PATCH")
+        < primary_run.index("agent_runtime.py stage")
+        and repair_run.index("gh api --method PATCH")
+        < repair_run.index("agent_runtime.py stage")
         and "always()" in str(repair_finalize.get("if", "")),
     )
     check(

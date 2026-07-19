@@ -784,8 +784,7 @@ def test_triage_requires_evidence_field():
     )
     check(
         "evidence: a list containing a non-string item is rejected",
-        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", 3]))
-        is None,
+        rc.normalize_triage(dict(complete, evidence=["target.txt: quote", 3])) is None,
     )
     check(
         "evidence: parse_triage_json rejects a complete-but-evidence-less result",
@@ -2000,7 +1999,9 @@ def test_reconcile_refreshes_issue_updated_at_when_auto_triage_disabled():
         "reconcile(issue): disabled triage does not do a separate activity stamp",
         calls["reflect"] == [],
     )
-    refreshed_state = core.parse_state_block(card_row(calls["upsert"][0]["item"])["body"])
+    refreshed_state = core.parse_state_block(
+        card_row(calls["upsert"][0]["item"])["body"]
+    )
     check(
         "reconcile(issue): refreshed item uses the new updated_at",
         calls["upsert"][0]["item"].get("updated_at") == "2024-06-01T00:00:00Z",
@@ -2055,8 +2056,14 @@ def test_triage_workflow_issue_path_isolation():
     resolve = step_by_id(steps, "resolve")
     verify_head = step_by_id(steps, "verify_head")
     prepare = step_by_id(steps, "prepare")
-    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
-    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"][
+        "model"
+    ]["steps"]
+    claude_steps = [
+        s
+        for s in model_steps
+        if s.get("id") in ("triage_search", "triage_local", "triage_repair")
+    ]
 
     check(
         "workflow: kind input exists and is required",
@@ -2190,7 +2197,8 @@ def test_triage_workflow_issue_path_isolation():
         )
         check(
             "workflow(issue path): Claude uses immutable model",
-            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
+            "--model claude-sonnet-4-6"
+            in str((step.get("with") or {}).get("claude_args", "")),
         )
 
     check(
@@ -2275,14 +2283,18 @@ def test_triage_workflow_security_wiring():
             and "card is no longer queued for this auto-triage attempt" in run,
         )
 
-    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"]["model"]["steps"]
-    claude_steps = [s for s in model_steps if s.get("id") in ("triage_search", "triage_local", "triage_repair")]
+    model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"][
+        "model"
+    ]["steps"]
+    claude_steps = [
+        s
+        for s in model_steps
+        if s.get("id") in ("triage_search", "triage_local", "triage_repair")
+    ]
     # Two MAIN triage branches plus the bounded schema-repair branch.
     main_claude = [s for s in claude_steps if s.get("id") != "triage_repair"]
     repair = step_by_id(model_steps, "triage_repair")
-    check(
-        "workflow: search and no-search Claude branches exist", len(main_claude) == 2
-    )
+    check("workflow: search and no-search Claude branches exist", len(main_claude) == 2)
     # Every Claude step (main triage AND repair) shares the same security posture.
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
@@ -2292,7 +2304,8 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: Claude uses immutable model",
-            "--model claude-sonnet-4-6" in str((step.get("with") or {}).get("claude_args", "")),
+            "--model claude-sonnet-4-6"
+            in str((step.get("with") or {}).get("claude_args", "")),
         )
         check(
             "security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped
@@ -2489,10 +2502,7 @@ def test_triage_workflow_security_wiring():
             "workflow: final card update keeps card and fleet tokens separated",
             env.get("GH_TOKEN") == "${{ github.token }}"
             and env.get("WHEELHOUSE_FLEET_TOKEN") == "${{ secrets.FLEET_TOKEN }}"
-            and run.count(
-                'WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"'
-            )
-            == 2,
+            and run.count('WHEELHOUSE_FLEET_TOKEN="$WHEELHOUSE_FLEET_TOKEN"') == 2,
         )
         check(
             "workflow: final card update carries GITHUB_REPOSITORY_OWNER for ref qualification",
@@ -2599,7 +2609,7 @@ def test_triage_workflow_security_wiring():
             env.get("ISSUE") == "${{ github.event.inputs.issue }}"
             and env.get("KIND") == "${{ github.event.inputs.kind }}"
             and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
-            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}"
+            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
         )
         check(
             "workflow: no-source fallback uses only the card token",
@@ -2615,8 +2625,7 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: no-source fallback retains PR-review coverage",
-            'elif [ "$KIND" = "pr-review" ]' in run
-            and 'REVISION="$HEAD_SHA"' in run,
+            'elif [ "$KIND" = "pr-review" ]' in run and 'REVISION="$HEAD_SHA"' in run,
         )
         check(
             "workflow: no-source fallback visibly marks its non-atomic exception",
@@ -2643,9 +2652,7 @@ def test_triage_workflow_security_wiring():
 
 def test_no_source_pr_fallback_writes_visible_security_notice():
     """Run the workflow's source-less transformer against a queued PR card."""
-    steps = load_yaml(".github", "workflows", "triage.yml")["jobs"]["triage"][
-        "steps"
-    ]
+    steps = load_yaml(".github", "workflows", "triage.yml")["jobs"]["triage"]["steps"]
     fallback = step_by_name(
         steps,
         "Clear queued triage cache if trusted source is unavailable",
@@ -3090,9 +3097,7 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
     try:
         for label, scenario_item, has_token, expect_held in scenarios:
             captured = {}
-            rc._create_and_verify_card = (
-                lambda item_, card: captured.update(card) or 99
-            )
+            rc._create_and_verify_card = lambda item_, card: captured.update(card) or 99
             number = rc.upsert_card(scenario_item, has_token=has_token)
             check("create: %s" % label, number == 99)
             check(
