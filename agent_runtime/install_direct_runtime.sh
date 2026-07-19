@@ -47,7 +47,10 @@ PY
     "$sandbox" --version
     # Exercise the same namespace primitive the production supervisor needs,
     # without credentials, a provider request, or model execution.
-    "$sandbox" \
+    # Hosted Ubuntu 24.04 permits the runner to create a network namespace but
+    # denies its unprivileged loopback setup.  Use the same privileged launcher
+    # as the production supervisor; Bubblewrap drops all worker capabilities.
+    sudo --non-interactive "$sandbox" \
       --die-with-parent \
       --new-session \
       --unshare-all \

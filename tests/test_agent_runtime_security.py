@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_runtime.contract import canonical_json_bytes
 from agent_runtime.redaction import REDACTED, contains_secret, redact_text
+from agent_runtime import supervisor
 from agent_runtime.sandbox import build_command
 from agent_runtime.tools import CanonicalTools, ToolError, _bounded_text_result
 from agent_runtime.worker import _auth_secret_values
@@ -119,6 +120,7 @@ def main():
             proof={"binary": "/usr/bin/bwrap", "testOnly": False},
         )
         joined = " ".join(command)
+        check("sandbox: privileged launcher creates the isolated network namespace", command[:2] == ["sudo", "--non-interactive"])
         check("sandbox: all namespaces unshared", "--unshare-all" in command)
         check("sandbox: capabilities dropped", "--cap-drop ALL" in joined)
         check("sandbox: environment cleared", "--clearenv" in command)
@@ -132,6 +134,21 @@ def main():
         check("sandbox: no inherited environment map", environment == {})
         for token_name in ("GH_TOKEN", "GITHUB_TOKEN", "FLEET_TOKEN", "READONLY_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"):
             check("sandbox: %s not injected" % token_name, token_name not in joined)
+
+        direct_output = bundle / "direct-output"
+        direct_output.mkdir()
+        expected_state = direct_output / "worker-state.json"
+        expected_state.write_text("{}", encoding="utf-8")
+        unexpected_link = direct_output / "worker-result.json"
+        unexpected_link.symlink_to(outside)
+        chown_calls = []
+        original_run = supervisor.subprocess.run
+        try:
+            supervisor.subprocess.run = lambda command, **kwargs: chown_calls.append((command, kwargs))
+            supervisor._restore_direct_output_access(direct_output)
+        finally:
+            supervisor.subprocess.run = original_run
+        check("sandbox: direct output ownership restoration is restricted to regular expected files", len(chown_calls) == 1 and chown_calls[0][0][:4] == ["sudo", "--non-interactive", "chown", "--no-dereference"] and str(expected_state) in chown_calls[0][0])
 
     extracted = _auth_secret_values({"tokens": {"access_token": "fixture-access-value", "refresh_token": "fixture-refresh-value"}, "agent_identity": {"private_key": "fixture-private-value"}, "email": "not-secret@example.test"})
     check("redaction: managed auth secret fields collected recursively", set(extracted) == {"fixture-access-value", "fixture-refresh-value", "fixture-private-value"})

@@ -306,6 +306,26 @@ def _read_worker_events(path: Path, events: EventWriter) -> None:
         warn("adapter-events-unavailable", "Adapter event diagnostics were unavailable.")
 
 
+def _restore_direct_output_access(output_dir: Path) -> None:
+    """Return expected root-mapped direct-worker output to the runner safely."""
+
+    owner = "%d:%d" % (os.getuid(), os.getgid())
+    for name in ("worker-state.json", "worker-result.json", "adapter-events.ndjson"):
+        path = output_dir / name
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            continue
+        subprocess.run(
+            ["sudo", "--non-interactive", "chown", "--no-dereference", owner, "--", str(path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
     if task["spec"]["output"]["evidencePolicy"] != "target-anchor/v1":
         return True
@@ -442,6 +462,10 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
         raise RuntimeFailure("selection.no_candidate", "selecting", "Selected adapter is not in the trusted allowlist.")
     adapter = adapter_class()
     host = host_proof(adapter.id)
+    if not host.get("testOnly"):
+        # The root-launched Bubblewrap worker is mapped to host root.  It needs
+        # to create its mode-0600 result files, but must not enumerate output.
+        output_dir.chmod(0o733)
     schema_path = bundle / task["spec"]["output"]["schemaArtifact"]
     try:
         schema_bytes = schema_path.read_bytes()
@@ -544,6 +568,8 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                 signal.signal(signal.SIGTERM, old_term)
                 signal.signal(signal.SIGINT, old_int)
 
+            if not host.get("testOnly"):
+                _restore_direct_output_access(output_dir)
             worker_path = output_dir / "worker-result.json"
             state_path = output_dir / "worker-state.json"
             try:

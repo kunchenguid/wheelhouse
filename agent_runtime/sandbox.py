@@ -77,6 +77,12 @@ def build_command(
 
     root = str(Path(__file__).resolve().parents[1])
     command = [
+        # GitHub's Ubuntu 24.04 runner prohibits an unprivileged process from
+        # bringing up loopback in its new network namespace.  Bubblewrap needs
+        # that privilege only while it builds the namespace; it clears the
+        # environment and drops every capability before the worker starts.
+        "sudo",
+        "--non-interactive",
         proof["binary"],
         "--die-with-parent",
         "--new-session",
