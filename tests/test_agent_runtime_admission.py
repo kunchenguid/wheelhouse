@@ -161,6 +161,7 @@ def main():
             )
             first = agent_claim.claim(args)
             first_outputs = output_path.read_text(encoding="utf-8")
+            primary_comment = comments[-1]
             output_path.write_text("", encoding="utf-8")
             second = agent_claim.claim(args)
             second_outputs = output_path.read_text(encoding="utf-8")
@@ -168,9 +169,53 @@ def main():
             check("claim: duplicate event exits before a second trusted claim", second == 0 and "admitted=false" in second_outputs and len(comments) == 2)
 
             output_path.write_text("", encoding="utf-8")
+            args.action = "nl-decision.schema-repair"
+            repair = agent_claim.claim(args)
+            repair_outputs = output_path.read_text(encoding="utf-8")
+            repair_comment = comments[-1]
+            check(
+                "claim: repair admission has distinct owner-facing text",
+                repair == 0
+                and "admitted=true" in repair_outputs
+                and primary_comment["body"].startswith(
+                    "Agent event admitted and is being processed."
+                )
+                and repair_comment["body"].startswith(
+                    "Schema repair admitted and is being processed."
+                ),
+            )
+            check(
+                "claim: primary and repair hidden identities remain durable",
+                event_claim_marker(nl_one) in primary_comment["body"]
+                and event_claim_marker(nl_repair) in repair_comment["body"]
+                and nl_one != nl_repair,
+            )
+
+            output_path.write_text("", encoding="utf-8")
+            duplicate_repair = agent_claim.claim(args)
+            check(
+                "claim: repair admission remains idempotent",
+                duplicate_repair == 0
+                and "admitted=false" in output_path.read_text(encoding="utf-8")
+                and comments[-1] is repair_comment,
+            )
+
+            output_path.write_text("", encoding="utf-8")
+            args.action = "nl-decision.local"
             args.event_id = "comment:101"
             agent_claim.claim(args)
-            check("claim: distinct same-revision comment gets a distinct claim", "admitted=true" in output_path.read_text(encoding="utf-8") and len(comments) == 3)
+            check("claim: distinct same-revision comment gets a distinct claim", "admitted=true" in output_path.read_text(encoding="utf-8") and len(comments) == 4)
+
+            workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/decision-handler.yml").read_text(encoding="utf-8")
+            check(
+                "claim: repair finalizer targets the repair claim and marker",
+                'REPAIR_CLAIM_ID: ${{ needs.nl-repair-prepare.outputs.repair_claim_id }}'
+                in workflow
+                and 'REPAIR_MARKER: ${{ needs.nl-repair-prepare.outputs.repair_claim_marker }}'
+                in workflow
+                and "--action nl-decision.schema-repair" in workflow
+                and 'issues/comments/$REPAIR_CLAIM_ID' in workflow,
+            )
     finally:
         agent_claim.gh_json = saved
         os.environ.pop("GITHUB_OUTPUT", None)

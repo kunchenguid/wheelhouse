@@ -30,6 +30,12 @@ TRIAGE_ACTIONS = {
 }
 
 
+def claim_visible_text(action: str) -> str:
+    if action.endswith(".schema-repair"):
+        return "Schema repair admitted and is being processed."
+    return "Agent event admitted and is being processed."
+
+
 def output(name: str, value: object) -> None:
     path = os.environ.get("GITHUB_OUTPUT", "")
     if path:
@@ -570,7 +576,7 @@ def claim(args: argparse.Namespace) -> int:
     if existing:
         comment = existing[0]
     else:
-        body = "Agent event admitted and is being processed.\n\n%s" % marker
+        body = "%s\n\n%s" % (claim_visible_text(args.action), marker)
         created = gh_json(
             "api",
             "--method",

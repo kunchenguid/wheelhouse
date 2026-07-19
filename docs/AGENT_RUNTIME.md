@@ -32,7 +32,7 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 GitHub resolves that local reusable workflow from the caller's commit, and every caller also passes its exact `github.sha` as the expected source revision.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
-An eligible natural-language schema repair uses a distinct durable claim bound to the same authorized comment event, so a rerun cannot spend another repair turn.
+An eligible natural-language schema repair uses a distinct durable claim bound to the same authorized comment event, so a rerun cannot spend another repair turn. Its visible admission copy identifies the schema-repair phase while the hidden marker preserves the separate repair identity and idempotency key.
 Schema-repair actions are structurally ineligible to create another repair task.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
 An operator-approved exact-revision auto-triage replay first tombstones only the matching primary-triage claim marker and directly verifies that admission can no longer discover it.
