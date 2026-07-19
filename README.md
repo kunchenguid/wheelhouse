@@ -257,9 +257,8 @@ Auto triage and deep review keep their action prompts independent of target size
 To set it up:
 
 1. Generate a **Claude subscription** token (requires a Claude Pro/Max subscription): run `claude setup-token` in the Claude Code CLI.
-   This is **not** an Anthropic API key - the workflows authenticate `anthropics/claude-code-action` with your subscription only.
-   The workflows pin `anthropics/claude-code-action` to `v1.0.178` at `af0559ee4f514d1ef21826982bed13f7edc3c35e` and pass immutable `--model claude-sonnet-4-6` to every Claude step.
-   The pinned action resolves Claude Code to `2.1.215` and `@anthropic-ai/claude-agent-sdk` to `0.3.215`.
+   This is **not** an Anthropic API key - the Claude Action and direct repair runtime use it only for Claude subscription authentication.
+   Reviewed immutable action and direct-runtime provenance is documented in [Agent runtime operations](docs/AGENT_RUNTIME.md).
    Trusted preflight and post-action bridge steps validate `AgentTask`, observed model identity, and atomic `AgentResult` before deterministic consumers run.
 2. Add it as an Actions secret named exactly `CLAUDE_CODE_OAUTH_TOKEN`.
 3. Optional: set `auto_triage: false` and/or `auto_triage_issues: false` in `wheelhouse.config.yml` if you do not want automatic PR-card or issue-card triage to spend Claude turns.
@@ -269,7 +268,7 @@ To set it up:
    permissions and no access to private repositories.
 
 In every case Claude only treats trusted workflow prompts and owner/maintainer-authored text as instructions; the target diff/issue/code and optional search output are untrusted data, and it never receives `FLEET_TOKEN`.
-When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob/Write, no shell tools, and no model `GH_TOKEN`.
+When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 Auto triage and deep review's no-token branches run with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 When `READONLY_TOKEN` is present, search-enabled Claude steps receive it as GitHub CLI credentials for the scoped search wrapper.
 Auto triage's GitHub write is the workflow-owned card edit, deep review's GitHub write is the workflow-owned card comment, `nl_decisions` actions are performed by the deterministic handler, and `READONLY_TOKEN` never authorizes an action.
