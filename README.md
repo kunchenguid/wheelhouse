@@ -578,7 +578,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Wait for the **triage** workflow to attach either the `Triage` section or an unavailable note; either outcome removes `pending-triage` and restores the normal checkboxes.
   If the configured budget is unavailable before dispatch, the scan or ingest run should publish the card immediately with a deferred-advisory note and leave it eligible for a later retry.
   If the dispatch itself could not be started, the scan or ingest run should publish the card immediately with a "could not be started" note.
-  If the triage run failed before its update step, the final recovery step should publish it with a "did not finish" note. If trusted source setup is unavailable, only an issue-triage card can have its queued cache cleared for a later retry; a PR-review card stays unchanged until trusted maintenance can update its Triage block and auto-merge criteria together.
+  If the triage run failed before its update step, the final recovery step should publish it with a "did not finish" note. If trusted source setup is unavailable, the card-only security fallback clears the queued cache for a later retry and visibly warns that auto-merge criteria were not re-evaluated and may temporarily reflect the prior queued state.
 - **A PR-review or issue-triage card has no Triage section.**
   For PR-review, auto triage is skipped when `auto_triage: false`, `CLAUDE_CODE_OAUTH_TOKEN` is absent, the card is not a pure `needs-decision` PR-review card, or the card already carries `triaged_sha` for the current head.
   For issue-triage, it's skipped the same way but under the INDEPENDENT `auto_triage_issues`, and the cache is the issue's `updatedAt` revision instead of a head SHA.

@@ -2214,7 +2214,7 @@ def test_triage_workflow_security_wiring():
     update = step_by_name(steps, "Update the decision card")
     fallback = step_by_name(
         steps,
-        "Clear queued issue-triage cache if trusted source is unavailable",
+        "Clear queued triage cache if trusted source is unavailable",
     )
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
@@ -2591,16 +2591,15 @@ def test_triage_workflow_security_wiring():
         env = fallback.get("env", {})
         run = str(fallback.get("run", ""))
         check(
-            "workflow: no-source fallback runs only for issue-triage without trusted source",
-            fallback.get("if")
-            == "always() && steps.trusted-src.outputs.path == '' && github.event.inputs.kind == 'issue-triage'",
+            "workflow: no-source fallback runs only when trusted source is absent",
+            fallback.get("if") == "always() && steps.trusted-src.outputs.path == ''",
         )
         check(
-            "workflow: no-source fallback reads the raw issue-triage dispatch inputs",
+            "workflow: no-source fallback reads RAW dispatch inputs for both kinds",
             env.get("ISSUE") == "${{ github.event.inputs.issue }}"
             and env.get("KIND") == "${{ github.event.inputs.kind }}"
+            and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
             and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}"
-            and "HEAD_SHA" not in env,
         )
         check(
             "workflow: no-source fallback uses only the card token",
@@ -2615,15 +2614,21 @@ def test_triage_workflow_security_wiring():
             and "future scan can retry" in run,
         )
         check(
-            "workflow: no-source fallback cannot write a PR-review triage exception",
-            '"pr-review"' not in run
-            and "Security fallback" not in run
-            and "without re-evaluating Auto-merge criteria" not in run,
+            "workflow: no-source fallback retains PR-review coverage",
+            'elif [ "$KIND" = "pr-review" ]' in run
+            and 'REVISION="$HEAD_SHA"' in run,
         )
         check(
-            "workflow: source-less fallback is documented as issue-triage only",
-            "fallback is therefore limited to\n  issue-triage cards" in read("AGENTS.md")
-            and "Every PR-review triage body mutation (queued, deferred, cleared, failed, or completed)" in read("AGENTS.md"),
+            "workflow: no-source fallback visibly marks its non-atomic exception",
+            "### Triage" in run
+            and "Security fallback" in run
+            and "without re-evaluating Auto-merge criteria" in run
+            and "until trusted card maintenance runs" in run,
+        )
+        check(
+            "workflow: no-source fallback exception is documented",
+            "no-trusted-source security fallback" in read("AGENTS.md")
+            and "visible `### Triage` security-fallback warning" in read("AGENTS.md"),
         )
     recover_i = step_index(
         steps,
@@ -2633,6 +2638,83 @@ def test_triage_workflow_security_wiring():
     check(
         "workflow: recovery step runs after the update step",
         None not in (update_i, recover_i) and update_i < recover_i,
+    )
+
+
+def test_no_source_pr_fallback_writes_visible_security_notice():
+    """Run the workflow's source-less transformer against a queued PR card."""
+    steps = load_yaml(".github", "workflows", "triage.yml")["jobs"]["triage"][
+        "steps"
+    ]
+    fallback = step_by_name(
+        steps,
+        "Clear queued triage cache if trusted source is unavailable",
+    )
+    run = str((fallback or {}).get("run", ""))
+    heredoc_start = 'python3 - "$card_json" "$body_file" <<\'PY\'\n'
+    start = run.find(heredoc_start)
+    end = run.find("\nPY\n", start + len(heredoc_start))
+    check(
+        "fallback notice: inline card transformer is extractable",
+        fallback is not None and start >= 0 and end > start,
+    )
+    if fallback is None or start < 0 or end <= start:
+        return
+
+    transform = run[start + len(heredoc_start) : end]
+    candidate = item()
+    rendered = rc.render(candidate, held=True)
+    queued_body = rc.body_with_triage_queued(rendered["body"], candidate)
+    queued_state = core.parse_state_block(queued_body)
+    card = {
+        "state": "OPEN",
+        "labels": rendered["labels"],
+        "body": queued_body,
+    }
+
+    with tempfile.TemporaryDirectory() as directory:
+        card_path = os.path.join(directory, "card.json")
+        body_path = os.path.join(directory, "body.md")
+        with open(card_path, "w") as f:
+            json.dump(card, f)
+        env = dict(os.environ)
+        env.update({"KIND": "pr-review", "REVISION": candidate["head_sha"]})
+        result = subprocess.run(
+            [sys.executable, "-", card_path, body_path],
+            input=transform,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        check(
+            "fallback notice: PR-review transformer succeeds",
+            result.returncode == 0 and os.path.exists(body_path),
+        )
+        if result.returncode != 0 or not os.path.exists(body_path):
+            return
+        with open(body_path) as f:
+            written_body = f.read()
+
+    written_state = core.parse_state_block(written_body)
+    check(
+        "fallback notice: card visibly identifies the security fallback",
+        "### Triage" in written_body
+        and "> **Security fallback:** Trusted source was unavailable" in written_body
+        and "without re-evaluating Auto-merge criteria" in written_body
+        and "checklist may temporarily reflect the prior queued state" in written_body,
+    )
+    check(
+        "fallback notice: queued cache clears while frozen criteria remain explicit",
+        written_state.get("triaged_sha") is None
+        and written_state.get("triage_status") is None
+        and written_state.get(rc.AUTOMERGE_CRITERIA_FIELD)
+        == queued_state.get(rc.AUTOMERGE_CRITERIA_FIELD),
+    )
+    check(
+        "fallback notice: exactly one managed Triage notice is written",
+        written_body.count("<!-- wheelhouse-triage:start -->") == 1
+        and written_body.count("<!-- wheelhouse-triage:end -->") == 1,
     )
 
 
@@ -3634,6 +3716,7 @@ def main():
     test_auto_triage_toggles_are_independent_end_to_end()
     test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()
+    test_no_source_pr_fallback_writes_visible_security_notice()
     test_scan_and_ingest_can_dispatch_with_default_token()
     test_should_hold_gates()
     test_render_held_card_placeholder_and_labels()
