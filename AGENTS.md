@@ -1214,6 +1214,7 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   It uses the same pass-by-reference prompt invariant as `triage.yml`; only the bounded decision-card body remains inline.
   When `READONLY_TOKEN` is absent, this remains the production no-search path: no shell `GH_TOKEN`, no Bash tool, and `github_token: github.token`.
   When `READONLY_TOKEN` is present, Claude also uses that read-only public-scoped token as both the action `github_token` input and shell `GH_TOKEN`, plus `Write` for `search-request.json` and `Bash(wheelhouse-search)`.
+  This direct in-process token exposure is deliberate; see `docs/READONLY_TOKEN_DELIVERY.md` for the accepted decision and tradeoff.
   The wrapper is still the existing `scripts/nl_readonly_search.py` install path, scoped to the target repo plus configured fleet repos, so deep-review can cross-reference related, duplicate, or superseding PRs/issues and code context.
   Search output is UNTRUSTED DATA and advisory evidence only; the model still produces only verdict text, and `FLEET_TOKEN` never reaches it.
   No deterministic downstream step reads raw model output because the trusted bridge validates the action `execution_file` and exposes only `AgentResult`.
