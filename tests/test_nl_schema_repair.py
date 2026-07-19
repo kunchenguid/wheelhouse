@@ -20,7 +20,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import apply_decision as decision  # noqa: E402
-from agent_runtime.claude_bridge import IMMUTABLE_MODEL, bridge  # noqa: E402
+from agent_runtime.claude_bridge import (  # noqa: E402
+    IMMUTABLE_MODEL,
+    _repair_candidate,
+    bridge,
+)
 from agent_runtime.claude_handoff import hydrate, pack  # noqa: E402
 from agent_runtime.contract import (  # noqa: E402
     canonical_json_bytes,
@@ -28,6 +32,7 @@ from agent_runtime.contract import (  # noqa: E402
     load_json_regular,
     validate_contract,
 )
+from agent_runtime.task_builder import claude_declared_outputs  # noqa: E402
 from agent_runtime_testlib import make_task, run_fake  # noqa: E402
 from test_agent_runtime_claude_bridge import (  # noqa: E402
     make_bundle,
@@ -52,6 +57,10 @@ MALFORMED_ESCAPE = (
 VALID_ANSWER = {
     "mode": "answer",
     "answer": "The budget is enforced by the `max_tokens` limit.",
+}
+QUOTED_ANSWER = {
+    "mode": "answer",
+    "answer": 'The "outside guarded clone refreshes" sentence is exact.',
 }
 
 
@@ -174,6 +183,32 @@ def test_pure_repair_contract():
         len(decision.build_nl_repair_prompt(huge).encode("utf-8")) < 30000,
     )
 
+    encoded = canonical_json_bytes(QUOTED_ANSWER)
+    check(
+        "carrier: trusted JSON serialization escapes and reparses the exact nested quotes",
+        b'\\"outside guarded clone refreshes\\"' in encoded
+        and json.loads(encoded) == QUOTED_ANSWER,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        malformed_file = Path(directory) / "decision.json"
+        malformed_file.write_text(
+            '{"mode":"answer","answer":"The "outside guarded clone refreshes" sentence is exact."}',
+            encoding="utf-8",
+        )
+        has_candidate, candidate = _repair_candidate(
+            "nl-decision.local",
+            {
+                "is_error": False,
+                "result": json.dumps(QUOTED_ANSWER),
+            },
+            str(malformed_file),
+            131072,
+        )
+    check(
+        "carrier: schema-shaped terminal JSON outranks a malformed legacy file",
+        has_candidate and candidate == QUOTED_ANSWER,
+    )
+
     repaired = decision.decide_nl_apply(MALFORMED_ESCAPE, valid)
     check(
         "apply: valid repair is selected only after strict re-validation",
@@ -239,10 +274,7 @@ def test_native_bridge_and_portable_fallback():
             native_result["delivered"]["value"] != "ignored terminal prose",
         )
 
-        production_answer = {
-            "mode": "answer",
-            "answer": 'The "outside guarded clone refreshes" sentence is exact.',
-        }
+        production_answer = QUOTED_ANSWER
         _, carrier_omission_bundle = make_bundle(
             root / "carrier-omission", action="nl-decision.local"
         )
@@ -481,6 +513,16 @@ def test_bound_schema_is_passed_to_action():
     check(
         "workflow: pinned rollback repair does not claim native enforcement",
         "--json-schema" not in step_by_id(steps, "nl_repair")["with"]["claude_args"],
+    )
+    check(
+        "workflow: live NL output is native-only and no model-authored carrier is captured",
+        "decision.json" not in decision.build_nl_prompt(
+            "", "answer this", "pr-review", target_slug="owner/repo"
+        )
+        and "decision.json" not in (ROOT / ".github/workflows/claude-model.yml").read_text()
+        and claude_declared_outputs("nl-decision.local") == []
+        and claude_declared_outputs("nl-decision.search")
+        == ["search-request.json"],
     )
 
     lock = load_json_regular(ROOT / "agent_runtime/runtime.lock.json")

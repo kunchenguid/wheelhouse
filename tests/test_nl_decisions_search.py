@@ -176,9 +176,9 @@ def test_claude_steps_split_legacy_vs_search():
         check(
             "workflow: legacy step keeps the no-shell tool mode and immutable model "
             "(Read/Grep/Glob added for pass-by-reference target.txt, card #555; "
-            "Write kept for decision.json, still no Bash)",
+            "no Write and no Bash)",
             args
-            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
+            == "--allowedTools Read,Grep,Glob\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
         )
         check(
             "workflow: legacy step has no GH_TOKEN env",

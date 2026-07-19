@@ -280,9 +280,9 @@ def test_nl_fetch_bounds_target_on_disk_with_explicit_truncation():
 def test_both_nl_claude_steps_can_read_the_on_disk_file():
     """Both NL Claude steps (READONLY search + legacy no-token) consume the SAME
     by-reference nl-prompt and gain Read/Grep/Glob so they can open target.txt.
-    The write/acting boundary is unchanged: the search step keeps Bash limited to
-    wheelhouse-search, and the legacy step keeps Write (for decision.json) with no
-    shell and no GH_TOKEN."""
+    The write/acting boundary is unchanged: the search step keeps Write only for
+    search-request.json and Bash limited to wheelhouse-search, while the legacy
+    step has no Write, shell, or GH_TOKEN."""
     search = nl_model_step("nl_search")
     legacy = nl_model_step("nl_local")
     check("nl: read-only search Claude step exists", search is not None)
@@ -317,9 +317,9 @@ def test_both_nl_claude_steps_can_read_the_on_disk_file():
     if legacy:
         largs = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
-            "nl: legacy step is exactly Read,Grep,Glob,Write (no shell, no Bash)",
+            "nl: legacy step is exactly Read,Grep,Glob (no Write, shell, or Bash)",
             largs
-            == "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
+            == "--allowedTools Read,Grep,Glob\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'",
         )
         check(
             "nl: legacy step still receives no GH_TOKEN (unchanged isolation)",

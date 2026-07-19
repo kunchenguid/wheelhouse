@@ -588,7 +588,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   The persisted diagnostics carry only structural facts, never raw target/comment
   content. See `tests/test_triage_schema_repair.py`.
 - Natural-language decisions accept only owner/maintainer comments and are structured.
-  `docs/AGENT_RUNTIME.md` owns the native structured-output and portable schema-repair contract.
+  `docs/AGENT_RUNTIME.md` owns the native structured-output and bounded schema-repair contract.
   `apply_decision.py nl-route` is the trust boundary - it validates `action` against the per-kind allowlist and only then
   sets the `decision` output that makes the SAME deterministic `execute` run
   (so every guard - allowlist, head-SHA re-check, fork-CI HOLD, token isolation,
@@ -598,7 +598,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   removed from the trusted card context before the NL prompt is built, so a prior
   model recommendation cannot become an instruction to the intent-mapper.
   When `READONLY_TOKEN` is absent, the LLM receives
-  `Read,Grep,Glob,Write` and no GitHub credential. When the
+  `Read,Grep,Glob` and no GitHub credential. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
   `GH_TOKEN`, plus a narrow Bash allow-list for `wheelhouse-search`, which wraps
@@ -1238,7 +1238,7 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   Both primary Claude branches pass the exact content-bound canonical `nl-decision-v1` schema through the pinned action's `--json-schema` support. The bridge prefers terminal `structured_output`; when that carrier alone is absent, it may accept the terminal `result` only after strict JSON parsing and validation against the same bound schema.
   The trusted bridge independently enforces the byte bound, schema, task binding, and downstream `nl-route` allowlist before anything can be posted or acted on; native generation and plain terminal JSON are never treated as trusted validation by themselves.
   Absent or genuinely invalid results fail closed into the one bounded `nl-decision.schema-repair` turn, which runs through the direct `claude-cli-pinned` worker on Claude Code `2.1.215` and must itself return native structured output.
-  If it is absent, Claude stays in the production no-shell mode (`--allowedTools Read,Grep,Glob,Write`), has no `GH_TOKEN`, and runs no commands; `decision.json` remains only the bounded portable repair carrier, never a native-success path.
+  If it is absent, Claude stays in the production no-shell mode (`--allowedTools Read,Grep,Glob`), has no `GH_TOKEN`, and runs no commands. The model is never asked to hand-serialize a decision file; trusted code parses and serializes result objects.
   If it is present, Claude also uses `READONLY_TOKEN` as the action
   `github_token` input and shell `GH_TOKEN`, plus the
   `Bash(wheelhouse-search)` allow-list (tools

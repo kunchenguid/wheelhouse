@@ -156,8 +156,21 @@ def _repair_candidate(
                 return True, value
         except (ContractError, RecursionError, TypeError, ValueError):
             pass
-    raw = _raw_delivered_file(delivered_file, max_bytes) or _result_text(terminal)
-    return (bool(raw), raw)
+    result_text = _result_text(terminal)
+    if result_text:
+        try:
+            value = json.loads(result_text)
+            if (
+                isinstance(value, dict)
+                and len(canonical_json_bytes(value)) <= max_bytes
+            ):
+                return True, value
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            pass
+    raw_file = _raw_delivered_file(delivered_file, max_bytes)
+    if raw_file:
+        return True, raw_file
+    return (bool(result_text), result_text)
 
 
 def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
@@ -619,9 +632,10 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                 }
         except (ContractError, json.JSONDecodeError, OSError, RecursionError, UnicodeError, ValueError):
             # Native NL failures retain the bounded structured value when one
-            # exists, then the portable decision.json carrier, then terminal
-            # prose. The candidate remains failed and can never become `final`
-            # until the separate repair task passes the same trusted validation.
+            # exists, then a JSON-parseable terminal result, then a legacy raw
+            # file or terminal prose. The candidate remains failed and can never
+            # become `final` until the separate repair task passes the same
+            # trusted validation.
             has_candidate, repair_value = _repair_candidate(
                 task["metadata"]["action"],
                 terminal,

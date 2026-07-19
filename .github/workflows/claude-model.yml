@@ -429,7 +429,7 @@ jobs:
           allowed_bots: github-actions[bot]
           allowed_non_write_users: ${{ github.actor }}
           prompt: ${{ steps.hydrate.outputs.prompt }}
-          claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
+          claude_args: "--allowedTools Read,Grep,Glob\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
 
       - id: nl_repair
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && steps.hydrate.outputs.action == 'nl-decision.schema-repair' }}
@@ -463,9 +463,6 @@ jobs:
             "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
           esac
           unset PYTHONDONTWRITEBYTECODE
-          if [[ "${ACTION:-}" == nl-decision.* ]] && [ "$ACTION" != "nl-decision.schema-repair" ] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
-            cp decision.json "$OUTPUT/decision.json"
-          fi
           # Pre-hydration / pre-checkpoint failures never reach the durable spend
           # checkpoint. Write one bounded content-free stage record so the parent
           # receives a trusted no-spend result instead of a missing-file cascade.
@@ -719,7 +716,6 @@ jobs:
               if [ -f "$RAW/enforcement.json" ] && [ ! -L "$RAW/enforcement.json" ]; then
                 proof="$RAW/enforcement.json"
                 execution="$RAW/execution.json"
-                if [ -f "$RAW/decision.json" ] && [ ! -L "$RAW/decision.json" ]; then delivered="$RAW/decision.json"; fi
                 conclusion="success"
                 termination="completed"
               elif [ -f "$ATTEMPT/enforcement.json" ] && [ ! -L "$ATTEMPT/enforcement.json" ]; then

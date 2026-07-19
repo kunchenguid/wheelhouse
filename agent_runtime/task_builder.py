@@ -953,10 +953,7 @@ def claude_declared_tools(action: str) -> list[str]:
 
 
 def claude_declared_outputs(action: str) -> list[str]:
-    outputs = ["search-request.json"] if action.endswith(".search") else []
-    if action.startswith("nl-decision") and action not in SCHEMA_REPAIR_ACTIONS:
-        outputs.append("decision.json")
-    return outputs
+    return ["search-request.json"] if action.endswith(".search") else []
 
 
 def claude_limit_enforcement() -> dict[str, str]:
@@ -1306,8 +1303,8 @@ def build_task(
         "",
         '<wheelhouse-adapter-shim trust="trusted" version="%s">' % direct_shim_version,
         tool_instruction,
-        "Any earlier request-file, Write, Bash, wheelhouse-search command, or",
-        "decision.json instruction describes the action compatibility path and",
+        "Any earlier request-file, Write, Bash, or wheelhouse-search command",
+        "describes the action compatibility path and",
         "is superseded for this adapter task. You have no shell or file-write tool.",
         "Submit the final value through the native strict output schema.",
         "Do not add Markdown fences or prose outside that schema.",

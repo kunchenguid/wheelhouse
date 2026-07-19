@@ -49,9 +49,8 @@ Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
                also tells the LLM it may use the read-only wheelhouse-search
                wrapper for answer context only.
 
-  nl-route     Read the LLM's native STRUCTURED result (with decision.json as
-               the portable fallback carrier:
-               {mode, action?, free_text?, answer?}) and emit deterministic
+  nl-route     Read the LLM's schema-validated structured result:
+               {mode, action?, free_text?, answer?} and emit deterministic
                outputs. The LLM only MAPS intent; this phase validates the
                action against the per-kind allowlist and hands `action` mode to
                the SAME `execute` above (inheriting every guard). `answer`/
@@ -1417,19 +1416,14 @@ def build_nl_prompt(
         parts += [
             "",
         ]
-    if search_enabled:
+    parts += [
+        "Output: submit ONLY a single JSON object through the native structured",
+        "output schema. Trusted code owns JSON serialization; do not write a",
+        "decision file. No prose or code fences. Shape:",
+    ]
+    if not search_enabled:
         parts += [
-            "Output: submit ONLY a single JSON object through the native structured",
-            "output schema. Also write the exact same compact object to a file named",
-            "`decision.json` solely as a portable fallback. No prose, no code fences,",
-            "and do not write any other files. Shape:",
-        ]
-    else:
-        parts += [
-            "Output: submit ONLY a single JSON object through the native structured",
-            "output schema. Also write the exact same compact object to a file named",
-            "`decision.json` solely as a portable fallback. No prose, no code fences,",
-            "no other files, and do not run any git or gh commands. Shape:",
+            "Do not write any files, and do not run any git or gh commands.",
         ]
     parts += [
         "  " + schema,
@@ -1595,8 +1589,7 @@ def cmd_nl_prompt():
 
 
 def _load_llm_result(path):
-    """Read the LLM's decision.json tolerantly: accept a bare object, or one
-    wrapped in prose/code-fences (extract the first {...} block)."""
+    """Read a legacy portable result tolerantly for backward compatibility."""
     if not path or not os.path.exists(path):
         return None
     try:
