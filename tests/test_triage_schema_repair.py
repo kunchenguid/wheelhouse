@@ -955,7 +955,9 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: claude_repair uses the pinned action",
-        str(rep.get("uses", "")).endswith("fad22eb3fa582b7357fc0ea48af6645851b884fd"),
+        str(rep.get("uses", "")).endswith(
+            "af0559ee4f514d1ef21826982bed13f7edc3c35e"
+        ),
     )
     check(
         "yaml: Claude repair prompt is hydrated from its AgentTask",

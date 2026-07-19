@@ -39,3 +39,32 @@ jobs:
         run: |
           bash agent_runtime/install_direct_runtime.sh \
             claude agent_runtime/runtime.lock.json "$RUNNER_TEMP/wheelhouse-claude-cli"
+
+  claude-action-native-output:
+    name: Claude Action native output contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out the exact production action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anthropics/claude-code-action
+          ref: af0559ee4f514d1ef21826982bed13f7edc3c35e
+          path: claude-code-action
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.2.23"
+
+      - name: Run the no-spend native output fixture
+        run: |
+          cp tests/fixtures/claude-action-native-output.test.ts \
+            claude-code-action/base-action/test/wheelhouse-native-output.test.ts
+          cd claude-code-action/base-action
+          bun install --frozen-lockfile
+          bun test test/wheelhouse-native-output.test.ts

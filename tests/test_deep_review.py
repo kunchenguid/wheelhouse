@@ -44,7 +44,7 @@ import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
 
 CLAUDE_ACTION_PIN = (
-    "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
+    "anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e"
 )
 _failures = []
 
@@ -351,7 +351,7 @@ def test_code_grounded_checkout_and_tool_isolation():
     for claude in llm_steps:
         dumped = yaml.safe_dump(claude)
         check(
-            "workflow: Claude action is pinned to the reviewed v1.0.161 commit",
+            "workflow: Claude action is pinned to the reviewed v1.0.178 commit",
             str(claude.get("uses", "")) == CLAUDE_ACTION_PIN,
         )
         check(
@@ -448,8 +448,8 @@ def test_code_grounded_checkout_and_tool_isolation():
     # The verdict is posted by the workflow (default token), not by Claude.
     dr = read(".github", "workflows", "claude-model.yml")
     check(
-        "workflow: Claude action pin keeps the v1.0.161 breadcrumb",
-        f"uses: {CLAUDE_ACTION_PIN} # v1.0.161" in dr,
+        "workflow: Claude action pin keeps the v1.0.178 breadcrumb",
+        f"uses: {CLAUDE_ACTION_PIN} # v1.0.178" in dr,
     )
     trusted = step_by_id(steps, "trusted-src")
     check("workflow: trusted source snapshot step exists", trusted is not None)

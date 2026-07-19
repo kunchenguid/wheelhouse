@@ -1178,7 +1178,7 @@ They run only in the separately permissioned `claude-model.yml` reusable workflo
 Each local reusable-workflow call resolves from the caller's exact commit and also passes that commit as `expected_commit_sha`; the model job must observe the same `GITHUB_SHA` before hydration, checkpointing, or provider execution.
 Every invocation step is conditional on the admitted adapter and action, and no provider failure can trigger a different adapter.
 Those production steps share the same Claude **subscription** token from `claude setup-token`, never an Anthropic API key.
-Every action step remains pinned to `anthropics/claude-code-action` `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes the immutable `--model claude-sonnet-4-6` identifier.
+Every action step remains pinned to `anthropics/claude-code-action` `v1.0.178` at commit `af0559ee4f514d1ef21826982bed13f7edc3c35e` (Claude Code `2.1.215`, Agent SDK `0.3.215`) and passes the immutable `--model claude-sonnet-4-6` identifier.
 The direct schema-repair lane pins `ubuntu-24.04`, installs and verifies the exact Bubblewrap package from `runtime.lock.json`, proves a minimal namespace before provider admission, verifies Claude CLI `2.1.215`, passes the OAuth token only through a private file into the Claude child environment, and uses the existing Bubblewrap supervisor with native structured output and zero tools.
 Trusted preflight builds an immutable `AgentTask`, and the post-action bridge requires the execution transcript's observed `system/init.model` to match before it emits an atomic `AgentResult`.
 Repository inputs are packaged by `agent_runtime/task_builder.py` from the exact bound Git commit (object DB + clean index/worktree), not from live filesystem shape: ordinary `100644`/`100755` blobs are included; committed relative mode `120000` links are materialized as regular bounded content (file links copy the target blob; directory links expand committed descendants under the alias path, with alias bytes/files counted); mode `160000` gitlinks are rejected; absolute/traversal/broken/cyclic/dirty/untracked links fail closed; no live symlink may reach the handoff or model workspace (post-snapshot handoff rejection stays).
@@ -1235,9 +1235,9 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   Opt-in: inert unless `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN`
   present.
   `READONLY_TOKEN` is optional.
-  Both primary Claude branches pass the exact content-bound canonical `nl-decision-v1` schema through the pinned action's `--json-schema` support and require one terminal `structured_output` value.
-  The trusted bridge independently enforces the byte bound, schema, task binding, and downstream `nl-route` allowlist before anything can be posted or acted on; native generation is never treated as trusted validation.
-  Missing, multiple, or invalid native output fails closed into the one bounded `nl-decision.schema-repair` turn, which runs through the direct `claude-cli-pinned` worker on Claude Code `2.1.215` and must itself return native structured output.
+  Both primary Claude branches pass the exact content-bound canonical `nl-decision-v1` schema through the pinned action's `--json-schema` support. The bridge prefers terminal `structured_output`; when that carrier alone is absent, it may accept the terminal `result` only after strict JSON parsing and validation against the same bound schema.
+  The trusted bridge independently enforces the byte bound, schema, task binding, and downstream `nl-route` allowlist before anything can be posted or acted on; native generation and plain terminal JSON are never treated as trusted validation by themselves.
+  Absent or genuinely invalid results fail closed into the one bounded `nl-decision.schema-repair` turn, which runs through the direct `claude-cli-pinned` worker on Claude Code `2.1.215` and must itself return native structured output.
   If it is absent, Claude stays in the production no-shell mode (`--allowedTools Read,Grep,Glob,Write`), has no `GH_TOKEN`, and runs no commands; `decision.json` remains only the bounded portable repair carrier, never a native-success path.
   If it is present, Claude also uses `READONLY_TOKEN` as the action
   `github_token` input and shell `GH_TOKEN`, plus the

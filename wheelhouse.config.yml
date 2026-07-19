@@ -325,7 +325,7 @@ triage_daily_ceiling: 1200
 # Read/Grep/Glob-only behavior. Known claude-code-action harness polling/status
 # lines are preserved in the posted verdict but labeled as automated status.
 # All Claude-powered paths use the pinned
-# claude-code-action v1.0.161 commit and pass immutable
+# claude-code-action v1.0.178 commit and pass immutable
 # `--model claude-sonnet-4-6` to every Claude
 # step.
 

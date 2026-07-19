@@ -14,7 +14,7 @@ WORKFLOWS = {
     "decision": Path(".github/workflows/decision-handler.yml"),
     "model": Path(".github/workflows/claude-model.yml"),
 }
-PIN = "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
+PIN = "anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e"
 
 
 def check(name, condition):

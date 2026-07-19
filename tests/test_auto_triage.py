@@ -33,7 +33,7 @@ rc._evaluate_automerge_card_projection = lambda *args, **kwargs: (
 )
 
 CLAUDE_ACTION_PIN = (
-    "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
+    "anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e"
 )
 _failures = []
 

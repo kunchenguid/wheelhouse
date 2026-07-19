@@ -20,7 +20,7 @@ import apply_decision as ad  # noqa: E402
 import nl_readonly_search as nls  # noqa: E402
 
 CLAUDE_ACTION_PIN = (
-    "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
+    "anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e"
 )
 _failures = []
 
@@ -166,7 +166,7 @@ def test_claude_steps_split_legacy_vs_search():
 
     for claude in llm_steps:
         check(
-            "workflow: Claude action is pinned to the reviewed v1.0.161 commit",
+            "workflow: Claude action is pinned to the reviewed v1.0.178 commit",
             str(claude.get("uses", "")) == CLAUDE_ACTION_PIN,
         )
 
@@ -291,8 +291,8 @@ def test_claude_steps_split_legacy_vs_search():
 
     dh = read(".github", "workflows", "claude-model.yml")
     check(
-        "workflow: Claude action pin keeps the v1.0.161 breadcrumb",
-        f"uses: {CLAUDE_ACTION_PIN} # v1.0.161" in dh,
+        "workflow: Claude action pin keeps the v1.0.178 breadcrumb",
+        f"uses: {CLAUDE_ACTION_PIN} # v1.0.178" in dh,
     )
 
 

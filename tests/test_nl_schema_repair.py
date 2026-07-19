@@ -239,6 +239,58 @@ def test_native_bridge_and_portable_fallback():
             native_result["delivered"]["value"] != "ignored terminal prose",
         )
 
+        production_answer = {
+            "mode": "answer",
+            "answer": 'The "outside guarded clone refreshes" sentence is exact.',
+        }
+        _, carrier_omission_bundle = make_bundle(
+            root / "carrier-omission", action="nl-decision.local"
+        )
+        carrier_omission_execution = root / "carrier-omission-execution.json"
+        transcript(
+            carrier_omission_execution,
+            IMMUTABLE_MODEL,
+            json.dumps(production_answer),
+        )
+        carrier_omission_result, _ = run_bridge(
+            carrier_omission_bundle,
+            carrier_omission_execution,
+            "carrier-omission",
+        )
+        check(
+            "trust contract: schema-valid plain terminal result survives absent native carrier",
+            carrier_omission_result["status"] == "succeeded"
+            and carrier_omission_result["final"]["value"] == production_answer
+            and carrier_omission_result["proof"]["structuredOutputMechanism"]
+            == "schema-validated-terminal-result"
+            and {row["name"] for row in carrier_omission_result["final"]["validation"]}
+            >= {
+                "schema-validated-terminal-result",
+                "json-schema",
+                "observed-provenance",
+            },
+        )
+
+        _, invalid_plain_bundle = make_bundle(
+            root / "invalid-plain", action="nl-decision.local"
+        )
+        invalid_plain_execution = root / "invalid-plain-execution.json"
+        transcript(
+            invalid_plain_execution,
+            IMMUTABLE_MODEL,
+            json.dumps({"mode": "invalid"}),
+        )
+        invalid_plain_result, _ = run_bridge(
+            invalid_plain_bundle,
+            invalid_plain_execution,
+            "invalid-plain",
+        )
+        check(
+            "trust contract: carrier omission never bypasses the bound schema",
+            invalid_plain_result["status"] == "failed"
+            and invalid_plain_result["error"]["code"] == "output.schema_invalid",
+        )
+
         for label, invalid_value in (("null", None), ("empty", "")):
             _, invalid_bundle = make_bundle(
                 root / ("invalid-" + label), action="nl-decision.local"
@@ -429,6 +481,36 @@ def test_bound_schema_is_passed_to_action():
     check(
         "workflow: pinned rollback repair does not claim native enforcement",
         "--json-schema" not in step_by_id(steps, "nl_repair")["with"]["claude_args"],
+    )
+
+    lock = load_json_regular(ROOT / "agent_runtime/runtime.lock.json")
+    canary = yaml.safe_load(
+        (ROOT / ".github/workflows/agent-runtime-canary.yml").read_text()
+    )
+    canary_steps = canary["jobs"]["claude-action-native-output"]["steps"]
+    action_checkout = next(
+        step
+        for step in canary_steps
+        if (step.get("with") or {}).get("repository")
+        == "anthropics/claude-code-action"
+    )
+    fixture = (
+        ROOT / "tests/fixtures/claude-action-native-output.test.ts"
+    ).read_text()
+    check(
+        "canary: exact production action and >=2.1.205 SDK stack are pinned",
+        action_checkout["with"]["ref"]
+        == lock["claudeProduction"]["actionCommit"]
+        == "af0559ee4f514d1ef21826982bed13f7edc3c35e"
+        and lock["claudeProduction"]["claudeCodeVersion"] == "2.1.215"
+        and lock["claudeProduction"]["agentSdkVersion"] == "0.3.215",
+    )
+    check(
+        "canary: action-level schema fixture rejects omission and captures native output without spend",
+        "hasJsonSchema: true" in fixture
+        and "did not return structured_output" in fixture
+        and "structured_output: { ok: true }" in fixture
+        and "CLAUDE_CODE_OAUTH_TOKEN" not in json.dumps(canary_steps),
     )
 
 

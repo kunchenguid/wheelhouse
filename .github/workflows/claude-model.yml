@@ -139,7 +139,7 @@ jobs:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
-          ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
+          ACTION_COMMIT: af0559ee4f514d1ef21826982bed13f7edc3c35e
           CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
@@ -343,7 +343,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         continue-on-error: true
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -356,7 +356,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -369,7 +369,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && steps.hydrate.outputs.action == 'triage.schema-repair' }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -383,7 +383,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.search') }}
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -396,7 +396,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.local') }}
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -409,7 +409,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -422,7 +422,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -435,7 +435,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && steps.hydrate.outputs.action == 'nl-decision.schema-repair' }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
