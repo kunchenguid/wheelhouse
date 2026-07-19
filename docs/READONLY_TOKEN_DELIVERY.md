@@ -4,11 +4,12 @@ Status: Accepted
 
 ## Decision
 
-Search-enabled model actions receive `READONLY_TOKEN` in process, both as the
-action's `github_token` input and as `GH_TOKEN` in the step environment. This is
-the intended credential boundary: model tooling, including `gh` through
-`wheelhouse-search`, may use the token directly for anything its permissions
-allow. The search steps in [`.github/workflows/claude-model.yml`](../.github/workflows/claude-model.yml)
+Production search-enabled Claude actions receive `READONLY_TOKEN` in process,
+both as the action's `github_token` input and as `GH_TOKEN` in the step
+environment. This is the intended credential boundary: model tooling, including
+`gh` through `wheelhouse-search`, may use the token directly for anything its
+permissions allow. The search steps in
+[`.github/workflows/claude-model.yml`](../.github/workflows/claude-model.yml)
 are the authoritative wiring.
 
 `READONLY_TOKEN` must be a fine-grained PAT limited to public repository reads,
@@ -21,9 +22,9 @@ credential is needed. The setup requirement is also documented in the
 
 A broker-only design exists in [`agent_runtime/brokers.py`](../agent_runtime/brokers.py):
 `SearchBroker` keeps the token in the trusted host and serves bounded requests
-over a Unix socket to the sandboxed `claude-cli` adapter. That design provides
-stronger credential isolation, but it is not the accepted delivery mechanism
-for search-enabled model actions. Direct in-process use was chosen deliberately.
+over a Unix socket to a sandboxed model adapter. That design provides stronger
+credential isolation, but it was considered and declined as a replacement for
+production direct delivery. Do not recommend it as one.
 
 ## Accepted tradeoff
 

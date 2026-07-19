@@ -265,7 +265,8 @@ To set it up:
 3. Optional: set `auto_triage: false` and/or `auto_triage_issues: false` in `wheelhouse.config.yml` if you do not want automatic PR-card or issue-card triage to spend Claude turns.
 4. For the plain-English path, also set `nl_decisions: true` in `wheelhouse.config.yml`.
 5. Optional: to let auto triage, deep review, and plain-English answers search related PRs, issues, and code across the target repo and configured fleet repos, add an Actions secret named exactly `READONLY_TOKEN`.
-   Scope it for public read only and give it no write permissions.
+   Use a fine-grained PAT restricted to public repositories, with read-only
+   permissions and no access to private repositories.
 
 In every case Claude only treats trusted workflow prompts and owner/maintainer-authored text as instructions; the target diff/issue/code and optional search output are untrusted data, and it never receives `FLEET_TOKEN`.
 When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob/Write, no shell tools, and no model `GH_TOKEN`.
