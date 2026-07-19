@@ -55,6 +55,26 @@ def main():
     checkpoint_upload = next((index for index, step in enumerate(model_steps) if step.get("name") == "Upload durable pre-invocation checkpoint"), -1)
     checkpoint_stage = next((index for index, step in enumerate(model_steps) if step.get("name") == "Record durable checkpoint stage"), -1)
     check("production: durable spend checkpoint precedes every direct action", repository < checkpoint < checkpoint_upload < min(direct) and '"spendStarted": True' in model_steps[checkpoint]["run"] and "-attempt" in str(model_steps[checkpoint_upload]))
+    readonly_token = "${{ secrets.READONLY_TOKEN }}"
+    selected_search_steps = [
+        step
+        for _, step in claude
+        if "endsWith(steps.hydrate.outputs.action, '.search')"
+        in str(step.get("if", ""))
+    ]
+    readonly_token_steps = [
+        step
+        for _, step in claude
+        if (step.get("env") or {}).get("GH_TOKEN") == readonly_token
+        and (step.get("with") or {}).get("github_token") == readonly_token
+    ]
+    check(
+        "production: in-process search proof matches exact READONLY_TOKEN delivery",
+        '"readonlyTokenBoundary": "in-process" if os.environ["ACTION"].endswith(".search") else "absent"'
+        in model_steps[checkpoint]["run"]
+        and len(selected_search_steps) == 3
+        and selected_search_steps == readonly_token_steps,
+    )
     check(
         "production: provider checkpoint rebinds the hydrated task to the caller commit",
         (model_steps[checkpoint].get("env") or {}).get("EXPECTED_COMMIT_SHA")

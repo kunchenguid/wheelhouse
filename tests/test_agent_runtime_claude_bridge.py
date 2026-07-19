@@ -82,7 +82,7 @@ def transcript(path: Path, model: str, text: str, duration_ms: int = 2500):
     )
 
 
-def run_bridge(bundle: Path, execution: Path, suffix: str, conclusion: str = "success", termination_reason: str = "completed"):
+def run_bridge(bundle: Path, execution: Path, suffix: str, conclusion: str = "success", termination_reason: str = "completed", readonly_token_boundary: str | None = None):
     result = bundle / ("result-%s.json" % suffix)
     events = bundle / ("events-%s.ndjson" % suffix)
     task = json.loads((bundle / "task.json").read_text(encoding="utf-8"))
@@ -91,7 +91,9 @@ def run_bridge(bundle: Path, execution: Path, suffix: str, conclusion: str = "su
     inputs_verified = termination_reason == "completed"
     observation = "b" * 64
     enforced = {name: task["spec"]["limits"][name] for name, quality in task["spec"]["limits"]["enforcement"].items() if quality == "externally-enforced"}
-    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "readonlyTokenBoundary": "broker-only" if task["metadata"]["action"].endswith(".search") else "absent", "spendStarted": True, "isolationLevel": "github-readonly-artifact-bridge-v1", "artifactHydration": "content-addressed-bounded-verified", "targetInputsReadOnly": inputs_verified, "preActionInputObservationSha256": observation, "postActionInputObservationSha256": observation if inputs_verified else None, "declaredOutputPaths": claude_declared_outputs(task["metadata"]["action"]), "workspaceRepository": "local-no-remote", "declaredTools": claude_declared_tools(task["metadata"]["action"]), "action": task["metadata"]["action"], "actionSourceCommit": ACTION_COMMIT, "actionMetadataQuality": "pinned-action-reference", "actionMetadataSha256": None, "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution) if execution.is_file() else None, "childExecutionTimeoutMs": task["spec"]["limits"]["childExecutionTimeoutMs"], "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": None, "dispatchDeadlineMs": task["spec"]["limits"]["dispatchDeadlineMs"], "childExecutionTimeoutMs": task["spec"]["limits"]["childExecutionTimeoutMs"], "enforcedLimits": enforced, "conclusion": conclusion, "terminationReason": termination_reason, "dispatchRef": "main", "expectedCommitSha": task["metadata"]["wheelhouseRevision"], "observedCommitSha": task["metadata"]["wheelhouseRevision"], "correlationId": "a" * 32}}), encoding="utf-8")
+    if readonly_token_boundary is None:
+        readonly_token_boundary = "in-process" if task["metadata"]["action"].endswith(".search") else "absent"
+    enforcement.write_text(json.dumps({"version": 1, "boundary": "separate-read-only-github-job", "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"}, "writeCapableGithubTokenAvailable": False, "fleetTokenAvailable": False, "readonlyTokenBoundary": readonly_token_boundary, "spendStarted": True, "isolationLevel": "github-readonly-artifact-bridge-v1", "artifactHydration": "content-addressed-bounded-verified", "targetInputsReadOnly": inputs_verified, "preActionInputObservationSha256": observation, "postActionInputObservationSha256": observation if inputs_verified else None, "declaredOutputPaths": claude_declared_outputs(task["metadata"]["action"]), "workspaceRepository": "local-no-remote", "declaredTools": claude_declared_tools(task["metadata"]["action"]), "action": task["metadata"]["action"], "actionSourceCommit": ACTION_COMMIT, "actionMetadataQuality": "pinned-action-reference", "actionMetadataSha256": None, "taskSha256": canonical_sha256(task), "handoffManifestSha256": handoff_sha256, "transcriptSha256": file_sha256(execution) if execution.is_file() else None, "childExecutionTimeoutMs": task["spec"]["limits"]["childExecutionTimeoutMs"], "controller": {"parentRunId": "1", "parentRunAttempt": "1", "modelRunId": "2", "hardDeadlineMs": None, "dispatchDeadlineMs": task["spec"]["limits"]["dispatchDeadlineMs"], "childExecutionTimeoutMs": task["spec"]["limits"]["childExecutionTimeoutMs"], "enforcedLimits": enforced, "conclusion": conclusion, "terminationReason": termination_reason, "dispatchRef": "main", "expectedCommitSha": task["metadata"]["wheelhouseRevision"], "observedCommitSha": task["metadata"]["wheelhouseRevision"], "correlationId": "a" * 32}}), encoding="utf-8")
     value = bridge(str(bundle / "task.json"), str(bundle), str(execution), "", str(enforcement), handoff_sha256, str(result), str(events))
     validate_contract(value, "AgentResult")
     return value, events
@@ -246,6 +248,36 @@ def main():
         check("bridge: normalized events contain no delivered text", "Reviewed the bounded target" not in events.read_text(encoding="utf-8"))
         terminal_event = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
         check("bridge: terminal hash uses stable non-cyclic projection", terminal_event["data"]["projection"] == "agent-result-without-artifacts/v1" and terminal_event["data"]["resultSha256"] == result_projection_sha256(result))
+
+        search_task, search_bundle = make_bundle(
+            root / "search", action="deep-review.search"
+        )
+        search_execution = root / "search.json"
+        transcript(search_execution, IMMUTABLE_MODEL, "HOLD\n\n- Reviewed the bounded target.")
+        search_result, _ = run_bridge(search_bundle, search_execution, "search")
+        check(
+            "bridge: reconciled in-process search boundary is accepted",
+            search_result["status"] == "succeeded"
+            and search_task["spec"]["isolation"]["toolNetwork"]["mode"]
+            == "runner-default"
+            and next(
+                capability
+                for capability in search_task["spec"]["capabilities"]["required"]
+                if capability["name"] == "credentials.isolated"
+            )["constraints"]["readonlyToken"]
+            == "in-process",
+        )
+        stale_search_result, _ = run_bridge(
+            search_bundle,
+            search_execution,
+            "search-broker-only",
+            readonly_token_boundary="broker-only",
+        )
+        check(
+            "bridge: stale broker-only search boundary fails closed",
+            stale_search_result["status"] == "failed"
+            and stale_search_result["error"]["code"] == "sandbox.violation",
+        )
 
         mismatch_result_path = bundle / "revision-mismatch-result.json"
         mismatch_events_path = bundle / "revision-mismatch-events.ndjson"

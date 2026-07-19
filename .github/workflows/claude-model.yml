@@ -175,7 +175,7 @@ jobs:
               "jobPermissions": {"actions": "read", "contents": "read", "issues": "none"},
               "writeCapableGithubTokenAvailable": False,
               "fleetTokenAvailable": False,
-              "readonlyTokenBoundary": "broker-only" if os.environ["ACTION"].endswith(".search") else "absent",
+              "readonlyTokenBoundary": "in-process" if os.environ["ACTION"].endswith(".search") else "absent",
               "spendStarted": True,
               "isolationLevel": "github-readonly-artifact-bridge-v1",
               "artifactHydration": "content-addressed-bounded-verified",

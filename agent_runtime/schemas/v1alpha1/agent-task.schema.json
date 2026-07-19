@@ -170,7 +170,7 @@
                 "allowedHosts": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z0-9.-]+$"}}
               }
             },
-            "toolNetwork": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"type": "string", "enum": ["none", "broker-only"]}}},
+            "toolNetwork": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"type": "string", "enum": ["none", "broker-only", "runner-default"]}}},
             "inheritEnvironment": {"type": "boolean"},
             "dropCapabilities": {"type": "boolean"},
             "noNewPrivileges": {"type": "boolean"},
