@@ -271,7 +271,8 @@ For deep review, missing output posts the existing fixed no-verdict note and lea
 
 For natural-language mapping, missing or invalid output cannot produce an action.
 The primary call is native first, and only bridge-validated terminal `structured_output` is a native success.
-A missing, multiple, or invalid native carrier, or a result that fails strict JSON or `nl-decision-v1` validation, receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
+When that carrier alone is absent, a plain terminal result is accepted without repair only if it passes the unchanged byte bound, task binding, and exact `nl-decision-v1` validation; its proof records `schema-validated-terminal-result` rather than native delivery.
+An absent native carrier without such a valid plain terminal result, a multiple or invalid native carrier, or a result that fails strict JSON or `nl-decision-v1` validation, receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
 The marker-keyed failure note remains bounded and fire-once.
 A normalized `source.revision_mismatch` result uses the same precise retry explanation, while unknown failures keep the generic note.
 A successful mapped action still enters the existing card claim and deterministic executor.
