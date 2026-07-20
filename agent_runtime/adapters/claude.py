@@ -816,6 +816,13 @@ class ClaudeCliAdapter(AgentAdapterV1):
                 sort_keys=True,
                 separators=(",", ":"),
             )
+        completion_instruction = (
+            "End every successful run with exactly one StructuredOutput call. Its json field "
+            "must contain a JSON-encoded result instance satisfying the trusted output schema "
+            "in the user prompt. Never return the result as plain text or Markdown."
+            if transport == "draft-07-json-carrier-v1"
+            else "End every successful run with exactly one StructuredOutput call."
+        )
         argv = [
             "claude",
             "--print",
@@ -827,6 +834,8 @@ class ClaudeCliAdapter(AgentAdapterV1):
             "",
             "--strict-mcp-config",
             "--disable-slash-commands",
+            "--append-system-prompt",
+            completion_instruction,
             "--permission-mode",
             "dontAsk",
             "--tools",

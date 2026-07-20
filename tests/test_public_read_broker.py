@@ -1613,6 +1613,8 @@ def test_public_task_contract():
             "--safe-mode" not in argv
             and argv[argv.index("--setting-sources") + 1] == ""
             and "--strict-mcp-config" in argv
+            and "exactly one StructuredOutput call"
+            in argv[argv.index("--append-system-prompt") + 1]
             and argv[argv.index("--tools") + 1] == "StructuredOutput"
             and set(argv[allowed_index].split(","))
             == {
