@@ -285,12 +285,14 @@ def run_node_npm_cli(evidence_root: Path, scratch: Path, receipts: list[dict[str
 
 
 class ExerciseService:
-    def __init__(self, evidence_root: Path, scratch: Path, execution_id: str, task_sha256: str) -> None:
+    def __init__(self, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str) -> None:
         self.evidence_root = evidence_root
+        self.receipt_dir = receipt_dir
         self.scratch = scratch
         self.execution_id = execution_id
         self.task_sha256 = task_sha256
         self.scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.calls = 0
         self.started = time.monotonic()
 
@@ -355,7 +357,7 @@ class ExerciseService:
         receipt = {"evidence_id": evidence_id, **core}
         receipt["receipt_sha256"] = canonical_sha256(receipt)
         payload = canonical_json_bytes(receipt) + b"\n"
-        path = self.evidence_root / (evidence_id + ".json")
+        path = self.receipt_dir / (evidence_id + ".json")
         with path.open("xb") as handle:
             handle.write(payload)
             handle.flush()
@@ -533,12 +535,12 @@ class ExerciseService:
         )
 
 
-def serve(socket_path: Path, evidence_root: Path, scratch: Path, execution_id: str, task_sha256: str, attestation_path: Path) -> None:
+def serve(socket_path: Path, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str, attestation_path: Path) -> None:
     socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
     attestation = {"version": 1, "isolation_mode": "bubblewrap-no-network", "uid": os.getuid(), "environment_names": sorted(os.environ), "credential_reachable": any(re.search(r"(?i)(token|credential|secret|password|oauth|authorization)", name) for name in os.environ), "network_namespace": os.readlink("/proc/self/ns/net") if Path("/proc/self/ns/net").exists() else "unavailable"}
     attestation_path.write_bytes(canonical_json_bytes(attestation) + b"\n")
-    service = ExerciseService(evidence_root, scratch, execution_id, task_sha256)
+    service = ExerciseService(evidence_root, receipt_dir, scratch, execution_id, task_sha256)
 
     class Server(socketserver.UnixStreamServer):
         pass

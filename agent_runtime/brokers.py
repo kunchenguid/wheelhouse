@@ -711,6 +711,7 @@ class ExerciseBrokerProcess:
         )
         self.socket_path = str(self.root / "exercise.sock")
         self.scratch = self.root / "scratch"
+        self.receipt_dir = self.root / "receipts"
         self.attestation_path = self.root / "attestation.json"
         self.stderr_path = self.root / "exercise.stderr"
         self.runtime_root = self.root.parent / (self.root.name + "-runtime")
@@ -785,6 +786,8 @@ class ExerciseBrokerProcess:
                 self.socket_path,
                 "--evidence",
                 str(self.evidence_root),
+                "--receipts",
+                str(self.receipt_dir),
                 "--scratch",
                 str(self.scratch),
                 "--execution-id",
@@ -853,7 +856,7 @@ class ExerciseBrokerProcess:
             "--bind",
             str(self.root),
             "/run/exercise",
-            "--bind",
+            "--ro-bind",
             str(self.evidence_root),
             "/evidence",
         ]
@@ -889,6 +892,7 @@ class ExerciseBrokerProcess:
                 "python3", "-m", "agent_runtime.exercise_broker",
                 "--socket", "/run/exercise/exercise.sock",
                 "--evidence", "/evidence",
+                "--receipts", "/run/exercise/receipts",
                 "--scratch", "/run/exercise/scratch",
                 "--execution-id", self.execution_id,
                 "--task-sha256", self.task_sha256,

@@ -588,6 +588,9 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     mixed_plan = derive_evidence_plan(
         (FIXTURES / "mixed-ambiguous-vision.md").read_text(encoding="utf-8")
     )
+    partial_plan = derive_evidence_plan(
+        "Artifacts must be released only after legal approval."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -595,7 +598,11 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             row["semantic_status"] == "ambiguous"
             for row in mixed_plan["obligations"]
         )
-        and any(row["operation"] == "public.fetch" for row in mixed_plan["obligations"]),
+        and any(row["operation"] == "public.fetch" for row in mixed_plan["obligations"])
+        and any(
+            row["semantic_status"] == "unknown"
+            for row in partial_plan["obligations"]
+        ),
     )
     digest = hashlib.sha256(b"policy-bound-artifact").hexdigest()
     digest_plan = derive_evidence_plan(
@@ -1178,6 +1185,14 @@ def test_production_launcher_contract():
             and private_writable_tmp(exercise_command)
             and readable_etc_mount_parent(exercise_command)
             and runner_handoff(exercise_command)
+            and any(
+                exercise_command[index : index + 3]
+                == ["--ro-bind", str(broker.receipt_dir), "/evidence"]
+                for index in range(len(exercise_command) - 2)
+            )
+            and "--receipts" in exercise_command
+            and exercise_command[exercise_command.index("--receipts") + 1]
+            == "/run/exercise/receipts"
             and exercise_environment == {},
         )
         check(
@@ -1278,7 +1293,11 @@ def test_exercise_hard_wall():
             canonical_json_bytes(artifact_receipt) + b"\n"
         )
         service = ExerciseService(
-            evidence, root / "scratch", EXECUTION_ID, TASK_SHA256
+            evidence,
+            root / "receipts",
+            root / "scratch",
+            EXECUTION_ID,
+            TASK_SHA256,
         )
 
         def stalled_child(*_args):

@@ -354,7 +354,7 @@ def _validate_worker(
     bundle: Path,
     worker: dict[str, Any],
     structured_output_mechanism: str = "",
-    public_receipt_dir: Path | None = None,
+    public_receipt_dir: Path | tuple[Path, ...] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     candidate = task["spec"]["selection"]["candidates"][0]
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
@@ -660,7 +660,11 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                     bundle,
                     worker,
                     negotiated.proof["structuredOutputMechanism"],
-                    public_broker.receipt_dir if public_broker else None,
+                    (
+                        (public_broker.receipt_dir, exercise_broker.receipt_dir)
+                        if public_broker and exercise_broker
+                        else public_broker.receipt_dir if public_broker else None
+                    ),
                 )
             except Exception:
                 final = None
@@ -705,6 +709,10 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             receipts = []
             if public_broker.receipt_dir.is_dir():
                 for path in sorted(public_broker.receipt_dir.glob("*.json")):
+                    if path.is_file() and not path.is_symlink() and path.stat().st_size <= 262144:
+                        receipts.append(load_json_regular(path, max_bytes=262144))
+            if exercise_broker and exercise_broker.receipt_dir.is_dir():
+                for path in sorted(exercise_broker.receipt_dir.glob("*.json")):
                     if path.is_file() and not path.is_symlink() and path.stat().st_size <= 262144:
                         receipts.append(load_json_regular(path, max_bytes=262144))
             excerpts = []

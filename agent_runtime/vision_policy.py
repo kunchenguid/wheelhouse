@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .contract import canonical_sha256, file_sha256, load_json_regular
 
@@ -141,6 +141,17 @@ def _operations(text: str) -> list[str]:
     return operations
 
 
+def _normative_clauses(sentence: str) -> list[str]:
+    return [
+        clause.strip(" ,;:")
+        for clause in re.split(
+            r"(?i)\s*(?:;|\b(?:and|but|only\s+after|provided\s+that|contingent\s+upon)\b)\s*",
+            sentence,
+        )
+        if clause.strip(" ,;:")
+    ]
+
+
 def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
     """Conservatively prove that every normative sentence was understood.
 
@@ -160,12 +171,10 @@ def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
     ]
     for sentence in sentences or [text]:
         sentence_normative = bool(_NORMATIVE.search(sentence))
-        if (
-            sentence_normative
-            and not _operations(sentence)
-            and not _LOCAL_POLICY_RULE.search(sentence)
-        ):
-            return "unknown"
+        if sentence_normative:
+            for clause in _normative_clauses(sentence):
+                if not _operations(clause) and not _LOCAL_POLICY_RULE.search(clause):
+                    return "unknown"
     if not operations:
         return "recognized-local" if not normative or _LOCAL_POLICY_RULE.search(text) else "unknown"
     return "recognized"
@@ -330,12 +339,14 @@ def write_evidence_plan(vision_path: Path, destination: Path) -> dict[str, Any]:
 
 
 def _receipt_index(
-    receipt_dir: Path, execution_id: str, task_sha256: str
+    receipt_dirs: Iterable[Path], execution_id: str, task_sha256: str
 ) -> dict[str, dict[str, Any]]:
     receipts: dict[str, dict[str, Any]] = {}
-    if not receipt_dir.is_dir() or receipt_dir.is_symlink():
-        return receipts
-    for path in sorted(receipt_dir.glob("*.json")):
+    paths = []
+    for receipt_dir in receipt_dirs:
+        if receipt_dir.is_dir() and not receipt_dir.is_symlink():
+            paths.extend(receipt_dir.glob("*.json"))
+    for path in sorted(paths):
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 262144:
             continue
         try:
@@ -364,7 +375,7 @@ def project_advisory_review(
     *,
     task: dict[str, Any],
     bundle: Path,
-    receipt_dir: Path,
+    receipt_dir: Path | tuple[Path, ...],
     task_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Return trusted advisory projection or raise on structural substitution."""
@@ -400,7 +411,7 @@ def project_advisory_review(
         raise VisionPolicyError("advisory review omitted or invented a VISION obligation")
 
     receipts = _receipt_index(
-        receipt_dir,
+        (receipt_dir,) if isinstance(receipt_dir, Path) else receipt_dir,
         task["metadata"]["executionId"],
         task_sha256 or canonical_sha256(task),
     )
