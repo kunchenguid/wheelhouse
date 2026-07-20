@@ -647,17 +647,30 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     unknown_secure_plan = derive_evidence_plan(
         "A reviewer must inspect source and secure legal approval."
     )
+    punctuated_secure_plan = derive_evidence_plan(
+        "A reviewer must inspect source, and secure legal approval."
+    )
+    short_secure_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest and secure approval."
+    )
     unknown_then_plan = derive_evidence_plan(
         "A reviewer must inspect source then obtain approval."
     )
     adjacent_unknown_plan = derive_evidence_plan(
         "A reviewer must inspect source obtain approval."
     )
+    semicolon_unknown_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest; obtain legal approval."
+    )
     without_plan = derive_evidence_plan(
         "A reviewer must inspect source without execution of the package."
     )
     permissive_guard_plan = derive_evidence_plan(
         "If a reviewer inspects source or executes a package, release must satisfy policy."
+    )
+    unrelated_local_or_plan = derive_evidence_plan(
+        "If source inspection or execution cannot be completed, the verdict must satisfy "
+        "policy or recommend admission and must remain inconclusive and request missing evidence."
     )
     masked_disjunction_plan = derive_evidence_plan(
         "A reviewer must inspect source or execute a package; failures must remain inconclusive."
@@ -727,8 +740,11 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             for plan in (
                 unknown_conjunct_plan,
                 unknown_secure_plan,
+                punctuated_secure_plan,
+                short_secure_plan,
                 unknown_then_plan,
                 adjacent_unknown_plan,
+                semicolon_unknown_plan,
             )
             for row in plan["obligations"]
         ),
@@ -746,7 +762,8 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         "VISION: only proven fail-closed guards admit prerequisite disjunctions",
         all(
             row["semantic_status"] == "ambiguous"
-            for row in permissive_guard_plan["obligations"]
+            for plan in (permissive_guard_plan, unrelated_local_or_plan)
+            for row in plan["obligations"]
         ),
     )
     check(

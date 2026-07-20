@@ -65,6 +65,13 @@ _OPERAND_QUALIFIERS = {
     "across", "against", "as", "at", "by", "for", "from", "in", "including", "into",
     "of", "on", "rather", "such", "than", "through", "to", "under", "using",
 }
+_GENERIC_OPERAND_HEADS = {
+    "artifact", "behavior", "checksum", "claim", "commit", "component",
+    "dataset", "digest", "error", "evidence", "exercise", "hash", "inspection",
+    "manifest", "output", "package", "path", "release", "repository", "revision",
+    "source", "url", "version",
+}
+_LIST_INTRODUCERS = {"across", "including", "through"}
 
 
 class VisionPolicyError(ValueError):
@@ -287,20 +294,46 @@ def _leading_guard_end(tokens: list[str]) -> int:
     return -1
 
 
-def _noun_connector_is_consumed(tokens: list[str], index: int) -> bool:
-    if index > 0 and tokens[index - 1] == ",":
-        return True
-    end = next(
-        (
-            offset
-            for offset in range(index + 1, len(tokens))
-            if tokens[offset] in {"and", "or", ",", ";", "."}
-        ),
-        len(tokens),
+def _generic_operand_head(token: str) -> bool:
+    singular = token[:-1] if token.endswith("s") else token
+    return token in _GENERIC_OPERAND_HEADS or singular in _GENERIC_OPERAND_HEADS
+
+
+def _operand_list_connector(
+    tokens: list[str], index: int, source: int
+) -> bool:
+    if source < 0:
+        return False
+    span_start = max(
+        [
+            offset + 1
+            for offset in range(source + 1, index)
+            if tokens[offset] in {";", "."}
+        ],
+        default=source + 1,
     )
-    branch = tokens[index + 1 : end]
-    return 0 < len(branch) <= 2 or (
-        len(branch) >= 2 and branch[1] in {"that", "which", "whose"}
+    prefix = tokens[span_start:index]
+    explicitly_listed = any(token in _LIST_INTRODUCERS for token in prefix) or any(
+        prefix[offset : offset + 2] == ["such", "as"]
+        for offset in range(len(prefix) - 1)
+    )
+    explicitly_listed = explicitly_listed or (
+        tokens[index - 1 : index] == [","] and prefix.count(",") >= 2
+    )
+    cursor = index + 1
+    while cursor < len(tokens) and tokens[cursor] in {",", "("}:
+        cursor += 1
+    previous = next(
+        (
+            tokens[offset]
+            for offset in range(index - 1, source, -1)
+            if tokens[offset] not in {",", "("}
+        ),
+        "",
+    )
+    following = tokens[cursor] if cursor < len(tokens) else ""
+    return explicitly_listed or (
+        _generic_operand_head(previous) and _generic_operand_head(following)
     )
 
 
@@ -437,6 +470,7 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
     for index, token in enumerate(tokens):
         if token not in {"and", "or", "then"}:
             continue
+        source = max((offset for offset in selected if offset < index), default=-1)
         cursor = index + 1
         while cursor < len(tokens) and tokens[cursor] in {",", "("}:
             cursor += 1
@@ -485,11 +519,10 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
                 cursor
             ] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
         if candidates:
-            source = max((offset for offset in selected if offset < index), default=-1)
             selected.setdefault(candidates[0], polarity)
             connector_edges.append((token, source, candidates[0]))
-        elif any(offset < index for offset in selected) and (
-            token == "then" or not _noun_connector_is_consumed(tokens, index)
+        elif source >= 0 and (
+            token == "then" or not _operand_list_connector(tokens, index, source)
         ):
             return {}, "unknown"
 
@@ -498,6 +531,20 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             candidate = index + 1
             if tokens[candidate] in _PREDICATES:
                 selected[candidate] = "negative"
+
+    for index, token in enumerate(tokens):
+        if token != ";":
+            continue
+        end = next(
+            (
+                offset
+                for offset in range(index + 1, len(tokens))
+                if tokens[offset] in {";", "."}
+            ),
+            len(tokens),
+        )
+        if not any(index < offset < end for offset in selected):
+            return {}, "unknown"
 
     semantic_start = min(
         (
@@ -582,13 +629,15 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             and source < guard_end
             and target < guard_end
         )
-        local_outcomes = (
+        fail_closed_outcome = (
             fail_closed_guard
             and source > guard_end
-            and node_operations.get(source) == ["policy.assess"]
-            and node_operations.get(target) == ["policy.assess"]
+            and tokens[source] == "remain"
+            and tokens[source + 1 : source + 2] == ["inconclusive"]
+            and tokens[target] == "request"
+            and "evidence" in _predicate_operand(tokens, target)
         )
-        if not in_guard and not local_outcomes:
+        if not in_guard and not fail_closed_outcome:
             ambiguous = True
 
     if not operation_statuses:
