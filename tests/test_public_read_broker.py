@@ -1669,7 +1669,8 @@ def test_public_task_contract():
             "task: isolated policy passes can read every input before native schema submission",
             ACTION_LIMITS["policy-derive.public"] == (300_000, 330_000, 12, 4, 131_072)
             and ACTION_LIMITS["policy-audit.public"] == (300_000, 330_000, 12, 4, 131_072)
-            and derive_task["spec"]["limits"]["maxOutputTokens"] == 16_000,
+            and derive_task["spec"]["limits"]["maxInputTokens"] == 300_000
+            and derive_task["spec"]["limits"]["maxOutputTokens"] == 32_000,
         )
         check(
             "task: one wrapped policy result is normalized before identity validation",

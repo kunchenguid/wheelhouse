@@ -1890,18 +1890,20 @@ def build_task(
                 "maxProviderRequests": None
                 if adapter == "claude-action-compat"
                 else (64 if turns > 32 else 40),
-                "maxInputTokens": None if adapter == "claude-action-compat" else 180000,
+                "maxInputTokens": None
+                if adapter == "claude-action-compat"
+                else (
+                    300000
+                    if action in {"policy-derive.public", "policy-audit.public"}
+                    else 180000
+                ),
                 "maxOutputTokens": None
                 if adapter == "claude-action-compat"
                 else (
-                    16000
-                    if action.startswith("deep-review")
-                    or action
-                    in {
-                        "advisory-review.public",
-                        "policy-derive.public",
-                        "policy-audit.public",
-                    }
+                    32000
+                    if action in {"policy-derive.public", "policy-audit.public"}
+                    else 16000
+                    if action.startswith("deep-review") or action == "advisory-review.public"
                     else 8000
                 ),
                 "enforcement": _limit_enforcement(adapter),

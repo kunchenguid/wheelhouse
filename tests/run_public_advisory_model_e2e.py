@@ -61,7 +61,10 @@ def execute_case(
             raise AssertionError("production transport is not draft-07")
         result = run(str(bundle / "task.json"), str(bundle), str(invocation_root / "result.json"), str(invocation_root / "events.ndjson"))
         if result.get("status") != "succeeded":
-            raise AssertionError("%s %s failed: %s" % (name, action, result.get("error")))
+            raise AssertionError(
+                "%s %s failed: %s usage=%s"
+                % (name, action, result.get("error"), result.get("usage"))
+            )
         return task, result
 
     derive_task, derive_result = invoke(
