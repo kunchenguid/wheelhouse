@@ -220,7 +220,7 @@ That is the only secret the deterministic machine needs.
 ### 4. (Optional) Add the Claude production token for agent-assisted features
 
 Skip this for the deterministic machine.
-The pinned Claude Action remains the explicit production selection for non-repair work and the deployable schema-repair rollback target; schema repair uses the direct Claude CLI through the same trusted boundary.
+The pinned Claude Action remains the explicit production selection for eight actions and the deployable schema-repair rollback target; schema repair and credential-free public advisory review use the direct Claude CLI through the same trusted boundary.
 Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate reusable model workflow has read-only permissions and returns only a verified normalized result artifact to the trusted consumer.
 Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
 Do not add credentials for disabled or deferred provider candidates.
@@ -259,7 +259,7 @@ Auto triage and deep review keep their action prompts independent of target size
 To set it up:
 
 1. Generate a **Claude subscription** token (requires a Claude Pro/Max subscription): run `claude setup-token` in the Claude Code CLI.
-   This is **not** an Anthropic API key - the Claude Action and direct repair runtime use it only for Claude subscription authentication.
+   This is **not** an Anthropic API key - the Claude Action and direct CLI runtime use it only for Claude subscription authentication.
    Reviewed immutable action and direct-runtime provenance is documented in [Agent runtime operations](docs/AGENT_RUNTIME.md).
    Trusted preflight and post-action bridge steps validate `AgentTask`, observed model identity, and atomic `AgentResult` before deterministic consumers run.
 2. Add it as an Actions secret named exactly `CLAUDE_CODE_OAUTH_TOKEN`.

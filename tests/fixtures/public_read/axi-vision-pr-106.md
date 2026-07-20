@@ -36,4 +36,3 @@ SDKs for additional programming languages are welcome when they:
 - remain faithful to the AXI principles;
 - are structurally similar to the JavaScript SDK; and
 - expose the same common-denominator facilities without language-specific scope expansion.
-

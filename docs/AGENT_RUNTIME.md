@@ -1,7 +1,7 @@
 # Wheelhouse agent runtime
 
 Wheelhouse has one versioned contract for every agent-assisted task.
-The contract covers automatic PR and issue triage with and without search, bounded triage and natural-language schema repair, deep review with and without search, and natural-language decision mapping with and without search.
+The contract covers automatic PR and issue triage with and without search, bounded triage and natural-language schema repair, deep review with and without search, natural-language decision mapping with and without search, and credential-free public advisory review.
 
 Claude is the production primary adapter.
 The two schema-repair actions and the credential-free public advisory action resolve to the exact-pin direct Claude CLI profile through the guarded production activation.
@@ -51,7 +51,7 @@ Malformed cap configuration fails closed to one, while malformed ceiling or ledg
 Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.
 The model job verifies the complete handoff before hydrating a fresh workspace and initializes a local repository without a remote or network fetch.
 The action lane applies its exact action tool allowlist and leaves only a bounded transcript plus observed enforcement record for its finalizer.
-The direct repair lane pins the model job to `ubuntu-24.04`, installs and verifies Bubblewrap `0.9.0-1ubuntu0.1`, exercises a real namespace before provider admission, verifies Claude CLI `2.1.215` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox. Bubblewrap is launched through the runner's passwordless `sudo` solely because Ubuntu 24.04 denies unprivileged loopback setup in a new network namespace; it clears the environment and drops all worker capabilities before executing the model process. The root-mapped worker receives only a write-only output mount; after exit, the trusted supervisor restores ownership only on regular expected result and diagnostic files before validating them.
+The direct lane pins the model job to `ubuntu-24.04`, installs and verifies Bubblewrap `0.9.0-1ubuntu0.1`, exercises a real namespace before provider admission, verifies Claude CLI `2.1.215` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox. Bubblewrap is launched through the runner's passwordless `sudo` solely because Ubuntu 24.04 denies unprivileged loopback setup in a new network namespace; it clears the environment and drops all worker capabilities before executing the model process. The root-mapped worker receives only a write-only output mount; after exit, the trusted supervisor restores ownership only on regular expected result and diagnostic files before validating them.
 Sandbox-prerequisite failure is recorded separately from Claude download or digest failure, and both remain pre-spend with zero provider requests.
 The action lane revalidates the signed target inputs after invocation and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
@@ -65,7 +65,7 @@ Trusted artifact, transcript, event, and final-output bounds remain explicit.
 The model workflow uploads a content-free `spendStarted: true` checkpoint immediately before either invocation lane, so cancellation or a harness crash cannot downgrade a possibly spent attempt.
 The Claude Action bridge profile does not claim the disabled Codex worker's network namespace, capability dropping, no-new-privileges, environment denial, or host-home denial.
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
-The action lane records the pinned action source commit and a checked-out action metadata digest when the runner exposes it; a successful direct repair records its verified Claude executable version and digest instead.
+The action lane records the pinned action source commit and a checked-out action metadata digest when the runner exposes it; a successful direct invocation records its verified Claude executable version and digest instead.
 
 ## Direct Claude production profile
 
