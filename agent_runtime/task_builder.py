@@ -25,7 +25,7 @@ from .contract import (
     validate_contract,
 )
 from .tools import tool_schema_sha256
-from .vision_policy import write_evidence_plan
+from .vision_policy import write_vision_units
 
 ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
@@ -1358,6 +1358,14 @@ def build_task(
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]
+    if action == "advisory-review.public":
+        shim_lines[1:1] = [
+            '<wheelhouse-policy-derivation trust="trusted" version="v2">',
+            "First act only as PolicyDeriver. Read pinned vision-units.json and VISION.md, classify every exact unit, fully interpret every normative clause and condition, and produce the generic policy_derivation. Mark unknown or ambiguous explicitly. Do not inspect the target or public evidence during this derivation.",
+            "Then independently act only as CoverageAuditor. Re-read the same pinned VISION units and the proposed derivation, checking omissions, condition strength, requiredness, operation mapping, and exact identity. Record every disagreement and set complete false on any uncertainty.",
+            "Only after both structured policy passes may you inspect the target or call typed public evidence tools and produce AdvisoryReview. Never weaken a VISION condition and never let public bytes influence policy interpretation.",
+            "</wheelhouse-policy-derivation>",
+        ]
     compiled_prompt = (
         prompt_text
         if adapter == "claude-action-compat"
@@ -1455,8 +1463,8 @@ def build_task(
             }
         )
         if action == "advisory-review.public":
-            plan_source = bundle / ".evidence-plan.json"
-            write_evidence_plan(Path(vision_file), plan_source)
+            plan_source = bundle / ".vision-units.json"
+            write_vision_units(Path(vision_file), plan_source)
             try:
                 plan_digest, plan_size, plan_artifact = _copy_file(
                     plan_source, bundle, 262144
@@ -1465,11 +1473,11 @@ def build_task(
                 plan_source.unlink(missing_ok=True)
             inputs.append(
                 {
-                    "id": "evidence-plan",
+                    "id": "vision-units",
                     "artifact": plan_artifact,
-                    "logicalPath": "evidence-plan.json",
+                    "logicalPath": "vision-units.json",
                     "sha256": plan_digest,
-                    "mediaType": "application/vnd.wheelhouse.evidence-plan+json",
+                    "mediaType": "application/vnd.wheelhouse.vision-units+json",
                     "trust": "trusted",
                     "mount": "read-only",
                     "maxBytes": 262144,
@@ -1622,7 +1630,7 @@ def build_task(
                 "maxInputTokens": None if adapter == "claude-action-compat" else 180000,
                 "maxOutputTokens": None
                 if adapter == "claude-action-compat"
-                else (16000 if action.startswith("deep-review") else 8000),
+                else (16000 if action.startswith("deep-review") or action == "advisory-review.public" else 8000),
                 "enforcement": _limit_enforcement(adapter),
             },
             "output": {

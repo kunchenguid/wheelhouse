@@ -5,7 +5,8 @@
   "additionalProperties": false,
   "required": [
     "result_kind",
-    "plan_sha256",
+    "policy_derivation",
+    "coverage_audit",
     "verdict",
     "summary",
     "obligation_results",
@@ -15,7 +16,86 @@
   ],
   "properties": {
     "result_kind": {"type": "string", "const": "AdvisoryReview"},
-    "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_derivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "vision_sha256", "units", "obligations"],
+      "properties": {
+        "version": {"type": "string", "const": "wheelhouse/evidence-plan/v2"},
+        "vision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "units": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["unit_id", "start_line", "end_line", "text", "sha256", "classification", "semantic_status"],
+            "properties": {
+              "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+              "start_line": {"type": "integer", "minimum": 1},
+              "end_line": {"type": "integer", "minimum": 1},
+              "text": {"type": "string", "minLength": 1, "maxLength": 40000},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "classification": {"type": "string", "enum": ["context-only", "decision-criterion", "evidence-obligation"]},
+              "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]}
+            }
+          }
+        },
+        "obligations": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["obligation_id", "unit_id", "operation", "required", "requirement", "semantic_status"],
+            "properties": {
+              "obligation_id": {"type": "string", "pattern": "^O[0-9]{3}$"},
+              "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+              "operation": {"type": "string", "enum": ["public.git_snapshot", "public.fetch", "public.artifact", "digest.verify", "exercise.run", "policy.assess"]},
+              "required": {"type": "boolean"},
+              "requirement": {"type": "string", "minLength": 1, "maxLength": 40000},
+              "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+              "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "coverage_audit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "vision_sha256", "units", "obligations", "complete", "disagreements"],
+      "properties": {
+        "version": {"type": "string", "const": "wheelhouse/evidence-plan-audit/v1"},
+        "vision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "units": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["unit_id", "sha256", "classification", "semantic_status", "complete"],
+            "properties": {
+              "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "classification": {"type": "string", "enum": ["context-only", "decision-criterion", "evidence-obligation"]},
+              "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+              "complete": {"type": "boolean"}
+            }
+          }
+        },
+        "obligations": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["obligation_id", "unit_id", "operation", "required", "semantic_status", "complete"],
+            "properties": {
+              "obligation_id": {"type": "string", "pattern": "^O[0-9]{3}$"},
+              "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+              "operation": {"type": "string", "enum": ["public.git_snapshot", "public.fetch", "public.artifact", "digest.verify", "exercise.run", "policy.assess"]},
+              "required": {"type": "boolean"},
+              "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+              "complete": {"type": "boolean"}
+            }
+          }
+        },
+        "complete": {"type": "boolean"},
+        "disagreements": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 2000}}
+      }
+    },
     "verdict": {"type": "string", "enum": ["positive", "negative", "inconclusive"]},
     "summary": {"type": "string", "minLength": 1, "maxLength": 8000},
     "obligation_results": {
