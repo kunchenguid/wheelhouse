@@ -470,6 +470,10 @@ def run_node_npm_cli(
                 or stderr.startswith("/adapter/node")
             ):
                 diagnostic = ".node"
+                if "EACCES" in stderr or "permission denied" in stderr.lower():
+                    diagnostic += "_permission"
+                elif "ENOENT" in stderr or "no such file" in stderr.lower():
+                    diagnostic += "_missing"
             diagnostic += ".code_%d" % scenario["exit_code"]
         raise ExerciseError(
             "exercise.assertion.%s%s" % (failed, diagnostic),

@@ -539,6 +539,10 @@ def main():
     check(
         "stream: strict terminal carrier compatibility is bounded and explicit",
         decode_json_carrier(carrier.structured_output) == {"ok": True}
+        and decode_json_carrier(
+            decode_json_carrier({"json": '{"json":"{\\"ok\\":true}"}'})
+        )
+        == {"ok": True}
         and fails(
             lambda: parse_stream(
                 [init, b'{"type":"result","subtype":"success","result":"{}"}\n'],
