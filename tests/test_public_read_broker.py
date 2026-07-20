@@ -1529,9 +1529,8 @@ def test_public_task_contract():
             == "public-evidence/v1",
         )
         check(
-            "task: isolated policy passes can read every input before native schema submission",
-            ACTION_LIMITS["policy-derive.public"][2:] == (8, 4, 131_072)
-            and ACTION_LIMITS["policy-audit.public"][2:] == (8, 4, 131_072),
+            "task: policy auditor can read every input before native schema submission",
+            ACTION_LIMITS["policy-audit.public"][2:] == (6, 4, 131_072),
         )
         bound_schema = json.loads(
             (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(
@@ -1567,13 +1566,14 @@ def test_public_task_contract():
         argv = compiled["claude"]["argv"]
         allowed_index = argv.index("--allowedTools") + 1
         check(
-            "task: Claude loads no ambient settings and only the exact MCP tools",
+            "task: Claude loads no ambient settings and only the exact MCP and schema tools",
             "--safe-mode" not in argv
             and argv[argv.index("--setting-sources") + 1] == ""
             and "--strict-mcp-config" in argv
             and argv[argv.index("--tools") + 1] == ""
             and set(argv[allowed_index].split(","))
             == {
+                "StructuredOutput",
                 "mcp__wheelhouse__fs_read",
                 "mcp__wheelhouse__fs_grep",
                 "mcp__wheelhouse__fs_glob",

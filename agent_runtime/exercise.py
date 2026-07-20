@@ -408,16 +408,26 @@ def run_node_npm_cli(
         "success": _run_scenario(node, entrypoint, app, work, ["--version"], deadline, artifact_sandbox),
         "error": _run_scenario(node, entrypoint, app, work, ["--wheelhouse-invalid-option"], deadline, artifact_sandbox),
     }
-    complete = bool(
-        scenarios["discovery"]["exit_code"] == 0
-        and scenarios["discovery"]["stdout"].strip()
-        and scenarios["success"]["exit_code"] == 0
-        and scenarios["success"]["stdout"].strip()
-        and scenarios["error"]["exit_code"] != 0
-        and (scenarios["error"]["stdout"].strip() or scenarios["error"]["stderr"].strip())
+    assertions = (
+        ("discovery_exit", scenarios["discovery"]["exit_code"] == 0),
+        ("discovery_output", bool(scenarios["discovery"]["stdout"].strip())),
+        ("success_exit", scenarios["success"]["exit_code"] == 0),
+        ("success_output", bool(scenarios["success"]["stdout"].strip())),
+        ("error_exit", scenarios["error"]["exit_code"] != 0),
+        (
+            "error_output",
+            bool(
+                scenarios["error"]["stdout"].strip()
+                or scenarios["error"]["stderr"].strip()
+            ),
+        ),
     )
-    if not complete:
-        raise ExerciseError("exercise.assertion", "representative CLI scenarios were not complete")
+    failed = next((name for name, passed in assertions if not passed), "")
+    if failed:
+        raise ExerciseError(
+            "exercise.assertion.%s" % failed,
+            "representative CLI scenarios were not complete",
+        )
     return {"adapter": "node-npm-cli-v1", "binary": binary_name, "scenarios": scenarios, "extracted_bytes": budget[0], "files": budget[1]}
 
 

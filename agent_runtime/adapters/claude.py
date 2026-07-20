@@ -806,8 +806,11 @@ class ClaudeCliAdapter(AgentAdapterV1):
                     "/tmp/wheelhouse-mcp.json",
                     "--allowedTools",
                     ",".join(
-                        "mcp__wheelhouse__%s" % mcp_names[name]
-                        for name in requested_tools
+                        ["StructuredOutput"]
+                        + [
+                            "mcp__wheelhouse__%s" % mcp_names[name]
+                            for name in requested_tools
+                        ]
                     ),
                 ]
             )
