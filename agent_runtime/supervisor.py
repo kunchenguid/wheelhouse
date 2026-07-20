@@ -416,15 +416,23 @@ def _validate_worker(
             trusted_units = []
             by_id = {}
             resolved_units = []
-        if (
-            not isinstance(units, list)
-            or any(unit is None for unit in resolved_units)
+        identity_failure = (
+            any(unit is None for unit in resolved_units)
             or len({unit["unit_id"] for unit in resolved_units}) != len(resolved_units)
             or {unit["unit_id"] for unit in resolved_units} != set(by_id)
-        ):
+        )
+        if not isinstance(units, list) or identity_failure:
+            category = (
+                "shape"
+                if not isinstance(units, list)
+                else "count"
+                if len(units) != len(trusted_units)
+                else "identity"
+            )
             return None, None, _error(
                 "output.schema_invalid",
-                "Policy result did not preserve the exact VISION unit identities.",
+                "Policy result did not preserve the exact VISION unit identities (%s)."
+                % category,
                 spend_started=bool(worker.get("spendStarted")),
             )
         normalized = deepcopy(delivered_value)
