@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -83,11 +84,18 @@ def main():
     parser.add_argument("--address", required=True)
     parser.add_argument("--certificate", required=True)
     parser.add_argument("--key", required=True)
+    parser.add_argument("--ready-file", required=True)
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.address, 443), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.certificate, args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
+    ready = args.ready_file + ".tmp"
+    with open(ready, "x", encoding="utf-8") as handle:
+        handle.write("ready\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(ready, args.ready_file)
     server.serve_forever()
 
 

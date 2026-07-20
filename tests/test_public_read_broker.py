@@ -66,6 +66,7 @@ from agent_runtime.vision_policy import (  # noqa: E402
     derive_evidence_plan,
     project_advisory_review,
 )
+from agent_runtime.worker import CLAUDE_CANONICAL_TOOLS  # noqa: E402
 import apply_decision  # noqa: E402
 import auto_merge  # noqa: E402
 import render_card  # noqa: E402
@@ -929,6 +930,10 @@ def test_public_task_contract():
                 "mcp__wheelhouse__exercise_run",
             },
         )
+        check(
+            "task: sandbox worker admits every compiled Claude MCP tool",
+            set(names).issubset(CLAUDE_CANONICAL_TOOLS),
+        )
 
 
 def test_authority_separation(advisory):
@@ -1146,6 +1151,8 @@ def test_production_launcher_contract():
             "exercise: privileged launcher drops to the runner before the no-network adapter",
             "--unshare-net" in exercise_command
             and "--nproc=132" in exercise_command
+            and ("--fsize=%d" % exercise_module.MAX_EXTRACTED_BYTES)
+            in exercise_command
             and runner_handoff(exercise_command)
             and exercise_environment == {},
         )
@@ -1356,6 +1363,7 @@ def production_setup(directory, hosts_backup):
     root = Path(directory)
     certificate = root / "public-evidence.crt"
     key = root / "public-evidence.key"
+    ready = root / "public-evidence.ready"
     subprocess.run(
         [
             "openssl",
@@ -1408,15 +1416,21 @@ def production_setup(directory, hosts_backup):
             str(certificate),
             "--key",
             str(key),
+            "--ready-file",
+            str(ready),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    time.sleep(0.5)
-    if server.poll() is not None:
-        raise Failure("local HTTPS adversary failed to start")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not ready.is_file():
+        if server.poll() is not None:
+            raise Failure("local HTTPS adversary failed to start")
+        time.sleep(0.05)
+    if not ready.is_file():
+        raise Failure("local HTTPS adversary readiness timed out")
     return server, hosts_backup, trust_path
 
 

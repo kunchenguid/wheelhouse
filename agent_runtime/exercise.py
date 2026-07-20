@@ -156,7 +156,9 @@ def _exercise_child(
     """Run one fixed adapter behind a killable hard wall-clock boundary."""
     try:
         resource.setrlimit(resource.RLIMIT_CPU, (MAX_WALL_SECONDS, MAX_WALL_SECONDS))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES))
+        resource.setrlimit(
+            resource.RLIMIT_FSIZE, (MAX_EXTRACTED_BYTES, MAX_EXTRACTED_BYTES)
+        )
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         if sys.platform.startswith("linux"):
             import ctypes

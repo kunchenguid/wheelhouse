@@ -27,6 +27,19 @@ from .contract import ContractError, atomic_write_json, canonical_json_bytes, ca
 from .redaction import redact_text, sanitize_message
 from .tools import CanonicalTools, ToolError, dynamic_tool_spec
 
+CLAUDE_CANONICAL_TOOLS = frozenset(
+    {
+        "fs.read",
+        "fs.grep",
+        "fs.glob",
+        "public.search",
+        "public.fetch",
+        "public.git_snapshot",
+        "public.artifact",
+        "exercise.run",
+    }
+)
+
 
 class WorkerFailure(Exception):
     def __init__(
@@ -482,19 +495,10 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
     requested_tools = [
         row.get("name") for row in plan["tools"].get("tools", []) if isinstance(row, dict)
     ]
-    allowed_claude_tools = {
-        "fs.read",
-        "fs.grep",
-        "fs.glob",
-        "public.search",
-        "public.fetch",
-        "public.git_snapshot",
-        "public.artifact",
-    }
     if (
         len(requested_tools) != len(plan["tools"].get("tools", []))
         or len(set(requested_tools)) != len(requested_tools)
-        or any(name not in allowed_claude_tools for name in requested_tools)
+        or any(name not in CLAUDE_CANONICAL_TOOLS for name in requested_tools)
     ):
         raise WorkerFailure(
             "capability.unsatisfied",

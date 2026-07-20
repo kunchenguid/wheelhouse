@@ -804,7 +804,7 @@ class ExerciseBrokerProcess:
             prlimit,
             "--as=1073741824",
             "--cpu=120",
-            "--fsize=1048576",
+            "--fsize=209715200",
             "--nofile=128",
             "--nproc=%d" % process_limit,
             "--",
