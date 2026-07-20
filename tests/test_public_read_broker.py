@@ -1529,8 +1529,9 @@ def test_public_task_contract():
             == "public-evidence/v1",
         )
         check(
-            "task: policy auditor can read every input before native schema submission",
-            ACTION_LIMITS["policy-audit.public"][2:] == (6, 4, 131_072),
+            "task: isolated policy passes can read every input before native schema submission",
+            ACTION_LIMITS["policy-derive.public"][2:] == (12, 4, 131_072)
+            and ACTION_LIMITS["policy-audit.public"][2:] == (12, 4, 131_072),
         )
         bound_schema = json.loads(
             (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(

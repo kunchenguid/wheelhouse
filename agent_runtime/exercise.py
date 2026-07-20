@@ -422,8 +422,17 @@ def run_node_npm_cli(
     )
     failed = next((name for name, passed in assertions if not passed), "")
     if failed:
+        diagnostic = ""
+        if failed.endswith("_exit"):
+            stderr = scenarios[failed.removesuffix("_exit")]["stderr"].lstrip()
+            if stderr.startswith("bwrap:"):
+                diagnostic = ".sandbox"
+            elif "ERR_MODULE_NOT_FOUND" in stderr:
+                diagnostic = ".module"
+            elif stderr.startswith("node:") or stderr.startswith("/node"):
+                diagnostic = ".node"
         raise ExerciseError(
-            "exercise.assertion.%s" % failed,
+            "exercise.assertion.%s%s" % (failed, diagnostic),
             "representative CLI scenarios were not complete",
         )
     return {"adapter": "node-npm-cli-v1", "binary": binary_name, "scenarios": scenarios, "extracted_bytes": budget[0], "files": budget[1]}
