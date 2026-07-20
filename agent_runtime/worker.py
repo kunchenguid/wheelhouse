@@ -54,7 +54,10 @@ def _decode_claude_carrier(carrier: Any, action: str) -> Any:
     ):
         nested_carrier = decode_json_carrier(carrier)
         if isinstance(nested_carrier, dict):
-            carrier = nested_carrier
+            if set(nested_carrier) == expected_fields:
+                carrier = nested_carrier
+            else:
+                return nested_carrier
     if not isinstance(carrier, dict) or set(carrier) != expected_fields:
         raise ClaudeProtocolError("Claude native JSON carrier was invalid")
     final = decode_json_carrier({"json": carrier["json"]})

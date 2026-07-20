@@ -1574,12 +1574,17 @@ def test_public_task_contract():
             },
             "policy-derive.public",
         )
+        fallback_policy = _decode_claude_carrier(
+            {"json": json.dumps(plan)},
+            "policy-derive.public",
+        )
         check(
             "task: trusted worker merges native policy semantics into the full carrier result",
             decoded_policy["version"] == "transported"
             and decoded_policy["units"] == unit_semantics
             and nested_policy["version"] == "nested"
-            and nested_policy["units"] == unit_semantics,
+            and nested_policy["units"] == unit_semantics
+            and fallback_policy == plan,
         )
         bundle = root / "bundle"
         task = build_task(
