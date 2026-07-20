@@ -103,17 +103,17 @@ class VisionPolicyBoundaryTests(unittest.TestCase):
             "advisory-review.public", "advisory", target_file=str(target),
             policy_plan_file=str(plan_path), policy_audit_file=str(audit_path),
         )
-        self.assertEqual({row["id"] for row in derive["spec"]["inputs"]}, {"vision", "vision-units", "policy-binding"})
-        self.assertEqual({row["id"] for row in audit["spec"]["inputs"]}, {"vision", "vision-units", "policy-binding", "policy-derivation"})
+        self.assertEqual({row["id"] for row in derive["spec"]["inputs"]}, {"vision", "vision-units", "policy-binding", "output-schema"})
+        self.assertEqual({row["id"] for row in audit["spec"]["inputs"]}, {"vision", "vision-units", "policy-binding", "policy-derivation", "output-schema"})
         self.assertEqual(
             {row["id"] for row in advisory["spec"]["inputs"]},
-            {"vision", "vision-units", "policy-binding", "policy-derivation", "policy-audit", "target"},
+            {"vision", "vision-units", "policy-binding", "policy-derivation", "policy-audit", "target", "output-schema"},
         )
         self.assertEqual(len({task["metadata"]["executionId"] for task in (derive, audit, advisory)}), 3)
         self.assertEqual(len({task["spec"]["output"]["schemaSha256"] for task in (derive, audit, advisory)}), 3)
-        for directory, task, max_turns in (("derive", derive, 5), ("audit", audit, 6)):
-            self.assertEqual(task["spec"]["limits"]["maxTurns"], max_turns)
-            self.assertEqual(task["spec"]["limits"]["maxToolCalls"], 4)
+        for directory, task in (("derive", derive), ("audit", audit)):
+            self.assertEqual(task["spec"]["limits"]["maxTurns"], 32)
+            self.assertEqual(task["spec"]["limits"]["maxToolCalls"], 8)
             schema = json.loads(
                 (self.root / directory / task["spec"]["output"]["schemaArtifact"]).read_text()
             )

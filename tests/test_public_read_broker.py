@@ -75,6 +75,7 @@ from agent_runtime.vision_policy import (  # noqa: E402
     AUDIT_VERSION,
     PLAN_VERSION,
     VisionPolicyError,
+    obligation_semantic_status,
     project_advisory_review,
     vision_unit_document,
 )
@@ -1569,6 +1570,15 @@ def test_public_task_contract():
                     "vision_sha256": document["vision_sha256"],
                 }.items()
             ),
+        )
+        check(
+            "task: mixed policy units retain operation-specific semantic status",
+            obligation_semantic_status("recognized", "public.git_snapshot")
+            == "recognized"
+            and obligation_semantic_status("recognized", "policy.assess")
+            == "recognized-local"
+            and obligation_semantic_status("unknown", "policy.assess")
+            == "unknown",
         )
         unit_semantics = [
             {

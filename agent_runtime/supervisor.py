@@ -41,6 +41,7 @@ from .vision_policy import (
     AUDIT_VERSION,
     PLAN_VERSION,
     VisionPolicyError,
+    obligation_semantic_status,
     project_advisory_review,
 )
 
@@ -646,7 +647,9 @@ def _validate_worker(
                     )
                 obligation["obligation_id"] = "O%03d" % index
                 obligation["requirement"] = by_id[unit_id]["text"]
-                obligation["semantic_status"] = semantic_by_id[unit_id]
+                obligation["semantic_status"] = obligation_semantic_status(
+                    semantic_by_id[unit_id], obligation.get("operation")
+                )
         delivered_value = normalized
     delivered = None
     secret_match = False

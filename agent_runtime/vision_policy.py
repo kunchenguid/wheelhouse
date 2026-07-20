@@ -139,6 +139,12 @@ def _semantic_fields(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def obligation_semantic_status(unit_status: Any, operation: Any) -> Any:
+    if unit_status in {"unknown", "ambiguous"}:
+        return unit_status
+    return "recognized-local" if operation == "policy.assess" else "recognized"
+
+
 def validate_policy_artifacts(
     text: str,
     plan: Any,
@@ -219,17 +225,16 @@ def validate_policy_artifacts(
             or unit_id not in unit_status
             or operation not in _OPERATIONS
             or semantic_status not in _SEMANTIC_STATUSES
-            or semantic_status != unit_status[unit_id]["semantic_status"]
+            or semantic_status
+            != obligation_semantic_status(
+                unit_status[unit_id]["semantic_status"], operation
+            )
             or not isinstance(row.get("requirement"), str)
             or row.get("requirement") != next(
                 unit["text"] for unit in document["units"] if unit["unit_id"] == unit_id
             )
         ):
             raise VisionPolicyError("policy derivation obligation binding is invalid")
-        if operation == "policy.assess" and semantic_status == "recognized":
-            raise VisionPolicyError("local policy obligation status is invalid")
-        if operation != "policy.assess" and semantic_status == "recognized-local":
-            raise VisionPolicyError("public evidence obligation status is invalid")
         obligation_ids.add(obligation_id)
         obligated_units.add(unit_id)
         expected_sha256 = row.get("expected_sha256")
@@ -494,6 +499,7 @@ def project_advisory_review(
 
 __all__ = [
     "AUDIT_VERSION", "PLAN_VERSION", "REVIEW_KIND", "UNITS_VERSION",
-    "VisionPolicyError", "project_advisory_review", "validate_policy_artifacts", "vision_unit_document",
+    "VisionPolicyError", "obligation_semantic_status", "project_advisory_review",
+    "validate_policy_artifacts", "vision_unit_document",
     "vision_units", "write_vision_units",
 ]
