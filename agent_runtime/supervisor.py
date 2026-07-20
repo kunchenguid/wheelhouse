@@ -382,6 +382,25 @@ def _unwrap_policy_value(value: Any) -> Any:
     return candidates[0] if len(candidates) == 1 else value
 
 
+def _policy_shape_category(value: Any) -> str:
+    if isinstance(value, dict):
+        if "$schema" in value and "properties" in value:
+            return "schema-definition"
+        if "json" in value:
+            return "carrier-object"
+        child_types = "".join(
+            label
+            for kind, label in ((dict, "object"), (list, "list"), (str, "string"))
+            if any(isinstance(child, kind) for child in value.values())
+        )
+        return "object-" + (child_types or "scalar")
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, str):
+        return "string"
+    return "scalar"
+
+
 def _validate_worker(
     task: dict[str, Any],
     bundle: Path,
@@ -455,7 +474,7 @@ def _validate_worker(
         )
         if not isinstance(units, list) or identity_failure:
             category = (
-                "shape"
+                _policy_shape_category(delivered_value)
                 if not isinstance(units, list)
                 else "count"
                 if len(units) != len(trusted_units)
