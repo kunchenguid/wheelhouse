@@ -212,8 +212,10 @@ def main():
             {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "enum": ["answer"]}}},
             {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "pattern": "answer"}}},
         ):
-            accepted7 = dict(canonical); accepted7.update(candidate)
-            accepted20 = dict(old); accepted20.update(candidate)
+            accepted7 = dict(canonical)
+            accepted7.update(candidate)
+            accepted20 = dict(old)
+            accepted20.update(candidate)
             check("schema: draft-07 and draft-2020 have identical keyword verdict", verdict(json.dumps(accepted7).encode(), candidate) == verdict(json.dumps(accepted20).encode(), candidate))
 
         canary_binary = os.environ.get("WHEELHOUSE_CLAUDE_2_1_215_CANARY_BINARY")
