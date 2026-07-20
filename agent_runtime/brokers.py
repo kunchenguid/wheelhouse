@@ -350,8 +350,9 @@ class PublicReadBrokerProcess:
     def _stage_runtime(self) -> Path:
         import shutil
 
+        self.runtime_root.mkdir(mode=0o700, exist_ok=True)
         package = self.runtime_root / "agent_runtime"
-        package.mkdir(parents=True, exist_ok=True, mode=0o700)
+        package.mkdir(exist_ok=True, mode=0o700)
         source = Path(__file__).resolve().parent
         for name in (
             "__init__.py",
@@ -431,6 +432,9 @@ class PublicReadBrokerProcess:
         prlimit = shutil.which("prlimit")
         if not prlimit:
             raise BrokerError("public-read broker production isolation requires prlimit")
+        privilege_drop = shutil.which("setpriv")
+        if not privilege_drop:
+            raise BrokerError("public-read broker production isolation requires setpriv")
         runtime_root = str(self._stage_runtime())
         command = [
             "sudo",
@@ -448,12 +452,12 @@ class PublicReadBrokerProcess:
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
-            "--uid",
-            str(os.getuid()),
-            "--gid",
-            str(os.getgid()),
             "--cap-drop",
             "ALL",
+            "--cap-add",
+            "CAP_SETUID",
+            "--cap-add",
+            "CAP_SETGID",
             "--clearenv",
             "--proc",
             "/proc",
@@ -516,6 +520,16 @@ class PublicReadBrokerProcess:
                 "C.UTF-8",
                 "--chdir",
                 "/tmp",
+                "--",
+                privilege_drop,
+                "--reuid",
+                str(os.getuid()),
+                "--regid",
+                str(os.getgid()),
+                "--clear-groups",
+                "--inh-caps=-all",
+                "--ambient-caps=-all",
+                "--no-new-privs",
                 "--",
                 "python3",
                 "-m",
@@ -658,8 +672,9 @@ class ExerciseBrokerProcess:
     def _stage_runtime(self) -> Path:
         import shutil
 
+        self.runtime_root.mkdir(mode=0o700, exist_ok=True)
         package = self.runtime_root / "agent_runtime"
-        package.mkdir(parents=True, exist_ok=True, mode=0o700)
+        package.mkdir(exist_ok=True, mode=0o700)
         source = Path(__file__).resolve().parent
         for name in (
             "__init__.py",
@@ -732,8 +747,11 @@ class ExerciseBrokerProcess:
             raise BrokerError("exercise broker production isolation requires Linux")
         binary = shutil.which("bwrap")
         prlimit = shutil.which("prlimit")
-        if not binary or not prlimit:
-            raise BrokerError("exercise broker production isolation requires Bubblewrap and prlimit")
+        privilege_drop = shutil.which("setpriv")
+        if not binary or not prlimit or not privilege_drop:
+            raise BrokerError(
+                "exercise broker production isolation requires Bubblewrap, prlimit, and setpriv"
+            )
         command = [
             "sudo",
             "--non-interactive",
@@ -751,12 +769,12 @@ class ExerciseBrokerProcess:
             "--unshare-net",
             "--unshare-ipc",
             "--unshare-uts",
-            "--uid",
-            str(os.getuid()),
-            "--gid",
-            str(os.getgid()),
             "--cap-drop",
             "ALL",
+            "--cap-add",
+            "CAP_SETUID",
+            "--cap-add",
+            "CAP_SETGID",
             "--clearenv",
             "--proc",
             "/proc",
@@ -802,7 +820,16 @@ class ExerciseBrokerProcess:
                 "--setenv", "LC_ALL", "C.UTF-8",
                 "--setenv", "LANG", "C.UTF-8",
                 "--chdir", "/tmp",
-                "--", "python3", "-m", "agent_runtime.exercise_broker",
+                "--",
+                privilege_drop,
+                "--reuid", str(os.getuid()),
+                "--regid", str(os.getgid()),
+                "--clear-groups",
+                "--inh-caps=-all",
+                "--ambient-caps=-all",
+                "--no-new-privs",
+                "--",
+                "python3", "-m", "agent_runtime.exercise_broker",
                 "--socket", "/run/exercise/exercise.sock",
                 "--evidence", "/evidence",
                 "--scratch", "/run/exercise/scratch",

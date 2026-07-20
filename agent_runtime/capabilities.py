@@ -36,6 +36,7 @@ def claude_descriptor(binary_version: str, binary_digest: str, protocol_fixture_
             "public.fetch": {"mechanism": "mcp-typed-tool-broker"},
             "public.git_snapshot": {"mechanism": "mcp-typed-tool-broker"},
             "public.artifact": {"mechanism": "mcp-typed-tool-broker"},
+            "exercise.run": {"mechanism": "mcp-typed-tool-broker"},
             "process.exec": {"mechanism": "external-deny", "mode": "none"},
             "tool.network": {"mechanism": "external-deny", "modes": ["none", "broker-only"]},
             "output.structured": {

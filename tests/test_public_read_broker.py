@@ -20,6 +20,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ from agent_runtime.brokers import (  # noqa: E402
     ExerciseBrokerProcess,
     PublicReadBrokerProcess,
 )
+from agent_runtime.capabilities import claude_descriptor, negotiate  # noqa: E402
 from agent_runtime.config import resolve_selection  # noqa: E402
 from agent_runtime.contract import (  # noqa: E402
     canonical_json_bytes,
@@ -791,6 +793,7 @@ def test_generic_vision(receipt_dir, manifest_result=None):
 
 
 def test_public_task_contract():
+    descriptor = claude_descriptor("2.1.215", "a" * 64, "b" * 64)
     triage_workflow = (ROOT / ".github/workflows/triage.yml").read_text(
         encoding="utf-8"
     )
@@ -839,6 +842,21 @@ def test_public_task_contract():
             allow_automerge_behavior=True,
         )
         names = [row["name"] for row in task["spec"]["tools"]["tools"]]
+        negotiated = negotiate(
+            task,
+            descriptor,
+            {
+                "externalSandbox": True,
+                "networkProxy": True,
+                "denyHostHome": True,
+                "processGroupCleanup": True,
+            },
+        )
+        check(
+            "task: Claude negotiates every brokered advisory capability before spend",
+            negotiated.proof["exactTools"] == names
+            and "exercise.run" in negotiated.proof["required"],
+        )
         check(
             "task: production public advisory has typed tools and no acting schema",
             names
@@ -1032,24 +1050,78 @@ def test_production_launcher_contract():
     ), mock.patch(
         "shutil.which",
         side_effect=lambda name: (
-            "/usr/bin/" + name if name in {"bwrap", "prlimit"} else None
+            "/usr/bin/" + name
+            if name in {"bwrap", "prlimit", "setpriv"}
+            else None
         ),
     ):
         broker = PublicReadBrokerProcess(str(Path(directory) / "broker"), EXECUTION_ID, TASK_SHA256)
-        command, environment = broker._sandboxed()
+        previous_umask = os.umask(0o022)
+        try:
+            command, environment = broker._sandboxed()
+        finally:
+            os.umask(previous_umask)
         source = (ROOT / "agent_runtime" / "brokers.py").read_text(encoding="utf-8")
+        expected_handoff = [
+            "/usr/bin/setpriv",
+            "--reuid",
+            str(os.getuid()),
+            "--regid",
+            str(os.getgid()),
+            "--clear-groups",
+            "--inh-caps=-all",
+            "--ambient-caps=-all",
+            "--no-new-privs",
+            "--",
+        ]
+
+        def runner_handoff(candidate):
+            return (
+                "--uid" not in candidate
+                and "--gid" not in candidate
+                and candidate[
+                    candidate.index("--cap-drop") + 1 : candidate.index("--clearenv")
+                ]
+                == ["ALL", "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID"]
+                and candidate[
+                    candidate.index("/usr/bin/setpriv") : candidate.index("python3")
+                ]
+                == expected_handoff
+            )
+
         check(
             "broker: privileged launcher drops to the runner without recursive ownership or shared-parent changes",
             command[:3] == ["sudo", "--non-interactive", "/usr/bin/prlimit"]
             and "/usr/bin/bwrap" in command
-            and "--cap-drop" in command
             and "--unshare-user" not in command
-            and command[command.index("--uid") + 1] == str(os.getuid())
-            and command[command.index("--gid") + 1] == str(os.getgid())
+            and runner_handoff(command)
             and '"chown"' not in source
             and "os.chmod(self.root.parent" not in source
             and '"-%d" % process.pid' not in source
             and environment == {},
+        )
+        broker.receipt_dir.mkdir(mode=0o700)
+        exercise = ExerciseBrokerProcess(
+            str(Path(directory) / "exercise"),
+            str(broker.receipt_dir),
+            EXECUTION_ID,
+            TASK_SHA256,
+        )
+        previous_umask = os.umask(0o022)
+        try:
+            exercise_command, exercise_environment = exercise._command()
+        finally:
+            os.umask(previous_umask)
+        check(
+            "exercise: privileged launcher drops to the runner before the no-network adapter",
+            "--unshare-net" in exercise_command
+            and runner_handoff(exercise_command)
+            and exercise_environment == {},
+        )
+        check(
+            "broker: staged runtime roots stay private under the CI umask",
+            stat.S_IMODE(broker.runtime_root.stat().st_mode) == 0o700
+            and stat.S_IMODE(exercise.runtime_root.stat().st_mode) == 0o700,
         )
         parent_mode = Path(directory).stat().st_mode & 0o777
         broker._validate_trusted_tree()

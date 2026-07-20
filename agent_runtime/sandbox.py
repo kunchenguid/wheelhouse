@@ -31,9 +31,13 @@ def host_proof(adapter_id: str) -> dict[str, Any]:
     binary = shutil.which("bwrap")
     if not binary:
         raise SandboxError("bubblewrap external sandbox is unavailable")
+    privilege_drop = shutil.which("setpriv")
+    if not privilege_drop:
+        raise SandboxError("setpriv privilege drop is unavailable")
     return {
         "implementation": "bubblewrap-network-namespace-v1",
         "binary": binary,
+        "privilegeDropBinary": privilege_drop,
         "externalSandbox": True,
         "networkProxy": True,
         "denyHostHome": True,
@@ -91,9 +95,9 @@ def build_command(
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
-        "--uid", str(os.getuid()),
-        "--gid", str(os.getgid()),
         "--cap-drop", "ALL",
+        "--cap-add", "CAP_SETUID",
+        "--cap-add", "CAP_SETGID",
         "--clearenv",
         "--tmpfs", "/tmp",
         "--proc", "/proc",
@@ -169,5 +173,17 @@ def build_command(
         ]
     )
     translated = ["/run/wheelhouse/plan.json" if arg == plan_path else "/run/wheelhouse/output" if arg == output_dir else arg for arg in worker_command]
-    command.extend(translated)
+    command.extend(
+        [
+            proof["privilegeDropBinary"],
+            "--reuid", str(os.getuid()),
+            "--regid", str(os.getgid()),
+            "--clear-groups",
+            "--inh-caps=-all",
+            "--ambient-caps=-all",
+            "--no-new-privs",
+            "--",
+            *translated,
+        ]
+    )
     return command, {}

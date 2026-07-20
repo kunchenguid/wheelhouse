@@ -119,12 +119,27 @@ def main():
             public_socket="",
             exercise_socket="",
             worker_command=["python3", "-m", "agent_runtime.worker", "--plan", str(plan), "--output-dir", str(output)],
-            proof={"binary": "/usr/bin/bwrap", "testOnly": False},
+            proof={
+                "binary": "/usr/bin/bwrap",
+                "privilegeDropBinary": "/usr/bin/setpriv",
+                "testOnly": False,
+            },
         )
         joined = " ".join(command)
         check("sandbox: privileged launcher creates the isolated network namespace", command[:2] == ["sudo", "--non-interactive"])
         check("sandbox: all namespaces unshared", "--unshare-all" in command)
-        check("sandbox: capabilities dropped", "--cap-drop ALL" in joined)
+        check(
+            "sandbox: fixed privilege handoff drops to the runner before Python",
+            "--uid" not in command
+            and "--gid" not in command
+            and "--cap-drop ALL --cap-add CAP_SETUID --cap-add CAP_SETGID" in joined
+            and (
+                "-- /usr/bin/setpriv --reuid %d --regid %d --clear-groups "
+                "--inh-caps=-all --ambient-caps=-all --no-new-privs -- python3"
+                % (os.getuid(), os.getgid())
+            )
+            in joined,
+        )
         check("sandbox: environment cleared", "--clearenv" in command)
         home = os.path.expanduser("~")
         check("sandbox: host home never mounted", "--ro-bind %s %s" % (home, home) not in joined and "--bind %s %s" % (home, home) not in joined)
