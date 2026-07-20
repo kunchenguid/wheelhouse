@@ -3483,6 +3483,93 @@ def parse_state_block(body):
         return None
 
 
+def trusted_public_advisory(state, *, require_eligible=False):
+    """Validate the card-owned projection of one public-evidence review.
+
+    Raw fetched bytes and raw model output never satisfy this predicate. Only
+    the compact projection written by render_card after receipt validation is
+    accepted, and it must bind the current head, base, and default-branch
+    VISION revisions. The result is still advisory, never acting authority.
+    """
+    state = state if isinstance(state, dict) else {}
+    advisory = state.get("advisory_review")
+    if not isinstance(advisory, dict):
+        return False
+    head_sha = str(state.get("head_sha") or "")
+    base_sha = str(state.get("triaged_base_sha") or "")
+    vision_sha = str(state.get("triaged_vision_sha") or "")
+    obligations = advisory.get("obligations")
+    eligible = advisory.get("auto_merge_eligible") is True
+    obligation_ids = [
+        str(row.get("id") or "") for row in obligations
+    ] if isinstance(obligations, list) else []
+    eligibility = advisory.get("eligibility_facts")
+    recommendation = state.get("triage_recommendation")
+    behavior = state.get("automerge_verdict")
+    eligible_projection = bool(
+        isinstance(eligibility, dict)
+        and eligibility.get("behavior_class") in {"A", "B", "C"}
+        and eligibility.get("changes_existing_or_default_behavior") is False
+        and eligibility.get("aligns_with_vision") is True
+        and eligibility.get("recommendation") == "eligible"
+        and (
+            eligibility.get("behavior_class") != "C"
+            or eligibility.get("optin_default_off") is True
+        )
+        and isinstance(recommendation, dict)
+        and recommendation.get("action") == "merge"
+        and isinstance(behavior, dict)
+        and behavior.get("behavior_class") == eligibility.get("behavior_class")
+        and behavior.get("changes_existing_or_default_behavior") is False
+        and behavior.get("optin_default_off")
+        == eligibility.get("optin_default_off")
+        and behavior.get("aligns_with_vision") is True
+        and behavior.get("recommend_merge") is True
+        and behavior.get("base_sha") == base_sha
+        and behavior.get("vision_sha") == vision_sha
+    )
+    valid = bool(
+        state.get("public_evidence_influenced") is True
+        and state.get("triage_status") == "succeeded"
+        and head_sha
+        and str(state.get("triaged_sha") or "") == head_sha
+        and advisory.get("version") == 2
+        and advisory.get("trusted_projection") is True
+        and advisory.get("acting_authority") is False
+        and advisory.get("policy_coverage_complete") is True
+        and advisory.get("projection_complete") is True
+        and advisory.get("verdict") in {"positive", "negative", "inconclusive"}
+        and isinstance(advisory.get("plan_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", advisory["plan_sha256"])
+        and advisory.get("head_sha") == head_sha
+        and advisory.get("base_sha") == base_sha
+        and advisory.get("vision_sha") == vision_sha
+        and re.fullmatch(r"[0-9a-f]{40,64}", base_sha)
+        and re.fullmatch(r"[0-9a-f]{40,64}", vision_sha)
+        and isinstance(obligations, list)
+        and bool(obligations)
+        and len(obligation_ids) == len(set(obligation_ids))
+        and all(
+            isinstance(row, dict)
+            and re.fullmatch(r"O[0-9]{3}", str(row.get("id") or ""))
+            and row.get("status") in {"complete-pass", "complete-fail"}
+            for row in obligations
+        )
+        and (
+            not eligible
+            or (
+                advisory.get("verdict") == "positive"
+                and eligible_projection
+            )
+        )
+    )
+    if require_eligible:
+        valid = valid and eligible and all(
+            row.get("status") == "complete-pass" for row in obligations
+        )
+    return valid
+
+
 # --------------------------------------------------------------------------- #
 # cross-repo reference qualification (shared util)
 # --------------------------------------------------------------------------- #

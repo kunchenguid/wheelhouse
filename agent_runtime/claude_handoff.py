@@ -54,6 +54,8 @@ PACKAGED_RUNTIME_FILES = (
     "mcp_bridge.py",
     "public_read.py",
     "public_read_broker.py",
+    "exercise.py",
+    "exercise_broker.py",
     "install_direct_runtime.sh",
     "redaction.py",
     "runtime.lock.json",

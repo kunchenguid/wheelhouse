@@ -716,10 +716,13 @@ def fresh_verdict_facts(state, head_sha):
         state.get("public_evidence_influenced") is True
         or isinstance(state.get("advisory_review"), dict)
     )
+    trusted_public_advisory = core.trusted_public_advisory(
+        state, require_eligible=True
+    )
     triage_ok = (
         current_head_ok
         and state.get("triage_status") == "succeeded"
-        and not public_evidence_influenced
+        and (not public_evidence_influenced or trusted_public_advisory)
     )
     revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
     card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
@@ -727,8 +730,8 @@ def fresh_verdict_facts(state, head_sha):
         "current head SHA is unavailable"
         if not current_head_ok
         else (
-            "public-evidence review is advisory and cannot satisfy auto-merge"
-            if public_evidence_influenced
+            "public-evidence review is unavailable, stale, incomplete, or ineligible"
+            if public_evidence_influenced and not trusted_public_advisory
             else "no successful auto-triage verdict on the card"
             if not triage_ok
             else (

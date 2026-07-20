@@ -17,6 +17,25 @@
     },
     "mode": {"type": "string", "enum": ["action", "answer", "clarify"]},
     "action": {"type": "string", "maxLength": 80},
+    "conditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "fact", "operator", "value"],
+        "properties": {
+          "source": {"type": "string", "const": "current_trusted_advisory"},
+          "fact": {
+            "type": "string",
+            "enum": ["verdict", "projection_complete", "policy_coverage_complete", "auto_merge_eligible"]
+          },
+          "operator": {"type": "string", "const": "equals"},
+          "value": {"type": "string", "enum": ["positive", "negative", "inconclusive", "true", "false"]}
+        }
+      }
+    },
     "free_text": {"type": "string", "maxLength": 32768},
     "answer": {"type": "string", "maxLength": 65536}
   }

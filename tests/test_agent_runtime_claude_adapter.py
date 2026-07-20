@@ -195,7 +195,9 @@ def main():
             ),
         )
 
-        # Draft-07 migration preserves the canonical accepted/rejected language.
+        # The exact production advisory schema is intentionally draft-07 because
+        # pinned Claude Code 2.1.215 rejects the old transport dialect before
+        # model initialization.
         def verdict(schema_bytes, candidate):
             try:
                 validate_schema_subset(schema_bytes)
@@ -203,7 +205,7 @@ def main():
             except ClaudeProbeError:
                 return False
         production_schema = Path(
-            "agent_runtime/schemas/actions/nl-decision-v1.schema.json"
+            "agent_runtime/schemas/actions/advisory-review-v1.schema.json"
         ).read_text()
         canonical = json.loads(production_schema)
         old = dict(canonical)
@@ -249,8 +251,8 @@ def main():
             if version_matches:
                 fixed = probe(production_schema)
                 old = probe(old_schema)
-                check("real 2.1.215 accepts fixed production schema before auth", "401 Invalid bearer token" in (fixed.stdout + fixed.stderr))
-                check("real 2.1.215 rejects old draft-2020-12 schema", "no schema with key or ref" in (old.stdout + old.stderr))
+                check("real 2.1.215 accepts exact production advisory schema before auth", "401 Invalid bearer token" in (fixed.stdout + fixed.stderr))
+                check("real 2.1.215 rejects old advisory draft-2020-12 schema", "no schema with key or ref" in (old.stdout + old.stderr))
         else:
             print("skip real 2.1.215 boundary (canary binary not supplied)")
 

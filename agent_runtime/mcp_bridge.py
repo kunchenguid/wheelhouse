@@ -25,6 +25,7 @@ NAME_TO_CANONICAL = {
     "public_fetch": "public.fetch",
     "public_git_snapshot": "public.git_snapshot",
     "public_artifact": "public.artifact",
+    "exercise_run": "exercise.run",
 }
 CANONICAL_TO_NAME = {value: key for key, value in NAME_TO_CANONICAL.items()}
 
@@ -56,6 +57,7 @@ def serve(plan_path: Path) -> None:
         canonical_names,
         max_results,
         public_socket=os.environ.get("WHEELHOUSE_PUBLIC_SOCKET", ""),
+        exercise_socket=os.environ.get("WHEELHOUSE_EXERCISE_SOCKET", ""),
         execution_id=str(plan.get("executionId") or ""),
         task_sha256=str(plan.get("taskSha256") or ""),
     )

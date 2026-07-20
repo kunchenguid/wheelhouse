@@ -541,10 +541,13 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
     }
     if requested_tools:
         public_socket = os.environ.get("WHEELHOUSE_PUBLIC_SOCKET", "")
+        exercise_socket = os.environ.get("WHEELHOUSE_EXERCISE_SOCKET", "")
         if any(str(name).startswith("public.") for name in requested_tools) and not public_socket:
             raise WorkerFailure(
                 "sandbox.violation", "Credential-free public broker is unavailable."
             )
+        if "exercise.run" in requested_tools and not exercise_socket:
+            raise WorkerFailure("sandbox.violation", "No-network exercise broker is unavailable.")
         mcp_home = Path("/tmp/mcp-home")
         mcp_home.mkdir(mode=0o700, exist_ok=True)
         mcp_environment = [
@@ -559,6 +562,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
             "WHEELHOUSE_WORK_ROOT=%s"
             % os.environ.get("WHEELHOUSE_WORK_ROOT", "/work"),
             "WHEELHOUSE_PUBLIC_SOCKET=%s" % public_socket,
+            "WHEELHOUSE_EXERCISE_SOCKET=%s" % exercise_socket,
             "python3",
             "-m",
             "agent_runtime.mcp_bridge",

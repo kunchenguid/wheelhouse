@@ -19,7 +19,7 @@ from typing import Any
 
 from . import API_VERSION
 from .adapters import ADAPTERS
-from .brokers import ProviderProxy, PublicReadBrokerProcess, SearchBroker
+from .brokers import ExerciseBrokerProcess, ProviderProxy, PublicReadBrokerProcess, SearchBroker
 from .capabilities import CapabilityError, negotiate
 from .contract import (
     ContractError,
@@ -523,9 +523,11 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
     provider_proxy = None
     search_broker = None
     public_broker = None
+    exercise_broker = None
     provider_socket = ""
     search_socket = ""
     public_socket = ""
+    exercise_socket = ""
     broker_dir = Path(tempfile.mkdtemp(prefix="wha-"))
     try:
         if adapter.id in ("claude-cli", "codex-app-server"):
@@ -550,6 +552,16 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             )
             public_broker.start()
             public_socket = public_broker.socket_path
+            if any(tool.get("name") == "exercise.run" for tool in task["spec"]["tools"]["tools"]):
+                exercise_broker = ExerciseBrokerProcess(
+                    str(broker_dir / "exercise-broker"),
+                    str(public_broker.receipt_dir),
+                    execution_id,
+                    request_sha256,
+                    test_unsandboxed=bool(host.get("testOnly")),
+                )
+                exercise_broker.start()
+                exercise_socket = exercise_broker.socket_path
 
         auth_source = probe.auth_source
 
@@ -564,6 +576,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             provider_socket=provider_socket,
             search_socket=search_socket,
             public_socket=public_socket,
+            exercise_socket=exercise_socket,
             worker_command=worker_command,
             proof=host,
         )
@@ -749,6 +762,8 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
         atomic_write_json(result_path, result)
         return result
     finally:
+        if exercise_broker:
+            exercise_broker.close()
         if public_broker:
             public_broker.close()
         if search_broker:

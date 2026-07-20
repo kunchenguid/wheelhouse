@@ -311,7 +311,7 @@ TRIAGE_BUDGET_DEFERRED = (
     "Automated advisory generation was deferred because the configured budget "
     "was unavailable."
 )
-PUBLIC_ADVISORY_STATE_VERSION = 1
+PUBLIC_ADVISORY_STATE_VERSION = 2
 
 _STATE_BLOCK_RE = re.compile(
     r"<!--\s*(?:wheelhouse|triage)-state:\s*(\{.*?\})\s*-->",
@@ -1441,7 +1441,8 @@ def normalize_public_advisory(data):
     if (
         data.get("public_evidence_influenced") is not True
         or data.get("acting_authority") is not False
-        or data.get("auto_merge_eligible") is not False
+        or data.get("trusted_projection") is not True
+        or not isinstance(data.get("auto_merge_eligible"), bool)
         or data.get("policy_coverage_complete") is not True
     ):
         return None
@@ -1496,6 +1497,21 @@ def normalize_public_advisory(data):
     requested = data.get("requested_evidence")
     if not isinstance(limitations, list) or not isinstance(requested, list):
         return None
+    eligibility = data.get("eligibility_facts")
+    auto_merge_eligible = data["auto_merge_eligible"]
+    if auto_merge_eligible:
+        if (
+            not isinstance(eligibility, dict)
+            or eligibility.get("behavior_class") not in {"A", "B", "C"}
+            or eligibility.get("changes_existing_or_default_behavior") is not False
+            or eligibility.get("aligns_with_vision") is not True
+            or eligibility.get("recommendation") != "eligible"
+            or (
+                eligibility.get("behavior_class") == "C"
+                and eligibility.get("optin_default_off") is not True
+            )
+        ):
+            return None
     return {
         "plan_sha256": plan_sha,
         "verdict": verdict,
@@ -1511,6 +1527,8 @@ def normalize_public_advisory(data):
             for value in requested[:32]
             if isinstance(value, str) and value.strip()
         ],
+        "auto_merge_eligible": auto_merge_eligible,
+        "eligibility_facts": dict(eligibility) if isinstance(eligibility, dict) else None,
     }
 
 
@@ -2092,12 +2110,41 @@ def body_with_public_advisory(body, revision, advisory, vision_sha="", base_sha=
         "verdict": normalized["verdict"],
         "policy_coverage_complete": True,
         "acting_authority": False,
-        "auto_merge_eligible": False,
+        "trusted_projection": True,
+        "projection_complete": all(
+            row["status"] in {"complete-pass", "complete-fail"}
+            for row in normalized["obligations"]
+        ),
+        "auto_merge_eligible": normalized["auto_merge_eligible"],
+        "eligibility_facts": normalized.get("eligibility_facts"),
+        "head_sha": str(state.get("head_sha") or ""),
+        "base_sha": str(base_sha or ""),
+        "vision_sha": str(vision_sha or ""),
         "obligations": [
             {"id": row["id"], "status": row["status"]}
             for row in normalized["obligations"]
         ],
     }
+    eligibility = normalized.get("eligibility_facts")
+    if normalized["auto_merge_eligible"] and isinstance(eligibility, dict):
+        new_state["triage_recommendation"] = {
+            "action": "merge",
+            "reason": "Trusted, current, complete public advisory is eligible under the target VISION.",
+        }
+        new_state["automerge_verdict"] = {
+            "behavior_class": eligibility["behavior_class"],
+            "changes_existing_or_default_behavior": eligibility[
+                "changes_existing_or_default_behavior"
+            ],
+            "optin_default_off": eligibility["optin_default_off"],
+            "aligns_with_vision": eligibility["aligns_with_vision"],
+            "recommend_merge": True,
+            "vision_sha": str(vision_sha or ""),
+            "base_sha": str(base_sha or ""),
+        }
+    else:
+        new_state.pop("triage_recommendation", None)
+        new_state.pop("automerge_verdict", None)
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])
     updated = _set_recommendation_section_visible(updated, visible=True)

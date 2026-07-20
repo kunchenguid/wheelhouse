@@ -4,7 +4,8 @@
 The default mode exercises pure fail-closed policy and a real isolated broker
 against public Internet sources. ``--production-e2e`` additionally creates a
 local public-address HTTPS adversary and runs the exact Bubblewrap production
-broker. No fetch path, receipt, or authority guard is mocked.
+broker process path. This is broker/process E2E evidence, not a model/product
+E2E. No fetch path, receipt, or authority guard is mocked.
 """
 
 from __future__ import annotations
@@ -32,9 +33,19 @@ sys.path.insert(1, str(ROOT / "scripts"))
 
 from agent_runtime.adapters.base import AdapterDescriptor, AdapterProbe  # noqa: E402
 from agent_runtime.adapters.claude import ClaudeCliAdapter  # noqa: E402
-from agent_runtime.brokers import PublicReadBrokerProcess  # noqa: E402
+from agent_runtime.brokers import (  # noqa: E402
+    BrokerError,
+    ExerciseBrokerProcess,
+    PublicReadBrokerProcess,
+)
 from agent_runtime.config import resolve_selection  # noqa: E402
-from agent_runtime.contract import file_sha256  # noqa: E402
+from agent_runtime.contract import (  # noqa: E402
+    canonical_json_bytes,
+    canonical_sha256,
+    file_sha256,
+)
+from agent_runtime import exercise as exercise_module  # noqa: E402
+from agent_runtime.exercise import ExerciseError, ExerciseService  # noqa: E402
 from agent_runtime.public_read import (  # noqa: E402
     MAX_RESPONSE_HEADER_BYTES,
     PinnedHTTPSClient,
@@ -73,18 +84,21 @@ def check(name, condition):
         raise Failure(name)
 
 
-def tool_client(socket_path):
+def tool_client(socket_path, exercise_socket=""):
     names = [
         "public.fetch",
         "public.search",
         "public.git_snapshot",
         "public.artifact",
     ]
+    if exercise_socket:
+        names.append("exercise.run")
     return CanonicalTools(
         str(ROOT),
         names,
         {name: 2 * 1024 * 1024 for name in names},
         public_socket=socket_path,
+        exercise_socket=exercise_socket,
         execution_id=EXECUTION_ID,
         task_sha256=TASK_SHA256,
     )
@@ -463,11 +477,13 @@ def test_git_proxy_hard_bounds():
     )
 
 
-def vision_review(vision_path, result_rows, citations, receipt_dir):
+def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_facts=None):
     with tempfile.TemporaryDirectory() as directory:
         bundle = Path(directory)
         copied = bundle / "VISION.md"
         shutil.copyfile(vision_path, copied)
+        target = bundle / "target.txt"
+        target.write_text("Bound target change under review.\n", encoding="utf-8")
         plan = derive_evidence_plan(copied.read_text(encoding="utf-8"))
         task = {
             "metadata": {"executionId": EXECUTION_ID},
@@ -477,7 +493,12 @@ def vision_review(vision_path, result_rows, citations, receipt_dir):
                         "id": "vision",
                         "artifact": "VISION.md",
                         "sha256": file_sha256(copied),
-                    }
+                    },
+                    {
+                        "id": "target",
+                        "artifact": "target.txt",
+                        "sha256": file_sha256(target),
+                    },
                 ]
             },
         }
@@ -491,6 +512,8 @@ def vision_review(vision_path, result_rows, citations, receipt_dir):
             "limitations": [],
             "requested_evidence": [],
         }
+        if eligibility_facts is not None:
+            raw["eligibility_facts"] = eligibility_facts
         return plan, project_advisory_review(
             raw,
             task=task,
@@ -555,6 +578,21 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     else:
         missing_failed = False
     check("VISION: missing policy fails closed", missing_failed)
+    unfamiliar_plan = derive_evidence_plan(
+        (FIXTURES / "unfamiliar-normative-vision.md").read_text(encoding="utf-8")
+    )
+    mixed_plan = derive_evidence_plan(
+        (FIXTURES / "mixed-ambiguous-vision.md").read_text(encoding="utf-8")
+    )
+    check(
+        "VISION: unfamiliar and mixed normative language is explicitly unavailable",
+        any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
+        and any(
+            row["semantic_status"] == "ambiguous"
+            for row in mixed_plan["obligations"]
+        )
+        and any(row["operation"] == "public.fetch" for row in mixed_plan["obligations"]),
+    )
 
     _, axi_review = vision_review(
         axi_path,
@@ -601,6 +639,53 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         "VISION B: the same generic projector applies its unrelated requirement",
         unrelated_review["verdict"] == "positive"
         and unrelated_review["policy_coverage_complete"] is True,
+    )
+    _, mixed_review = vision_review(
+        FIXTURES / "mixed-ambiguous-vision.md",
+        lambda plan: [
+            {
+                "obligation_id": row["obligation_id"],
+                "assessment": "pass",
+                "rationale": "Attempted assessment of every structurally mapped clause.",
+                "citation_ids": [manifest_receipt["evidence_id"]]
+                if row["operation"] == "public.fetch"
+                else [],
+            }
+            for row in plan["obligations"]
+        ],
+        [citation],
+        receipt_dir,
+    )
+    check(
+        "VISION: an ambiguous clause prevents positive even when known evidence passes",
+        mixed_review["verdict"] == "inconclusive"
+        and any(
+            row["trusted_status"] == "unavailable"
+            for row in mixed_review["obligation_results"]
+        ),
+    )
+    _, unfamiliar_review = vision_review(
+        FIXTURES / "unfamiliar-normative-vision.md",
+        lambda plan: [
+            {
+                "obligation_id": row["obligation_id"],
+                "assessment": "pass",
+                "rationale": "A positive interpretation was attempted.",
+                "citation_ids": [],
+            }
+            for row in plan["obligations"]
+        ],
+        [],
+        receipt_dir,
+    )
+    check(
+        "VISION: unfamiliar normative semantics are unavailable to the projector",
+        unfamiliar_review["verdict"] == "inconclusive"
+        and unfamiliar_review["projection_complete"] is False
+        and all(
+            row["trusted_status"] == "unavailable"
+            for row in unfamiliar_review["obligation_results"]
+        ),
     )
     return axi_review, unrelated_review
 
@@ -650,6 +735,7 @@ def test_public_task_contract():
             event_key="c" * 64,
             target_file=str(target),
             vision_file=str(FIXTURES / "reproducible-data-vision.md"),
+            allow_automerge_behavior=True,
         )
         names = [row["name"] for row in task["spec"]["tools"]["tools"]]
         check(
@@ -663,11 +749,22 @@ def test_public_task_contract():
                 "public.fetch",
                 "public.git_snapshot",
                 "public.artifact",
+                "exercise.run",
             ]
             and task["spec"]["output"]["schemaId"]
             == "wheelhouse/advisory-review/v1"
             and task["spec"]["output"]["evidencePolicy"]
             == "public-evidence/v1",
+        )
+        bound_schema = json.loads(
+            (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        check(
+            "task: auto-merge lane requires advisory eligibility facts in draft-07",
+            bound_schema["$schema"] == "http://json-schema.org/draft-07/schema#"
+            and "eligibility_facts" in bound_schema["required"],
         )
         plan_input = next(
             row for row in task["spec"]["inputs"] if row["id"] == "evidence-plan"
@@ -709,6 +806,7 @@ def test_public_task_contract():
                 "mcp__wheelhouse__public_fetch",
                 "mcp__wheelhouse__public_git_snapshot",
                 "mcp__wheelhouse__public_artifact",
+                "mcp__wheelhouse__exercise_run",
             },
         )
 
@@ -745,8 +843,7 @@ def test_authority_separation(advisory):
         "authority: AdvisoryReview cannot drive apply_decision",
         routed["decision"] == "" and routed["mode"] == "clarify",
     )
-    facts, _ = auto_merge.fresh_verdict_facts(
-        {
+    injected_state = {
             "repo": "target",
             "number": 1,
             "kind": "pr-review",
@@ -764,14 +861,48 @@ def test_authority_separation(advisory):
             },
             "public_evidence_influenced": True,
             "advisory_review": advisory,
-        },
+        }
+    facts, _ = auto_merge.fresh_verdict_facts(
+        injected_state,
         "a" * 40,
     )
     check(
-        "authority: AdvisoryReview cannot satisfy the auto-merge gate",
+        "authority: raw or injected advisory state cannot satisfy auto-merge",
         facts["g6_triage_success"]["status"] == "unmet"
-        and "advisory" in facts["g6_triage_success"]["reason"],
+        and "public-evidence" in facts["g6_triage_success"]["reason"],
     )
+    if advisory.get("auto_merge_eligible") is True:
+        state = {
+            "repo": "target",
+            "number": 1,
+            "kind": "pr-review",
+            "head_sha": "a" * 40,
+            "options": ["merge", "close", "hold"],
+        }
+        body = "Card\n\n<!-- wheelhouse-state: %s -->" % json.dumps(
+            state, separators=(",", ":")
+        )
+        projected_body = render_card.body_with_public_advisory(
+            body,
+            "a" * 40,
+            advisory,
+            vision_sha="c" * 40,
+            base_sha="b" * 40,
+        )
+        projected_state = render_card.parse_state_block(projected_body)
+        positive_facts, _ = auto_merge.fresh_verdict_facts(
+            projected_state, "a" * 40
+        )
+        stale_facts, _ = auto_merge.fresh_verdict_facts(
+            projected_state, "d" * 40
+        )
+        check(
+            "Option B: trusted current complete projection can satisfy G6 without acting authority",
+            projected_state["advisory_review"]["acting_authority"] is False
+            and positive_facts["g6_triage_success"]["status"] == "met"
+            and positive_facts["g6_merge_recommendation"]["status"] == "met"
+            and stale_facts["g6_triage_success"]["status"] == "unmet",
+        )
 
 
 def parent_secret_environment():
@@ -803,17 +934,145 @@ def test_production_launcher_contract():
             "/usr/bin/" + name if name in {"bwrap", "prlimit"} else None
         ),
     ):
-        broker = PublicReadBrokerProcess(directory, EXECUTION_ID, TASK_SHA256)
+        broker = PublicReadBrokerProcess(str(Path(directory) / "broker"), EXECUTION_ID, TASK_SHA256)
         command, environment = broker._sandboxed()
+        source = (ROOT / "agent_runtime" / "brokers.py").read_text(encoding="utf-8")
         check(
-            "broker: hosted-runner namespace admission uses the privileged launcher",
+            "broker: privileged launcher drops to the runner without recursive ownership or shared-parent changes",
             command[:3] == ["sudo", "--non-interactive", "/usr/bin/prlimit"]
             and "/usr/bin/bwrap" in command
             and "--cap-drop" in command
-            and "--unshare-user" in command
-            and command[command.index("--uid") + 1] == "0"
-            and command[command.index("--gid") + 1] == "0"
+            and "--unshare-user" not in command
+            and command[command.index("--uid") + 1] == str(os.getuid())
+            and command[command.index("--gid") + 1] == str(os.getgid())
+            and '"chown"' not in source
+            and "os.chmod(self.root.parent" not in source
+            and '"-%d" % process.pid' not in source
             and environment == {},
+        )
+        parent_mode = Path(directory).stat().st_mode & 0o777
+        broker._validate_trusted_tree()
+        check(
+            "broker: launch admission preserves the private parent mode",
+            Path(directory).stat().st_mode & 0o777 == parent_mode,
+        )
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        target = root / "target"
+        target.mkdir(mode=0o700)
+        link = root / "broker-link"
+        link.symlink_to(target, target_is_directory=True)
+        try:
+            PublicReadBrokerProcess(str(link), EXECUTION_ID, TASK_SHA256)
+        except BrokerError:
+            symlink_rejected = True
+        else:
+            symlink_rejected = False
+        check("broker: supplied symlink root is rejected before launch", symlink_rejected)
+
+        replaced = PublicReadBrokerProcess(
+            str(root / "replace-broker"), EXECUTION_ID, TASK_SHA256
+        )
+        replaced._stage_runtime()
+        moved = root / "original-broker"
+        replaced.root.rename(moved)
+        replaced.root.mkdir(mode=0o700)
+        try:
+            replaced._validate_trusted_tree()
+        except BrokerError:
+            replacement_rejected = True
+        else:
+            replacement_rejected = False
+        check(
+            "broker: inode replacement under the private root fails admission",
+            replacement_rejected,
+        )
+
+    with tempfile.TemporaryDirectory() as directory:
+        failed = PublicReadBrokerProcess(
+            str(Path(directory) / "failed-broker"),
+            EXECUTION_ID,
+            TASK_SHA256,
+            test_unsandboxed=True,
+        )
+        failed.runtime_root.mkdir(mode=0o700)
+        failed._direct = lambda: (
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('admission-canary\\n'); raise SystemExit(23)",
+            ],
+            {},
+        )
+        try:
+            failed.start()
+        except BrokerError as error:
+            diagnostic = str(error)
+        else:
+            diagnostic = ""
+        check(
+            "broker: admission reports the real child exit and bounded stderr",
+            "exit 23" in diagnostic and "admission-canary" in diagnostic,
+        )
+
+
+def test_exercise_hard_wall():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        evidence = root / "evidence"
+        artifacts = evidence / "artifacts"
+        artifacts.mkdir(parents=True)
+        artifact = b"bounded-artifact-fixture"
+        digest = hashlib.sha256(artifact).hexdigest()
+        (artifacts / digest).write_bytes(artifact)
+        core = {
+            "version": "wheelhouse/public-evidence-receipt/v1",
+            "execution_id": EXECUTION_ID,
+            "task_sha256": TASK_SHA256,
+            "operation": "public.artifact",
+            "status": "complete",
+            "truncated": False,
+            "staged": True,
+            "artifact_sha256": digest,
+        }
+        evidence_id = canonical_sha256({"receipt": core})
+        artifact_receipt = {"evidence_id": evidence_id, **core}
+        artifact_receipt["receipt_sha256"] = canonical_sha256(artifact_receipt)
+        (evidence / (evidence_id + ".json")).write_bytes(
+            canonical_json_bytes(artifact_receipt) + b"\n"
+        )
+        service = ExerciseService(
+            evidence, root / "scratch", EXECUTION_ID, TASK_SHA256
+        )
+
+        def stalled_child(*_args):
+            time.sleep(5)
+
+        original_child = exercise_module._exercise_child
+        original_wall = exercise_module.MAX_WALL_SECONDS
+        exercise_module._exercise_child = stalled_child
+        exercise_module.MAX_WALL_SECONDS = 0.05
+        started = time.monotonic()
+        try:
+            service.call(
+                {
+                    "adapter": "node-npm-cli-v1",
+                    "artifact_evidence_ids": [evidence_id],
+                    "binary": "fixture",
+                    "scenario_set": "cli-discovery-success-error-v1",
+                }
+            )
+        except ExerciseError as error:
+            code = error.code
+        else:
+            code = ""
+        finally:
+            exercise_module._exercise_child = original_child
+            exercise_module.MAX_WALL_SECONDS = original_wall
+        check(
+            "exercise: extraction and execution share one killable hard wall bound",
+            code == "exercise.deadline" and time.monotonic() - started < 1,
         )
 
 
@@ -959,19 +1218,20 @@ def production_setup(directory, hosts_backup):
 
 def production_cleanup(server, hosts_backup, trust_path):
     if server is not None:
-        subprocess.run(
-            [
-                "sudo",
-                "--non-interactive",
-                "kill",
-                "-TERM",
-                "--",
-                "-%d" % server.pid,
-            ],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if server.poll() is None:
+            subprocess.run(
+                [
+                    "sudo",
+                    "--non-interactive",
+                    "kill",
+                    "-TERM",
+                    "--",
+                    str(server.pid),
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         try:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -982,7 +1242,7 @@ def production_cleanup(server, hosts_backup, trust_path):
                     "kill",
                     "-KILL",
                     "--",
-                    "-%d" % server.pid,
+                    str(server.pid),
                 ],
                 check=False,
                 stdout=subprocess.DEVNULL,
@@ -1030,10 +1290,22 @@ def test_production_e2e():
     try:
         with tempfile.TemporaryDirectory() as directory:
             server, hosts_backup, trust_path = production_setup(directory, hosts_backup)
+            launch_root = Path(directory)
+            launch_root_mode = launch_root.stat().st_mode & 0o777
+            host_network_namespace = os.readlink("/proc/self/ns/net")
             broker = PublicReadBrokerProcess(directory + "/broker", EXECUTION_ID, TASK_SHA256)
             broker.start()
+            broker_process = broker.process
+            exercise_broker = ExerciseBrokerProcess(
+                directory + "/exercise",
+                str(broker.receipt_dir),
+                EXECUTION_ID,
+                TASK_SHA256,
+            )
+            exercise_broker.start()
+            exercise_process = exercise_broker.process
             try:
-                tools = tool_client(broker.socket_path)
+                tools = tool_client(broker.socket_path, exercise_broker.socket_path)
                 injected, inventory = mcp_fetch(
                     broker.socket_path,
                     "https://%s/inject" % PUBLIC_HOST,
@@ -1211,21 +1483,126 @@ def test_production_e2e():
                 snapshot = tools.call(
                     "public.git_snapshot",
                     {
-                        "url": "https://github.com/kunchenguid/axi.git",
-                        "ref": "cddff0cc1b01adef5f3f6d81360e49e76c27985b",
+                        "url": "https://github.com/SSBrouhard/npm-axi.git",
+                        "ref": "c77a9affa23c773c3eaeb467de2ed67185a89555",
                     },
                 )
                 snapshot_receipt = receipt(snapshot)
                 check(
-                    "git: real PR 106 snapshot is exact, anonymous, depth-1 data",
+                    "VISION A: real package release source is exact, anonymous, depth-1 data",
                     snapshot_receipt["status"] == "complete"
                     and snapshot_receipt["commit"]
-                    == "cddff0cc1b01adef5f3f6d81360e49e76c27985b"
+                    == "c77a9affa23c773c3eaeb467de2ed67185a89555"
                     and snapshot_receipt["depth"] == 1
                     and snapshot_receipt["history_commits"] == 1
                     and snapshot_receipt["bounds"]["history_depth"] == 1
                     and snapshot_receipt["wire_bytes"]
                     <= snapshot_receipt["bounds"]["wire_bytes"],
+                )
+
+                artifact_results = [
+                    tools.call("public.artifact", {"url": url})
+                    for url in (
+                        "https://registry.npmjs.org/npm-axi/-/npm-axi-0.1.1.tgz",
+                        "https://registry.npmjs.org/axi-sdk-js/-/axi-sdk-js-0.1.7.tgz",
+                        "https://registry.npmjs.org/@toon-format/toon/-/toon-2.1.0.tgz",
+                    )
+                ]
+                exercise = tools.call(
+                    "exercise.run",
+                    {
+                        "adapter": "node-npm-cli-v1",
+                        "artifact_evidence_ids": [
+                            receipt(row)["evidence_id"] for row in artifact_results
+                        ],
+                        "binary": "npm-axi",
+                        "scenario_set": "cli-discovery-success-error-v1",
+                    },
+                )
+                exercise_receipt = receipt(exercise)
+                exercise_attestation = json.loads(
+                    exercise_broker.attestation_path.read_text(encoding="utf-8")
+                )
+                check(
+                    "VISION A: released CLI exercise is real, complete, bounded, and no-network",
+                    exercise_receipt["status"] == "complete"
+                    and exercise_receipt["operation"] == "exercise.run"
+                    and exercise_receipt["adapter"] == "node-npm-cli-v1"
+                    and exercise_receipt["bounds"]["network"] == "none"
+                    and exercise_attestation["isolation_mode"]
+                    == "bubblewrap-no-network"
+                    and exercise_attestation["credential_reachable"] is False
+                    and exercise_attestation["network_namespace"]
+                    != host_network_namespace,
+                )
+                evidence_by_operation = {
+                    "public.git_snapshot": snapshot_receipt,
+                    "public.artifact": receipt(artifact_results[0]),
+                    "exercise.run": exercise_receipt,
+                }
+                citations = [
+                    {
+                        "evidence_id": row["evidence_id"],
+                        "location": row.get("final_url") or row["operation"],
+                        "claim": "Direct bounded observation for %s." % operation,
+                    }
+                    for operation, row in evidence_by_operation.items()
+                ]
+                _, axi_positive = vision_review(
+                    FIXTURES / "axi-vision-pr-106.md",
+                    lambda plan: [
+                        {
+                            "obligation_id": obligation["obligation_id"],
+                            "assessment": "pass",
+                            "rationale": "The applicable target-owned requirement has complete direct evidence.",
+                            "citation_ids": []
+                            if obligation["operation"] == "policy.assess"
+                            else [
+                                evidence_by_operation[obligation["operation"]][
+                                    "evidence_id"
+                                ]
+                            ],
+                        }
+                        for obligation in plan["obligations"]
+                    ],
+                    citations,
+                    broker.receipt_dir,
+                    eligibility_facts={
+                        "behavior_class": "A",
+                        "changes_existing_or_default_behavior": False,
+                        "optin_default_off": False,
+                        "aligns_with_vision": True,
+                        "recommendation": "eligible",
+                    },
+                )
+                check(
+                    "VISION A: source, artifact, and representative exercise produce a complete positive projection",
+                    axi_positive["verdict"] == "positive"
+                    and axi_positive["projection_complete"] is True
+                    and axi_positive["auto_merge_eligible"] is True
+                    and all(
+                        row["trusted_status"] == "complete-pass"
+                        for row in axi_positive["obligation_results"]
+                    ),
+                )
+                test_authority_separation(axi_positive)
+
+                unavailable_exercise = tools.call(
+                    "exercise.run",
+                    {
+                        "adapter": "node-npm-cli-v1",
+                        "artifact_evidence_ids": ["0" * 64],
+                        "binary": "npm-axi",
+                        "scenario_set": "cli-discovery-success-error-v1",
+                    },
+                )
+                unavailable_exercise_receipt = receipt(unavailable_exercise)
+                check(
+                    "VISION A: missing released-artifact evidence is explicitly unavailable",
+                    unavailable_exercise_receipt.get("status") == "unavailable"
+                    and unavailable_exercise_receipt.get("reason_code")
+                    == "evidence.invalid"
+                    and unavailable_exercise["evidence"]["complete"] is False,
                 )
 
                 unavailable(
@@ -1239,7 +1616,23 @@ def test_production_e2e():
                     "ssrf.non_public",
                 )
             finally:
+                exercise_broker.close()
                 broker.close()
+            check(
+                "broker: exact child handles are terminated without process-group cleanup",
+                broker_process is not None
+                and broker_process.poll() is not None
+                and exercise_process is not None
+                and exercise_process.poll() is not None,
+            )
+            check(
+                "broker: cleanup preserves parent mode and leaves no privileged residue",
+                launch_root.stat().st_mode & 0o777 == launch_root_mode
+                and all(
+                    path.lstat().st_uid == os.getuid()
+                    for path in [launch_root, *launch_root.rglob("*")]
+                ),
+            )
     finally:
         production_cleanup(server, hosts_backup, trust_path)
         sentinel.unlink(missing_ok=True)
@@ -1251,6 +1644,7 @@ def main():
     parser.add_argument("--production-e2e", action="store_true")
     args = parser.parse_args()
     test_production_launcher_contract()
+    test_exercise_hard_wall()
     if args.production_e2e:
         test_production_e2e()
     else:

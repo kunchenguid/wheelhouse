@@ -117,6 +117,7 @@ def main():
             provider_socket=str(provider_socket),
             search_socket=str(search_socket),
             public_socket="",
+            exercise_socket="",
             worker_command=["python3", "-m", "agent_runtime.worker", "--plan", str(plan), "--output-dir", str(output)],
             proof={"binary": "/usr/bin/bwrap", "testOnly": False},
         )

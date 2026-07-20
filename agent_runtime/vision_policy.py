@@ -21,7 +21,7 @@ REVIEW_KIND = "AdvisoryReview"
 _NORMATIVE = re.compile(
     r"(?i)\b(?:must|required|requires?|shall|only\s+after|cannot|may\s+receive"
     r"\s+(?:a\s+)?positive\b|insufficient\s+evidence|remain\s+inconclusive|"
-    r"never)\b"
+    r"never|contingent\s+upon|prerequisite)\b"
 )
 _GENERIC_OPERATIONS = {
     "public.git_snapshot",
@@ -31,6 +31,18 @@ _GENERIC_OPERATIONS = {
     "exercise.run",
     "policy.assess",
 }
+
+_LOCAL_POLICY_RULE = re.compile(
+    r"(?i)(?:\b(?:should|may|can)\b|\b(?:welcome|belong|faithful|similar|"
+    r"common[- ]denominator|scope|principle|default|opt[- ]?in|owner|maintain|"
+    r"clarity|meaning|behavior|interface|output|error|discoverab|ergonomic|"
+    r"assertion|claim|screenshot|evidence)\w*\b|"
+    r"\b(?:open|closed)\s+to\b)"
+)
+_AMBIGUOUS_CONDITION = re.compile(
+    r"(?i)\b(?:unless|except\s+when|provided\s+that|either\b[^.]{0,160}\bor|"
+    r"and\s*/\s*or)\b"
+)
 
 
 class VisionPolicyError(ValueError):
@@ -106,7 +118,37 @@ def _operations(text: str) -> list[str]:
         add("digest.verify")
     if any(word in lowered for word in ("execute", "run ", "running", "verifier", "exercise")):
         add("exercise.run")
+    if "validat" in lowered and "representative" in lowered:
+        add("exercise.run")
     return operations
+
+
+def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
+    """Conservatively prove that every normative sentence was understood.
+
+    Known operation words in one part of a paragraph must not hide an unknown or
+    alternative condition elsewhere in that paragraph. Unknown and ambiguous
+    language remains structurally mapped, but its evidence can never become a
+    complete positive observation.
+    """
+    if _AMBIGUOUS_CONDITION.search(text):
+        return "ambiguous"
+    sentences = [
+        value.strip()
+        for value in re.split(r"(?<=[.!?])\s+", text)
+        if value.strip() and not value.lstrip().startswith("#")
+    ]
+    for sentence in sentences or [text]:
+        sentence_normative = bool(_NORMATIVE.search(sentence))
+        if (
+            sentence_normative
+            and not _operations(sentence)
+            and not _LOCAL_POLICY_RULE.search(sentence)
+        ):
+            return "unknown"
+    if not operations:
+        return "recognized-local" if not normative or _LOCAL_POLICY_RULE.search(text) else "unknown"
+    return "recognized"
 
 
 def _coverage_audit(
@@ -194,12 +236,8 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
         normative = bool(_NORMATIVE.search(unit["text"]))
         heading_only = unit["text"].lstrip().startswith("#")
         operations = _operations(unit["text"]) if not heading_only or normative else []
+        semantic_status = _semantic_status(unit["text"], operations, normative)
         if not operations and (not heading_only or normative):
-            # Every prose/list unit becomes an explicit check, even when its
-            # natural language lacks a keyword from the conservative normative
-            # detector. This fail-toward-hold rule prevents an unfamiliar target
-            # policy style from disappearing from a positive review. The generic
-            # local assessment is available only with a content-bound target.
             operations = ["policy.assess"]
         classification = (
             "evidence-obligation"
@@ -213,6 +251,7 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
                 **unit,
                 "classification": classification,
                 "normative": normative,
+                "semantic_status": semantic_status,
             }
         )
         for operation in operations:
@@ -225,6 +264,7 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
                     "source_location": "VISION.md:L%d-L%d"
                     % (unit["start_line"], unit["end_line"]),
                     "requirement": unit["text"],
+                    "semantic_status": semantic_status,
                 }
             )
     if not obligations:
@@ -347,15 +387,19 @@ def project_advisory_review(
     }
     projected_results = []
     all_required_pass = plan["coverage_complete"]
+    all_evidence_complete = plan["coverage_complete"]
     for obligation_id, obligation in expected.items():
         row = observed[obligation_id]
         assessment = row.get("assessment")
         row_citations = row.get("citation_ids")
         citation_ids = row_citations if isinstance(row_citations, list) else []
         receipts_complete = (
-            bound_local_evidence and not citation_ids
+            bound_local_evidence
+            and obligation.get("semantic_status") == "recognized-local"
+            and not citation_ids
             if obligation["operation"] == "policy.assess"
-            else bool(citation_ids)
+            else obligation.get("semantic_status") == "recognized"
+            and bool(citation_ids)
             and all(
                 evidence_id in cited_ids
                 and evidence_id in receipts
@@ -376,6 +420,11 @@ def project_advisory_review(
             trusted_status = "unavailable"
         if obligation["required"] and trusted_status != "complete-pass":
             all_required_pass = False
+        if obligation["required"] and trusted_status not in {
+            "complete-pass",
+            "complete-fail",
+        }:
+            all_evidence_complete = False
         projected_results.append({**row, "trusted_status": trusted_status})
 
     verdict = value.get("verdict")
@@ -386,6 +435,21 @@ def project_advisory_review(
         limitations.append(
             "Trusted projection blocked a positive verdict because required VISION evidence was unavailable, incomplete, or failing."
         )
+    eligibility = value.get("eligibility_facts")
+    eligibility_complete = bool(
+        isinstance(eligibility, dict)
+        and eligibility.get("behavior_class") in {"A", "B", "C"}
+        and eligibility.get("changes_existing_or_default_behavior") is False
+        and eligibility.get("aligns_with_vision") is True
+        and eligibility.get("recommendation") == "eligible"
+        and (
+            eligibility.get("behavior_class") != "C"
+            or eligibility.get("optin_default_off") is True
+        )
+    )
+    auto_merge_eligible = bool(
+        verdict == "positive" and all_required_pass and eligibility_complete
+    )
     return {
         **value,
         "verdict": verdict,
@@ -395,7 +459,9 @@ def project_advisory_review(
         "policy_coverage_complete": plan["coverage_complete"],
         "public_evidence_influenced": True,
         "acting_authority": False,
-        "auto_merge_eligible": False,
+        "trusted_projection": True,
+        "projection_complete": all_evidence_complete,
+        "auto_merge_eligible": auto_merge_eligible,
     }
 
 

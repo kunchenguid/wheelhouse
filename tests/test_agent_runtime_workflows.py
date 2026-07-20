@@ -361,7 +361,16 @@ def main():
     install_script = Path("agent_runtime/install_direct_runtime.sh").read_text()
     canary_text = Path(".github/workflows/agent-runtime-canary.yml").read_text()
     check("production: direct binary remains exact and digest verified", "sha256sum" in install_script and "runtime.lock.json" in model_text and "install_direct_runtime.sh" in model_text)
-    check("canary: production sandbox, public adversary, and binary installer run model-free", "runs-on: ubuntu-24.04" in canary_text and canary_text.count("install_direct_runtime.sh") == 3 and "test_public_read_broker.py --production-e2e" in canary_text and 'host_proof("claude-cli")' in canary_text and "CLAUDE_CODE_OAUTH_TOKEN" not in canary_text)
+    check(
+        "canary: broker/process and fresh real-model product paths are distinct and mandatory",
+        "runs-on: ubuntu-24.04" in canary_text
+        and "test_public_read_broker.py --production-e2e" in canary_text
+        and 'host_proof("claude-cli")' in canary_text
+        and "Public advisory real-model product E2E" in canary_text
+        and "run_public_advisory_model_e2e.py" in canary_text
+        and "WHEELHOUSE_CLAUDE_2_1_215_CANARY_BINARY" in canary_text
+        and "if-no-files-found: error" in canary_text,
+    )
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
     check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)

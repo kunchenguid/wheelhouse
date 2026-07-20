@@ -136,6 +136,7 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
                 "public.fetch",
                 "public.git_snapshot",
                 "public.artifact",
+                "exercise.run",
             }
         )
     _require(set(requested_tools).issubset(allowed_tools), "task requested a tool outside its action profile")

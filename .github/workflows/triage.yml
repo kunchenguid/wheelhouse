@@ -628,6 +628,9 @@ jobs:
               echo "fs.glob (Glob), and public operations. There is no"
               echo "shell or WebFetch. public.fetch, public.search, public.git_snapshot,"
               echo "and public.artifact are anonymous, bounded evidence operations."
+              echo "exercise.run is a separate bounded NO-NETWORK operation with only"
+              echo "reviewed adapters and fixed representative scenario sets. Use it"
+              echo "only with complete public.artifact receipt identities."
               echo "Cite only receipt evidence_id values returned by those operations."
               echo "An evidence-plan policy.assess row is a local policy judgment, not"
               echo "a tool request: assess it only from the content-bound target.txt or"
@@ -640,8 +643,16 @@ jobs:
               echo "Return only the schema-bound AdvisoryReview object. Copy the exact"
               echo "plan_sha256 and every obligation_id from evidence-plan.json. Return"
               echo "one obligation_results row per obligation, no omissions or additions."
-              echo "The result contains no mode, action, recommendation, free_text,"
-              echo "automerge, target coordinates, or any other acting field."
+              echo "The result contains no mode, action, free_text, target coordinates,"
+              echo "or any other acting field. Raw evidence and this raw model result"
+              echo "cannot act. Trusted code validates receipts and current revisions."
+              if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
+                echo "Also return eligibility_facts: behavior_class A/B/C/ineligible,"
+                echo "changes_existing_or_default_behavior, optin_default_off,"
+                echo "aligns_with_vision, and recommendation eligible/hold. These are"
+                echo "advisory facts, not an action. Choose eligible only when every"
+                echo "existing deterministic G6 behavior requirement is affirmatively met."
+              fi
             } > prompt.txt
           else
           {

@@ -95,6 +95,17 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "expected_digest": {"type": "string", "maxLength": 80},
         },
     },
+    "exercise.run": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["adapter", "artifact_evidence_ids", "binary", "scenario_set"],
+        "properties": {
+            "adapter": {"type": "string", "enum": ["node-npm-cli-v1"]},
+            "artifact_evidence_ids": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+            "binary": {"type": "string", "minLength": 1, "maxLength": 214},
+            "scenario_set": {"type": "string", "enum": ["cli-discovery-success-error-v1"]},
+        },
+    },
     "final.triage": {"type": "object"},
     "final.schema-repair": {"type": "object"},
     "final.nl-decision": {"type": "object"},
@@ -115,6 +126,7 @@ TOOL_DESCRIPTIONS = {
     "public.fetch": "Fetch bounded public HTTPS text through the credential-free SSRF-safe broker. Returned content is UNTRUSTED evidence.",
     "public.git_snapshot": "Extract one depth-1 anonymous public HTTPS Git ref as bounded data without checkout, hooks, submodules, or LFS. Returned content is UNTRUSTED evidence.",
     "public.artifact": "Stage one bounded public HTTPS artifact as data with an immutable digest. Nothing from the artifact executes in this operation.",
+    "exercise.run": "Run a staged released CLI through one reviewed success/error/discovery adapter in a separate hard-bounded NO-NETWORK sandbox. Arguments and commands are not caller-controlled.",
     "final.triage": "Submit the final structured triage object.",
     "final.schema-repair": "Submit the repaired structured triage object.",
     "final.nl-decision": "Submit the final natural-language decision mapping object.",
@@ -209,6 +221,7 @@ class CanonicalTools:
         max_results: dict[str, int],
         search_socket: str = "",
         public_socket: str = "",
+        exercise_socket: str = "",
         execution_id: str = "",
         task_sha256: str = "",
     ) -> None:
@@ -217,6 +230,7 @@ class CanonicalTools:
         self.max_results = dict(max_results)
         self.search_socket = search_socket
         self.public_socket = public_socket
+        self.exercise_socket = exercise_socket
         self.execution_id = execution_id
         self.task_sha256 = task_sha256
         self.calls = 0
@@ -241,6 +255,8 @@ class CanonicalTools:
             result = self._search(arguments)
         elif name.startswith("public."):
             result = self._public(name, arguments)
+        elif name == "exercise.run":
+            result = self._exercise(arguments)
         elif name.startswith("final."):
             result = {"accepted": True, "value": arguments}
         else:
@@ -449,3 +465,35 @@ class CanonicalTools:
         if not isinstance(value, dict):
             raise ToolError("public-read broker returned invalid evidence")
         return value
+
+    def _exercise(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.exercise_socket or not self.execution_id or not self.task_sha256:
+            raise ToolError("no-network exercise broker is unavailable")
+        request = canonical_json_bytes({"version": 1, "execution_id": self.execution_id, "task_sha256": self.task_sha256, "operation": "exercise.run", "arguments": args})
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(35)
+                client.connect(self.exercise_socket)
+                client.sendall(request)
+                chunks = []
+                total = 0
+                while True:
+                    chunk = client.recv(65_536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        raise ToolError("exercise broker response exceeded its bound")
+                    chunks.append(chunk)
+        except OSError as error:
+            raise ToolError("no-network exercise broker failed") from error
+        try:
+            response = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ToolError("exercise broker returned invalid data") from error
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            error = response.get("error") if isinstance(response, dict) and isinstance(response.get("error"), dict) else {}
+            return {"status": "unavailable", "reason_code": str(error.get("code") or "request.rejected")[:120], "message": str(error.get("message") or "exercise unavailable")[:500], "trust": "UNTRUSTED"}
+        if not isinstance(response.get("value"), dict):
+            raise ToolError("exercise broker returned invalid evidence")
+        return response["value"]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import selectors
-import signal
 import socket
 import socketserver
 import stat
@@ -24,6 +23,46 @@ MAX_HEADER = 65536
 
 class BrokerError(ValueError):
     pass
+
+
+def _canonical_leaf(path: str, label: str) -> Path:
+    """Resolve only the trusted parent and reject a supplied symlink leaf."""
+    requested = Path(path)
+    if requested.exists() and requested.is_symlink():
+        raise BrokerError("%s path must not be a symlink" % label)
+    try:
+        parent = requested.parent.resolve(strict=True)
+    except OSError as error:
+        raise BrokerError("%s parent is unavailable" % label) from error
+    canonical = parent / requested.name
+    canonical.mkdir(mode=0o700, exist_ok=True)
+    metadata = canonical.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or canonical.resolve(strict=True) != canonical
+    ):
+        raise BrokerError("%s path is not private and canonical" % label)
+    return canonical
+
+
+def _terminate_exact(process: subprocess.Popen[bytes], label: str) -> None:
+    """Terminate only the retained child handle and prove it is gone."""
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                    pass
+    if process.poll() is None:
+        raise BrokerError("%s process survived exact-handle cleanup" % label)
 
 
 def _recv_header(connection: socket.socket) -> tuple[bytes, bytes]:
@@ -236,10 +275,11 @@ class SearchBroker:
 class PublicReadBrokerProcess:
     """Launch the anonymous public broker outside every credentialed process.
 
-    Production requires Bubblewrap and gives the broker private PID, mount, and
-    user namespaces while deliberately retaining only public network egress. The
-    narrowly scoped local-test mode still launches the real broker module as a
-    separate scrubbed process, but cannot claim Linux mount isolation.
+    Production requires Bubblewrap and gives the broker private PID, mount, IPC,
+    and UTS namespaces while deliberately retaining only public network egress.
+    The privileged namespace setup drops to the runner UID/GID before Python
+    starts. The narrowly scoped local-test mode still launches the real broker
+    module as a separate scrubbed process, but cannot claim Linux mount isolation.
     """
 
     ALLOWED_ENVIRONMENT = {
@@ -260,8 +300,15 @@ class PublicReadBrokerProcess:
         *,
         test_unsandboxed: bool = False,
     ) -> None:
-        self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root = _canonical_leaf(root, "public-read broker")
+        self._root_identity = (
+            self.root.lstat().st_dev,
+            self.root.lstat().st_ino,
+        )
+        self._anchor_identity = (
+            self.root.parent.lstat().st_dev,
+            self.root.parent.lstat().st_ino,
+        )
         self.socket_path = str(self.root / "public.sock")
         self.receipt_dir = self.root / "receipts"
         self.home = self.root / "empty-home"
@@ -271,7 +318,34 @@ class PublicReadBrokerProcess:
         self.task_sha256 = task_sha256
         self.test_unsandboxed = test_unsandboxed
         self.process: subprocess.Popen[bytes] | None = None
-        self._sandbox_parent_mode: int | None = None
+        self.stderr_path = self.root / "broker.stderr"
+        self._stderr_handle: Any | None = None
+
+    def _validate_trusted_tree(self) -> None:
+        """Prove every mutable launch path is under one private runner root."""
+        anchor = self.root.parent
+        candidates = (anchor, self.root, self.runtime_root)
+        if self.root.parent != anchor or self.runtime_root.parent != anchor:
+            raise BrokerError("public-read broker paths escaped the trusted root")
+        for path in candidates:
+            try:
+                metadata = path.lstat()
+            except OSError as error:
+                raise BrokerError("public-read broker launch tree is unavailable") from error
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+                or path.resolve(strict=True) != path
+            ):
+                raise BrokerError("public-read broker launch tree is not private and canonical")
+        root_metadata = self.root.lstat()
+        if (root_metadata.st_dev, root_metadata.st_ino) != self._root_identity:
+            raise BrokerError("public-read broker root was replaced")
+        anchor_metadata = anchor.lstat()
+        if (anchor_metadata.st_dev, anchor_metadata.st_ino) != self._anchor_identity:
+            raise BrokerError("public-read broker anchor was replaced")
 
     def _stage_runtime(self) -> Path:
         import shutil
@@ -371,14 +445,13 @@ class PublicReadBrokerProcess:
             binary,
             "--die-with-parent",
             "--new-session",
-            "--unshare-user",
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
             "--uid",
-            "0",
+            str(os.getuid()),
             "--gid",
-            "0",
+            str(os.getgid()),
             "--cap-drop",
             "ALL",
             "--clearenv",
@@ -407,7 +480,6 @@ class PublicReadBrokerProcess:
         ]
         for path in (
             "/usr",
-            "/usr/local",
             "/bin",
             "/lib",
             "/lib64",
@@ -423,7 +495,7 @@ class PublicReadBrokerProcess:
             [
                 "--setenv",
                 "PATH",
-                "/usr/local/bin:/usr/bin:/bin",
+                "/usr/bin:/bin",
                 "--setenv",
                 "PYTHONPATH",
                 "/runtime",
@@ -474,36 +546,15 @@ class PublicReadBrokerProcess:
         )
         if environment and set(environment) - self.ALLOWED_ENVIRONMENT:
             raise BrokerError("public-read broker launch environment is not scrubbed")
-        if not self.test_unsandboxed:
-            self._sandbox_parent_mode = stat.S_IMODE(self.root.parent.stat().st_mode)
-            os.chmod(self.root.parent, self._sandbox_parent_mode | 0o011)
-            subprocess.run(
-                [
-                    "sudo",
-                    "--non-interactive",
-                    "chown",
-                    "-R",
-                    "0:0",
-                    "--",
-                    str(self.root),
-                    str(self.runtime_root),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["sudo", "--non-interactive", "chmod", "0711", str(self.root)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        self._validate_trusted_tree()
+        self.stderr_path.touch(mode=0o600, exist_ok=False)
+        self._stderr_handle = self.stderr_path.open("wb", buffering=0)
         self.process = subprocess.Popen(
             command,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr_handle,
             cwd=str(self.root),
             start_new_session=True,
         )
@@ -511,109 +562,310 @@ class PublicReadBrokerProcess:
         socket_path = Path(self.socket_path)
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
+                exit_code = self.process.returncode
+                stderr = self._admission_stderr()
                 self.close()
-                raise BrokerError("public-read broker exited during admission")
+                raise BrokerError(
+                    "public-read broker exited during admission (exit %s): %s"
+                    % (exit_code, stderr or "no stderr")
+                )
             if socket_path.exists() and self.attestation_path.is_file():
-                if not self.test_unsandboxed:
-                    subprocess.run(
-                        [
-                            "sudo",
-                            "--non-interactive",
-                            "chown",
-                            "%d:%d" % (os.getuid(), os.getgid()),
-                            str(socket_path),
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    subprocess.run(
-                        [
-                            "sudo",
-                            "--non-interactive",
-                            "chmod",
-                            "0755",
-                            str(self.receipt_dir),
-                            str(self.receipt_dir / "excerpts"),
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                self._verify_runner_owned_outputs()
                 return
             time.sleep(0.05)
         self.close()
         raise BrokerError("public-read broker admission timed out")
 
-    def close(self) -> None:
-        import shutil
-
-        process = self.process
-        self.process = None
-        if process is not None and process.poll() is None:
+    def _admission_stderr(self) -> str:
+        handle = self._stderr_handle
+        if handle is not None:
             try:
-                if self.test_unsandboxed:
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
-                    subprocess.run(
-                        [
-                            "sudo",
-                            "--non-interactive",
-                            "kill",
-                            "-TERM",
-                            "--",
-                            "-%d" % process.pid,
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                process.wait(timeout=5)
-            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-                try:
-                    if self.test_unsandboxed:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        subprocess.run(
-                            [
-                                "sudo",
-                                "--non-interactive",
-                                "kill",
-                                "-KILL",
-                                "--",
-                                "-%d" % process.pid,
-                            ],
-                            check=False,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    process.wait(timeout=5)
-                except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-                    pass
-        if not self.test_unsandboxed:
-            subprocess.run(
-                [
-                    "sudo",
-                    "--non-interactive",
-                    "chown",
-                    "-R",
-                    "%d:%d" % (os.getuid(), os.getgid()),
-                    "--",
-                    str(self.root),
-                    str(self.runtime_root),
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                os.chmod(self.root, 0o700)
+                handle.flush()
             except OSError:
                 pass
-            if self._sandbox_parent_mode is not None:
-                try:
-                    os.chmod(self.root.parent, self._sandbox_parent_mode)
-                except OSError:
-                    pass
-                self._sandbox_parent_mode = None
-        shutil.rmtree(self.runtime_root, ignore_errors=True)
+        try:
+            raw = self.stderr_path.read_bytes()[-32768:]
+        except OSError:
+            return ""
+        return raw.decode("utf-8", "replace").replace("\x00", "\\0").strip()
+
+    def _verify_runner_owned_outputs(self) -> None:
+        for base, directories, files in os.walk(self.root, followlinks=False):
+            for name in [".", *directories, *files]:
+                path = Path(base) if name == "." else Path(base) / name
+                metadata = path.lstat()
+                if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+                    raise BrokerError("public-read broker left a privileged output")
+
+    def close(self) -> None:
+        process = self.process
+        self.process = None
+        if process is not None:
+            _terminate_exact(process, "public-read broker")
+        if self._stderr_handle is not None:
+            try:
+                self._stderr_handle.close()
+            except OSError:
+                pass
+            self._stderr_handle = None
+        self._verify_runner_owned_outputs()
+        import shutil
+
+        if self.runtime_root.exists():
+            self._validate_trusted_tree()
+            shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+
+class ExerciseBrokerProcess:
+    """Launch the small reviewed exercise adapter set with no network namespace."""
+
+    ALLOWED_ENVIRONMENT = PublicReadBrokerProcess.ALLOWED_ENVIRONMENT
+
+    def __init__(
+        self,
+        root: str,
+        evidence_root: str,
+        execution_id: str,
+        task_sha256: str,
+        *,
+        test_unsandboxed: bool = False,
+    ) -> None:
+        self.root = _canonical_leaf(root, "exercise broker")
+        supplied_evidence = Path(evidence_root)
+        if supplied_evidence.is_symlink():
+            raise BrokerError("exercise evidence path must not be a symlink")
+        self.evidence_root = supplied_evidence.resolve(strict=True)
+        self._root_identity = (self.root.lstat().st_dev, self.root.lstat().st_ino)
+        self._anchor_identity = (
+            self.root.parent.lstat().st_dev,
+            self.root.parent.lstat().st_ino,
+        )
+        self._evidence_identity = (
+            self.evidence_root.lstat().st_dev,
+            self.evidence_root.lstat().st_ino,
+        )
+        self.socket_path = str(self.root / "exercise.sock")
+        self.scratch = self.root / "scratch"
+        self.attestation_path = self.root / "attestation.json"
+        self.stderr_path = self.root / "exercise.stderr"
+        self.runtime_root = self.root.parent / (self.root.name + "-runtime")
+        self.execution_id = execution_id
+        self.task_sha256 = task_sha256
+        self.test_unsandboxed = test_unsandboxed
+        self.process: subprocess.Popen[bytes] | None = None
+        self._stderr_handle: Any | None = None
+
+    def _stage_runtime(self) -> Path:
+        import shutil
+
+        package = self.runtime_root / "agent_runtime"
+        package.mkdir(parents=True, exist_ok=True, mode=0o700)
+        source = Path(__file__).resolve().parent
+        for name in (
+            "__init__.py",
+            "contract.py",
+            "public_read.py",
+            "exercise.py",
+            "exercise_broker.py",
+        ):
+            shutil.copyfile(source / name, package / name)
+            os.chmod(package / name, 0o444)
+        return self.runtime_root
+
+    def _validate_paths(self) -> None:
+        anchor = self.root.parent
+        for path in (anchor, self.root, self.runtime_root, self.evidence_root):
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+                or path.resolve(strict=True) != path
+            ):
+                raise BrokerError("exercise broker launch tree is not private and canonical")
+        if self.root.parent != anchor or self.runtime_root.parent != anchor:
+            raise BrokerError("exercise broker paths escaped the trusted root")
+        if (self.root.lstat().st_dev, self.root.lstat().st_ino) != self._root_identity:
+            raise BrokerError("exercise broker root was replaced")
+        if (anchor.lstat().st_dev, anchor.lstat().st_ino) != self._anchor_identity:
+            raise BrokerError("exercise broker anchor was replaced")
+        if (
+            self.evidence_root.lstat().st_dev,
+            self.evidence_root.lstat().st_ino,
+        ) != self._evidence_identity:
+            raise BrokerError("exercise evidence root was replaced")
+
+    def _command(self) -> tuple[list[str], dict[str, str]]:
+        import platform
+        import shutil
+
+        runtime = self._stage_runtime()
+        if self.test_unsandboxed:
+            environment = {
+                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "PYTHONPATH": str(runtime),
+                "HOME": str(self.root),
+                "TMPDIR": str(self.scratch),
+                "TZ": "UTC",
+                "LC_ALL": "C.UTF-8",
+                "LANG": "C.UTF-8",
+            }
+            return [
+                str(Path(sys.executable).resolve()),
+                "-m",
+                "agent_runtime.exercise_broker",
+                "--socket",
+                self.socket_path,
+                "--evidence",
+                str(self.evidence_root),
+                "--scratch",
+                str(self.scratch),
+                "--execution-id",
+                self.execution_id,
+                "--task-sha256",
+                self.task_sha256,
+                "--attestation",
+                str(self.attestation_path),
+            ], environment
+        if platform.system() != "Linux":
+            raise BrokerError("exercise broker production isolation requires Linux")
+        binary = shutil.which("bwrap")
+        prlimit = shutil.which("prlimit")
+        if not binary or not prlimit:
+            raise BrokerError("exercise broker production isolation requires Bubblewrap and prlimit")
+        command = [
+            "sudo",
+            "--non-interactive",
+            prlimit,
+            "--as=1073741824",
+            "--cpu=120",
+            "--fsize=1048576",
+            "--nofile=128",
+            "--nproc=32",
+            "--",
+            binary,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--uid",
+            str(os.getuid()),
+            "--gid",
+            str(os.getgid()),
+            "--cap-drop",
+            "ALL",
+            "--clearenv",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/runtime",
+            "--dir",
+            "/run",
+            "--dir",
+            "/run/exercise",
+            "--dir",
+            "/evidence",
+            "--ro-bind",
+            str(runtime / "agent_runtime"),
+            "/runtime/agent_runtime",
+            "--bind",
+            str(self.root),
+            "/run/exercise",
+            "--bind",
+            str(self.evidence_root),
+            "/evidence",
+        ]
+        for path in (
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/etc/ssl",
+            "/etc/ca-certificates",
+        ):
+            if os.path.exists(path):
+                command.extend(["--ro-bind", path, path])
+        command.extend(
+            [
+                "--setenv", "PATH", "/usr/bin:/bin",
+                "--setenv", "PYTHONPATH", "/runtime",
+                "--setenv", "HOME", "/tmp",
+                "--setenv", "TMPDIR", "/tmp",
+                "--setenv", "TZ", "UTC",
+                "--setenv", "LC_ALL", "C.UTF-8",
+                "--setenv", "LANG", "C.UTF-8",
+                "--chdir", "/tmp",
+                "--", "python3", "-m", "agent_runtime.exercise_broker",
+                "--socket", "/run/exercise/exercise.sock",
+                "--evidence", "/evidence",
+                "--scratch", "/run/exercise/scratch",
+                "--execution-id", self.execution_id,
+                "--task-sha256", self.task_sha256,
+                "--attestation", "/run/exercise/attestation.json",
+            ]
+        )
+        return command, {}
+
+    def start(self) -> None:
+        self.scratch.mkdir(mode=0o700, exist_ok=True)
+        command, environment = self._command()
+        if environment and set(environment) - self.ALLOWED_ENVIRONMENT:
+            raise BrokerError("exercise broker launch environment is not scrubbed")
+        self._validate_paths()
+        self.stderr_path.touch(mode=0o600, exist_ok=False)
+        self._stderr_handle = self.stderr_path.open("wb", buffering=0)
+        self.process = subprocess.Popen(
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=self._stderr_handle,
+            cwd=str(self.root),
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                code = self.process.returncode
+                stderr = self.stderr_path.read_text(encoding="utf-8", errors="replace")[-32768:].strip()
+                self.close()
+                raise BrokerError(
+                    "exercise broker exited during admission (exit %s): %s"
+                    % (code, stderr or "no stderr")
+                )
+            if Path(self.socket_path).exists() and self.attestation_path.is_file():
+                self._verify_runner_owned_outputs()
+                return
+            time.sleep(0.05)
+        self.close()
+        raise BrokerError("exercise broker admission timed out")
+
+    def close(self) -> None:
+        process = self.process
+        self.process = None
+        if process is not None:
+            _terminate_exact(process, "exercise broker")
+        if self._stderr_handle is not None:
+            self._stderr_handle.close()
+            self._stderr_handle = None
+        self._verify_runner_owned_outputs()
+        import shutil
+
+        if self.runtime_root.exists():
+            self._validate_paths()
+            shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    def _verify_runner_owned_outputs(self) -> None:
+        for base, directories, files in os.walk(self.root, followlinks=False):
+            for name in [".", *directories, *files]:
+                path = Path(base) if name == "." else Path(base) / name
+                metadata = path.lstat()
+                if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+                    raise BrokerError("exercise broker left a privileged output")

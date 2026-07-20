@@ -144,7 +144,7 @@
                 "type": "object", "additionalProperties": false,
                 "required": ["name", "version", "maxResultBytes", "inputSchemaSha256"],
                 "properties": {
-                  "name": {"type": "string", "enum": ["fs.read", "fs.grep", "fs.glob", "github.search.readonly", "public.search", "public.fetch", "public.git_snapshot", "public.artifact", "final.triage", "final.nl-decision", "final.deep-review", "final.schema-repair"]},
+                  "name": {"type": "string", "enum": ["fs.read", "fs.grep", "fs.glob", "github.search.readonly", "public.search", "public.fetch", "public.git_snapshot", "public.artifact", "exercise.run", "final.triage", "final.nl-decision", "final.deep-review", "final.schema-repair"]},
                   "version": {"const": 1},
                   "maxResultBytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
                   "inputSchemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

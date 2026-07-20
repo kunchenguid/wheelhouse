@@ -929,6 +929,13 @@ def _bound_output_schema(
     allow_automerge_behavior: bool,
     require_vision_fields: bool,
 ) -> dict[str, Any]:
+    if action == "advisory-review.public":
+        bound = deepcopy(schema)
+        if allow_automerge_behavior:
+            bound["required"] = list(bound["required"]) + ["eligibility_facts"]
+        else:
+            bound["properties"].pop("eligibility_facts", None)
+        return bound
     is_pr_triage = action.startswith("triage.pr") or (
         action == "triage.schema-repair" and repair_kind == "pr"
     )
@@ -1148,6 +1155,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
                 "public.fetch",
                 "public.git_snapshot",
                 "public.artifact",
+                "exercise.run",
             )
         )
     return {
@@ -1178,6 +1186,7 @@ def _tools(action: str, adapter: str) -> dict[str, Any]:
                 "public.fetch",
                 "public.git_snapshot",
                 "public.artifact",
+                "exercise.run",
             ]
         )
     bounds = {
@@ -1189,6 +1198,7 @@ def _tools(action: str, adapter: str) -> dict[str, Any]:
         "public.fetch": 786432,
         "public.git_snapshot": 1048576,
         "public.artifact": 131072,
+        "exercise.run": 1048576,
     }
     return {
         "default": "deny",

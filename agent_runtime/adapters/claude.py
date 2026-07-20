@@ -698,6 +698,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
                 "public.fetch": "public_fetch",
                 "public.git_snapshot": "public_git_snapshot",
                 "public.artifact": "public_artifact",
+                "exercise.run": "exercise_run",
             }
             if any(name not in mcp_names for name in requested_tools):
                 raise ClaudeProbeError("Claude task requested an unsupported typed tool")

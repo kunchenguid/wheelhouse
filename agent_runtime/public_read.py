@@ -1203,9 +1203,8 @@ class ReceiptStore:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        # The production broker is root-launched solely to create its sandbox.
-        # Its parent owns the non-searchable receipt directory and must be able
-        # to verify these immutable, non-secret evidence records afterward.
+        # Bubblewrap drops to the runner identity before this write, so immutable
+        # receipts need no privileged ownership repair during admission or cleanup.
         os.chmod(temporary, 0o444)
         os.replace(temporary, path)
         return receipt
