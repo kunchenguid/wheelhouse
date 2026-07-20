@@ -1679,6 +1679,11 @@ def test_public_task_contract():
             and task["spec"]["output"]["evidencePolicy"]
             == "public-evidence/v1",
         )
+        check(
+            "task: exhaustive public advisory retains a bounded execution window",
+            ACTION_LIMITS["advisory-review.public"]
+            == (840_000, 900_000, 64, 40, 131_072),
+        )
         compiled_prompt = (
             bundle / task["spec"]["prompt"]["userArtifact"]
         ).read_text(encoding="utf-8")
