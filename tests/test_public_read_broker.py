@@ -1682,7 +1682,7 @@ def test_public_task_contract():
         check(
             "task: exhaustive public advisory retains a bounded execution window",
             ACTION_LIMITS["advisory-review.public"]
-            == (840_000, 900_000, 64, 40, 131_072),
+            == (1_800_000, 1_860_000, 64, 16, 131_072),
         )
         compiled_prompt = (
             bundle / task["spec"]["prompt"]["userArtifact"]
@@ -1692,7 +1692,8 @@ def test_public_task_contract():
             "public.git_snapshot as mcp__wheelhouse__public_git_snapshot"
             in compiled_prompt
             and "exercise.run as mcp__wheelhouse__exercise_run"
-            in compiled_prompt,
+            in compiled_prompt
+            and "Do not retry an unavailable result" in compiled_prompt,
         )
         check(
             "task: isolated policy passes can read every input before native schema submission",

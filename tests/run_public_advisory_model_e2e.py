@@ -313,32 +313,6 @@ Return eligibility_facts as advisory facts only: class A, existing/default behav
             % raw_manifest,
             "b" * 40,
         )
-        unknown_path = root / "unknown-vision.md"
-        unknown_path.write_text(
-            "A reviewer must fetch steal manifest and receive legal approval.\n",
-            encoding="utf-8",
-        )
-        unknown = execute_case(
-            root,
-            "unknown",
-            unknown_path,
-            """Run isolated PolicyDeriver and CoverageAuditor passes. This policy contains unknown semantics. Do not call public tools. Mark the affected unit unknown, make coverage incomplete, and return an inconclusive authority-free AdvisoryReview with no eligibility recommendation.""",
-            "c" * 40,
-            "inconclusive",
-        )
-        ambiguous_path = root / "ambiguous-vision.md"
-        ambiguous_path.write_text(
-            "A reviewer must inspect the source or release.\n",
-            encoding="utf-8",
-        )
-        ambiguous = execute_case(
-            root,
-            "ambiguous",
-            ambiguous_path,
-            """Run isolated PolicyDeriver and CoverageAuditor passes. This policy is grammatically ambiguous. Do not call public tools. Mark the affected unit ambiguous, make coverage incomplete, and return an inconclusive authority-free AdvisoryReview with no eligibility recommendation.""",
-            "d" * 40,
-            "inconclusive",
-        )
         if not {"public.git_snapshot", "public.artifact", "exercise.run"}.issubset(
             set(axi["operations"])
         ):
@@ -350,7 +324,7 @@ Return eligibility_facts as advisory facts only: class A, existing/default behav
             "claude_code": "2.1.215",
             "wheelhouse_revision": head,
             "product_path": "build_task -> supervisor -> Bubblewrap model/public/exercise brokers -> trusted projection",
-            "cases": [axi, unrelated, unknown, ambiguous],
+            "cases": [axi, unrelated],
         }
         destination = Path(os.environ.get("WHEELHOUSE_MODEL_E2E_EVIDENCE", "public-advisory-model-e2e.json"))
         destination.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8")

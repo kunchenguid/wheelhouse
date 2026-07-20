@@ -61,7 +61,7 @@ ACTION_LIMITS = {
     "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
-    "advisory-review.public": (840_000, 900_000, 64, 40, 131_072),
+    "advisory-review.public": (1_800_000, 1_860_000, 64, 16, 131_072),
     "policy-derive.public": (540_000, 600_000, 32, 8, 131_072),
     "policy-audit.public": (540_000, 600_000, 32, 8, 131_072),
 }
@@ -1499,7 +1499,9 @@ def build_task(
         "public.fetch as mcp__wheelhouse__public_fetch, public.git_snapshot as "
         "mcp__wheelhouse__public_git_snapshot, public.artifact as "
         "mcp__wheelhouse__public_artifact, and exercise.run as "
-        "mcp__wheelhouse__exercise_run. It exposes no shell, WebFetch, browser, or raw network tool."
+        "mcp__wheelhouse__exercise_run. Call each requested input or public-evidence operation "
+        "exactly once with the prompt's exact arguments. Do not retry an unavailable result. "
+        "It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
         else "This isolated policy profile exposes the MCP tool mcp__wheelhouse__fs_read. "
         "Call it with exactly {\"path\":\"vision.md\"}, {\"path\":\"vision-units.json\"}, "
