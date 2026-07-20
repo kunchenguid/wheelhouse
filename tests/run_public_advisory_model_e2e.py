@@ -102,7 +102,21 @@ def execute_case(
         and final.get("projection_complete") is (expected_verdict == "positive")
         and final.get("auto_merge_eligible") is (expected_verdict == "positive")
     ):
-        raise AssertionError("%s real-model projection was not complete positive" % name)
+        projection = {
+            key: final.get(key)
+            for key in (
+                "result_kind",
+                "trusted_projection",
+                "acting_authority",
+                "verdict",
+                "projection_complete",
+                "auto_merge_eligible",
+            )
+        }
+        raise AssertionError(
+            "%s real-model projection did not match the expected authority-free verdict: %s"
+            % (name, json.dumps(projection, sort_keys=True))
+        )
     manifest_path = case / "advisory" / "public-evidence-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise AssertionError("%s production evidence manifest is missing" % name)
