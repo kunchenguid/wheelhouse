@@ -1412,6 +1412,15 @@ def build_task(
         unit_count = len(vision_units)
         schema_value["properties"]["units"]["minItems"] = unit_count
         schema_value["properties"]["units"]["maxItems"] = unit_count
+    if action == "policy-audit.public":
+        proposed_plan = load_json_regular(Path(policy_plan_file), max_bytes=262144)
+        if not isinstance(proposed_plan, dict) or not isinstance(
+            proposed_plan.get("obligations"), list
+        ):
+            raise ArtifactError("CoverageAuditor requires a valid proposed plan")
+        obligation_count = len(proposed_plan["obligations"])
+        schema_value["properties"]["obligations"]["minItems"] = obligation_count
+        schema_value["properties"]["obligations"]["maxItems"] = obligation_count
 
     source_prompt = Path(prompt_path)
     try:
