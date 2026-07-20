@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,7 @@ from agent_runtime.public_read import (  # noqa: E402
     PinnedHTTPSClient,
     PublicReadError,
     _BoundedHeaderReader,
+    _GitProxy,
     _WireBudget,
     resolve_public_host,
 )
@@ -343,6 +345,92 @@ def test_https_hard_bounds():
         and connections.call_count == 2
         and retry_budget.used == 200
         and sum(charged) == 200,
+    )
+
+
+def test_git_proxy_hard_bounds():
+    def connect(proxy):
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(1)
+        client.connect(proxy.server.server_address)
+        return client
+
+    def wait_for_error(proxy):
+        deadline = time.monotonic() + 1
+        while not proxy.error and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return proxy.error
+
+    charged = []
+    proxy_upstream, remote_peer = socket.socketpair()
+    try:
+        with _GitProxy(
+            "example.com",
+            ["1.1.1.1"],
+            10,
+            time.monotonic() + 1,
+            charged.append,
+        ) as proxy:
+            client = connect(proxy)
+            try:
+                with mock.patch(
+                    "agent_runtime.public_read.socket.create_connection",
+                    return_value=proxy_upstream,
+                ):
+                    client.sendall(
+                        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+                    )
+                    check(
+                        "bounds: Git proxy accepts only its admitted CONNECT target",
+                        client.recv(4096).startswith(b"HTTP/1.1 200"),
+                    )
+                    remote_peer.sendall(b"x" * 20)
+                    received = client.recv(10)
+                    proxy_error = wait_for_error(proxy)
+            finally:
+                client.close()
+        check(
+            "bounds: Git proxy reads stop at the shared wire cap without overshoot",
+            received == b"x" * 10
+            and proxy_error == "bytes.wire"
+            and proxy.bytes == 10
+            and sum(charged) == 10,
+        )
+    finally:
+        proxy_upstream.close()
+        remote_peer.close()
+
+    observed_timeouts = []
+
+    def slow_connect(_target, timeout):
+        observed_timeouts.append(timeout)
+        proxy.deadline = time.monotonic() - 1
+        raise OSError("timed out")
+
+    with _GitProxy(
+        "example.com",
+        ["1.1.1.1", "8.8.8.8"],
+        1024,
+        time.monotonic() + 0.5,
+    ) as proxy:
+        client = connect(proxy)
+        try:
+            with mock.patch(
+                "agent_runtime.public_read.socket.create_connection",
+                side_effect=slow_connect,
+            ) as connections:
+                client.sendall(
+                    b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+                )
+                proxy_error = wait_for_error(proxy)
+        finally:
+            client.close()
+    check(
+        "bounds: Git IP retries share one cumulative operation deadline",
+        proxy_error == "time.wall"
+        and connections.call_count == 1
+        and len(observed_timeouts) == 1
+        and 0 < observed_timeouts[0] <= 0.5,
     )
 
 
@@ -679,6 +767,7 @@ def restore_environment(saved):
 
 def test_public_internet_broker():
     test_https_hard_bounds()
+    test_git_proxy_hard_bounds()
     test_public_task_contract()
     saved = parent_secret_environment()
     try:
@@ -877,6 +966,7 @@ def test_production_e2e():
         raise Failure("production public-read E2E requires Linux")
     saved = parent_secret_environment()
     test_https_hard_bounds()
+    test_git_proxy_hard_bounds()
     test_public_task_contract()
     sentinel = Path("/tmp/wheelhouse-parent-secret-canary")
     sentinel.write_text("credential-canary\n", encoding="utf-8")

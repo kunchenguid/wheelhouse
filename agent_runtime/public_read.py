@@ -688,8 +688,22 @@ class _GitProxy:
                     last_error: OSError | None = None
                     pinned = ""
                     for address in proxy.addresses:
+                        remaining = proxy.deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise PublicReadError(
+                                "time.wall", "Git fetch exceeded its wall bound"
+                            )
                         try:
-                            upstream = socket.create_connection((address, 443), timeout=CONNECT_TIMEOUT)
+                            upstream = socket.create_connection(
+                                (address, 443),
+                                timeout=min(CONNECT_TIMEOUT, remaining),
+                            )
+                            if time.monotonic() >= proxy.deadline:
+                                upstream.close()
+                                upstream = None
+                                raise PublicReadError(
+                                    "time.wall", "Git fetch exceeded its wall bound"
+                                )
                             pinned = address
                             break
                         except OSError as error:
@@ -702,13 +716,26 @@ class _GitProxy:
                     selector.register(upstream, selectors.EVENT_READ, self.request)
                     try:
                         while selector.get_map():
-                            if time.monotonic() >= proxy.deadline:
+                            remaining_time = proxy.deadline - time.monotonic()
+                            if remaining_time <= 0:
                                 raise PublicReadError("time.wall", "Git fetch exceeded its wall bound")
-                            events = selector.select(timeout=0.2)
+                            events = selector.select(timeout=min(0.2, remaining_time))
                             for key, _mask in events:
+                                if time.monotonic() >= proxy.deadline:
+                                    raise PublicReadError(
+                                        "time.wall", "Git fetch exceeded its wall bound"
+                                    )
                                 source = key.fileobj
                                 destination = key.data
-                                data = source.recv(65_536)
+                                with proxy.lock:
+                                    remaining = proxy.byte_limit - proxy.bytes
+                                    if remaining <= 0:
+                                        raise PublicReadError(
+                                            "bytes.wire",
+                                            "Git transfer exceeded its wire-byte bound",
+                                        )
+                                    data = source.recv(min(65_536, remaining))
+                                    proxy.bytes += len(data)
                                 if not data:
                                     selector.unregister(source)
                                     try:
@@ -716,10 +743,6 @@ class _GitProxy:
                                     except OSError:
                                         pass
                                     continue
-                                with proxy.lock:
-                                    proxy.bytes += len(data)
-                                    if proxy.bytes > proxy.byte_limit:
-                                        raise PublicReadError("bytes.wire", "Git transfer exceeded its wire-byte bound")
                                 if account_bytes is not None:
                                     account_bytes(len(data))
                                 destination.sendall(data)
