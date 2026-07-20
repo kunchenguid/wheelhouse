@@ -47,6 +47,14 @@ def _decode_claude_carrier(carrier: Any, action: str) -> Any:
         expected_fields.add("unit_semantics")
     if action == "policy-audit.public":
         expected_fields.update({"complete", "disagreements"})
+    if (
+        action in {"policy-derive.public", "policy-audit.public"}
+        and isinstance(carrier, dict)
+        and set(carrier) == {"json"}
+    ):
+        nested_carrier = decode_json_carrier(carrier)
+        if isinstance(nested_carrier, dict):
+            carrier = nested_carrier
     if not isinstance(carrier, dict) or set(carrier) != expected_fields:
         raise ClaudeProtocolError("Claude native JSON carrier was invalid")
     final = decode_json_carrier({"json": carrier["json"]})
