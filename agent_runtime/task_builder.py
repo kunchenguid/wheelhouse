@@ -1527,7 +1527,19 @@ def build_task(
         *(
             [
                 "A policy result without a top-level units array is invalid. Include exactly "
-                "%d unit entries, one for every vision-units.json entry." % unit_count
+                "%d unit entries, one for every vision-units.json entry." % unit_count,
+                "Use this canonical generic rubric. Markdown headings alone are context-only. "
+                "Every unit that states an acceptance, review, evidence, behavior, or prohibition "
+                "criterion is decision-relevant and MUST have at least one obligation. Map pinned "
+                "source inspection to public.git_snapshot, public JSON or text retrieval to "
+                "public.fetch, released package retrieval to public.artifact, an explicit digest "
+                "check to digest.verify, runnable behavior to exercise.run, and all other "
+                "target-local judgments to policy.assess. Clear supported public operations are "
+                "recognized; clear policy.assess operations are recognized-local. Use unknown only "
+                "when a required meaning or operation cannot be represented, and ambiguous only "
+                "when the clause has unresolved alternative meanings. For an audit agreement, copy "
+                "the proposed semantic fields and obligations exactly; otherwise supply your "
+                "independent values, list every disagreement, and set complete false.",
             ]
             if policy_action
             else []

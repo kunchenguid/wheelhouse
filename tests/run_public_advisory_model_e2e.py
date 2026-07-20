@@ -116,6 +116,40 @@ def execute_case(
         projection["policy_coverage_complete"] = final.get(
             "policy_coverage_complete"
         )
+        plan = derive_result["final"]["value"]
+        audit = audit_result["final"]["value"]
+        projection["policy_derivation"] = {
+            "units": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "unit_id",
+                        "classification",
+                        "semantic_status",
+                        "condition_strength",
+                    )
+                }
+                for row in plan.get("units", [])
+                if isinstance(row, dict)
+            ],
+            "obligations": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "obligation_id",
+                        "unit_id",
+                        "operation",
+                        "semantic_status",
+                    )
+                }
+                for row in plan.get("obligations", [])
+                if isinstance(row, dict)
+            ],
+        }
+        projection["policy_audit"] = {
+            "complete": audit.get("complete"),
+            "disagreements": audit.get("disagreements"),
+        }
         projection["obligation_statuses"] = {
             status: sorted(
                 row.get("obligation_id", "")
