@@ -428,7 +428,26 @@ def _compact_audit_category(value: Any) -> str:
         if disagreements is None
         else "malformed"
     )
-    return "audit-%s-%s" % (complete_label, disagreement_label)
+    known_fields = "-".join(
+        name
+        for name in (
+            "version",
+            "target_head_sha",
+            "target_base_sha",
+            "vision_blob_sha",
+            "vision_sha256",
+            "units",
+            "obligations",
+            "complete",
+            "disagreements",
+        )
+        if name in value
+    )
+    return "audit-%s-%s-fields-%s" % (
+        complete_label,
+        disagreement_label,
+        known_fields or "none",
+    )
 
 
 def _restore_agreed_audit_units(value: Any, proposed_plan: Any) -> Any:
