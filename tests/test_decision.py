@@ -31,6 +31,12 @@ Covers:
   * the optional READONLY_TOKEN search prompt: when enabled it tells the LLM how
     to use read-only gh for answer context, and when disabled the prompt
     stays in the legacy no-shell/no-search mode.
+  * decline prose is an explicit prompt contract carried through the native
+    schema's strict `free_text` field: the model is told to use card/target
+    context, write respectfully for the contributor, preserve the decision and
+    stated factual rationale, and neither invent a reason nor soften the close
+    into ambiguity. The real #1493 instruction is carried through the mocked
+    structured-result, route, comment, and close path.
   * the card-driven workflow-merge gate: net-diff and history-only workflow
     touches, including either side of a rename, fail closed as terminal
     `blocked` with manual UI-merge guidance and no merge API call.
@@ -2722,6 +2728,206 @@ def test_prompt_offers_request_changes_guidance_for_pr_review_only():
     )
 
 
+def test_decline_prose_contract_and_real_action_path():
+    instruction = (
+        "decline - tasks-axi is owned by me, and i will be adding it when i see fit"
+    )
+    body = (
+        "## Decision needed - axi#103\n\n"
+        "**PR review** by RooseveltAdvisors\n\n"
+        "> docs: add tasks-axi to community catalog\n\n"
+        '<!-- wheelhouse-state: {"repo":"axi","number":103,'
+        '"kind":"pr-review","head_sha":"deadbeefcafe"} -->'
+    )
+    prompt = ad.build_nl_prompt(
+        body,
+        instruction,
+        "pr-review",
+        target_slug="kunchenguid/axi",
+    )
+    check(
+        "decline contract: exact production instruction reaches trusted prompt",
+        "=== The maintainer's new comment (trusted instruction) ===\n" + instruction
+        in prompt,
+    )
+    check(
+        "decline contract: card and target context are available for interpretation",
+        "RooseveltAdvisors" in prompt
+        and "tasks-axi to community catalog" in prompt
+        and "target.txt" in prompt,
+    )
+    check(
+        "decline contract: respectful tone cannot weaken the decision",
+        "Respect changes the tone, not the decision" in prompt
+        and "contribution is declined" in prompt
+        and "target is being closed" in prompt,
+    )
+    check(
+        "decline contract: factual rationale is preserved without invention",
+        "every factual rationale" in prompt
+        and "Do not omit, contradict, or replace that rationale" in prompt
+        and "must not supply a new rationale" in prompt,
+    )
+    check(
+        "decline contract: ambiguity and reason-free declines are explicit",
+        "Never soften it into maybe, might, perhaps" in prompt
+        and "If no rationale was given" in prompt,
+    )
+    check(
+        "decline contract: reason-bearing close selects decline instead of silent close",
+        "reason-bearing close/reject instruction maps to `decline`" in prompt
+        and "`close` only when the maintainer wants no target note" in prompt,
+    )
+    check(
+        "decline contract: prompt's schema-shaped guidance binds free_text to the rules",
+        '"free_text":"<required and non-empty for decline; optional final target-facing prose otherwise>"'
+        in prompt
+        and "Never return a `decline` action" in prompt,
+    )
+
+    with open(ad.NL_SCHEMA_PATH, encoding="utf-8") as schema_file:
+        schema = json.load(schema_file)
+    check(
+        "decline contract: native schema keeps the strict bounded prose carrier",
+        schema["additionalProperties"] is False
+        and schema["properties"]["free_text"] == {"type": "string", "maxLength": 32768},
+    )
+
+    omission_cases = (
+        ("omitted prose", {"mode": "action", "action": "decline"}),
+        (
+            "normalized action",
+            {"mode": "action", "action": " Decline ", "free_text": " \t"},
+        ),
+    )
+    for label, candidate in omission_cases:
+        omitted_note = json.dumps(candidate)
+        omission_reason = ad.nl_schema_reason(omitted_note)
+        omission_plan = ad.plan_nl_repair(omitted_note)
+        omission_result = ad.decide_nl_apply(
+            omitted_note,
+            "",
+            repair_needed=omission_plan["repair_needed"],
+        )
+        check(
+            "decline regression: %s is rejected before deterministic routing" % label,
+            omission_reason == "decline action requires non-empty field 'free_text'"
+            and omission_plan["repair_needed"] is True
+            and omission_result["outcome"] == "repair-failed"
+            and omission_result["result"] is None,
+        )
+
+    # Faithful no-spend replay of the observed model payload through the same
+    # deterministic route + executor used by production run 29722388363.
+    contributor_note = (
+        "Thanks for the contribution, but tasks-axi is maintained by the repo "
+        "owner, who will add it to the community catalog when the time is right. "
+        "Closing this PR."
+    )
+    routed = ad.route_decision(
+        {"mode": "action", "action": "decline", "free_text": contributor_note},
+        "pr-review",
+        {
+            "repo": "axi",
+            "number": 103,
+            "kind": "pr-review",
+            "head_sha": "deadbeefcafe",
+        },
+    )
+    check(
+        "decline regression: structured result preserves decline plus rewritten note",
+        routed["decision"] == "decline"
+        and routed["free_text"] == contributor_note
+        and routed["target_repo"] == "axi"
+        and routed["target_number"] == 103,
+    )
+    check(
+        "decline regression: decision and real factual rationale survive the rewrite",
+        all(
+            phrase in routed["free_text"]
+            for phrase in (
+                "tasks-axi",
+                "maintained by the repo owner",
+                "add it to the community catalog",
+                "Closing this PR",
+            )
+        ),
+    )
+    check(
+        "decline regression: rewrite has no invented technical rationale or ambiguity",
+        not any(
+            phrase in routed["free_text"].lower()
+            for phrase in (
+                "maybe",
+                "might",
+                "perhaps",
+                "security",
+                "performance",
+                "test failure",
+            )
+        ),
+    )
+
+    fake, calls = fake_gh_rest(open_pr(head_sha="deadbeefcafe"))
+    with patch_core(gh_rest=fake, get_owner=lambda: "kunchenguid"):
+        outcome = run_execute(
+            {
+                "DECISION": routed["decision"],
+                "FREE_TEXT": routed["free_text"],
+                "TARGET_REPO": routed["target_repo"],
+                "TARGET_NUMBER": str(routed["target_number"]),
+                "KIND": routed["kind"],
+                "HEAD_SHA": routed["head_sha"],
+                "TARGET_REVISION": routed["target_revision"],
+            }
+        )
+    mutations = [call for call in calls if call["method"] in ("POST", "PATCH")]
+    check(
+        "decline regression: executor resolves the card action",
+        outcome["terminal_state"] == "resolved" and outcome["success"] == "true",
+    )
+    check(
+        "decline regression: executor posts contributor prose verbatim before close",
+        len(mutations) == 2
+        and mutations[0]["method"] == "POST"
+        and mutations[0]["path"] == "/repos/kunchenguid/axi/issues/103/comments"
+        and mutations[0]["fields"]["body"] == contributor_note
+        and mutations[1]["method"] == "PATCH"
+        and mutations[1]["path"] == "/repos/kunchenguid/axi/issues/103"
+        and mutations[1]["fields"]["state"] == "closed",
+    )
+
+
+def test_decline_prompt_semantic_and_adversarial_cases():
+    body = '<!-- wheelhouse-state: {"repo":"target","number":7,"kind":"pr-review"} -->'
+    cases = (
+        (
+            "semantic preservation",
+            "decline and close this - it duplicates the built-in exporter",
+        ),
+        (
+            "no softening",
+            "definitely reject and close this; do not leave it open",
+        ),
+        ("no invented reason", "decline and close this PR"),
+    )
+    for label, instruction in cases:
+        prompt = ad.build_nl_prompt(body, instruction, "pr-review")
+        check(
+            "decline adversarial (%s): instruction remains the sole decision source"
+            % label,
+            "NEW comment" in prompt
+            and "instruction to classify is always the new comment" in prompt
+            and instruction in prompt,
+        )
+        check(
+            "decline adversarial (%s): semantic guardrails remain attached" % label,
+            "Preserve the meaning and every factual rationale" in prompt
+            and "Never soften it into maybe, might, perhaps" in prompt
+            and "Do not invent" in prompt,
+        )
+
+
 def main():
     test_state_marker_back_compat()
     test_checkbox_diff()
@@ -2794,6 +3000,8 @@ def main():
     test_prompt_omits_advisory_auto_triage_from_trusted_card()
     test_prompt_search_capability_is_gated()
     test_prompt_offers_request_changes_guidance_for_pr_review_only()
+    test_decline_prose_contract_and_real_action_path()
+    test_decline_prompt_semantic_and_adversarial_cases()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

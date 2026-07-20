@@ -339,6 +339,7 @@ You drive the queue three ways - whichever fits the decision:
 - **Plain English - just reply (opt-in).** When you turn on `nl_decisions` (see [step 4](#4-optional-add-the-claude-production-token-for-agent-assisted-features)), reply to a card in normal language and Claude maps what you meant onto the same actions above.
   It does one of three things:
   - **Acts** when you're clearly deciding - "merge it", "close this, it's superseded by #50", "decline because the approach is wrong", or (pr-review only) "request changes, the tests are missing".
+    A reason-bearing close or rejection becomes `decline`: Claude writes concise, respectful contributor-facing prose that preserves only the rationale you stated, never invents a reason, and never softens the decision; a reason-free close remains `close` with no target note.
     It runs that action on the target exactly as the slash-command would (same guards: per-kind allowlist, head-SHA re-check, fork-CI HOLD), closing the card after a successful terminal decision like merge/close/decline, leaving it open for a non-terminal one like comment/request-changes, or marking it `blocked` after a non-retryable action error.
   - **Answers** when you're asking - "why is this safe to merge?", "what's the risk here?".
     It reads the target (diff/issue) and replies on the card, and **leaves the card open** so you can keep the thread going.
