@@ -65,13 +65,9 @@ _OPERAND_QUALIFIERS = {
     "across", "against", "as", "at", "by", "for", "from", "in", "including", "into",
     "of", "on", "rather", "such", "than", "through", "to", "under", "using",
 }
-_GENERIC_OPERAND_HEADS = {
-    "artifact", "behavior", "checksum", "claim", "commit", "component",
-    "dataset", "digest", "error", "evidence", "exercise", "hash", "inspection",
-    "manifest", "output", "package", "path", "release", "repository", "revision",
-    "source", "url", "version",
-}
-_LIST_INTRODUCERS = {"across", "including", "through"}
+_LIST_INTRODUCERS = {"across", "including", "representative", "through"}
+_COORDINATED_OBJECT_PREDICATES = {"identify"}
+_COORDINATING_PREPOSITIONS = {"against", "at", "by", "from", "of", "to", "under"}
 
 
 class VisionPolicyError(ValueError):
@@ -294,11 +290,6 @@ def _leading_guard_end(tokens: list[str]) -> int:
     return -1
 
 
-def _generic_operand_head(token: str) -> bool:
-    singular = token[:-1] if token.endswith("s") else token
-    return token in _GENERIC_OPERAND_HEADS or singular in _GENERIC_OPERAND_HEADS
-
-
 def _operand_list_connector(
     tokens: list[str], index: int, source: int
 ) -> bool:
@@ -313,28 +304,32 @@ def _operand_list_connector(
         default=source + 1,
     )
     prefix = tokens[span_start:index]
-    explicitly_listed = any(token in _LIST_INTRODUCERS for token in prefix) or any(
+    explicitly_listed = tokens[source] in (
+        _LIST_INTRODUCERS | _COORDINATED_OBJECT_PREDICATES
+    ) or any(
+        token in _LIST_INTRODUCERS for token in prefix
+    ) or any(
         prefix[offset : offset + 2] == ["such", "as"]
         for offset in range(len(prefix) - 1)
     )
-    explicitly_listed = explicitly_listed or (
-        tokens[index - 1 : index] == [","] and prefix.count(",") >= 2
+    return explicitly_listed or any(
+        token in _COORDINATING_PREPOSITIONS for token in prefix
     )
-    cursor = index + 1
-    while cursor < len(tokens) and tokens[cursor] in {",", "("}:
-        cursor += 1
-    previous = next(
-        (
-            tokens[offset]
-            for offset in range(index - 1, source, -1)
-            if tokens[offset] not in {",", "("}
-        ),
-        "",
+
+
+def _guard_or_is_negative(
+    tokens: list[str], source: int, target: int, guard_end: int, selected: dict[int, str]
+) -> bool:
+    if selected.get(source) == selected.get(target) == "negative":
+        return True
+    nominal_branches = all(
+        tokens[index].endswith(("ing", "ion")) for index in (source, target)
     )
-    following = tokens[cursor] if cursor < len(tokens) else ""
-    return explicitly_listed or (
-        _generic_operand_head(previous) and _generic_operand_head(following)
+    shared_negative = any(
+        target < index < guard_end and polarity == "negative"
+        for index, polarity in selected.items()
     )
+    return nominal_branches and shared_negative
 
 
 def _fail_closed_guard(tokens: list[str], guard_end: int, selected: dict[int, str]) -> bool:
@@ -365,6 +360,25 @@ def _fail_closed_guard(tokens: list[str], guard_end: int, selected: dict[int, st
 
 
 def _parse_production(production: str) -> tuple[dict[str, str], str]:
+    if ";" in production:
+        operation_statuses: dict[str, str] = {}
+        for clause in production.split(";"):
+            clause = clause.strip()
+            if not clause or not _NORMATIVE.search(clause):
+                return {
+                    operation: "unknown" for operation in operation_statuses
+                }, "unknown"
+            resolved, status = _parse_production(clause)
+            operation_statuses.update(resolved)
+            if status in {"unknown", "ambiguous"}:
+                return {
+                    operation: status for operation in operation_statuses
+                }, status
+        return operation_statuses, (
+            "recognized-local"
+            if set(operation_statuses) == {"policy.assess"}
+            else "recognized"
+        )
     tokens = [match.group(0).casefold() for match in _VISION_TOKEN.finditer(production)]
     if not tokens or len(tokens) > 160:
         return {}, "unknown"
@@ -532,20 +546,6 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             if tokens[candidate] in _PREDICATES:
                 selected[candidate] = "negative"
 
-    for index, token in enumerate(tokens):
-        if token != ";":
-            continue
-        end = next(
-            (
-                offset
-                for offset in range(index + 1, len(tokens))
-                if tokens[offset] in {";", "."}
-            ),
-            len(tokens),
-        )
-        if not any(index < offset < end for offset in selected):
-            return {}, "unknown"
-
     semantic_start = min(
         (
             index
@@ -575,6 +575,17 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
                 return {}, "unknown"
 
     for index in selected:
+        if tokens[index] == "review":
+            operand = _predicate_operand(tokens, index)
+            opaque = [
+                token
+                for token in operand
+                if token not in _OPERAND_QUALIFIERS
+                | _CONDITIONS
+                | {"a", "an", "the", "that", "which", "whose", ",", "(", ")"}
+            ]
+            if len(opaque) > 2:
+                return {}, "unknown"
         if tokens[index] != "inspect":
             continue
         operand = _predicate_operand(tokens, index)
@@ -628,6 +639,9 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             and source >= 0
             and source < guard_end
             and target < guard_end
+            and _guard_or_is_negative(
+                tokens, source, target, guard_end, selected
+            )
         )
         fail_closed_outcome = (
             fail_closed_guard
