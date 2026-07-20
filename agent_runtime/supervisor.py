@@ -351,6 +351,17 @@ def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
     return False
 
 
+def _unwrap_policy_value(value: Any) -> Any:
+    if not isinstance(value, dict) or isinstance(value.get("units"), list):
+        return value
+    candidates = [
+        child
+        for child in value.values()
+        if isinstance(child, dict) and isinstance(child.get("units"), list)
+    ]
+    return candidates[0] if len(candidates) == 1 else value
+
+
 def _validate_worker(
     task: dict[str, Any],
     bundle: Path,
@@ -361,6 +372,7 @@ def _validate_worker(
     candidate = task["spec"]["selection"]["candidates"][0]
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
     if task["metadata"]["action"] in {"policy-derive.public", "policy-audit.public"}:
+        delivered_value = _unwrap_policy_value(delivered_value)
         source = next(
             (row for row in task["spec"]["inputs"] if row["id"] == "vision-units"),
             None,

@@ -65,6 +65,7 @@ from agent_runtime.public_read import (  # noqa: E402
     resolve_public_host,
 )
 from agent_runtime.task_builder import ACTION_LIMITS, build_task  # noqa: E402
+from agent_runtime.supervisor import _unwrap_policy_value  # noqa: E402
 from agent_runtime.tools import CanonicalTools  # noqa: E402
 from agent_runtime.vision_policy import (  # noqa: E402
     AUDIT_VERSION,
@@ -1574,8 +1575,14 @@ def test_public_task_contract():
         check(
             "task: isolated policy passes can read every input before native schema submission",
             ACTION_LIMITS["policy-derive.public"][2:] == (12, 4, 131_072)
-            and ACTION_LIMITS["policy-audit.public"][2:] == (12, 4, 131_072)
-            and derive_task["spec"]["limits"]["maxOutputTokens"] == 16_000,
+            and ACTION_LIMITS["policy-audit.public"][2:] == (12, 4, 131_072),
+        )
+        check(
+            "task: one wrapped policy result is normalized before identity validation",
+            _unwrap_policy_value({"result": plan, "presentation": "complete"})
+            == plan
+            and _unwrap_policy_value({"first": plan, "second": audit})
+            != plan,
         )
         bound_schema = json.loads(
             (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(

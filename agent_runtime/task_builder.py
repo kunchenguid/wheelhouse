@@ -1870,17 +1870,7 @@ def build_task(
                 "maxInputTokens": None if adapter == "claude-action-compat" else 180000,
                 "maxOutputTokens": None
                 if adapter == "claude-action-compat"
-                else (
-                    16000
-                    if action.startswith("deep-review")
-                    or action
-                    in {
-                        "advisory-review.public",
-                        "policy-derive.public",
-                        "policy-audit.public",
-                    }
-                    else 8000
-                ),
+                else (16000 if action.startswith("deep-review") or action == "advisory-review.public" else 8000),
                 "enforcement": _limit_enforcement(adapter),
             },
             "output": {
