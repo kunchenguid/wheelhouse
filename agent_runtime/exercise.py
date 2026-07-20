@@ -216,7 +216,9 @@ def _scenario_command(
         "--cap-drop",
         "ALL",
         "--clearenv",
-        "--proc",
+        # Keep the nested PID namespace opaque. An unprivileged Bubblewrap
+        # child cannot mount another procfs inside the outer broker sandbox.
+        "--dir",
         "/proc",
         "--dev",
         "/dev",

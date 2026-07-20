@@ -112,6 +112,8 @@ class VisionPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(len({task["metadata"]["executionId"] for task in (derive, audit, advisory)}), 3)
         self.assertEqual(len({task["spec"]["output"]["schemaSha256"] for task in (derive, audit, advisory)}), 3)
         for directory, task in (("derive", derive), ("audit", audit)):
+            self.assertEqual(task["spec"]["limits"]["maxTurns"], 5)
+            self.assertEqual(task["spec"]["limits"]["maxToolCalls"], 4)
             schema = json.loads(
                 (self.root / directory / task["spec"]["output"]["schemaArtifact"]).read_text()
             )

@@ -1878,7 +1878,10 @@ def test_production_launcher_contract():
         check(
             "exercise: artifact process receives a private filesystem namespace",
             "--unshare-user" in scenario_command
+            and "--unshare-pid" in scenario_command
             and "--unshare-net" in scenario_command
+            and scenario_command[scenario_command.index("/proc") - 1] == "--dir"
+            and "--proc" not in scenario_command
             and any(
                 scenario_command[index : index + 3]
                 == ["--ro-bind", str(work), "/work"]
@@ -2512,6 +2515,11 @@ def test_production_e2e():
                     },
                 )
                 exercise_receipt = receipt(exercise)
+                if exercise_receipt.get("status") != "complete":
+                    raise Failure(
+                        "released CLI exercise was unavailable: %s"
+                        % exercise_receipt.get("reason_code", "missing reason")
+                    )
                 exercise_attestation = json.loads(
                     exercise_broker.attestation_path.read_text(encoding="utf-8")
                 )
