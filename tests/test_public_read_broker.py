@@ -39,6 +39,7 @@ from agent_runtime.public_read import (  # noqa: E402
     PinnedHTTPSClient,
     PublicReadError,
     _BoundedHeaderReader,
+    _WireBudget,
     resolve_public_host,
 )
 from agent_runtime.task_builder import build_task  # noqa: E402
@@ -220,7 +221,7 @@ def test_https_hard_bounds():
         try:
             PinnedHTTPSClient()._request_once(
                 "https://example.com/",
-                max_bytes=1024,
+                budget=_WireBudget(1024, None),
                 deadline=started + remaining,
             )
         except PublicReadError as error:
@@ -246,6 +247,102 @@ def test_https_hard_bounds():
     check(
         "bounds: system DNS helper uses the supplied deadline budget",
         helper_rejected and run.call_args.kwargs["timeout"] == dns_timeout,
+    )
+
+    class ResponseStream(io.BytesIO):
+        def __init__(self, body, fail_after_first_read=False):
+            super().__init__(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + body
+            )
+            self.body_reads = 0
+            self.fail_after_first_read = fail_after_first_read
+
+        def read(self, size=-1):
+            if self.fail_after_first_read and self.body_reads:
+                raise OSError("reset after partial response")
+            self.body_reads += 1
+            return super().read(size)
+
+    class FakeTLS:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def makefile(self, _mode):
+            return self.stream
+
+        def sendall(self, _request):
+            return None
+
+        def settimeout(self, _timeout):
+            return None
+
+        def getpeercert(self):
+            return {}
+
+        def version(self):
+            return "TLSv1.3"
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeContext:
+        def __init__(self):
+            self.streams = iter(
+                [
+                    ResponseStream(b"a" * 60, fail_after_first_read=True),
+                    ResponseStream(b"b" * 100),
+                ]
+            )
+
+        def wrap_socket(self, _raw, server_hostname):
+            return FakeTLS(next(self.streams))
+
+    class FakeTimer:
+        daemon = True
+
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    charged = []
+    retry_budget = _WireBudget(200, charged.append)
+    context = FakeContext()
+    with mock.patch(
+        "agent_runtime.public_read.resolve_public_host",
+        return_value=["1.1.1.1", "8.8.8.8"],
+    ), mock.patch(
+        "agent_runtime.public_read.socket.create_connection",
+        side_effect=[object(), object()],
+    ) as connections, mock.patch(
+        "agent_runtime.public_read.ssl.create_default_context",
+        return_value=context,
+    ), mock.patch(
+        "agent_runtime.public_read.threading.Timer", FakeTimer
+    ):
+        try:
+            PinnedHTTPSClient()._request_once(
+                "https://example.com/",
+                budget=retry_budget,
+                deadline=time.monotonic() + 1,
+            )
+        except PublicReadError as error:
+            retry_rejected = error.code == "bytes.wire"
+        else:
+            retry_rejected = False
+    check(
+        "bounds: failed IP retries share one cumulative wire budget",
+        retry_rejected
+        and connections.call_count == 2
+        and retry_budget.used == 200
+        and sum(charged) == 200,
     )
 
 

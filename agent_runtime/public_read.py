@@ -407,6 +407,30 @@ class _BoundedHeaderReader:
         return getattr(self.reader, name)
 
 
+class _WireBudget:
+    def __init__(
+        self,
+        max_bytes: int,
+        account_bytes: Callable[[int], None] | None,
+    ) -> None:
+        self.max_bytes = max_bytes
+        self.account_bytes = account_bytes
+        self.used = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.max_bytes - self.used
+
+    def consume(self, byte_count: int) -> None:
+        self.used += byte_count
+        if self.account_bytes is not None:
+            self.account_bytes(byte_count)
+        if self.used > self.max_bytes:
+            raise PublicReadError(
+                "bytes.wire", "public response exceeded its byte bound"
+            )
+
+
 class PinnedHTTPSClient:
     def __init__(self, resolver: Resolver = socket.getaddrinfo) -> None:
         self.resolver = resolver
@@ -415,12 +439,13 @@ class PinnedHTTPSClient:
         self,
         url: str,
         *,
-        max_bytes: int,
+        budget: _WireBudget,
         deadline: float,
-        account_bytes: Callable[[int], None] | None = None,
-    ) -> tuple[int, dict[str, str], bytes, dict[str, Any], int]:
+    ) -> tuple[int, dict[str, str], bytes, dict[str, Any]]:
         parsed = urllib.parse.urlsplit(url)
         host = _url_host(url)
+        if budget.remaining <= 0:
+            raise PublicReadError("bytes.wire", "public response exceeded its byte bound")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise PublicReadError("time.wall", "public fetch exceeded its wall bound")
@@ -430,8 +455,13 @@ class PinnedHTTPSClient:
         for address in addresses:
             raw: socket.socket | None = None
             tls: ssl.SSLSocket | None = None
+            response: http.client.HTTPResponse | None = None
             expiry: threading.Timer | None = None
             try:
+                if budget.remaining <= 0:
+                    raise PublicReadError(
+                        "bytes.wire", "public response exceeded its byte bound"
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise PublicReadError("time.wall", "public fetch exceeded its wall bound")
@@ -480,12 +510,11 @@ class PinnedHTTPSClient:
                 response = http.client.HTTPResponse(tls)
                 header_reader = _BoundedHeaderReader(
                     response.fp,
-                    min(MAX_RESPONSE_HEADER_BYTES, max_bytes),
-                    account_bytes,
+                    min(MAX_RESPONSE_HEADER_BYTES, budget.remaining),
+                    budget.consume,
                 )
                 response.fp = header_reader
                 response.begin()
-                header_bytes = header_reader.bytes_read
                 headers = {key.casefold(): value for key, value in response.getheaders()}
                 if headers.get("content-encoding", "identity").casefold() not in (
                     "",
@@ -495,18 +524,20 @@ class PinnedHTTPSClient:
                         "content.encoding", "compressed public responses are not accepted"
                     )
                 body = bytearray()
-                body_limit = max_bytes - header_bytes
                 while True:
                     if time.monotonic() >= deadline:
                         raise PublicReadError("time.wall", "public fetch exceeded its wall bound")
-                    chunk = response.read(min(65_536, body_limit + 1 - len(body)))
+                    if response.length == 0:
+                        break
+                    if budget.remaining <= 0:
+                        raise PublicReadError(
+                            "bytes.wire", "public response exceeded its byte bound"
+                        )
+                    chunk = response.read(min(65_536, budget.remaining))
                     if not chunk:
                         break
                     body.extend(chunk)
-                    if account_bytes is not None:
-                        account_bytes(len(chunk))
-                    if len(body) > body_limit:
-                        raise PublicReadError("bytes.wire", "public response exceeded its byte bound")
+                    budget.consume(len(chunk))
                 certificate = tls.getpeercert()
                 proof = {
                     "host": host,
@@ -516,7 +547,7 @@ class PinnedHTTPSClient:
                     "tls_version": tls.version() or "",
                     "certificate_subject": str(certificate.get("subject", ""))[:1000],
                 }
-                return response.status, headers, bytes(body), proof, header_bytes + len(body)
+                return response.status, headers, bytes(body), proof
             except PublicReadError:
                 raise
             except OSError as error:
@@ -528,6 +559,8 @@ class PinnedHTTPSClient:
             finally:
                 if expiry is not None:
                     expiry.cancel()
+                if response is not None:
+                    response.close()
                 if tls is not None:
                     try:
                         tls.close()
@@ -554,15 +587,13 @@ class PinnedHTTPSClient:
         current = canonical_public_url(url)
         redirects = []
         deadline = time.monotonic() + wall_seconds
-        wire_bytes = 0
+        budget = _WireBudget(max_bytes, account_bytes)
         for hop in range(max_redirects + 1):
-            status, headers, body, proof, response_wire_bytes = self._request_once(
+            status, headers, body, proof = self._request_once(
                 current,
-                max_bytes=max_bytes - wire_bytes,
+                budget=budget,
                 deadline=deadline,
-                account_bytes=account_bytes,
             )
-            wire_bytes += response_wire_bytes
             row = {"url": current, "status": status, **proof}
             if status in (301, 302, 303, 307, 308):
                 location = headers.get("location", "")
@@ -586,7 +617,7 @@ class PinnedHTTPSClient:
                 "status_code": status,
                 "headers": headers,
                 "body": body,
-                "wire_bytes": wire_bytes,
+                "wire_bytes": budget.used,
                 "network": proof,
             }
         raise PublicReadError("redirect.limit", "public redirect limit exceeded")
