@@ -108,6 +108,7 @@ def build_command(
         "--clearenv",
         "--tmpfs", "/tmp",
         "--chmod", "1777", "/tmp",
+        "--dir", "/etc",
         "--proc", "/proc",
         "--dev", "/dev",
         "--dir", "/runtime",

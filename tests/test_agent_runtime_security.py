@@ -164,7 +164,9 @@ def main():
         )
         check(
             "sandbox: Claude can resolve the fixed runner identity read-only",
-            all(
+            "--dir /etc" in joined
+            and joined.index("--dir /etc") < joined.index("--ro-bind /etc/passwd")
+            and all(
                 "--ro-bind %s %s" % (path, path) in joined
                 for path in ("/etc/passwd", "/etc/group")
             ),

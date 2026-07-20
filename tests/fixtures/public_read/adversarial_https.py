@@ -90,12 +90,12 @@ def main():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.certificate, args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
-    ready = args.ready_file + ".tmp"
-    with open(ready, "x", encoding="utf-8") as handle:
+    with open(args.ready_file, "r+", encoding="utf-8") as handle:
+        handle.seek(0)
+        handle.truncate()
         handle.write("ready\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(ready, args.ready_file)
     server.serve_forever()
 
 

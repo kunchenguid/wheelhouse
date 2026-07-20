@@ -1126,6 +1126,22 @@ def test_production_launcher_contract():
                 == expected_handoff
             )
 
+        def private_writable_tmp(candidate):
+            tmpfs = candidate.index("--tmpfs")
+            return candidate[tmpfs : tmpfs + 5] == [
+                "--tmpfs",
+                "/tmp",
+                "--chmod",
+                "1777",
+                "/tmp",
+            ]
+
+        def readable_etc_mount_parent(candidate):
+            parent = candidate.index("/etc")
+            return candidate[parent - 1] == "--dir" and parent < candidate.index(
+                "/etc/ssl"
+            )
+
         check(
             "broker: privileged launcher drops to the runner without recursive ownership or shared-parent changes",
             command[:3] == ["sudo", "--non-interactive", "/usr/bin/prlimit"]
@@ -1133,6 +1149,8 @@ def test_production_launcher_contract():
             and "/usr/bin/bwrap" in command
             and "--unshare-user" not in command
             and "/usr/local/share/ca-certificates" in command
+            and private_writable_tmp(command)
+            and readable_etc_mount_parent(command)
             and runner_handoff(command)
             and '"chown"' not in source
             and "os.chmod(self.root.parent" not in source
@@ -1157,6 +1175,8 @@ def test_production_launcher_contract():
             and "--nproc=132" in exercise_command
             and ("--fsize=%d" % exercise_module.MAX_EXTRACTED_BYTES)
             in exercise_command
+            and private_writable_tmp(exercise_command)
+            and readable_etc_mount_parent(exercise_command)
             and runner_handoff(exercise_command)
             and exercise_environment == {},
         )
@@ -1368,6 +1388,7 @@ def production_setup(directory, hosts_backup):
     certificate = root / "public-evidence.crt"
     key = root / "public-evidence.key"
     ready = root / "public-evidence.ready"
+    ready.touch(mode=0o600)
     subprocess.run(
         [
             "openssl",
@@ -1429,11 +1450,11 @@ def production_setup(directory, hosts_backup):
         start_new_session=True,
     )
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not ready.is_file():
+    while time.monotonic() < deadline and ready.read_text(encoding="utf-8") != "ready\n":
         if server.poll() is not None:
             raise Failure("local HTTPS adversary failed to start")
         time.sleep(0.05)
-    if not ready.is_file():
+    if ready.read_text(encoding="utf-8") != "ready\n":
         raise Failure("local HTTPS adversary readiness timed out")
     return server, hosts_backup, trust_path
 
@@ -1533,12 +1554,17 @@ def test_production_e2e():
                     "https://%s/inject" % PUBLIC_HOST,
                     "text",
                 )
+                injected_receipt = receipt(injected)
+                if injected_receipt.get("status") != "complete":
+                    raise Failure(
+                        "adversary fetch was unavailable: %s"
+                        % injected_receipt.get("reason_code", "missing reason")
+                    )
                 check(
                     "adversary: prompt injection receipt binds the exposed evidence",
-                    injected["receipt"]["sha256"]
-                    == injected["receipt"]["excerpt_sha256"]
-                    and injected["receipt"]["status"] == "complete"
-                    and injected["receipt"]["final_url"]
+                    injected_receipt["sha256"]
+                    == injected_receipt["excerpt_sha256"]
+                    and injected_receipt["final_url"]
                     == "https://%s/inject" % PUBLIC_HOST,
                 )
                 check(
