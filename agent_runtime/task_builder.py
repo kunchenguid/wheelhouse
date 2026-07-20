@@ -1412,17 +1412,6 @@ def build_task(
         unit_count = len(vision_units)
         schema_value["properties"]["units"]["minItems"] = unit_count
         schema_value["properties"]["units"]["maxItems"] = unit_count
-        unit_schema = source_schema["definitions"]["unit"]
-        bound_units = []
-        for unit in vision_units:
-            bound_unit = deepcopy(unit_schema)
-            for name in ("unit_id", "start_line", "end_line", "text", "sha256"):
-                bound_unit["properties"][name] = {
-                    "type": "integer" if name in {"start_line", "end_line"} else "string",
-                    "const": unit[name],
-                }
-            bound_units.append(bound_unit)
-        schema_value["properties"]["units"]["items"] = {"oneOf": bound_units}
 
     source_prompt = Path(prompt_path)
     try:

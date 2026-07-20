@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,38 @@ def _validate_worker(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     candidate = task["spec"]["selection"]["candidates"][0]
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
+    if task["metadata"]["action"] in {"policy-derive.public", "policy-audit.public"}:
+        source = next(
+            (row for row in task["spec"]["inputs"] if row["id"] == "vision-units"),
+            None,
+        )
+        units = delivered_value.get("units") if isinstance(delivered_value, dict) else None
+        try:
+            trusted = load_json_regular(bundle / source["artifact"], max_bytes=262144)
+            trusted_units = trusted["units"]
+            by_id = {row["unit_id"]: row for row in trusted_units}
+            actual_ids = [row.get("unit_id") for row in units]
+        except (ContractError, KeyError, TypeError):
+            trusted_units = []
+            by_id = {}
+            actual_ids = []
+        if (
+            not isinstance(units, list)
+            or not all(isinstance(unit_id, str) for unit_id in actual_ids)
+            or len(actual_ids) != len(set(actual_ids))
+            or set(actual_ids) != set(by_id)
+        ):
+            return None, None, _error(
+                "output.schema_invalid",
+                "Policy result did not preserve the exact VISION unit identities.",
+                spend_started=bool(worker.get("spendStarted")),
+            )
+        normalized = deepcopy(delivered_value)
+        for unit in normalized["units"]:
+            identity = by_id[unit["unit_id"]]
+            for name in ("start_line", "end_line", "text", "sha256"):
+                unit[name] = identity[name]
+        delivered_value = normalized
     delivered = None
     secret_match = False
     if delivered_value is not None:
