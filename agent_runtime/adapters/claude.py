@@ -147,7 +147,10 @@ def validate_schema_subset(
         ) from error
     if not isinstance(schema, dict):
         raise ClaudeProbeError("Claude output schema must be an object")
-    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+    if schema.get("$schema") not in {
+        "https://json-schema.org/draft/2020-12/schema",
+        "http://json-schema.org/draft-07/schema#",
+    }:
         raise ClaudeProbeError("Claude output schema dialect is unsupported")
 
     allowed = {

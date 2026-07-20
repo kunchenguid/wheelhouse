@@ -183,6 +183,7 @@ Canonical tools are:
 Codex uses its native `turn/start.outputSchema` mechanism.
 The fake adapter and future adapters use the same action schemas and trusted validation.
 Natural-language primary calls pass the canonical content-bound `nl-decision-v1` schema to the pinned Claude action and prefer one terminal `structured_output` value.
+That canonical schema declares JSON Schema draft-07 for Claude CLI 2.1.215 compatibility. The direct adapter also accepts the previous draft 2020-12 declaration through the same restricted keyword subset, so the trusted validation language and primary or repair behavior do not change with the dialect declaration.
 If that carrier alone is absent, the bridge may parse the plain terminal `result`, but accepts it only when the object passes the same byte bound, task binding, and exact bound schema. The resulting proof records `schema-validated-terminal-result` rather than claiming native delivery. Neither native generation nor terminal JSON alone can authorize a reply or action.
 
 Path tools reject absolute paths, traversal, symlinks, devices, sockets, and escaping canonical paths.
@@ -200,6 +201,7 @@ No symlink may reach the signed handoff or hydrated model workspace.
 
 Final-result delivery is independent of transcript retention.
 A bounded Claude transcript is transferred once within the read-only reusable workflow for trusted normalization with one-day artifact retention, then only the verified normalized result artifact crosses to the trusted consumer.
+The finalizer always uploads that normalized result before reporting a missing result or a pre-model harness, lifecycle, or sandbox failure as unhealthy, preserving cleanup and failure evidence without presenting the run as healthy.
 A schema-invalid but delivered triage candidate remains available to its one-turn repair policy.
 Natural-language primary calls fail closed when neither native output nor a schema-valid plain terminal result is available. A missing native carrier by itself no longer discards an otherwise schema-valid terminal result, covering the pre-2.1.205 carrier-omission class without weakening schema validation.
 Genuinely absent or invalid results receive one separately claimed repair task. Candidate precedence is bounded native output, then a JSON-parseable terminal result, then a legacy raw file or terminal prose. The live prompt never asks the model to hand-serialize `decision.json`.

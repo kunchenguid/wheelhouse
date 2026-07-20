@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -169,7 +170,7 @@ def main():
         )
         unsupported = json.dumps(
             {
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "additionalProperties": False,
                 "required": [],
@@ -181,7 +182,7 @@ def main():
             fails(lambda: validate_schema_subset(unsupported), ClaudeProbeError),
         )
         invalid = (
-            b'{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"'
+            b'{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"'
         )
         check(
             "schema: invalid JSON rejected",
@@ -193,6 +194,65 @@ def main():
                 lambda: validate_schema_subset(schema_bytes, "0" * 64), ClaudeProbeError
             ),
         )
+
+        # Draft-07 migration preserves the canonical accepted/rejected language.
+        def verdict(schema_bytes, candidate):
+            try:
+                validate_schema_subset(schema_bytes)
+                return True
+            except ClaudeProbeError:
+                return False
+        production_schema = Path(
+            "agent_runtime/schemas/actions/nl-decision-v1.schema.json"
+        ).read_text()
+        canonical = json.loads(production_schema)
+        old = dict(canonical)
+        old["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+        for candidate in (
+            {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "enum": ["answer"]}}},
+            {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "pattern": "answer"}}},
+        ):
+            accepted7 = dict(canonical)
+            accepted7.update(candidate)
+            accepted20 = dict(old)
+            accepted20.update(candidate)
+            check("schema: draft-07 and draft-2020 have identical keyword verdict", verdict(json.dumps(accepted7).encode(), candidate) == verdict(json.dumps(accepted20).encode(), candidate))
+
+        canary_binary = os.environ.get("WHEELHOUSE_CLAUDE_2_1_215_CANARY_BINARY")
+        old_schema = production_schema.replace(
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft/2020-12/schema",
+        )
+        if canary_binary:
+            canary_path = Path(canary_binary)
+            version = subprocess.run(
+                [str(canary_path), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            pinned_version = "2.1.215 (Claude Code)"
+            version_matches = (
+                canary_path.is_file()
+                and version.returncode == 0
+                and version.stdout.strip() == pinned_version
+            )
+            check("real boundary: explicitly supplied binary is pinned", version_matches)
+
+            def probe(schema):
+                env = {"HOME": tempfile.mkdtemp(dir=directory), AUTH_ENVIRONMENT: "invalid"}
+                return subprocess.run(
+                    [str(canary_path), "--print", "--json-schema", schema, "return {}"],
+                    env=env, capture_output=True, text=True, timeout=30,
+                )
+
+            if version_matches:
+                fixed = probe(production_schema)
+                old = probe(old_schema)
+                check("real 2.1.215 accepts fixed production schema before auth", "401 Invalid bearer token" in (fixed.stdout + fixed.stderr))
+                check("real 2.1.215 rejects old draft-2020-12 schema", "no schema with key or ref" in (old.stdout + old.stderr))
+        else:
+            print("skip real 2.1.215 boundary (canary binary not supplied)")
 
         binary = root / "claude"
         binary.write_text(

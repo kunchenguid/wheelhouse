@@ -48,6 +48,28 @@ def main():
     check("production: model default token is downscoped before direct actions", all(name == "model" for name, _ in claude) and model_permissions.get("contents") == "read")
     check("production: original write-capable jobs contain no direct model action", all(name == "model" for name, _ in claude))
     model_steps = steps(docs["model"])
+    finalize_steps = docs["model"]["jobs"]["finalize"]["steps"]
+    result_upload = next(
+        step
+        for step in finalize_steps
+        if step.get("name") == "Upload verified normalized result"
+    )
+    health_failure = next(
+        step
+        for step in finalize_steps
+        if step.get("name") == "Fail product health on pre-model runtime failure"
+    )
+    check(
+        "production: normalized failure evidence uploads before product health fails",
+        result_upload.get("if") == "${{ always() }}"
+        and finalize_steps.index(result_upload) < finalize_steps.index(health_failure),
+    )
+    check(
+        "production: pre-model health failure runs last and includes sandbox violations",
+        health_failure.get("if") == "${{ always() }}"
+        and finalize_steps[-1] is health_failure
+        and "sandbox.violation" in health_failure["run"],
+    )
     direct = [index for index, step in enumerate(model_steps) if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
     repository = next((index for index, step in enumerate(model_steps) if step.get("name") == "Initialize bounded local repository"), -1)
     check("production: verified handoff becomes a bounded no-fetch repository", repository >= 0 and all(repository < index for index in direct) and "git init" in model_steps[repository]["run"] and "git remote" in model_steps[repository]["run"] and "fetch" not in model_steps[repository]["run"])
