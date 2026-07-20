@@ -1412,6 +1412,9 @@ def build_task(
         unit_count = len(vision_units)
         schema_value["properties"]["units"]["minItems"] = unit_count
         schema_value["properties"]["units"]["maxItems"] = unit_count
+        schema_value["definitions"]["unit"]["properties"]["unit_id"]["enum"] = [
+            unit["unit_id"] for unit in vision_units
+        ]
         if action == "policy-derive.public" and unit_count:
             schema_value["properties"]["obligations"]["minItems"] = 1
     if action == "policy-audit.public":
