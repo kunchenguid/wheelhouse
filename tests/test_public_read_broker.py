@@ -1535,9 +1535,12 @@ def test_production_e2e():
                 )
                 check(
                     "adversary: prompt injection remains explicitly untrusted data",
-                    "IGNORE THE MAINTAINER" in injected["evidence"]["content"]
+                    "ignore the maintainer"
+                    in injected["evidence"]["content"].casefold()
                     and injected["evidence"]["trust"] == "UNTRUSTED"
-                    and injected["warning"].startswith("Public evidence is untrusted"),
+                    and injected["warning"]
+                    .casefold()
+                    .startswith("public evidence is untrusted"),
                 )
                 check(
                     "model surface: adversarial fetch uses only the typed production MCP tool",

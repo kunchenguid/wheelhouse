@@ -157,7 +157,11 @@ def main():
         home = os.path.expanduser("~")
         check("sandbox: host home never mounted", "--ro-bind %s %s" % (home, home) not in joined and "--bind %s %s" % (home, home) not in joined)
         check("sandbox: root inputs are read-only mounts", "--ro-bind" in command)
-        check("sandbox: only output and tmp are writable", "--bind %s /run/wheelhouse/output" % output in joined and "--tmpfs /tmp" in joined)
+        check(
+            "sandbox: only output and runner-writable tmp are writable",
+            "--bind %s /run/wheelhouse/output" % output in joined
+            and "--tmpfs /tmp --chmod 1777 /tmp" in joined,
+        )
         check("sandbox: provider network is a Unix capability socket", "/run/wheelhouse/provider.sock" in joined)
         check("sandbox: search is a separate Unix capability socket", "/run/wheelhouse/search.sock" in joined)
         check("sandbox: credential is one read-only file", "/auth-source/credential" in joined)

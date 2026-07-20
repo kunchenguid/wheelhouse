@@ -107,6 +107,7 @@ def build_command(
         "--cap-add", "CAP_SETGID",
         "--clearenv",
         "--tmpfs", "/tmp",
+        "--chmod", "1777", "/tmp",
         "--proc", "/proc",
         "--dev", "/dev",
         "--dir", "/runtime",
