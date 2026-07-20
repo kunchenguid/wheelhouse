@@ -38,6 +38,7 @@ from agent_runtime.brokers import (  # noqa: E402
     BrokerError,
     ExerciseBrokerProcess,
     PublicReadBrokerProcess,
+    _uid_process_limit,
 )
 from agent_runtime.capabilities import claude_descriptor, negotiate  # noqa: E402
 from agent_runtime.config import resolve_selection  # noqa: E402
@@ -1044,6 +1045,31 @@ def restore_environment(saved):
             os.environ[key] = value
 
 
+def test_uid_process_limit():
+    with tempfile.TemporaryDirectory() as directory:
+        proc_root = Path(directory)
+        processes = (
+            ("101", os.getuid(), 2),
+            ("202", os.getuid(), 1),
+            ("303", os.getuid() + 1, 5),
+        )
+        for pid, uid, tasks in processes:
+            process = proc_root / pid
+            process.mkdir()
+            (process / "status").write_text(
+                "Name:\ttest\nUid:\t%d\t%d\t%d\t%d\n" % ((uid,) * 4),
+                encoding="utf-8",
+            )
+            task_root = process / "task"
+            task_root.mkdir()
+            for index in range(tasks):
+                (task_root / str(index + 1)).mkdir()
+        check(
+            "broker: process allowance is added to every existing runner task",
+            _uid_process_limit(32, proc_root=proc_root) == 35,
+        )
+
+
 def test_production_launcher_contract():
     with tempfile.TemporaryDirectory() as directory, mock.patch(
         "platform.system", return_value="Linux"
@@ -1054,6 +1080,9 @@ def test_production_launcher_contract():
             if name in {"bwrap", "prlimit", "setpriv"}
             else None
         ),
+    ), mock.patch(
+        "agent_runtime.brokers._uid_process_limit",
+        side_effect=lambda allowance: 100 + allowance,
     ):
         broker = PublicReadBrokerProcess(str(Path(directory) / "broker"), EXECUTION_ID, TASK_SHA256)
         previous_umask = os.umask(0o022)
@@ -1092,6 +1121,7 @@ def test_production_launcher_contract():
         check(
             "broker: privileged launcher drops to the runner without recursive ownership or shared-parent changes",
             command[:3] == ["sudo", "--non-interactive", "/usr/bin/prlimit"]
+            and "--nproc=164" in command
             and "/usr/bin/bwrap" in command
             and "--unshare-user" not in command
             and runner_handoff(command)
@@ -1115,6 +1145,7 @@ def test_production_launcher_contract():
         check(
             "exercise: privileged launcher drops to the runner before the no-network adapter",
             "--unshare-net" in exercise_command
+            and "--nproc=132" in exercise_command
             and runner_handoff(exercise_command)
             and exercise_environment == {},
         )
@@ -1816,6 +1847,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--production-e2e", action="store_true")
     args = parser.parse_args()
+    test_uid_process_limit()
     test_production_launcher_contract()
     test_exercise_hard_wall()
     if args.production_e2e:

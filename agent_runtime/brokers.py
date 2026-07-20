@@ -19,10 +19,54 @@ from typing import Any
 from .redaction import sanitize_message
 
 MAX_HEADER = 65536
+PUBLIC_BROKER_PROCESS_ALLOWANCE = 64
+EXERCISE_BROKER_PROCESS_ALLOWANCE = 32
 
 
 class BrokerError(ValueError):
     pass
+
+
+def _uid_process_limit(additional: int, *, proc_root: Path = Path("/proc")) -> int:
+    """Bound broker tasks without charging the shared runner's existing tasks."""
+    if additional <= 0:
+        raise BrokerError("broker process allowance is invalid")
+    count = 0
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError as error:
+        raise BrokerError("broker process accounting is unavailable") from error
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "status").read_text(
+                encoding="utf-8", errors="strict"
+            ).splitlines()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as error:
+            raise BrokerError("broker process accounting failed closed") from error
+        uid_line = next((line for line in fields if line.startswith("Uid:")), None)
+        if uid_line is None:
+            raise BrokerError("broker process accounting returned malformed status")
+        try:
+            real_uid = int(uid_line.split()[1])
+        except (IndexError, ValueError) as error:
+            raise BrokerError("broker process accounting returned malformed UID") from error
+        if real_uid != os.getuid():
+            continue
+        try:
+            count += sum(
+                1 for task in (entry / "task").iterdir() if task.name.isdigit()
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as error:
+            raise BrokerError("broker task accounting failed closed") from error
+    if count < 1:
+        raise BrokerError("broker process accounting found no runner process")
+    return count + additional
 
 
 def _canonical_leaf(path: str, label: str) -> Path:
@@ -435,6 +479,7 @@ class PublicReadBrokerProcess:
         privilege_drop = shutil.which("setpriv")
         if not privilege_drop:
             raise BrokerError("public-read broker production isolation requires setpriv")
+        process_limit = _uid_process_limit(PUBLIC_BROKER_PROCESS_ALLOWANCE)
         runtime_root = str(self._stage_runtime())
         command = [
             "sudo",
@@ -444,7 +489,7 @@ class PublicReadBrokerProcess:
             "--cpu=600",
             "--fsize=314572800",
             "--nofile=256",
-            "--nproc=64",
+            "--nproc=%d" % process_limit,
             "--",
             binary,
             "--die-with-parent",
@@ -752,6 +797,7 @@ class ExerciseBrokerProcess:
             raise BrokerError(
                 "exercise broker production isolation requires Bubblewrap, prlimit, and setpriv"
             )
+        process_limit = _uid_process_limit(EXERCISE_BROKER_PROCESS_ALLOWANCE)
         command = [
             "sudo",
             "--non-interactive",
@@ -760,7 +806,7 @@ class ExerciseBrokerProcess:
             "--cpu=120",
             "--fsize=1048576",
             "--nofile=128",
-            "--nproc=32",
+            "--nproc=%d" % process_limit,
             "--",
             binary,
             "--die-with-parent",
