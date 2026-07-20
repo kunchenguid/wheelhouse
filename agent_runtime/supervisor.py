@@ -395,13 +395,23 @@ def _validate_worker(
                 len(actual_ids) == len(set(actual_ids))
                 and set(actual_ids) == set(by_id)
             )
-            resolved_units = [
+            content_units = [
                 by_sha.get(row.get("sha256"))
                 or by_text.get(row.get("text"))
-                or (by_id.get(row.get("unit_id")) if exact_id_set else None)
-                or trusted_units[index]
-                for index, row in enumerate(units)
+                for row in units
             ]
+            exact_content_set = (
+                all(unit is not None for unit in content_units)
+                and len({unit["unit_id"] for unit in content_units})
+                == len(content_units)
+                and {unit["unit_id"] for unit in content_units} == set(by_id)
+            )
+            if exact_content_set:
+                resolved_units = content_units
+            elif exact_id_set:
+                resolved_units = [by_id[unit_id] for unit_id in actual_ids]
+            else:
+                resolved_units = trusted_units[: len(units)]
         except (AttributeError, ContractError, IndexError, KeyError, TypeError):
             trusted_units = []
             by_id = {}
