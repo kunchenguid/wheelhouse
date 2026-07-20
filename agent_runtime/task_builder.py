@@ -1915,8 +1915,10 @@ def build_task(
                 else (
                     32000
                     if action in {"policy-derive.public", "policy-audit.public"}
+                    else 64000
+                    if action == "advisory-review.public"
                     else 16000
-                    if action.startswith("deep-review") or action == "advisory-review.public"
+                    if action.startswith("deep-review")
                     else 8000
                 ),
                 "enforcement": _limit_enforcement(adapter),
