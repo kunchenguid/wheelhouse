@@ -1535,8 +1535,8 @@ def test_production_e2e():
                 )
                 check(
                     "adversary: prompt injection remains explicitly untrusted data",
-                    "WHEELHOUSE_PROMPT_INJECTION_SENTINEL"
-                    in injected["evidence"]["content"]
+                    "ignore the maintainer"
+                    in injected["evidence"]["content"].casefold()
                     and injected["evidence"]["trust"] == "UNTRUSTED"
                     and injected["warning"]
                     .casefold()
