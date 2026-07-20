@@ -63,8 +63,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(302, location="http://example.com/")
             return
         if self.path == "/rebind":
-            with open("/etc/hosts", "a", encoding="utf-8") as hosts:
-                hosts.write("\n127.0.0.1 public-evidence.test\n")
+            with open("/etc/hosts", "r+", encoding="utf-8") as hosts:
+                lines = [
+                    line
+                    for line in hosts.readlines()
+                    if "public-evidence.test" not in line.split("#", 1)[0].split()
+                ]
+                hosts.seek(0)
+                hosts.truncate()
+                hosts.writelines(lines)
+                hosts.write("127.0.0.1 public-evidence.test\n")
             self._send(302, location="https://public-evidence.test/inject")
             return
         self._send(404, b"not found")

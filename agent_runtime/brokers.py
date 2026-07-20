@@ -357,8 +357,6 @@ class PublicReadBrokerProcess:
             raise BrokerError("public-read broker production isolation requires prlimit")
         runtime_root = str(self._stage_runtime())
         command = [
-            "sudo",
-            "--non-interactive",
             prlimit,
             "--as=1073741824",
             "--cpu=600",
@@ -487,28 +485,6 @@ class PublicReadBrokerProcess:
             if self.process.poll() is not None:
                 raise BrokerError("public-read broker exited during admission")
             if socket_path.exists() and self.attestation_path.is_file():
-                if not self.test_unsandboxed:
-                    try:
-                        subprocess.run(
-                            [
-                                "sudo",
-                                "--non-interactive",
-                                "chown",
-                                "-R",
-                                "%d:%d" % (os.getuid(), os.getgid()),
-                                "--",
-                                self.socket_path,
-                                str(self.receipt_dir),
-                            ],
-                            check=True,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    except (OSError, subprocess.SubprocessError) as error:
-                        self.close()
-                        raise BrokerError(
-                            "public-read broker capability ownership failed"
-                        ) from error
                 return
             time.sleep(0.05)
         self.close()
@@ -521,41 +497,11 @@ class PublicReadBrokerProcess:
         self.process = None
         if process is not None and process.poll() is None:
             try:
-                if self.test_unsandboxed:
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
-                    subprocess.run(
-                        [
-                            "sudo",
-                            "--non-interactive",
-                            "kill",
-                            "-TERM",
-                            "--",
-                            "-%d" % process.pid,
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=5)
             except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                 try:
-                    if self.test_unsandboxed:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        subprocess.run(
-                            [
-                                "sudo",
-                                "--non-interactive",
-                                "kill",
-                                "-KILL",
-                                "--",
-                                "-%d" % process.pid,
-                            ],
-                            check=False,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
+                    os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
                 except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                     pass

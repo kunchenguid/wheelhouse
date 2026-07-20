@@ -866,12 +866,10 @@ def append_hosts(line):
     )
 
 
-def production_setup(directory):
+def production_setup(directory, hosts_backup):
     root = Path(directory)
     certificate = root / "public-evidence.crt"
     key = root / "public-evidence.key"
-    hosts_backup = root / "hosts.backup"
-    shutil.copyfile("/etc/hosts", hosts_backup)
     subprocess.run(
         [
             "openssl",
@@ -973,6 +971,7 @@ def production_cleanup(server, hosts_backup, trust_path):
             ["sudo", "--non-interactive", "cp", str(hosts_backup), "/etc/hosts"],
             check=True,
         )
+        hosts_backup.unlink(missing_ok=True)
     subprocess.run(
         ["sudo", "--non-interactive", "ip", "address", "del", PUBLIC_ADDRESS + "/32", "dev", "lo"],
         check=False,
@@ -1000,11 +999,14 @@ def test_production_e2e():
     sentinel = Path("/tmp/wheelhouse-parent-secret-canary")
     sentinel.write_text("credential-canary\n", encoding="utf-8")
     server = None
-    hosts_backup = None
+    hosts_fd, hosts_name = tempfile.mkstemp(prefix="wheelhouse-hosts-", suffix=".backup")
+    os.close(hosts_fd)
+    hosts_backup = Path(hosts_name)
+    shutil.copyfile("/etc/hosts", hosts_backup)
     trust_path = ""
     try:
         with tempfile.TemporaryDirectory() as directory:
-            server, hosts_backup, trust_path = production_setup(directory)
+            server, hosts_backup, trust_path = production_setup(directory, hosts_backup)
             broker = PublicReadBrokerProcess(directory + "/broker", EXECUTION_ID, TASK_SHA256)
             broker.start()
             try:
