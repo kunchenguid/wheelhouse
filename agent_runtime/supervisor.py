@@ -352,24 +352,33 @@ def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
 
 
 def _unwrap_policy_value(value: Any) -> Any:
-    if not isinstance(value, dict) or isinstance(value.get("units"), list):
+    if isinstance(value, dict) and isinstance(value.get("units"), list):
         return value
-    candidates = [
-        child
-        for child in value.values()
-        if isinstance(child, dict) and isinstance(child.get("units"), list)
-    ]
     from .adapters.claude import ClaudeProtocolError, decode_json_carrier
 
-    for child in value.values():
-        if not isinstance(child, str):
-            continue
-        try:
-            decoded = decode_json_carrier({"json": child})
-        except ClaudeProtocolError:
-            continue
-        if isinstance(decoded, dict) and isinstance(decoded.get("units"), list):
-            candidates.append(decoded)
+    candidates: list[dict[str, Any]] = []
+
+    def visit(node: Any, depth: int) -> None:
+        if depth > 4:
+            return
+        if isinstance(node, dict):
+            if isinstance(node.get("units"), list):
+                candidates.append(node)
+                return
+            for child in node.values():
+                visit(child, depth + 1)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child, depth + 1)
+        elif isinstance(node, str):
+            try:
+                decoded = decode_json_carrier({"json": node})
+            except ClaudeProtocolError:
+                return
+            if decoded != node:
+                visit(decoded, depth + 1)
+
+    visit(value, 0)
     return candidates[0] if len(candidates) == 1 else value
 
 

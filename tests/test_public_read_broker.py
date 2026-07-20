@@ -1585,6 +1585,10 @@ def test_public_task_contract():
                 {"result": json.dumps(plan), "presentation": "complete"}
             )
             == plan
+            and _unwrap_policy_value(
+                {"presentation": [{"payload": json.dumps(plan)}]}
+            )
+            == plan
             and _unwrap_policy_value({"first": plan, "second": audit})
             != plan,
         )
