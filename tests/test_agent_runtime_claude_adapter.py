@@ -196,6 +196,24 @@ def main():
             ),
         )
 
+        # Draft-07 migration preserves the canonical accepted/rejected language.
+        def verdict(schema_bytes, candidate):
+            try:
+                validate_schema_subset(schema_bytes)
+                return True
+            except ClaudeProbeError:
+                return False
+        canonical = json.loads(production_schema) if "production_schema" in locals() else json.loads(Path("agent_runtime/schemas/actions/nl-decision-v1.schema.json").read_text())
+        old = dict(canonical)
+        old["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+        for candidate in (
+            {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "enum": ["answer"]}}},
+            {"type": "object", "additionalProperties": False, "required": [], "properties": {"mode": {"type": "string", "pattern": "answer"}}},
+        ):
+            accepted7 = dict(canonical); accepted7.update(candidate)
+            accepted20 = dict(old); accepted20.update(candidate)
+            check("schema: draft-07 and draft-2020 have identical keyword verdict", verdict(json.dumps(accepted7).encode(), candidate) == verdict(json.dumps(accepted20).encode(), candidate))
+
         # Real provider boundary: invalid auth stops accepted schemas before any spend.
         claude = shutil.which("claude")
         production_schema = Path("agent_runtime/schemas/actions/nl-decision-v1.schema.json").read_text()

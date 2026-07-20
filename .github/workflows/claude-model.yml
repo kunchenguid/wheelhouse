@@ -785,6 +785,23 @@ jobs:
             echo "observed_commit_sha=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Fail product health on pre-model runtime failure
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          result="${{ runner.temp }}/wheelhouse-model-result/result.json"
+          if [ ! -f "$result" ]; then
+            echo "::error::Claude model result is missing; product health failed (output.missing)"
+            exit 1
+          fi
+          code="$(python -c 'import json,sys; print((json.load(open(sys.argv[1], encoding="utf-8")).get("error") or {}).get("code", ""))' "$result")"
+          case "$code" in
+            output.missing|harness.*|lifecycle.*)
+              echo "::error::Claude pre-model runtime failure: $code"
+              exit 1
+              ;;
+          esac
+
       - name: Upload verified normalized result
         uses: actions/upload-artifact@v4
         with:
