@@ -1406,6 +1406,7 @@ def build_task(
         "describes the action compatibility path and",
         "is superseded for this adapter task. You have no shell or file-write tool.",
         "Submit the final value through the native strict output schema.",
+        "For a public policy action, encode the complete action-schema JSON object in the native `json` carrier field.",
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]

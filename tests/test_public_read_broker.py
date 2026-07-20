@@ -1596,6 +1596,7 @@ def test_public_task_contract():
         compiled = ClaudeCliAdapter().compile(task, {}, probe)
         argv = compiled["claude"]["argv"]
         allowed_index = argv.index("--allowedTools") + 1
+        native_schema = json.loads(argv[argv.index("--json-schema") + 1])
         check(
             "task: Claude loads no ambient settings and only the exact MCP and schema tools",
             "--safe-mode" not in argv
@@ -1614,6 +1615,15 @@ def test_public_task_contract():
                 "mcp__wheelhouse__public_artifact",
                 "mcp__wheelhouse__exercise_run",
             },
+        )
+        check(
+            "task: public policy uses the bounded draft-07 native carrier",
+            compiled["claude"]["structuredOutputTransport"]
+            == "draft-07-json-carrier-v1"
+            and native_schema["$schema"]
+            == "http://json-schema.org/draft-07/schema#"
+            and native_schema["required"] == ["json"]
+            and native_schema["properties"]["json"]["maxLength"] == 131_072,
         )
         check(
             "task: sandbox worker admits every compiled Claude MCP tool",
@@ -1930,36 +1940,22 @@ def test_production_launcher_contract():
             ["--version"],
             "/usr/bin/bwrap",
         )
+        exercise_source = (ROOT / "agent_runtime" / "exercise.py").read_text(
+            encoding="utf-8"
+        )
         check(
-            "exercise: artifact process receives a private filesystem namespace",
-            "--unshare-user" in scenario_command
-            and "--unshare-pid" in scenario_command
-            and "--unshare-net" in scenario_command
-            and scenario_command[scenario_command.index("/proc") - 1] == "--dir"
-            and "--proc" not in scenario_command
-            and any(
-                scenario_command[index : index + 3]
-                == ["--ro-bind", str(work), "/work"]
-                for index in range(len(scenario_command) - 2)
-            )
-            and any(
-                scenario_command[index : index + 3]
-                == ["--bind", str(writable), "/writable"]
-                for index in range(len(scenario_command) - 2)
-            )
-            and private_writable_tmp(scenario_command)
-            and readable_etc_mount_parent(scenario_command)
-            and any(
-                scenario_command[index : index + 3]
-                == ["--ro-bind", "/usr/bin/node", "/node"]
-                for index in range(len(scenario_command) - 2)
-            )
-            and scenario_command[-3:]
-            == ["/node", "/work/application/cli.js", "--version"]
+            "exercise: artifact child is filesystem-confined inside the no-network namespace",
+            scenario_command
+            == ["/usr/bin/node", str(entrypoint), "--version"]
             and "/run/exercise" not in scenario_command
             and "/evidence" not in scenario_command
             and "receipts" not in " ".join(scenario_command)
-            and scenario_cwd == "/",
+            and scenario_cwd == str(app)
+            and "_landlock_artifact(work, writable, node)" in exercise_source
+            and "allowed_paths = [(work, read_execute), (Path(node), read_execute)]"
+            in exercise_source
+            and "allowed_paths.append((writable, handled))" in exercise_source
+            and "libc.syscall(restrict_self, ruleset_fd, 0)" in exercise_source,
         )
         oversized = writable / "oversized"
         oversized.write_bytes(b"x" * (exercise_module.MAX_RUNTIME_BYTES + 1))

@@ -23,6 +23,7 @@ from agent_runtime.adapters.claude import (
     ClaudeStreamParser,
     _load_lock,
     _protocol_fixture_digest,
+    decode_json_carrier,
     parse_stream,
     validate_schema_subset,
 )
@@ -167,6 +168,14 @@ def main():
         check(
             "schema: exact bound schema text retained",
             schema["type"] == "object" and schema_text == schema_bytes.decode("utf-8"),
+        )
+        check(
+            "schema: native JSON carrier is strictly decoded",
+            decode_json_carrier({"json": '{"ok":true}'}) == {"ok": True}
+            and fails(
+                lambda: decode_json_carrier({"json": '{"ok":true,"ok":false}'}),
+                ClaudeProtocolError,
+            ),
         )
         unsupported = json.dumps(
             {

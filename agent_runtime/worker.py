@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .adapters.claude import ClaudeProtocolError, ClaudeStreamParser
+from .adapters.claude import ClaudeProtocolError, ClaudeStreamParser, decode_json_carrier
 from .contract import ContractError, atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular
 from .redaction import redact_text, sanitize_message
 from .tools import CanonicalTools, ToolError, dynamic_tool_spec
@@ -698,7 +698,13 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         usage["toolCalls"] = 0
         if usage.get("turns") is None:
             usage["turns"] = 1
-        final_bytes = canonical_json_bytes(outcome.structured_output)
+        final = outcome.structured_output
+        if claude_plan.get("structuredOutputTransport") == "draft-07-json-carrier-v1":
+            try:
+                final = decode_json_carrier(final)
+            except ClaudeProtocolError as error:
+                raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
+        final_bytes = canonical_json_bytes(final)
         if len(final_bytes) > plan["limits"]["maxFinalBytes"]:
             raise WorkerFailure("output.schema_invalid", "Claude structured output exceeded its byte bound.", spend_started=True)
         final_text = final_bytes.decode("utf-8")
@@ -720,7 +726,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
             "actualModel": actual_model,
             "actualProvider": actual_provider,
             "actualEffort": actual_effort,
-            "final": outcome.structured_output,
+            "final": final,
             "usage": usage,
             "spendStarted": True,
         }

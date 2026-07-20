@@ -35,6 +35,11 @@ CREDENTIAL_FILE_ENVIRONMENT = "WHEELHOUSE_CLAUDE_CREDENTIAL_FILE"
 MAX_SCHEMA_BYTES = 65536
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 8 * 1024 * 1024
+PUBLIC_POLICY_ACTIONS = {
+    "advisory-review.public",
+    "policy-derive.public",
+    "policy-audit.public",
+}
 
 
 class ClaudeProbeError(ValueError):
@@ -116,6 +121,20 @@ def _strict_json(text: str) -> Any:
         raise ValueError("non-finite number")
 
     return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def decode_json_carrier(value: Any) -> Any:
+    """Strictly decode the small native carrier used by public-policy actions."""
+
+    if not isinstance(value, dict) or set(value) != {"json"}:
+        raise ClaudeProtocolError("Claude native JSON carrier was invalid")
+    text = value["json"]
+    if not isinstance(text, str) or not text or len(text.encode("utf-8")) > 131_072:
+        raise ClaudeProtocolError("Claude native JSON carrier exceeded its bound")
+    try:
+        return _strict_json(text)
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise ClaudeProtocolError("Claude native JSON carrier was malformed") from error
 
 
 def validate_schema_subset(
@@ -766,6 +785,28 @@ class ClaudeCliAdapter(AgentAdapterV1):
             or max_turns < 1
         ):
             raise ClaudeProbeError("Claude max-turns bound is invalid")
+        transport = "action-schema"
+        native_schema_text = schema_text
+        if task["metadata"]["action"] in PUBLIC_POLICY_ACTIONS:
+            transport = "draft-07-json-carrier-v1"
+            native_schema_text = json.dumps(
+                {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "$id": "wheelhouse/claude-json-carrier/v1",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["json"],
+                    "properties": {
+                        "json": {
+                            "type": "string",
+                            "minLength": 2,
+                            "maxLength": 131_072,
+                        }
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         argv = [
             "claude",
             "--print",
@@ -786,7 +827,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
             "--max-turns",
             str(max_turns),
             "--json-schema",
-            schema_text,
+            native_schema_text,
         ]
         requested_tools = [row["name"] for row in task["spec"]["tools"]["tools"]]
         if not requested_tools:
@@ -849,6 +890,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
                 ],
                 "allowProviderModelFallback": False,
                 "structuredOutputMechanism": proof.get("structuredOutputMechanism"),
+                "structuredOutputTransport": transport,
                 "schemaSha256": probe.supplemental["schemaSha256"],
             },
         }

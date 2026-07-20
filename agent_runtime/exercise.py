@@ -148,6 +148,76 @@ def _limit_output() -> None:
         ctypes.CDLL(None).prctl(1, signal.SIGKILL)
 
 
+def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
+    """Confine the reviewed artifact inside the broker's no-network namespace."""
+    if not sys.platform.startswith("linux"):
+        raise ExerciseError("exercise.isolation", "Landlock requires Linux")
+    import ctypes
+
+    class RulesetAttr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class PathBeneathAttr(ctypes.Structure):
+        _fields_ = [
+            ("allowed_access", ctypes.c_uint64),
+            ("parent_fd", ctypes.c_int32),
+        ]
+
+    create_ruleset = 444
+    add_rule = 445
+    restrict_self = 446
+    version_flag = 1
+    path_beneath_rule = 1
+    read_execute = (1 << 0) | (1 << 2) | (1 << 3)
+    write_v1 = sum(1 << bit for bit in range(1, 13) if bit not in {2, 3})
+    libc = ctypes.CDLL(None, use_errno=True)
+    abi = libc.syscall(create_ruleset, 0, 0, version_flag)
+    if abi < 1:
+        raise ExerciseError("exercise.isolation", "Landlock is unavailable")
+    handled = read_execute | write_v1
+    if abi >= 2:
+        handled |= 1 << 13
+    if abi >= 3:
+        handled |= 1 << 14
+    if abi >= 5:
+        handled |= 1 << 15
+    ruleset_attr = RulesetAttr(handled)
+    ruleset_fd = libc.syscall(
+        create_ruleset, ctypes.byref(ruleset_attr), ctypes.sizeof(ruleset_attr), 0
+    )
+    if ruleset_fd < 0:
+        raise ExerciseError("exercise.isolation", "Landlock ruleset creation failed")
+    opened: list[int] = []
+    try:
+        allowed_paths = [(work, read_execute), (Path(node), read_execute)]
+        allowed_paths.extend(
+            (Path(path), read_execute)
+            for path in ("/usr", "/bin", "/lib", "/lib64")
+            if Path(path).exists()
+        )
+        allowed_paths.append((writable, handled))
+        for path, access in allowed_paths:
+            descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            opened.append(descriptor)
+            rule = PathBeneathAttr(access & handled, descriptor)
+            if libc.syscall(
+                add_rule, ruleset_fd, path_beneath_rule, ctypes.byref(rule), 0
+            ) != 0:
+                raise ExerciseError("exercise.isolation", "Landlock rule admission failed")
+        if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.syscall(restrict_self, ruleset_fd, 0) != 0:
+            raise ExerciseError("exercise.isolation", "Landlock confinement failed")
+    finally:
+        for descriptor in opened:
+            os.close(descriptor)
+        os.close(ruleset_fd)
+
+
+def _prepare_scenario(work: Path, writable: Path, node: str, confined: bool) -> None:
+    _limit_output()
+    if confined:
+        _landlock_artifact(work, writable, node)
+
+
 def _exercise_child(
     evidence_root: str,
     scratch: str,
@@ -197,73 +267,9 @@ def _scenario_command(
     arguments: list[str],
     artifact_sandbox: str,
 ) -> tuple[list[str], str]:
-    if not artifact_sandbox:
-        return [node, str(entrypoint), *arguments], str(cwd)
-    try:
-        sandbox_entrypoint = Path("/work") / entrypoint.relative_to(work)
-        sandbox_cwd = Path("/work") / cwd.relative_to(work)
-    except ValueError as error:
-        raise ExerciseError("exercise.isolation", "exercise path escaped its sandbox") from error
-    command = [
-        artifact_sandbox,
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-net",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--cap-drop",
-        "ALL",
-        "--clearenv",
-        # Keep the nested PID namespace opaque. An unprivileged Bubblewrap
-        # child cannot mount another procfs inside the outer broker sandbox.
-        "--dir",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--chmod",
-        "1777",
-        "/tmp",
-        "--dir",
-        "/work",
-        "--dir",
-        "/etc",
-        "--chmod",
-        "0755",
-        "/etc",
-        "--ro-bind",
-        str(work),
-        "/work",
-        "--ro-bind",
-        node,
-        "/node",
-        "--dir",
-        "/writable",
-        "--bind",
-        str(writable),
-        "/writable",
-        "--bind",
-        str(writable / "tmp"),
-        "/tmp",
-    ]
-    for path in ("/usr", "/bin", "/lib", "/lib64"):
-        if Path(path).exists():
-            command.extend(["--ro-bind", path, path])
-    command.extend(
-        [
-            "--setenv", "PATH", "/usr/bin:/bin",
-            "--setenv", "HOME", "/writable/home",
-            "--setenv", "LANG", "C.UTF-8",
-            "--setenv", "LC_ALL", "C.UTF-8",
-            "--setenv", "NO_PROXY", "*",
-            "--chdir", str(sandbox_cwd),
-            "--", "/node", str(sandbox_entrypoint), *arguments,
-        ]
-    )
-    return command, "/"
+    if not entrypoint.is_relative_to(work) or not cwd.is_relative_to(work):
+        raise ExerciseError("exercise.isolation", "exercise path escaped its sandbox")
+    return [node, str(entrypoint), *arguments], str(cwd)
 
 
 def _writable_usage(root: Path) -> tuple[int, int]:
@@ -313,7 +319,9 @@ def _run_scenario(
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
-            preexec_fn=_limit_output,
+            preexec_fn=lambda: _prepare_scenario(
+                work, writable, node, bool(artifact_sandbox)
+            ),
         )
         scenario_deadline = time.monotonic() + min(10, remaining)
         try:
