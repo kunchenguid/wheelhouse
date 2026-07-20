@@ -392,6 +392,11 @@ def _validate_worker(
             identity = by_id[unit["unit_id"]]
             for name in ("start_line", "end_line", "text", "sha256"):
                 unit[name] = identity[name]
+            if unit.get("classification") == "context-only":
+                unit["normative"] = False
+                unit["decision_relevant"] = False
+                unit["condition_strength"] = "none"
+                unit["conditions"] = []
             semantic_by_id[unit["unit_id"]] = unit.get("semantic_status")
         obligations = normalized.get("obligations")
         if isinstance(obligations, list):
