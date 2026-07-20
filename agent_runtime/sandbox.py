@@ -94,7 +94,14 @@ def build_command(
         proof["binary"],
         "--die-with-parent",
         "--new-session",
-        "--unshare-all",
+        # Keep the worker out of the host PID, network, IPC, and UTS
+        # namespaces, but retain the host user namespace. The root launcher
+        # must hand off to the runner UID below; an unshared user namespace
+        # only maps namespace root and makes that fixed setpriv handoff fail.
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
         "--cap-drop", "ALL",
         "--cap-add", "CAP_SETUID",
         "--cap-add", "CAP_SETGID",

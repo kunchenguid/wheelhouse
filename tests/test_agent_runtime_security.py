@@ -127,7 +127,20 @@ def main():
         )
         joined = " ".join(command)
         check("sandbox: privileged launcher creates the isolated network namespace", command[:2] == ["sudo", "--non-interactive"])
-        check("sandbox: all namespaces unshared", "--unshare-all" in command)
+        check(
+            "sandbox: isolation namespaces exclude the unmapped user namespace",
+            all(
+                option in command
+                for option in (
+                    "--unshare-pid",
+                    "--unshare-net",
+                    "--unshare-ipc",
+                    "--unshare-uts",
+                )
+            )
+            and "--unshare-all" not in command
+            and "--unshare-user" not in command,
+        )
         check(
             "sandbox: fixed privilege handoff drops to the runner before Python",
             "--uid" not in command

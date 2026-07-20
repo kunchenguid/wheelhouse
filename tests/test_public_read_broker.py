@@ -1088,6 +1088,9 @@ def test_production_launcher_contract():
     ), mock.patch(
         "agent_runtime.brokers._uid_process_limit",
         side_effect=lambda allowance: 100 + allowance,
+    ), mock.patch(
+        "agent_runtime.brokers.os.path.exists",
+        return_value=True,
     ):
         broker = PublicReadBrokerProcess(str(Path(directory) / "broker"), EXECUTION_ID, TASK_SHA256)
         previous_umask = os.umask(0o022)
@@ -1129,6 +1132,7 @@ def test_production_launcher_contract():
             and "--nproc=164" in command
             and "/usr/bin/bwrap" in command
             and "--unshare-user" not in command
+            and "/usr/local/share/ca-certificates" in command
             and runner_handoff(command)
             and '"chown"' not in source
             and "os.chmod(self.root.parent" not in source

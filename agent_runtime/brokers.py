@@ -534,6 +534,7 @@ class PublicReadBrokerProcess:
             "/lib64",
             "/etc/ssl",
             "/etc/ca-certificates",
+            "/usr/local/share/ca-certificates",
             "/etc/resolv.conf",
             "/etc/hosts",
             "/etc/nsswitch.conf",
