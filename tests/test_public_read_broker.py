@@ -623,6 +623,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     known_words_unknown_condition_plan = derive_evidence_plan(
         "Artifacts must be released if reviewer assertions are required."
     )
+    should_plan = derive_evidence_plan(
+        "Artifacts should receive LEGAL APPROVAL before release."
+    )
+    ought_plan = derive_evidence_plan(
+        "Artifacts ought to receive legal approval before release."
+    )
+    trailing_predicate_plan = derive_evidence_plan(
+        "Artifacts must satisfy release policy and receive legal approval."
+    )
+    disjunction_plan = derive_evidence_plan(
+        "A reviewer must inspect source or execute a package."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -650,8 +662,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 uppercase_plan,
                 false_subject_plan,
                 known_words_unknown_condition_plan,
+                should_plan,
+                ought_plan,
+                trailing_predicate_plan,
             )
             for row in plan["obligations"]
+        ),
+    )
+    check(
+        "VISION: ordinary predicate disjunctions are explicitly ambiguous",
+        all(
+            row["semantic_status"] == "ambiguous"
+            for row in disjunction_plan["obligations"]
         ),
     )
     check(

@@ -19,7 +19,7 @@ PLAN_VERSION = "wheelhouse/evidence-plan/v1"
 REVIEW_KIND = "AdvisoryReview"
 
 _NORMATIVE = re.compile(
-    r"(?i)\b(?:must|required|requires?|shall|only\s+after|cannot|may\s+receive"
+    r"(?i)\b(?:must|required|requires?|shall|should|ought\s+to|can|may|only\s+after|cannot"
     r"\s+(?:a\s+)?positive\b|insufficient\s+evidence|remain\s+inconclusive|"
     r"never|contingent\s+upon|prerequisite)\b"
 )
@@ -49,37 +49,18 @@ _DIGEST_LANGUAGE = re.compile(
 _SHA256_VALUE = re.compile(
     r"(?i)\bsha-?256\s*[:=]?\s*([0-9a-f]{64})\b"
 )
-_GRAMMAR_PRODUCTIONS = (
-    (re.compile(r".+\brequires?\s+(?:rigorous\s+)?validation\s+across\s+.+", re.I), ("policy.assess",)),
-    (re.compile(r".+\bmay\s+receive\s+(?:a\s+)?positive\s+(?:[\w-]+\s+){0,3}verdict\s+only\s+after\s+(?:[\w-]+\s+){0,4}review\s+of\s+(?:[\w-]+\s+){0,4}(?:package|artifact|release)(?:\s+itself)?", re.I), ("public.artifact",)),
-    (re.compile(r".+\bmay\s+receive\s+(?:a\s+)?positive\s+(?:review|verdict)\s+only\s+after\s+(?:[\w-]+\s+){0,5}fetches?\s+.+\b(?:manifest|dataset|public\s+url)\b\s+and\s+verifies?\s+.+", re.I), ("public.fetch",)),
-    (re.compile(r".+\bmust\s+inspect\s+.+\bsource\b.+(?:\band\b.+\bexecute\s+.+\b(?:package|artifact|release)\b.+)?", re.I), ("public.git_snapshot", "public.artifact", "exercise.run")),
-    (re.compile(r".+\bmust\s+satisfy\s+.+", re.I), ("policy.assess",)),
-    (re.compile(r".+\b(?:are|is)\s+insufficient\s+evidence(?:\s+.+)?", re.I), ("policy.assess",)),
-    (re.compile(r".+\bmust\s+identify\s+.+\b(?:source|revision|release)\b.+", re.I), ("public.git_snapshot", "public.artifact", "exercise.run")),
-    (re.compile(r".+\bmust\s+distinguish\s+direct\s+observations\s+from\s+unverified\s+claims\s+and\s+avoid\s+attributing\s+observations\s+to\s+.+\bthat\s+was\s+not\s+inspected", re.I), ("policy.assess",)),
-    (re.compile(r"if\s+.+\bcannot\s+be\s+(?:completed|fetched|established)(?:\s+.+)?\s*,\s*.+\bmust\s+remain\s+inconclusive(?:\s+.+)?", re.I), ()),
-    (re.compile(r".+\bshould\s+be\s+representative\s+of\s+.+;\s*exhaustive\s+auditing\s+of\s+.+\bis\s+not\s+required", re.I), ("policy.assess",)),
-    (re.compile(r".+\brequires?\s+verifying\s+.+\b(?:artifact|package|release)\b.+\bsha-?256\b\s+[0-9a-f]{64}", re.I), ("public.artifact",)),
-    (re.compile(r".+\brequires?\s+verifying\s+.+\b(?:artifact|package|release)\b.+\b(?:checksum|digest|integrity|hash)\b", re.I), ("digest.verify",)),
-)
-_GRAMMAR_LIMITS = (
-    (1, frozenset()),
-    (2, frozenset({"after"})),
-    (2, frozenset({"after"})),
-    (1, frozenset({"when"})),
-    (1, frozenset()),
-    (1, frozenset()),
-    (2, frozenset({"when"})),
-    (1, frozenset({"not"})),
-    (4, frozenset({"if", "when", "cannot"})),
-    (1, frozenset({"not"})),
-    (1, frozenset()),
-    (1, frozenset()),
-)
-_SEMANTIC_CONTROLS = re.compile(
-    r"(?i)(?<!-)\b(?:if|when|unless|after|before|with|without|cannot|not|never|except|provided|contingent)\b(?!-)"
-)
+_VISION_TOKEN = re.compile(r"https?://\S+|[0-9a-fA-F]{64}|[A-Za-z]+(?:-[A-Za-z]+)?|[,;:.()]" )
+_MODALS = {"must", "shall", "should", "may", "can", "cannot"}
+_CONDITIONS = {"if", "when", "after", "before", "with", "without"}
+_PREDICATES = {
+    "attribute", "attributing", "audit", "auditing", "avoid", "complete",
+    "completed", "establish", "established", "evolve", "execute", "executed",
+    "execution", "exercise", "exercised", "exist", "exists", "fetch", "fetched",
+    "fetches", "fetching", "identify", "inspect", "inspected", "inspection",
+    "maintain", "provide", "receive", "recommend", "remain", "representative",
+    "request", "review", "satisfy", "verify", "verification", "verifies",
+    "verifying", "validate", "validation", "distinguish",
+}
 
 
 class VisionPolicyError(ValueError):
@@ -190,34 +171,182 @@ def _normative_productions(text: str) -> list[str]:
     return productions
 
 
+def _predicate_operations(
+    predicate: str, tokens: list[str], index: int
+) -> list[str] | None:
+    context = " ".join(tokens)
+    nearby = " ".join(tokens[max(0, index - 12) : index + 24])
+    if predicate in {"inspect", "inspected", "inspection"}:
+        return ["public.git_snapshot"]
+    if predicate in {"fetch", "fetched", "fetches", "fetching"}:
+        return ["public.fetch"]
+    if predicate in {"execute", "executed", "execution", "exercise", "exercised"}:
+        return ["public.artifact", "exercise.run"]
+    if predicate == "review":
+        if re.search(r"\b(?:package|artifact|release)\b", nearby):
+            return ["public.artifact"]
+        if re.search(r"\b(?:source|repository|revision|commit)\b", nearby):
+            return ["public.git_snapshot"]
+        return ["policy.assess"]
+    if predicate in {"verify", "verification", "verifies", "verifying"}:
+        if (
+            any(re.fullmatch(r"[0-9a-f]{64}", token) for token in tokens)
+            and re.search(r"\b(?:artifact|package|release)\b", nearby)
+        ):
+            return ["public.artifact"]
+        if _DIGEST_LANGUAGE.search(nearby):
+            return ["public.artifact"] if _expected_sha256(context) else ["digest.verify"]
+        if re.search(r"\b(?:manifest|dataset|public\s+url)\b", nearby):
+            return ["public.fetch"]
+        if re.search(r"\b(?:source|repository|revision|commit)\b", nearby):
+            return ["public.git_snapshot"]
+        return ["policy.assess"]
+    if predicate == "identify":
+        operations = []
+        if re.search(r"\b(?:source|repository|revision|commit)\b", context):
+            operations.append("public.git_snapshot")
+        if re.search(r"\b(?:package|artifact|release)\b", context):
+            operations.append("public.artifact")
+        if re.search(r"\b(?:execute|execution|exercise|exercised)\b", context):
+            operations.append("exercise.run")
+        return operations or ["policy.assess"]
+    if predicate == "receive":
+        suffix = " ".join(tokens[index : index + 8])
+        return ["policy.assess"] if re.match(
+            r"receive\s+(?:a\s+)?positive\s+(?:[a-z-]+\s+){0,3}(?:review|verdict)",
+            suffix,
+        ) else None
+    if predicate == "remain":
+        return ["policy.assess"] if tokens[index + 1 : index + 2] == ["inconclusive"] else None
+    if predicate in {"complete", "completed", "establish", "established"}:
+        if re.search(r"\b(?:source|inspection|revision|commit)\b", nearby):
+            return ["public.git_snapshot"]
+        if re.search(r"\b(?:execute|execution|package|artifact|release)\b", nearby):
+            return ["public.artifact", "exercise.run"]
+        if re.search(r"\b(?:manifest|dataset|ordering|fetched)\b", nearby):
+            return ["public.fetch"]
+        return None
+    return ["policy.assess"]
+
+
+def _parse_production(production: str) -> tuple[list[str], str]:
+    raw = [match.group(0) for match in _VISION_TOKEN.finditer(production)]
+    tokens = [token.casefold() for token in raw]
+    if not tokens or len(tokens) > 160:
+        return [], "unknown"
+    ambiguous = bool(_AMBIGUOUS_CONDITION.search(production))
+    selected: set[int] = set()
+    if re.search(r"\b(?:is|are)\s+insufficient\s+evidence\b", production, re.I):
+        policy_marker = True
+    else:
+        policy_marker = False
+    for index, token in enumerate(tokens):
+        modal_end = index
+        if token == "ought" and tokens[index + 1 : index + 2] == ["to"]:
+            modal_end = index + 1
+        elif token not in _MODALS:
+            continue
+        cursor = modal_end + 1
+        if tokens[cursor : cursor + 1] == ["not"]:
+            cursor += 1
+        if tokens[cursor : cursor + 1] == ["be"]:
+            cursor += 1
+        if cursor >= len(tokens) or tokens[cursor] not in _PREDICATES:
+            return [], "unknown"
+        selected.add(cursor)
+    for index, token in enumerate(tokens):
+        if token in {"require", "requires"}:
+            candidates = [
+                offset
+                for offset in range(index + 1, min(len(tokens), index + 7))
+                if tokens[offset] in _PREDICATES
+            ]
+            if not candidates:
+                return [], "unknown"
+            selected.add(candidates[0])
+        elif token == "required":
+            candidates = [
+                offset
+                for offset in range(max(0, index - 6), min(len(tokens), index + 7))
+                if tokens[offset] in _PREDICATES and offset != index
+            ]
+            if not candidates and tokens[max(0, index - 1) : index] != ["not"]:
+                return [], "unknown"
+            selected.update(candidates[:1])
+            policy_marker = policy_marker or not candidates
+    for index, token in enumerate(tokens):
+        if token in _CONDITIONS or token in {"contingent", "prerequisite"}:
+            candidates = [
+                offset
+                for offset in range(index + 1, min(len(tokens), index + 14))
+                if tokens[offset] in _PREDICATES or tokens[offset] == "required"
+            ]
+            if not candidates:
+                return [], "unknown"
+            if tokens[candidates[0]] in _PREDICATES:
+                selected.add(candidates[0])
+    fail_closed = bool(
+        re.search(r"\b(?:cannot|inconclusive|insufficient\s+evidence)\b", production, re.I)
+    )
+    for index, token in enumerate(tokens):
+        if token not in {"and", "or"}:
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and tokens[cursor] in {",", "("}:
+            cursor += 1
+        if tokens[cursor : cursor + 1] == ["when"]:
+            candidates = [
+                offset
+                for offset in range(cursor + 1, min(len(tokens), cursor + 7))
+                if tokens[offset] in _PREDICATES
+            ][:1]
+        else:
+            candidates = [cursor] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
+        if candidates:
+            if token == "or" and not fail_closed:
+                ambiguous = True
+            selected.add(candidates[0])
+    ambiguous = ambiguous or "never" in tokens or "unless" in tokens or "and/or" in tokens
+    operations = ["policy.assess"] if policy_marker else []
+    for index in sorted(selected):
+        end = next(
+            (
+                offset
+                for offset in range(index + 1, len(tokens))
+                if tokens[offset] in {"and", "or", ";", "."}
+            ),
+            len(tokens),
+        )
+        if end - index > 48:
+            return [], "unknown"
+        resolved = _predicate_operations(tokens[index], tokens, index)
+        if resolved is None:
+            return [], "unknown"
+        for operation in resolved:
+            if operation not in operations:
+                operations.append(operation)
+    if not operations:
+        return [], "unknown"
+    if len(operations) > 1 and "policy.assess" in operations:
+        operations.remove("policy.assess")
+    if ambiguous:
+        return operations, "ambiguous"
+    if "digest.verify" in operations:
+        return operations, "unknown"
+    return operations, (
+        "recognized-local" if operations == ["policy.assess"] else "recognized"
+    )
+
+
 def _parse_normative(text: str) -> tuple[list[str], str]:
-    if _AMBIGUOUS_CONDITION.search(text):
-        return _operations(text), "ambiguous"
     operations = []
     productions = _normative_productions(text)
     if not productions:
         return [], "unknown"
     for production in productions:
-        matched = None
-        for index, (pattern, mapped) in enumerate(_GRAMMAR_PRODUCTIONS):
-            if pattern.fullmatch(production):
-                expected_count, allowed_controls = _GRAMMAR_LIMITS[index]
-                controls = {
-                    match.group(0).casefold()
-                    for match in _SEMANTIC_CONTROLS.finditer(production)
-                }
-                if (
-                    len(_NORMATIVE.findall(production)) != expected_count
-                    or not controls.issubset(allowed_controls)
-                ):
-                    continue
-                matched = mapped
-                break
-        if matched is None:
-            return [], "unknown"
-        resolved = list(matched) or _operations(production)
-        if not resolved:
-            resolved = ["policy.assess"]
+        resolved, status = _parse_production(production)
+        if status in {"unknown", "ambiguous"}:
+            return resolved, status
         for operation in resolved:
             if operation not in operations:
                 operations.append(operation)
