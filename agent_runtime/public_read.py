@@ -39,6 +39,7 @@ from .contract import canonical_json_bytes, canonical_sha256
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 65_536
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_HEADER_BYTES = 65_536
 MAX_FETCH_WIRE_BYTES = 4 * 1024 * 1024
 MAX_FETCH_TEXT_BYTES = 2 * 1024 * 1024
 MAX_MODEL_TEXT_BYTES = 512 * 1024
@@ -299,7 +300,13 @@ def validate_public_ip(value: str) -> str:
 Resolver = Callable[..., list[tuple[Any, ...]]]
 
 
-def resolve_public_host(host: str, resolver: Resolver = socket.getaddrinfo) -> list[str]:
+def resolve_public_host(
+    host: str,
+    resolver: Resolver = socket.getaddrinfo,
+    timeout: float = CONNECT_TIMEOUT,
+) -> list[str]:
+    if timeout <= 0:
+        raise PublicReadError("dns.timeout", "public host resolution exceeded its wall bound")
     if resolver is socket.getaddrinfo:
         # getaddrinfo has no portable timeout. Keep its libc resolver in a
         # short-lived, equally scrubbed helper so the broker can enforce the
@@ -323,7 +330,7 @@ def resolve_public_host(host: str, resolver: Resolver = socket.getaddrinfo) -> l
                     "LC_ALL": "C.UTF-8",
                     "LANG": "C.UTF-8",
                 },
-                timeout=CONNECT_TIMEOUT,
+                timeout=min(CONNECT_TIMEOUT, timeout),
             )
             if completed.returncode or len(completed.stdout) > 65_536:
                 raise PublicReadError(
@@ -365,6 +372,41 @@ def _url_host(url: str) -> str:
     return (urllib.parse.urlsplit(url).hostname or "").rstrip(".").casefold()
 
 
+class _BoundedHeaderReader:
+    def __init__(
+        self,
+        reader: Any,
+        max_bytes: int,
+        account_bytes: Callable[[int], None] | None,
+    ) -> None:
+        self.reader = reader
+        self.max_bytes = max_bytes
+        self.account_bytes = account_bytes
+        self.bytes_read = 0
+
+    def readline(self, limit: int = -1) -> bytes:
+        remaining = self.max_bytes - self.bytes_read
+        if remaining <= 0:
+            raise PublicReadError(
+                "headers.wire", "public response headers exceeded their byte bound"
+            )
+        read_limit = remaining
+        if limit >= 0:
+            read_limit = min(read_limit, limit)
+        value = self.reader.readline(read_limit)
+        self.bytes_read += len(value)
+        if self.account_bytes is not None:
+            self.account_bytes(len(value))
+        if self.bytes_read == self.max_bytes and value not in (b"\r\n", b"\n"):
+            raise PublicReadError(
+                "headers.wire", "public response headers exceeded their byte bound"
+            )
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.reader, name)
+
+
 class PinnedHTTPSClient:
     def __init__(self, resolver: Resolver = socket.getaddrinfo) -> None:
         self.resolver = resolver
@@ -376,10 +418,13 @@ class PinnedHTTPSClient:
         max_bytes: int,
         deadline: float,
         account_bytes: Callable[[int], None] | None = None,
-    ) -> tuple[int, dict[str, str], bytes, dict[str, Any]]:
+    ) -> tuple[int, dict[str, str], bytes, dict[str, Any], int]:
         parsed = urllib.parse.urlsplit(url)
         host = _url_host(url)
-        addresses = resolve_public_host(host, self.resolver)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PublicReadError("time.wall", "public fetch exceeded its wall bound")
+        addresses = resolve_public_host(host, self.resolver, timeout=remaining)
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         last_error: OSError | None = None
         for address in addresses:
@@ -433,7 +478,14 @@ class PinnedHTTPSClient:
                 ).encode("ascii")
                 tls.sendall(request)
                 response = http.client.HTTPResponse(tls)
+                header_reader = _BoundedHeaderReader(
+                    response.fp,
+                    min(MAX_RESPONSE_HEADER_BYTES, max_bytes),
+                    account_bytes,
+                )
+                response.fp = header_reader
                 response.begin()
+                header_bytes = header_reader.bytes_read
                 headers = {key.casefold(): value for key, value in response.getheaders()}
                 if headers.get("content-encoding", "identity").casefold() not in (
                     "",
@@ -443,16 +495,17 @@ class PinnedHTTPSClient:
                         "content.encoding", "compressed public responses are not accepted"
                     )
                 body = bytearray()
+                body_limit = max_bytes - header_bytes
                 while True:
                     if time.monotonic() >= deadline:
                         raise PublicReadError("time.wall", "public fetch exceeded its wall bound")
-                    chunk = response.read(min(65_536, max_bytes + 1 - len(body)))
+                    chunk = response.read(min(65_536, body_limit + 1 - len(body)))
                     if not chunk:
                         break
                     body.extend(chunk)
                     if account_bytes is not None:
                         account_bytes(len(chunk))
-                    if len(body) > max_bytes:
+                    if len(body) > body_limit:
                         raise PublicReadError("bytes.wire", "public response exceeded its byte bound")
                 certificate = tls.getpeercert()
                 proof = {
@@ -463,7 +516,7 @@ class PinnedHTTPSClient:
                     "tls_version": tls.version() or "",
                     "certificate_subject": str(certificate.get("subject", ""))[:1000],
                 }
-                return response.status, headers, bytes(body), proof
+                return response.status, headers, bytes(body), proof, header_bytes + len(body)
             except PublicReadError:
                 raise
             except OSError as error:
@@ -501,13 +554,15 @@ class PinnedHTTPSClient:
         current = canonical_public_url(url)
         redirects = []
         deadline = time.monotonic() + wall_seconds
+        wire_bytes = 0
         for hop in range(max_redirects + 1):
-            status, headers, body, proof = self._request_once(
+            status, headers, body, proof, response_wire_bytes = self._request_once(
                 current,
-                max_bytes=max_bytes,
+                max_bytes=max_bytes - wire_bytes,
                 deadline=deadline,
                 account_bytes=account_bytes,
             )
+            wire_bytes += response_wire_bytes
             row = {"url": current, "status": status, **proof}
             if status in (301, 302, 303, 307, 308):
                 location = headers.get("location", "")
@@ -531,6 +586,7 @@ class PinnedHTTPSClient:
                 "status_code": status,
                 "headers": headers,
                 "body": body,
+                "wire_bytes": wire_bytes,
                 "network": proof,
             }
         raise PublicReadError("redirect.limit", "public redirect limit exceeded")
@@ -1367,7 +1423,7 @@ class PublicReadService:
             redirects=redirects,
             network=result["network"],
             content_type=content_type,
-            wire_bytes=len(body),
+            wire_bytes=result["wire_bytes"],
             decoded_bytes=len(encoded),
             digest=digest,
             bounds={"wire_bytes": MAX_FETCH_WIRE_BYTES, "decoded_bytes": MAX_FETCH_TEXT_BYTES, "model_bytes": MAX_MODEL_TEXT_BYTES, "wall_seconds": FETCH_WALL_SECONDS, "redirects": MAX_REDIRECTS},
@@ -1412,7 +1468,7 @@ class PublicReadService:
             redirects=result["redirects"],
             network=result["network"],
             content_type=result["headers"].get("content-type", "application/octet-stream"),
-            wire_bytes=len(body),
+            wire_bytes=result["wire_bytes"],
             decoded_bytes=len(body),
             digest=digest,
             bounds={"wire_bytes": MAX_ARTIFACT_BYTES, "wall_seconds": GIT_WALL_SECONDS, "redirects": MAX_REDIRECTS},
@@ -1534,7 +1590,7 @@ class PublicReadService:
             redirects=result["redirects"],
             network=result["network"],
             content_type="text/html",
-            wire_bytes=len(result["body"]),
+            wire_bytes=result["wire_bytes"],
             decoded_bytes=len(canonical_json_bytes(links)),
             digest=digest,
             bounds={"wire_bytes": MAX_FETCH_WIRE_BYTES, "results": maximum, "wall_seconds": FETCH_WALL_SECONDS, "redirects": MAX_REDIRECTS},

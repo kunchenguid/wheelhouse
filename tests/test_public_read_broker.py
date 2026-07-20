@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
+import io
 import json
 import os
 import platform
@@ -20,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +34,13 @@ from agent_runtime.adapters.claude import ClaudeCliAdapter  # noqa: E402
 from agent_runtime.brokers import PublicReadBrokerProcess  # noqa: E402
 from agent_runtime.config import resolve_selection  # noqa: E402
 from agent_runtime.contract import file_sha256  # noqa: E402
+from agent_runtime.public_read import (  # noqa: E402
+    MAX_RESPONSE_HEADER_BYTES,
+    PinnedHTTPSClient,
+    PublicReadError,
+    _BoundedHeaderReader,
+    resolve_public_host,
+)
 from agent_runtime.task_builder import build_task  # noqa: E402
 from agent_runtime.tools import CanonicalTools  # noqa: E402
 from agent_runtime.vision_policy import (  # noqa: E402
@@ -162,6 +172,80 @@ def unavailable(result, reason_code):
     check(
         "ssrf: %s is rejected" % reason_code,
         row.get("status") == "unavailable" and row.get("reason_code") == reason_code,
+    )
+
+
+def test_https_hard_bounds():
+    oversized_headers = (
+        b"HTTP/1.1 200 OK\r\n"
+        + b"X-One: "
+        + b"a" * 40_000
+        + b"\r\nX-Two: "
+        + b"b" * 40_000
+        + b"\r\n\r\n"
+    )
+
+    class HeaderSocket:
+        def makefile(self, _mode):
+            return io.BytesIO(oversized_headers)
+
+    charged = []
+    response = http.client.HTTPResponse(HeaderSocket())
+    response.fp = _BoundedHeaderReader(
+        response.fp, MAX_RESPONSE_HEADER_BYTES, charged.append
+    )
+    try:
+        response.begin()
+        header_rejected = False
+    except PublicReadError as error:
+        header_rejected = error.code == "headers.wire"
+    check(
+        "bounds: aggregate HTTPS response headers are capped and charged",
+        header_rejected
+        and sum(charged) == MAX_RESPONSE_HEADER_BYTES,
+    )
+
+    observed = {}
+
+    def bounded_resolution(_host, _resolver, timeout):
+        observed["timeout"] = timeout
+        raise PublicReadError("dns.timeout", "bounded test lookup")
+
+    remaining = 0.05
+    started = time.monotonic()
+    with mock.patch(
+        "agent_runtime.public_read.resolve_public_host",
+        side_effect=bounded_resolution,
+    ):
+        try:
+            PinnedHTTPSClient()._request_once(
+                "https://example.com/",
+                max_bytes=1024,
+                deadline=started + remaining,
+            )
+        except PublicReadError as error:
+            dns_rejected = error.code == "dns.timeout"
+        else:
+            dns_rejected = False
+    check(
+        "bounds: DNS resolution receives only the fetch deadline remainder",
+        dns_rejected and 0 < observed.get("timeout", 0) <= remaining,
+    )
+
+    dns_timeout = 0.01
+    with mock.patch(
+        "agent_runtime.public_read.subprocess.run",
+        side_effect=subprocess.TimeoutExpired([sys.executable], dns_timeout),
+    ) as run:
+        try:
+            resolve_public_host("example.com", timeout=dns_timeout)
+        except PublicReadError as error:
+            helper_rejected = error.code == "dns.timeout"
+        else:
+            helper_rejected = False
+    check(
+        "bounds: system DNS helper uses the supplied deadline budget",
+        helper_rejected and run.call_args.kwargs["timeout"] == dns_timeout,
     )
 
 
@@ -497,6 +581,7 @@ def restore_environment(saved):
 
 
 def test_public_internet_broker():
+    test_https_hard_bounds()
     test_public_task_contract()
     saved = parent_secret_environment()
     try:
@@ -694,6 +779,7 @@ def test_production_e2e():
     if platform.system() != "Linux":
         raise Failure("production public-read E2E requires Linux")
     saved = parent_secret_environment()
+    test_https_hard_bounds()
     test_public_task_contract()
     sentinel = Path("/tmp/wheelhouse-parent-secret-canary")
     sentinel.write_text("credential-canary\n", encoding="utf-8")
