@@ -1365,6 +1365,8 @@ def build_task(
         raise ArtifactError("CoverageAuditor requires the completed proposed plan")
     if action == "advisory-review.public" and not (policy_plan_file and policy_audit_file):
         raise ArtifactError("AdvisoryReview requires validated policy artifacts")
+    if public_policy_action and not vision_file:
+        raise ArtifactError("public policy actions require trusted VISION input")
     adapter = (selection.get("profile") or {}).get("adapter")
     if (selection.get("mode"), adapter) not in (
         ("claude", "claude-action-compat"),
@@ -1378,6 +1380,29 @@ def build_task(
     if bundle.exists():
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True, mode=0o700)
+
+    vision_text = ""
+    policy_binding: dict[str, str] | None = None
+    if vision_file:
+        vision_text = Path(vision_file).read_text(encoding="utf-8")
+        if public_policy_action:
+            policy_binding = {
+                "version": "wheelhouse/policy-binding/v1",
+                "target_head_sha": revision,
+                "target_base_sha": base_revision,
+                "vision_blob_sha": vision_blob_sha,
+                "vision_sha256": canonical_sha256(vision_text),
+            }
+    schema_path, schema_id = _schema_for(action, repair_kind)
+    source_schema = load_json_regular(schema_path, max_bytes=65536)
+    schema_value = _bound_output_schema(
+        source_schema,
+        action,
+        repair_kind,
+        allow_automerge_behavior,
+        require_vision_fields or bool(vision_file),
+        policy_binding if public_policy_action else None,
+    )
 
     source_prompt = Path(prompt_path)
     try:
@@ -1415,6 +1440,15 @@ def build_task(
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),
         "Do not add Markdown fences or prose outside that schema.",
+        *(
+            [
+                '<wheelhouse-output-schema trust="trusted">',
+                canonical_json_bytes(schema_value).decode("utf-8"),
+                "</wheelhouse-output-schema>",
+            ]
+            if adapter == "claude-cli" and public_policy_action
+            else []
+        ),
         "</wheelhouse-adapter-shim>",
     ]
     compiled_prompt = (
@@ -1500,14 +1534,6 @@ def build_task(
         )
     if vision_file:
         digest, size, artifact = _copy_file(Path(vision_file), bundle, 40000)
-        vision_text = Path(vision_file).read_text(encoding="utf-8")
-        policy_binding = {
-            "version": "wheelhouse/policy-binding/v1",
-            "target_head_sha": revision,
-            "target_base_sha": base_revision,
-            "vision_blob_sha": vision_blob_sha,
-            "vision_sha256": canonical_sha256(vision_text),
-        }
         inputs.append(
             {
                 "id": "vision",
@@ -1610,16 +1636,6 @@ def build_task(
             vision_blob_sha=vision_blob_sha,
         )
 
-    schema_path, schema_id = _schema_for(action, repair_kind)
-    source_schema = load_json_regular(schema_path, max_bytes=65536)
-    schema_value = _bound_output_schema(
-        source_schema,
-        action,
-        repair_kind,
-        allow_automerge_behavior,
-        require_vision_fields or bool(vision_file),
-        policy_binding if public_policy_action else None,
-    )
     schema_source = schema_path
     canonical_schema = bundle / ".canonical-output-schema"
     if action.startswith("nl-decision") or schema_value != source_schema:

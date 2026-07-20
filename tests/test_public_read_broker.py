@@ -1571,13 +1571,18 @@ def test_public_task_contract():
         schema_input = next(
             row for row in task["spec"]["inputs"] if row["id"] == "output-schema"
         )
+        compiled_prompt = (
+            bundle / task["spec"]["prompt"]["userArtifact"]
+        ).read_text(encoding="utf-8")
         check(
             "task: auto-merge lane requires advisory eligibility facts in draft-07",
             bound_schema["$schema"] == "http://json-schema.org/draft-07/schema#"
             and "eligibility_facts" in bound_schema["required"]
             and schema_input["artifact"]
             == task["spec"]["output"]["schemaArtifact"]
-            and schema_input["trust"] == "trusted",
+            and schema_input["trust"] == "trusted"
+            and canonical_json_bytes(bound_schema).decode("utf-8")
+            in compiled_prompt,
         )
         plan_input = next(
             row for row in task["spec"]["inputs"] if row["id"] == "vision-units"
