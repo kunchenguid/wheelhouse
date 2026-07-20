@@ -401,44 +401,63 @@ def _validate_worker(
     try:
         validate_schema(delivered_value, schema)
     except ContractError as error:
-        reason = str(error)
-        category = next(
-            (
-                label
-                for marker, label in (
-                    ("must equal the contract constant", "constant"),
-                    ("is not an allowed value", "enum"),
-                    ("has the wrong type", "type"),
-                    ("is missing required field", "missing-required"),
-                    ("has unknown field", "unknown-field"),
-                    ("does not match", "alternative"),
-                    ("has too many", "upper-bound"),
-                    ("is too long", "upper-bound"),
-                    ("exceeds its maximum", "upper-bound"),
-                    ("has too few", "lower-bound"),
-                    ("is too short", "lower-bound"),
-                    ("is below its minimum", "lower-bound"),
-                    ("has an invalid format", "format"),
-                )
-                if marker in reason
-            ),
-            "contract",
-        )
-        missing = re.search(r"is missing required field ([A-Za-z0-9_-]+)$", reason)
-        if missing:
-            category += ":" + missing.group(1)
-            if isinstance(delivered_value, dict):
-                if "$schema" in delivered_value:
-                    category += ":schema-definition"
-                elif len(delivered_value) == 1 and isinstance(
-                    next(iter(delivered_value.values())), dict
-                ):
-                    category += ":wrapper"
-        return None, delivered, _error(
-            "output.schema_invalid",
-            "Delivered result failed the trusted output schema (%s)." % category,
-            spend_started=True,
-        )
+        nested_matches: list[dict[str, Any]] = []
+        if isinstance(delivered_value, dict):
+            for child in delivered_value.values():
+                if not isinstance(child, dict):
+                    continue
+                try:
+                    validate_schema(child, schema)
+                except ContractError:
+                    continue
+                nested_matches.append(child)
+        if len(nested_matches) == 1:
+            delivered_value = nested_matches[0]
+            encoded = canonical_json_bytes(delivered_value)
+            delivered = {
+                "value": delivered_value,
+                "valueSha256": canonical_sha256(delivered_value),
+                "bytes": len(encoded),
+            }
+        else:
+            reason = str(error)
+            category = next(
+                (
+                    label
+                    for marker, label in (
+                        ("must equal the contract constant", "constant"),
+                        ("is not an allowed value", "enum"),
+                        ("has the wrong type", "type"),
+                        ("is missing required field", "missing-required"),
+                        ("has unknown field", "unknown-field"),
+                        ("does not match", "alternative"),
+                        ("has too many", "upper-bound"),
+                        ("is too long", "upper-bound"),
+                        ("exceeds its maximum", "upper-bound"),
+                        ("has too few", "lower-bound"),
+                        ("is too short", "lower-bound"),
+                        ("is below its minimum", "lower-bound"),
+                        ("has an invalid format", "format"),
+                    )
+                    if marker in reason
+                ),
+                "contract",
+            )
+            missing = re.search(r"is missing required field ([A-Za-z0-9_-]+)$", reason)
+            if missing:
+                category += ":" + missing.group(1)
+                if isinstance(delivered_value, dict):
+                    if "$schema" in delivered_value:
+                        category += ":schema-definition"
+                    elif len(delivered_value) == 1 and isinstance(
+                        next(iter(delivered_value.values())), dict
+                    ):
+                        category += ":wrapper"
+            return None, delivered, _error(
+                "output.schema_invalid",
+                "Delivered result failed the trusted output schema (%s)." % category,
+                spend_started=True,
+            )
     if not _anchor_ok(delivered_value, task, bundle):
         return None, delivered, _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
     final_value = delivered_value

@@ -139,6 +139,17 @@ def main() -> None:
             worker,
             negotiated.proof["structuredOutputMechanism"],
         )
+        wrapped_worker = dict(worker)
+        wrapped_worker["final"] = {
+            "presentation": worker["final"],
+            "note": "schema-valid child is authoritative",
+        }
+        wrapped_final, _wrapped_delivered, wrapped_error = _validate_worker(
+            task,
+            bundle,
+            wrapped_worker,
+            negotiated.proof["structuredOutputMechanism"],
+        )
         serialized = json.dumps(
             {"plan": plan, "worker": worker, "final": final},
             sort_keys=True,
@@ -146,6 +157,7 @@ def main() -> None:
         check("synthetic: both schema-repair actions resolve to the direct profile", all(resolve_selection(action)["profile"]["adapter"] == "claude-cli" for action in ("triage.schema-repair", "nl-decision.schema-repair")))
         check("synthetic: malformed candidate yields trusted repaired output", error is None and delivered is not None and final is not None and final["value"] == repaired)
         check("synthetic: native structured output is explicitly revalidated", negotiated.proof["structuredOutputMechanism"] == "native-schema" and {row["name"] for row in final["validation"]} >= {"native-schema", "json-schema"})
+        check("synthetic: one uniquely schema-valid presentation child is normalized", wrapped_error is None and wrapped_final is not None and wrapped_final["value"] == repaired)
         check("synthetic: no tool, shell, or fallback lane is available", plan["tools"]["tools"] == [] and plan["limits"]["maxToolCalls"] == 0 and worker["usage"]["toolCalls"] == 0 and "--fallback-model" not in plan["claude"]["argv"] and "claude-action-compat" not in serialized)
         check("synthetic: exact model and provider are observed", worker["actualModel"] == "claude-sonnet-4-6" and worker["actualProvider"] == "anthropic")
         check("synthetic: OAuth canary is absent from durable data", TOKEN not in serialized)
