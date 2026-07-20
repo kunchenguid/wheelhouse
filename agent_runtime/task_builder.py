@@ -62,8 +62,8 @@ ACTION_LIMITS = {
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
     "advisory-review.public": (540_000, 600_000, 64, 40, 131_072),
-    "policy-derive.public": (300_000, 330_000, 32, 4, 131_072),
-    "policy-audit.public": (300_000, 330_000, 32, 4, 131_072),
+    "policy-derive.public": (300_000, 330_000, 32, 8, 131_072),
+    "policy-audit.public": (300_000, 330_000, 32, 8, 131_072),
 }
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
@@ -1497,8 +1497,9 @@ def build_task(
         "This direct Claude profile exposes only the exact typed filesystem and public-evidence tools declared by the task. It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
         else "This isolated policy profile exposes the MCP tool mcp__wheelhouse__fs_read. "
-        "Call it to read vision.md, vision-units.json, and policy-binding.json, plus "
-        "policy-derivation.json for an audit. These are the declared pinned policy inputs. "
+        "Call it with exactly {\"path\":\"vision.md\"}, {\"path\":\"vision-units.json\"}, "
+        "and {\"path\":\"policy-binding.json\"}, plus "
+        "{\"path\":\"policy-derivation.json\"} for an audit. These are the declared pinned policy inputs. "
         "It has no target, public evidence, shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action in {"policy-derive.public", "policy-audit.public"}
         else "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."

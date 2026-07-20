@@ -1546,7 +1546,7 @@ def test_public_task_contract():
             in derive_prompt
             and "For an audit agreement, copy the proposed semantic fields and obligations exactly"
             in derive_prompt
-            and "Call it to read vision.md, vision-units.json, and policy-binding.json"
+            and 'Call it with exactly {"path":"vision.md"}'
             in derive_prompt
             and derive_native_schema["required"] == ["json", "unit_semantics"]
             and derive_native_schema["properties"]["unit_semantics"]["minItems"]
@@ -1669,8 +1669,8 @@ def test_public_task_contract():
         )
         check(
             "task: isolated policy passes can read every input before native schema submission",
-            ACTION_LIMITS["policy-derive.public"] == (300_000, 330_000, 32, 4, 131_072)
-            and ACTION_LIMITS["policy-audit.public"] == (300_000, 330_000, 32, 4, 131_072)
+            ACTION_LIMITS["policy-derive.public"] == (300_000, 330_000, 32, 8, 131_072)
+            and ACTION_LIMITS["policy-audit.public"] == (300_000, 330_000, 32, 8, 131_072)
             and derive_task["spec"]["limits"]["maxInputTokens"] == 300_000
             and derive_task["spec"]["limits"]["maxOutputTokens"] == 32_000,
         )
