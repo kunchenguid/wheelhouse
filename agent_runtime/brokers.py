@@ -8,6 +8,7 @@ import selectors
 import signal
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -235,8 +236,8 @@ class SearchBroker:
 class PublicReadBrokerProcess:
     """Launch the anonymous public broker outside every credentialed process.
 
-    Production requires Bubblewrap and gives the broker a private PID/mount/user
-    namespace while deliberately retaining only public network egress. The
+    Production requires Bubblewrap and gives the broker private PID, mount, and
+    user namespaces while deliberately retaining only public network egress. The
     narrowly scoped local-test mode still launches the real broker module as a
     separate scrubbed process, but cannot claim Linux mount isolation.
     """
@@ -270,6 +271,7 @@ class PublicReadBrokerProcess:
         self.task_sha256 = task_sha256
         self.test_unsandboxed = test_unsandboxed
         self.process: subprocess.Popen[bytes] | None = None
+        self._sandbox_parent_mode: int | None = None
 
     def _stage_runtime(self) -> Path:
         import shutil
@@ -357,6 +359,8 @@ class PublicReadBrokerProcess:
             raise BrokerError("public-read broker production isolation requires prlimit")
         runtime_root = str(self._stage_runtime())
         command = [
+            "sudo",
+            "--non-interactive",
             prlimit,
             "--as=1073741824",
             "--cpu=600",
@@ -372,9 +376,9 @@ class PublicReadBrokerProcess:
             "--unshare-ipc",
             "--unshare-uts",
             "--uid",
-            str(os.getuid()),
+            "0",
             "--gid",
-            str(os.getgid()),
+            "0",
             "--cap-drop",
             "ALL",
             "--clearenv",
@@ -470,6 +474,30 @@ class PublicReadBrokerProcess:
         )
         if environment and set(environment) - self.ALLOWED_ENVIRONMENT:
             raise BrokerError("public-read broker launch environment is not scrubbed")
+        if not self.test_unsandboxed:
+            self._sandbox_parent_mode = stat.S_IMODE(self.root.parent.stat().st_mode)
+            os.chmod(self.root.parent, self._sandbox_parent_mode | 0o011)
+            subprocess.run(
+                [
+                    "sudo",
+                    "--non-interactive",
+                    "chown",
+                    "-R",
+                    "0:0",
+                    "--",
+                    str(self.root),
+                    str(self.runtime_root),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["sudo", "--non-interactive", "chmod", "0711", str(self.root)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         self.process = subprocess.Popen(
             command,
             env=environment,
@@ -483,8 +511,35 @@ class PublicReadBrokerProcess:
         socket_path = Path(self.socket_path)
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
+                self.close()
                 raise BrokerError("public-read broker exited during admission")
             if socket_path.exists() and self.attestation_path.is_file():
+                if not self.test_unsandboxed:
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "--non-interactive",
+                            "chown",
+                            "%d:%d" % (os.getuid(), os.getgid()),
+                            str(socket_path),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "--non-interactive",
+                            "chmod",
+                            "0755",
+                            str(self.receipt_dir),
+                            str(self.receipt_dir / "excerpts"),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 return
             time.sleep(0.05)
         self.close()
@@ -497,12 +552,68 @@ class PublicReadBrokerProcess:
         self.process = None
         if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                if self.test_unsandboxed:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "--non-interactive",
+                            "kill",
+                            "-TERM",
+                            "--",
+                            "-%d" % process.pid,
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 process.wait(timeout=5)
             except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    if self.test_unsandboxed:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "--non-interactive",
+                                "kill",
+                                "-KILL",
+                                "--",
+                                "-%d" % process.pid,
+                            ],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
                     process.wait(timeout=5)
                 except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                     pass
+        if not self.test_unsandboxed:
+            subprocess.run(
+                [
+                    "sudo",
+                    "--non-interactive",
+                    "chown",
+                    "-R",
+                    "%d:%d" % (os.getuid(), os.getgid()),
+                    "--",
+                    str(self.root),
+                    str(self.runtime_root),
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                os.chmod(self.root, 0o700)
+            except OSError:
+                pass
+            if self._sandbox_parent_mode is not None:
+                try:
+                    os.chmod(self.root.parent, self._sandbox_parent_mode)
+                except OSError:
+                    pass
+                self._sandbox_parent_mode = None
         shutil.rmtree(self.runtime_root, ignore_errors=True)

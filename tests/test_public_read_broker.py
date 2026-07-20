@@ -794,6 +794,29 @@ def restore_environment(saved):
             os.environ[key] = value
 
 
+def test_production_launcher_contract():
+    with tempfile.TemporaryDirectory() as directory, mock.patch(
+        "platform.system", return_value="Linux"
+    ), mock.patch(
+        "shutil.which",
+        side_effect=lambda name: (
+            "/usr/bin/" + name if name in {"bwrap", "prlimit"} else None
+        ),
+    ):
+        broker = PublicReadBrokerProcess(directory, EXECUTION_ID, TASK_SHA256)
+        command, environment = broker._sandboxed()
+        check(
+            "broker: hosted-runner namespace admission uses the privileged launcher",
+            command[:3] == ["sudo", "--non-interactive", "/usr/bin/prlimit"]
+            and "/usr/bin/bwrap" in command
+            and "--cap-drop" in command
+            and "--unshare-user" in command
+            and command[command.index("--uid") + 1] == "0"
+            and command[command.index("--gid") + 1] == "0"
+            and environment == {},
+        )
+
+
 def test_public_internet_broker():
     test_https_hard_bounds()
     test_git_proxy_hard_bounds()
@@ -1227,6 +1250,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--production-e2e", action="store_true")
     args = parser.parse_args()
+    test_production_launcher_contract()
     if args.production_e2e:
         test_production_e2e()
     else:
