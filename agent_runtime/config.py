@@ -23,11 +23,13 @@ ACTIONS = frozenset(
         "nl-decision.local",
         "nl-decision.search",
         "nl-decision.schema-repair",
+        "advisory-review.public",
     }
 )
 SCHEMA_REPAIR_ACTIONS = frozenset(
     {"triage.schema-repair", "nl-decision.schema-repair"}
 )
+DIRECT_ACTIONS = SCHEMA_REPAIR_ACTIONS | {"advisory-review.public"}
 PRIMARY_PROFILE = "claude-action-current-pinned"
 DIRECT_PROFILE = "claude-cli-pinned"
 
@@ -98,13 +100,17 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     activation = runtime.get("production_activation")
     if (
         not isinstance(activation, dict)
-        or set(activation) != SCHEMA_REPAIR_ACTIONS
+        or set(activation) != DIRECT_ACTIONS
         or any(value != DIRECT_PROFILE for value in activation.values())
     ):
-        raise ConfigError("only the complete schema-repair profile may be activated")
+        raise ConfigError("only reviewed direct-runtime action profiles may be activated")
     rollback = runtime.get("temporary_rollback_profile")
     if rollback not in (None, PRIMARY_PROFILE):
         raise ConfigError("temporary rollback must select the pinned action profile")
+    if action == "advisory-review.public" and rollback is not None:
+        raise ConfigError(
+            "public advisory review is disabled while the direct runtime is rolled back"
+        )
     action_config = actions.get(action) or {}
     target = (
         _repo_override(runtime, repo, action)
@@ -157,7 +163,7 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     for field in required:
         if field not in profile:
             raise ConfigError("selected agent runtime profile is incomplete")
-    expected_profile = DIRECT_PROFILE if action in SCHEMA_REPAIR_ACTIONS and rollback is None else PRIMARY_PROFILE
+    expected_profile = DIRECT_PROFILE if action in DIRECT_ACTIONS and rollback is None else PRIMARY_PROFILE
     expected_adapter = "claude-cli" if expected_profile == DIRECT_PROFILE else "claude-action-compat"
     if profile_name != expected_profile or profile["adapter"] != expected_adapter:
         raise ConfigError("Claude production selection does not match the guarded action profile")

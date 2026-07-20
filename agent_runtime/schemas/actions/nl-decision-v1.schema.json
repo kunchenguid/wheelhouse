@@ -3,8 +3,18 @@
   "$id": "wheelhouse/nl-decision/v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["mode"],
+  "required": ["result_kind", "authority", "mode"],
   "properties": {
+    "result_kind": {"type": "string", "const": "AuthorityDecision"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comment_id", "body_sha256"],
+      "properties": {
+        "comment_id": {"type": "string", "pattern": "^[0-9]+$", "maxLength": 32},
+        "body_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
     "mode": {"type": "string", "enum": ["action", "answer", "clarify"]},
     "action": {"type": "string", "maxLength": 80},
     "free_text": {"type": "string", "maxLength": 32768},

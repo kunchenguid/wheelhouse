@@ -681,19 +681,33 @@ jobs:
           CLAIM_ID: ${{ steps.nl-claim.outputs.comment_id }}
           CLAIM_MARKER: ${{ steps.nl-claim.outputs.marker }}
           CARD_REPO: ${{ github.repository }}
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
+          TRIGGER_COMMENT_BODY: ${{ github.event.comment.body }}
+          TRIGGER_ACTOR: ${{ github.event.sender.login }}
         run: |
           set -euo pipefail
           observed=""
+          comment_current=false
+          if GH_TOKEN="$CARD_TOKEN" gh api \
+            "repos/$CARD_REPO/issues/comments/$TRIGGER_COMMENT_ID" \
+            > trigger-comment.json 2>/dev/null \
+            && jq -e --arg body "$TRIGGER_COMMENT_BODY" --arg actor "$TRIGGER_ACTOR" '
+              (.body // "") == $body
+              and ((.user.login // "") | ascii_downcase) == ($actor | ascii_downcase)
+            ' trigger-comment.json >/dev/null; then
+            comment_current=true
+          fi
           if [ "$KIND" = "issue-triage" ]; then
             observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
           else
             observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
           fi
-          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+          if [ "$comment_current" = "true" ] \
+            && [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           else
             echo "fresh=false" >> "$GITHUB_OUTPUT"
-            body="The assistant output was rejected because the target revision changed or could not be verified. The card remains open and no target action was taken. ${CLAIM_MARKER}"
+            body="The assistant output was rejected because the target revision or triggering owner comment changed or could not be verified. The card remains open and no target action was taken. ${CLAIM_MARKER}"
             GH_TOKEN="$CARD_TOKEN" gh api --method PATCH \
               "repos/$CARD_REPO/issues/comments/$CLAIM_ID" -f "body=$body" >/dev/null
             python scripts/agent_runtime.py stage \
@@ -718,6 +732,8 @@ jobs:
           NL_REPAIR_CLAIM_ADMITTED: ${{ steps.nl-repair-claim.outputs.admitted }}
           NL_REPAIR_NEEDED: ${{ steps.nl-repair-prep.outputs.repair_needed }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           BASH_ENV: ""
@@ -738,6 +754,8 @@ jobs:
             NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
             NL_REPAIR_NEEDED="$NL_REPAIR_NEEDED" \
             ISSUE_BODY="$ISSUE_BODY" \
+            COMMENT_BODY="$COMMENT_BODY" \
+            TRIGGER_COMMENT_ID="$TRIGGER_COMMENT_ID" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
@@ -841,6 +859,9 @@ jobs:
           KIND: ${{ steps.decide.outputs.kind || steps.route.outputs.kind }}
           HEAD_SHA: ${{ steps.decide.outputs.head_sha || steps.route.outputs.head_sha }}
           TARGET_REVISION: ${{ steps.decide.outputs.target_revision || steps.route.outputs.target_revision }}
+          PUBLIC_CONDITION: ${{ steps.route.outputs.public_condition }}
+          EXPECTED_BASE_SHA: ${{ steps.route.outputs.expected_base_sha }}
+          EXPECTED_VISION_SHA: ${{ steps.route.outputs.expected_vision_sha }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -866,6 +887,9 @@ jobs:
             KIND="$KIND" \
             HEAD_SHA="$HEAD_SHA" \
             TARGET_REVISION="$TARGET_REVISION" \
+            PUBLIC_CONDITION="$PUBLIC_CONDITION" \
+            EXPECTED_BASE_SHA="$EXPECTED_BASE_SHA" \
+            EXPECTED_VISION_SHA="$EXPECTED_VISION_SHA" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py execute
 
       # --- Finalize the card (this repo, default token; never re-triggers) ----
@@ -1318,19 +1342,33 @@ jobs:
           CLAIM_ID: ${{ needs.handle.outputs.nl_claim_id }}
           CLAIM_MARKER: ${{ needs.handle.outputs.nl_claim_marker }}
           CARD_REPO: ${{ github.repository }}
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
+          TRIGGER_COMMENT_BODY: ${{ github.event.comment.body }}
+          TRIGGER_ACTOR: ${{ github.event.sender.login }}
         run: |
           set -euo pipefail
           observed=""
+          comment_current=false
+          if GH_TOKEN="$CARD_TOKEN" gh api \
+            "repos/$CARD_REPO/issues/comments/$TRIGGER_COMMENT_ID" \
+            > trigger-comment.json 2>/dev/null \
+            && jq -e --arg body "$TRIGGER_COMMENT_BODY" --arg actor "$TRIGGER_ACTOR" '
+              (.body // "") == $body
+              and ((.user.login // "") | ascii_downcase) == ($actor | ascii_downcase)
+            ' trigger-comment.json >/dev/null; then
+            comment_current=true
+          fi
           if [ "$KIND" = "issue-triage" ]; then
             observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
           else
             observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
           fi
-          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+          if [ "$comment_current" = "true" ] \
+            && [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           else
             echo "fresh=false" >> "$GITHUB_OUTPUT"
-            body="The assistant output was rejected because the target revision changed or could not be verified. The card remains open and no target action was taken. ${CLAIM_MARKER}"
+            body="The assistant output was rejected because the target revision or triggering owner comment changed or could not be verified. The card remains open and no target action was taken. ${CLAIM_MARKER}"
             GH_TOKEN="$CARD_TOKEN" gh api --method PATCH \
               "repos/$CARD_REPO/issues/comments/$CLAIM_ID" -f "body=$body" >/dev/null
             python scripts/agent_runtime.py stage \
@@ -1352,6 +1390,8 @@ jobs:
           NL_REPAIR_CLAIM_ADMITTED: ${{ needs.nl-repair-prepare.outputs.repair_admitted }}
           NL_REPAIR_NEEDED: ${{ needs.nl-repair-prepare.outputs.repair_needed }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
           KIND: ${{ needs.handle.outputs.nl_kind }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           BASH_ENV: ""
@@ -1372,6 +1412,8 @@ jobs:
             NL_REPAIR_CLAIM_ADMITTED="$NL_REPAIR_CLAIM_ADMITTED" \
             NL_REPAIR_NEEDED="$NL_REPAIR_NEEDED" \
             ISSUE_BODY="$ISSUE_BODY" \
+            COMMENT_BODY="$COMMENT_BODY" \
+            TRIGGER_COMMENT_ID="$TRIGGER_COMMENT_ID" \
             KIND="$KIND" \
             GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py nl-route
@@ -1429,6 +1471,9 @@ jobs:
           KIND: ${{ steps.route.outputs.kind }}
           HEAD_SHA: ${{ steps.route.outputs.head_sha }}
           TARGET_REVISION: ${{ steps.route.outputs.target_revision }}
+          PUBLIC_CONDITION: ${{ steps.route.outputs.public_condition }}
+          EXPECTED_BASE_SHA: ${{ steps.route.outputs.expected_base_sha }}
+          EXPECTED_VISION_SHA: ${{ steps.route.outputs.expected_vision_sha }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -1454,6 +1499,9 @@ jobs:
             KIND="$KIND" \
             HEAD_SHA="$HEAD_SHA" \
             TARGET_REVISION="$TARGET_REVISION" \
+            PUBLIC_CONDITION="$PUBLIC_CONDITION" \
+            EXPECTED_BASE_SHA="$EXPECTED_BASE_SHA" \
+            EXPECTED_VISION_SHA="$EXPECTED_VISION_SHA" \
             "$TRUSTED_PYTHON" scripts/apply_decision.py execute
 
       - id: nl-action-consumer

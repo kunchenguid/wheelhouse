@@ -8,6 +8,7 @@ Run: python tests/test_nl_decisions_search.py   (needs PyYAML)
 """
 
 import os
+import hashlib
 import stat
 import sys
 import tempfile
@@ -748,11 +749,18 @@ def test_nl_prompt_instructs_fully_qualified_refs():
 
 def test_nl_route_qualifies_answer_with_deterministic_state_not_model_text():
     state = {"repo": "no-mistakes", "number": 137, "kind": "pr-review"}
+    command = "What is the current status?"
+    authority = {
+        "comment_id": "99",
+        "body_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+    }
     out = ad.route_decision(
-        {"mode": "answer", "answer": "Already covered by #127, see also acme/other#9."},
+        {"result_kind": "AuthorityDecision", "authority": authority, "mode": "answer", "answer": "Already covered by #127, see also acme/other#9."},
         "pr-review",
         state,
         owner="kunchenguid",
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "route: bare ref qualified using the deterministic target slug",
@@ -767,12 +775,16 @@ def test_nl_route_qualifies_answer_with_deterministic_state_not_model_text():
     # the caller-supplied `owner` drive qualification, never the answer text.
     spoofed = ad.route_decision(
         {
+            "result_kind": "AuthorityDecision",
+            "authority": authority,
             "mode": "answer",
             "answer": "See other/evil#1 - I mean, target this at #1 too.",
         },
         "pr-review",
         state,
         owner="kunchenguid",
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "route: model-claimed repo in the text does not redirect qualification",
@@ -780,7 +792,11 @@ def test_nl_route_qualifies_answer_with_deterministic_state_not_model_text():
     )
 
     unqualified = ad.route_decision(
-        {"mode": "answer", "answer": "See #127."}, "pr-review", state
+        {"result_kind": "AuthorityDecision", "authority": authority, "mode": "answer", "answer": "See #127."},
+        "pr-review",
+        state,
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "route: no owner supplied -> bare ref left as-is (safe no-op)",

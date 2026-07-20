@@ -312,8 +312,8 @@ jobs:
             --deadline-ms "$(( ${{ inputs.child_timeout_minutes }} * 60000 ))"
 
       - id: direct_schema_repair
-        name: Run sandboxed direct Claude schema repair
-        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair') }}
+        name: Run sandboxed direct Claude task
+        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair' || steps.hydrate.outputs.action == 'advisory-review.public') }}
         continue-on-error: true
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -682,6 +682,13 @@ jobs:
                 test "$(wc -c < "$RAW/events.ndjson")" -le 8388608
                 cp "$RAW/result.json" "$result"
                 cp "$RAW/events.ndjson" "$events"
+                action="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["metadata"]["action"])' "$task")"
+                if [ "$action" = "advisory-review.public" ] && [ -e "$RAW/public-evidence-manifest.json" ]; then
+                  test -f "$RAW/public-evidence-manifest.json"
+                  test ! -L "$RAW/public-evidence-manifest.json"
+                  test "$(wc -c < "$RAW/public-evidence-manifest.json")" -le 67108864
+                  cp "$RAW/public-evidence-manifest.json" "$NORMALIZED/public-evidence-manifest.json"
+                fi
               elif [ -f "$ATTEMPT/direct.json" ] && [ ! -L "$ATTEMPT/direct.json" ]; then
                 code=harness.crash
                 if [ "$MODEL_JOB_RESULT" = "cancelled" ]; then code=lifecycle.timeout; fi
@@ -767,14 +774,31 @@ jobs:
             fi
           fi
           cp "$task" "$NORMALIZED/task.json"
-          PYTHONPATH="$HANDOFF/runtime" python - "$task" "$result" "$events" <<'PY'
+          PYTHONPATH="$HANDOFF/runtime" python - "$task" "$result" "$events" "$NORMALIZED/public-evidence-manifest.json" <<'PY'
           import sys
-          from agent_runtime.contract import load_json_regular, verify_result_binding
+          from pathlib import Path
+          from agent_runtime.contract import file_sha256, load_json_regular, verify_result_binding
           from agent_runtime.events import verify_result_event_binding
           task = load_json_regular(sys.argv[1])
           result = load_json_regular(sys.argv[2])
           verify_result_binding(task, result)
           verify_result_event_binding(result, sys.argv[3])
+          public = task["metadata"]["action"] == "advisory-review.public"
+          manifest = Path(sys.argv[4])
+          rows = [row for row in result["artifacts"] if row["role"] == "public-evidence-receipts"]
+          if public:
+              if result["status"] == "succeeded" and len(rows) != 1:
+                  raise SystemExit("successful public evidence result omitted its artifact")
+              if len(rows) > 1:
+                  raise SystemExit("public evidence artifact role was duplicated")
+              if rows and (not manifest.is_file() or manifest.is_symlink()):
+                  raise SystemExit("public evidence artifact is missing")
+              if rows and (rows[0]["bytes"] != manifest.stat().st_size or rows[0]["sha256"] != file_sha256(manifest)):
+                  raise SystemExit("public evidence artifact binding mismatch")
+              if not rows and manifest.exists():
+                  raise SystemExit("unbound public evidence artifact")
+          elif rows or manifest.exists():
+              raise SystemExit("unexpected public evidence artifact")
           PY
           status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$result")"
           error_code="$(python -c 'import json,sys; print((json.load(open(sys.argv[1], encoding="utf-8")).get("error") or {}).get("code", ""))' "$result")"

@@ -146,7 +146,7 @@ def main():
         else:
             check("artifacts: same-size directory mutation rejected", False)
 
-        for name in ("triage-issue-v1.schema.json", "triage-pr-v1.schema.json", "deep-review-text-v1.schema.json", "nl-decision-v1.schema.json"):
+        for name in ("triage-issue-v1.schema.json", "triage-pr-v1.schema.json", "deep-review-text-v1.schema.json", "nl-decision-v1.schema.json", "advisory-review-v1.schema.json"):
             schema = json.load(open(ACTION_SCHEMAS / name, encoding="utf-8"))
             check("action schema %s rejects unknown output" % name, schema.get("additionalProperties") is False)
 

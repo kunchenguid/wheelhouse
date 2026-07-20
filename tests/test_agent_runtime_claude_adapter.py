@@ -313,7 +313,7 @@ def main():
         )
         check(
             "compile: exact direct CLI argv",
-            plan["claude"]["argv"][:17]
+            plan["claude"]["argv"][:20]
             == [
                 "claude",
                 "--print",
@@ -322,7 +322,10 @@ def main():
                 "--verbose",
                 "--safe-mode",
                 "--no-session-persistence",
+                "--setting-sources",
+                "",
                 "--strict-mcp-config",
+                "--disable-slash-commands",
                 "--permission-mode",
                 "dontAsk",
                 "--tools",
@@ -333,7 +336,7 @@ def main():
                 str(task["spec"]["limits"]["maxTurns"]),
                 "--json-schema",
             ]
-            and plan["claude"]["argv"][17] == schema_text,
+            and plan["claude"]["argv"][20] == schema_text,
         )
         serialized_plan = json.dumps(plan, sort_keys=True)
         check(

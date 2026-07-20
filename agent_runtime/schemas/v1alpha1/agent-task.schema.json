@@ -14,7 +14,7 @@
       "required": ["executionId", "action", "idempotencyKey", "wheelhouseRevision", "target"],
       "properties": {
         "executionId": {"type": "string", "pattern": "^[0-9a-f-]{36}$"},
-        "action": {"type": "string", "enum": ["triage.issue.local", "triage.issue.search", "triage.pr.local", "triage.pr.search", "triage.schema-repair", "deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search", "nl-decision.schema-repair"]},
+        "action": {"type": "string", "enum": ["triage.issue.local", "triage.issue.search", "triage.pr.local", "triage.pr.search", "triage.schema-repair", "deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search", "nl-decision.schema-repair", "advisory-review.public"]},
         "idempotencyKey": {"type": "string", "minLength": 1, "maxLength": 512},
         "wheelhouseRevision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
         "target": {
@@ -144,9 +144,9 @@
                 "type": "object", "additionalProperties": false,
                 "required": ["name", "version", "maxResultBytes", "inputSchemaSha256"],
                 "properties": {
-                  "name": {"type": "string", "enum": ["fs.read", "fs.grep", "fs.glob", "github.search.readonly", "final.triage", "final.nl-decision", "final.deep-review", "final.schema-repair"]},
+                  "name": {"type": "string", "enum": ["fs.read", "fs.grep", "fs.glob", "github.search.readonly", "public.search", "public.fetch", "public.git_snapshot", "public.artifact", "final.triage", "final.nl-decision", "final.deep-review", "final.schema-repair"]},
                   "version": {"const": 1},
-                  "maxResultBytes": {"type": "integer", "minimum": 1, "maximum": 131072},
+                  "maxResultBytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
                   "inputSchemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                   "terminating": {"type": "boolean"}
                 }
@@ -220,7 +220,7 @@
             "schemaArtifact": {"type": "string", "pattern": "^artifacts/sha256/[0-9a-f]{64}$"},
             "schemaId": {"type": "string", "minLength": 1},
             "schemaSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "evidencePolicy": {"type": "string", "enum": ["target-anchor/v1", "none"]},
+            "evidencePolicy": {"type": "string", "enum": ["target-anchor/v1", "public-evidence/v1", "none"]},
             "allowProseFallback": {"const": false}
           }
         },

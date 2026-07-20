@@ -78,7 +78,14 @@ def main():
         check("NL consumer: final object exports atomically", export_value(str(nl_path), str(decision_file)))
         proposal = apply_decision._load_llm_result(str(decision_file))
         state = {"repo": "target", "number": 7, "head_sha": "abc1234"}
-        routed = apply_decision.route_decision(proposal, "pr-review", state, owner="owner")
+        routed = apply_decision.route_decision(
+            proposal,
+            "pr-review",
+            state,
+            owner="owner",
+            owner_command="Show me the status.",
+            authority_comment_id="1",
+        )
         check("NL consumer: answer stays non-acting", routed["mode"] == "answer" and not routed["decision"])
         forged = apply_decision.route_decision({"mode": "action", "action": "approve-ci"}, "pr-review", state, owner="owner")
         check("NL consumer: existing action allowlist rejects forged action", forged["mode"] == "clarify" and not forged["decision"])

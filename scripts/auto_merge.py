@@ -712,14 +712,24 @@ def fresh_verdict_facts(state, head_sha):
         }
 
     current_head_ok = bool(head_sha)
-    triage_ok = current_head_ok and state.get("triage_status") == "succeeded"
+    public_evidence_influenced = (
+        state.get("public_evidence_influenced") is True
+        or isinstance(state.get("advisory_review"), dict)
+    )
+    triage_ok = (
+        current_head_ok
+        and state.get("triage_status") == "succeeded"
+        and not public_evidence_influenced
+    )
     revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
     card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
     triage_reason = (
         "current head SHA is unavailable"
         if not current_head_ok
         else (
-            "no successful auto-triage verdict on the card"
+            "public-evidence review is advisory and cannot satisfy auto-merge"
+            if public_evidence_influenced
+            else "no successful auto-triage verdict on the card"
             if not triage_ok
             else (
                 "behavior verdict is stale (not for the current head SHA)"

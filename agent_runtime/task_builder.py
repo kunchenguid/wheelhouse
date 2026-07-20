@@ -25,6 +25,7 @@ from .contract import (
     validate_contract,
 )
 from .tools import tool_schema_sha256
+from .vision_policy import write_evidence_plan
 
 ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
@@ -54,6 +55,7 @@ ACTION_LIMITS = {
     "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
+    "advisory-review.public": (540_000, 600_000, 64, 40, 131_072),
 }
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
@@ -912,6 +914,11 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
             ACTION_SCHEMAS / "nl-decision-v1.schema.json",
             "wheelhouse/nl-decision/v1",
         )
+    if action == "advisory-review.public":
+        return (
+            ACTION_SCHEMAS / "advisory-review-v1.schema.json",
+            "wheelhouse/advisory-review/v1",
+        )
     raise ArtifactError("unsupported action output schema")
 
 
@@ -1084,7 +1091,9 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
         {
             "name": "tool.network",
             "constraints": {
-                "mode": "broker-only" if action.endswith(".search") else "none"
+            "mode": "broker-only"
+            if action.endswith(".search") or action == "advisory-review.public"
+            else "none"
             },
         },
         {
@@ -1108,7 +1117,9 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
             "constraints": {"worker": "sandboxed-adapter-worker"},
         },
     ]
-    if action not in SCHEMA_REPAIR_ACTIONS and adapter != "claude-cli":
+    if action not in SCHEMA_REPAIR_ACTIONS and (
+        adapter != "claude-cli" or action == "advisory-review.public"
+    ):
         required.extend(
             [
                 {
@@ -1129,6 +1140,16 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
         required.append(
             {"name": "github.search.readonly", "constraints": {"broker": True}}
         )
+    if action == "advisory-review.public":
+        required.extend(
+            {"name": name, "constraints": {"broker": True}}
+            for name in (
+                "public.search",
+                "public.fetch",
+                "public.git_snapshot",
+                "public.artifact",
+            )
+        )
     return {
         "required": required,
         "optional": [
@@ -1141,18 +1162,33 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
 
 
 def _tools(action: str, adapter: str) -> dict[str, Any]:
-    if adapter in ("claude-action-compat", "claude-cli"):
+    if adapter == "claude-action-compat" or (
+        adapter == "claude-cli" and action != "advisory-review.public"
+    ):
         return {"default": "deny", "parallel": False, "tools": []}
     names: list[str] = []
     if action not in SCHEMA_REPAIR_ACTIONS:
         names = ["fs.read", "fs.grep", "fs.glob"]
     if action.endswith(".search"):
         names.append("github.search.readonly")
+    if action == "advisory-review.public":
+        names.extend(
+            [
+                "public.search",
+                "public.fetch",
+                "public.git_snapshot",
+                "public.artifact",
+            ]
+        )
     bounds = {
         "fs.read": 65536,
         "fs.grep": 65536,
         "fs.glob": 32768,
         "github.search.readonly": 65536,
+        "public.search": 131072,
+        "public.fetch": 786432,
+        "public.git_snapshot": 1048576,
+        "public.artifact": 131072,
     }
     return {
         "default": "deny",
@@ -1290,7 +1326,9 @@ def build_task(
     except (OSError, UnicodeDecodeError) as error:
         raise ArtifactError("prompt artifact must be bounded UTF-8 text") from error
     tool_instruction = (
-        "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."
+        "This direct Claude profile exposes only the exact typed filesystem and public-evidence tools declared by the task. It exposes no shell, WebFetch, browser, or raw network tool."
+        if adapter == "claude-cli" and action == "advisory-review.public"
+        else "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."
         if adapter == "claude-cli"
         else "This schema-repair task exposes no tools. Work only from the bounded candidate in the prompt."
         if action in SCHEMA_REPAIR_ACTIONS
@@ -1406,6 +1444,30 @@ def build_task(
                 "bytes": size,
             }
         )
+        if action == "advisory-review.public":
+            plan_source = bundle / ".evidence-plan.json"
+            write_evidence_plan(Path(vision_file), plan_source)
+            try:
+                plan_digest, plan_size, plan_artifact = _copy_file(
+                    plan_source, bundle, 262144
+                )
+            finally:
+                plan_source.unlink(missing_ok=True)
+            inputs.append(
+                {
+                    "id": "evidence-plan",
+                    "artifact": plan_artifact,
+                    "logicalPath": "evidence-plan.json",
+                    "sha256": plan_digest,
+                    "mediaType": "application/vnd.wheelhouse.evidence-plan+json",
+                    "trust": "trusted",
+                    "mount": "read-only",
+                    "maxBytes": 262144,
+                    "bytes": plan_size,
+                }
+            )
+    elif action == "advisory-review.public":
+        raise ArtifactError("public advisory review requires trusted VISION input")
 
     schema_path, schema_id = _schema_for(action, repair_kind)
     source_schema = load_json_regular(schema_path, max_bytes=65536)
@@ -1521,7 +1583,9 @@ def build_task(
                     "allowedHosts": list(profile["provider_hosts"]),
                 },
                 "toolNetwork": {
-                    "mode": "broker-only" if action.endswith(".search") else "none"
+                    "mode": "broker-only"
+                    if action.endswith(".search") or action == "advisory-review.public"
+                    else "none"
                 },
                 "inheritEnvironment": False,
                 "dropCapabilities": True,
@@ -1555,7 +1619,9 @@ def build_task(
                 "schemaArtifact": schema_artifact,
                 "schemaId": schema_id,
                 "schemaSha256": schema_digest,
-                "evidencePolicy": "target-anchor/v1"
+                "evidencePolicy": "public-evidence/v1"
+                if action == "advisory-review.public"
+                else "target-anchor/v1"
                 if action.startswith("triage.") and action not in SCHEMA_REPAIR_ACTIONS
                 else "none",
                 "allowProseFallback": False,

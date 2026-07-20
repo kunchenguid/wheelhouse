@@ -6,13 +6,37 @@ on:
       - ".github/workflows/agent-runtime-canary.yml"
       - ".github/workflows/claude-model.yml"
       - "agent_runtime/**"
+      - "scripts/apply_decision.py"
+      - "scripts/auto_merge.py"
       - "tests/fixtures/claude-action-native-output.test.ts"
+      - "tests/fixtures/public_read/**"
+      - "tests/test_public_read_broker.py"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  public-read-security:
+    name: Public read broker adversarial E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install the production Bubblewrap prerequisite
+        run: |
+          bash agent_runtime/install_direct_runtime.sh \
+            sandbox agent_runtime/runtime.lock.json
+
+      - name: Exercise real broker, adversary, SSRF, authority, and VISION paths
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python tests/test_public_read_broker.py --production-e2e
+
   direct-runtime:
     name: Direct runtime sandbox and install
     runs-on: ubuntu-24.04

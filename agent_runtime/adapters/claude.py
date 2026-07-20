@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -164,6 +165,10 @@ def validate_schema_subset(
         "const",
         "minLength",
         "maxLength",
+        "pattern",
+        "items",
+        "minItems",
+        "maxItems",
     }
 
     node_count = 0
@@ -191,7 +196,7 @@ def validate_schema_subset(
         ):
             raise ClaudeProbeError("Claude output schema identity is invalid")
         node_type = node.get("type")
-        if node_type not in ("object", "string", "boolean"):
+        if node_type not in ("object", "array", "string", "boolean"):
             raise ClaudeProbeError("Claude output schema uses an unsupported type")
         if "const" in node and "enum" in node:
             raise ClaudeProbeError("Claude output schema cannot combine const and enum")
@@ -254,13 +259,53 @@ def validate_schema_subset(
             for child in properties.values():
                 visit(child, depth=depth + 1)
             if any(
-                name in node for name in ("minLength", "maxLength", "enum", "const")
+                name in node
+                for name in (
+                    "minLength",
+                    "maxLength",
+                    "pattern",
+                    "items",
+                    "minItems",
+                    "maxItems",
+                    "enum",
+                    "const",
+                )
             ):
                 raise ClaudeProbeError("Claude object schema uses a scalar constraint")
+        elif node_type == "array":
+            if any(
+                name in node
+                for name in (
+                    "properties",
+                    "required",
+                    "additionalProperties",
+                    "minLength",
+                    "maxLength",
+                    "pattern",
+                    "enum",
+                    "const",
+                )
+            ):
+                raise ClaudeProbeError("Claude array schema uses an incompatible constraint")
+            minimum = _require_int(node.get("minItems", 0), "minItems")
+            maximum = _require_int(node.get("maxItems", 256), "maxItems")
+            if maximum > 256 or minimum > maximum:
+                raise ClaudeProbeError("Claude array schema item bounds are invalid")
+            items = node.get("items")
+            if not isinstance(items, dict):
+                raise ClaudeProbeError("Claude array schema items are invalid")
+            visit(items, depth=depth + 1)
         else:
             if any(
                 name in node
-                for name in ("properties", "required", "additionalProperties")
+                for name in (
+                    "properties",
+                    "required",
+                    "additionalProperties",
+                    "items",
+                    "minItems",
+                    "maxItems",
+                )
             ):
                 raise ClaudeProbeError("Claude scalar schema uses an object constraint")
             if node_type == "string":
@@ -274,6 +319,16 @@ def validate_schema_subset(
                     raise ClaudeProbeError(
                         "Claude string schema value violates its length bounds"
                     )
+                pattern = node.get("pattern")
+                if pattern is not None:
+                    if not isinstance(pattern, str) or len(pattern) > 256:
+                        raise ClaudeProbeError("Claude string schema pattern is invalid")
+                    try:
+                        re.compile(pattern)
+                    except re.error as error:
+                        raise ClaudeProbeError(
+                            "Claude string schema pattern is invalid"
+                        ) from error
             elif any(name in node for name in ("minLength", "maxLength")):
                 raise ClaudeProbeError("Claude boolean schema uses a string constraint")
 
@@ -613,9 +668,11 @@ class ClaudeCliAdapter(AgentAdapterV1):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--safe-mode",
             "--no-session-persistence",
+            "--setting-sources",
+            "",
             "--strict-mcp-config",
+            "--disable-slash-commands",
             "--permission-mode",
             "dontAsk",
             "--tools",
@@ -627,6 +684,34 @@ class ClaudeCliAdapter(AgentAdapterV1):
             "--json-schema",
             schema_text,
         ]
+        requested_tools = [row["name"] for row in task["spec"]["tools"]["tools"]]
+        if not requested_tools:
+            # Safe mode disables all MCP servers, including the exact explicit
+            # configuration. Tool-free actions retain that extra defense.
+            argv.insert(5, "--safe-mode")
+        if requested_tools:
+            mcp_names = {
+                "fs.read": "fs_read",
+                "fs.grep": "fs_grep",
+                "fs.glob": "fs_glob",
+                "public.search": "public_search",
+                "public.fetch": "public_fetch",
+                "public.git_snapshot": "public_git_snapshot",
+                "public.artifact": "public_artifact",
+            }
+            if any(name not in mcp_names for name in requested_tools):
+                raise ClaudeProbeError("Claude task requested an unsupported typed tool")
+            argv.extend(
+                [
+                    "--mcp-config",
+                    "/tmp/wheelhouse-mcp.json",
+                    "--allowedTools",
+                    ",".join(
+                        "mcp__wheelhouse__%s" % mcp_names[name]
+                        for name in requested_tools
+                    ),
+                ]
+            )
         return {
             "planVersion": "wheelhouse.agent-runtime/adapter-plan-v1",
             "executionId": task["metadata"]["executionId"],

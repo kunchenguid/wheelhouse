@@ -343,7 +343,7 @@ def main():
     check("selection: every action explicitly targets Claude", config["target"] == "claude" and all(row["target"] == "claude" for row in config["actions"].values()))
     check("selection: fallback globally disabled", config["fallback"] == "none")
     check("selection: immutable Claude model forbids aliases", config["profiles"][config["primary_profile"]]["model"] == "claude-sonnet-4-6" and config["profiles"][config["primary_profile"]]["allow_model_alias"] is False)
-    check("selection: schema repair is the only direct activation", config["production_activation"] == {"triage.schema-repair": "claude-cli-pinned", "nl-decision.schema-repair": "claude-cli-pinned"} and config["temporary_rollback_profile"] is None)
+    check("selection: bounded direct actions are the only direct activation", config["production_activation"] == {"triage.schema-repair": "claude-cli-pinned", "nl-decision.schema-repair": "claude-cli-pinned", "advisory-review.public": "claude-cli-pinned"} and config["temporary_rollback_profile"] is None)
     check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
     check("selection: direct Claude CLI profile is exact", config["profiles"]["claude-cli-pinned"]["adapter"] == "claude-cli" and config["profiles"]["claude-cli-pinned"]["auth_profile"] == "anthropic-subscription")
     direct_step = next(step for step in model_steps if step.get("id") == "direct_schema_repair")
@@ -361,7 +361,7 @@ def main():
     install_script = Path("agent_runtime/install_direct_runtime.sh").read_text()
     canary_text = Path(".github/workflows/agent-runtime-canary.yml").read_text()
     check("production: direct binary remains exact and digest verified", "sha256sum" in install_script and "runtime.lock.json" in model_text and "install_direct_runtime.sh" in model_text)
-    check("canary: production sandbox preflight and binary installer run model-free", "runs-on: ubuntu-24.04" in canary_text and canary_text.count("install_direct_runtime.sh") == 2 and 'host_proof("claude-cli")' in canary_text and "CLAUDE_CODE_OAUTH_TOKEN" not in canary_text)
+    check("canary: production sandbox, public adversary, and binary installer run model-free", "runs-on: ubuntu-24.04" in canary_text and canary_text.count("install_direct_runtime.sh") == 3 and "test_public_read_broker.py --production-e2e" in canary_text and 'host_proof("claude-cli")' in canary_text and "CLAUDE_CODE_OAUTH_TOKEN" not in canary_text)
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
     check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from contextlib import contextmanager
@@ -58,7 +59,15 @@ def default_final(action: str) -> Any:
     if action.startswith("deep-review"):
         return {"text": "HOLD\n\n- Reviewed `target.txt`."}
     if action.startswith("nl-decision"):
-        return {"mode": "answer", "answer": "This remains safe to inspect."}
+        return {
+            "result_kind": "AuthorityDecision",
+            "authority": {
+                "comment_id": "1",
+                "body_sha256": hashlib.sha256(b"Show me the status.").hexdigest(),
+            },
+            "mode": "answer",
+            "answer": "This remains safe to inspect.",
+        }
     return {
         "summary": "A bounded fixture request.",
         "product_implications": "Routine and low risk.",

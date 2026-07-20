@@ -208,12 +208,16 @@ agent_runtime:
   primary_profile: claude-action-current-pinned
   target: claude
   fallback: none
-  # Schema repair is the first controlled direct-CLI production cutover.
+  # Schema repair and the credential-free public advisory lane are controlled
+  # direct-CLI production profiles.
   # Set temporary_rollback_profile to claude-action-current-pinned and replay
-  # the durable item explicitly to restore the pinned action path.
+  # a durable schema-repair item explicitly to restore the pinned action path.
+  # Public advisory review fails closed while this rollback is active because
+  # the action-compatible runtime cannot expose the credential-free broker.
   production_activation:
     triage.schema-repair: claude-cli-pinned
     nl-decision.schema-repair: claude-cli-pinned
+    advisory-review.public: claude-cli-pinned
   temporary_rollback_profile: null
   disabled_adapters:
     codex-app-server: unsupported-public-chatgpt-pro-auth
@@ -260,6 +264,7 @@ agent_runtime:
     nl-decision.local: {target: claude, profile: claude-action-current-pinned}
     nl-decision.search: {target: claude, profile: claude-action-current-pinned}
     nl-decision.schema-repair: {target: claude, profile: claude-action-current-pinned}
+    advisory-review.public: {target: claude, profile: claude-action-current-pinned}
 
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review

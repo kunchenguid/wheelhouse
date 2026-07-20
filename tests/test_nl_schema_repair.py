@@ -6,6 +6,7 @@ Run: python tests/test_nl_schema_repair.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -54,11 +55,19 @@ MALFORMED_ESCAPE = (
     '{"mode":"answer","answer":"The budget is enforced by the '
     '\\`max_tokens\\` limit."}'
 )
+AUTHORITY = {
+    "comment_id": "1",
+    "body_sha256": hashlib.sha256(b"Show me the status.").hexdigest(),
+}
 VALID_ANSWER = {
+    "result_kind": "AuthorityDecision",
+    "authority": AUTHORITY,
     "mode": "answer",
     "answer": "The budget is enforced by the `max_tokens` limit.",
 }
 QUOTED_ANSWER = {
+    "result_kind": "AuthorityDecision",
+    "authority": AUTHORITY,
     "mode": "answer",
     "answer": 'The "outside guarded clone refreshes" sentence is exact.',
 }
@@ -446,7 +455,7 @@ def test_native_bridge_and_portable_fallback():
             "fallback: invalid native plus invalid repair keeps precise retry projection",
             multiple_failed.get("result_valid") == "false"
             and multiple_failed.get("failure_code") == "output.schema_invalid"
-            and "missing required field mode"
+            and "missing required field result_kind"
             in multiple_failed.get("failure_reason", "")
             and "single bounded repair attempt"
             in multiple_failed.get("failure_message", "")
@@ -580,6 +589,8 @@ def route_cli(
         ISSUE_BODY=body,
         KIND="pr-review",
         GITHUB_REPOSITORY_OWNER="owner",
+        COMMENT_BODY="Show me the status.",
+        TRIGGER_COMMENT_ID="1",
     )
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "apply_decision.py"), "nl-route"],
@@ -655,7 +666,8 @@ def test_end_to_end_route_and_failure():
             "E2E: invalid repair projects a precise retryable schema reason",
             failed.get("failure_code") == "output.schema_invalid"
             and failed.get("retryable") == "true"
-            and "missing required field mode" in failed.get("failure_reason", "")
+            and "missing required field result_kind"
+            in failed.get("failure_reason", "")
             and "schema-invalid" in failed.get("failure_message", ""),
         )
 

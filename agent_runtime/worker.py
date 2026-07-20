@@ -479,8 +479,27 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         raise WorkerFailure("auth.invalid", "anthropic-subscription credential handoff is invalid.") from error
     if token != token.strip() or "\x00" in token:
         raise WorkerFailure("auth.invalid", "anthropic-subscription credential handoff is invalid.")
-    if plan["tools"]["tools"]:
-        raise WorkerFailure("capability.unsatisfied", "Claude CLI canonical tool transport is not enabled by this offline profile.")
+    requested_tools = [
+        row.get("name") for row in plan["tools"].get("tools", []) if isinstance(row, dict)
+    ]
+    allowed_claude_tools = {
+        "fs.read",
+        "fs.grep",
+        "fs.glob",
+        "public.search",
+        "public.fetch",
+        "public.git_snapshot",
+        "public.artifact",
+    }
+    if (
+        len(requested_tools) != len(plan["tools"].get("tools", []))
+        or len(set(requested_tools)) != len(requested_tools)
+        or any(name not in allowed_claude_tools for name in requested_tools)
+    ):
+        raise WorkerFailure(
+            "capability.unsatisfied",
+            "Claude CLI canonical tool inventory is invalid.",
+        )
     claude_plan = plan.get("claude") if isinstance(plan.get("claude"), dict) else {}
     argv = claude_plan.get("argv")
     if (
@@ -520,6 +539,44 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         "CLAUDE_CODE_OAUTH_TOKEN": token,
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
     }
+    if requested_tools:
+        public_socket = os.environ.get("WHEELHOUSE_PUBLIC_SOCKET", "")
+        if any(str(name).startswith("public.") for name in requested_tools) and not public_socket:
+            raise WorkerFailure(
+                "sandbox.violation", "Credential-free public broker is unavailable."
+            )
+        mcp_home = Path("/tmp/mcp-home")
+        mcp_home.mkdir(mode=0o700, exist_ok=True)
+        mcp_environment = [
+            "-i",
+            "PATH=%s" % environment["PATH"],
+            "PYTHONPATH=%s" % os.environ.get("PYTHONPATH", "/runtime"),
+            "HOME=/tmp/mcp-home",
+            "TMPDIR=/tmp",
+            "TZ=UTC",
+            "LC_ALL=C.UTF-8",
+            "LANG=C.UTF-8",
+            "WHEELHOUSE_WORK_ROOT=%s"
+            % os.environ.get("WHEELHOUSE_WORK_ROOT", "/work"),
+            "WHEELHOUSE_PUBLIC_SOCKET=%s" % public_socket,
+            "python3",
+            "-m",
+            "agent_runtime.mcp_bridge",
+            "--plan",
+            "/run/wheelhouse/plan.json",
+        ]
+        mcp_config = {
+            "mcpServers": {
+                "wheelhouse": {
+                    "type": "stdio",
+                    "command": "/usr/bin/env",
+                    "args": mcp_environment,
+                }
+            }
+        }
+        Path("/tmp/wheelhouse-mcp.json").write_bytes(
+            canonical_json_bytes(mcp_config)
+        )
     process: subprocess.Popen[bytes] | None = None
     stdout_messages: queue.Queue[bytes | None | Exception] = queue.Queue(maxsize=4)
     stderr_matches = 0

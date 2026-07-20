@@ -4,7 +4,7 @@ Wheelhouse has one versioned contract for every agent-assisted task.
 The contract covers automatic PR and issue triage with and without search, bounded triage and natural-language schema repair, deep review with and without search, and natural-language decision mapping with and without search.
 
 Claude is the production primary adapter.
-The two schema-repair actions resolve to the exact-pin direct Claude CLI profile through the guarded production activation.
+The two schema-repair actions and the credential-free public advisory action resolve to the exact-pin direct Claude CLI profile through the guarded production activation.
 The other eight actions remain on the exact pinned Claude Action implementation.
 The action path remains present and deployable as the schema-repair rollback target.
 Codex CLI app-server remains implemented and tested only as disabled non-target adapter evidence because public GitHub Actions cannot securely authenticate the captain's ChatGPT Pro subscription noninteractively.
@@ -19,8 +19,8 @@ The checked-in state is intentionally:
 - `fallback: none`
 - every action `target: claude`
 - every base action profile `claude-action-current-pinned`
-- `production_activation` maps only `triage.schema-repair` and `nl-decision.schema-repair` to `claude-cli-pinned`
-- `temporary_rollback_profile: null`; setting it to `claude-action-current-pinned` restores both repair actions for an explicit durable replay
+- `production_activation` maps `triage.schema-repair`, `nl-decision.schema-repair`, and `advisory-review.public` to `claude-cli-pinned`
+- `temporary_rollback_profile: null`; setting it to `claude-action-current-pinned` restores both repair actions for an explicit durable replay and disables public advisory review fail closed
 - `codex-app-server` recorded only under `disabled_adapters`
 
 This is not selected by secret presence.
@@ -67,9 +67,9 @@ The Claude Action bridge profile does not claim the disabled Codex worker's netw
 Its proof level is `github-readonly-artifact-bridge-v1`, distinct from `sandboxed-adapter-worker-v1` used by adapters actually launched through the stronger worker boundary.
 The action lane records the pinned action source commit and a checked-out action metadata digest when the runner exposes it; a successful direct repair records its verified Claude executable version and digest instead.
 
-## Direct Claude schema-repair production profile
+## Direct Claude production profile
 
-`agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary used by both schema-repair actions.
+`agent_runtime/adapters/claude.py` implements the direct Claude CLI boundary used by both schema-repair actions and the public advisory action.
 It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.215` platform digest before spend.
 The runtime lock records the official release commit, immutable download URLs, Linux x64 and arm64 plus Darwin arm64 digests, and a checked protocol fixture digest.
 
@@ -84,6 +84,16 @@ Successful results must contain terminal native `structured_output`; the trusted
 The pinned action, `claude_bridge.py`, their workflow steps, and their tests remain present for the rollback window.
 After rollback, replay is explicit through the existing marker-versioned durable triage replay path; automatic hourly cache retry remains disabled.
 Before another profile is promoted, production observation uses the durable result and stage records for at least 20 successful or expected-failure executions over at least seven days.
+
+### Credential-free public evidence
+
+`advisory-review.public` is a distinct, authority-free result path for PR triage when the target default branch has a readable `VISION.md`, the complete PR diff is available, and a VISION-derived obligation needs external public evidence. Trusted task construction copies that exact VISION and derives a generic evidence plan from all of its review units. A VISION whose obligations can be assessed entirely from trusted local inputs stays on the existing local triage path. No project, package, catalog, or domain policy is encoded in the runtime. A missing or unreadable VISION, omitted obligation, unavailable receipt, or truncated required source prevents a positive projected verdict.
+
+The model sees only the exact typed MCP operations `public.search`, `public.fetch`, `public.git_snapshot`, and `public.artifact`, plus bounded read-only input tools. It never receives a shell, WebFetch, caller-selected headers, credentials, or a raw network socket. `agent_runtime/public_read.py` owns URL validation, resolve-all and reject-any address admission, IP-pinned TLS with original SNI and Host, per-redirect revalidation, hard byte/time/count bounds, depth-1 data-only Git extraction, immutable receipts, and explicit UNTRUSTED evidence envelopes.
+
+The broker is a separate process launched by `PublicReadBrokerProcess` with an empty environment, empty home, private process/user/mount namespaces, no credential or provider sockets, and only its public network route plus one typed Unix socket. It receives a dedicated four-file read-only runtime staging directory, never the runner workspace or the broader agent runtime tree. Its admission attestation records the process chain, complete allowed environment-name inventory, mount list, empty home, and inaccessible credential paths. The `Agent Runtime canary` exercises this production Bubblewrap artifact against a real local TLS adversary and a real public Git snapshot with no secrets.
+
+The trusted supervisor converts model output to `AdvisoryReview`, which has no action fields and is permanently stamped `acting_authority:false` and `auto_merge_eligible:false`. `apply_decision.py` rejects it as a decision, and `auto_merge.py` rejects public-evidence-influenced state at G6. Only `AuthorityDecision`, bound to the exact current owner comment ID and SHA-256 body and independently checked for an explicitly named mutation, can reach deterministic execution.
 
 ## Disabled and investigated adapters
 
@@ -178,6 +188,10 @@ Canonical tools are:
 - `fs.grep`
 - `fs.glob`
 - `github.search.readonly`
+- `public.search`
+- `public.fetch`
+- `public.git_snapshot`
+- `public.artifact`
 - typed `final.*` schemas for adapters that need terminating final tools
 
 Codex uses its native `turn/start.outputSchema` mechanism.

@@ -51,13 +51,13 @@ def main():
     check("selection: unsupported emergency provider override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="codex"), ConfigError))
     check("selection: former legacy override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="legacy"), ConfigError))
     check("selection: Codex absent from active profiles", "codex-subscription-pinned" not in runtime["profiles"])
-    schema_actions = {"triage.schema-repair", "nl-decision.schema-repair"}
-    direct = {action: resolve_selection(action) for action in schema_actions}
-    pinned = {action: resolve_selection(action) for action in runtime_config.ACTIONS - schema_actions}
-    check("selection: both schema-repair actions use direct Claude CLI", all(row["profileName"] == "claude-cli-pinned" and row["profile"]["adapter"] == "claude-cli" for row in direct.values()))
+    direct_actions = {"triage.schema-repair", "nl-decision.schema-repair", "advisory-review.public"}
+    direct = {action: resolve_selection(action) for action in direct_actions}
+    pinned = {action: resolve_selection(action) for action in runtime_config.ACTIONS - direct_actions}
+    check("selection: direct actions use direct Claude CLI", all(row["profileName"] == "claude-cli-pinned" and row["profile"]["adapter"] == "claude-cli" for row in direct.values()))
     check("selection: every other action remains on pinned action", len(pinned) == 8 and all(row["profileName"] == "claude-action-current-pinned" and row["profile"]["adapter"] == "claude-action-compat" for row in pinned.values()))
     check("selection: Codex recorded only as disabled adapter evidence", runtime["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"})
-    check("selection: activation is limited to the complete schema-repair profile", runtime["production_activation"] == {action: "claude-cli-pinned" for action in schema_actions} and runtime["temporary_rollback_profile"] is None and "codex_auth_gate" not in runtime)
+    check("selection: activation is limited to the complete direct profile", runtime["production_activation"] == {action: "claude-cli-pinned" for action in direct_actions} and runtime["temporary_rollback_profile"] is None and "codex_auth_gate" not in runtime)
     check("selection: every action remains on Claude", all(row["target"] == "claude" for row in runtime["actions"].values()))
     core = Path("agent_runtime/config.py").read_text(encoding="utf-8")
     check("selection: core contains no OpenCode or Z.AI policy", "OpenCode" not in core and "Z.AI" not in core and "glm" not in core.lower())
@@ -72,12 +72,13 @@ def main():
     split_profile = copy.deepcopy(runtime)
     del split_profile["production_activation"]["nl-decision.schema-repair"]
     with mock.patch.object(runtime_config, "load_runtime_config", return_value=split_profile):
-        check("selection: schema-repair profile cannot be split", fails(lambda: resolve_selection("triage.schema-repair"), ConfigError))
+        check("selection: direct profile cannot be split", fails(lambda: resolve_selection("triage.schema-repair"), ConfigError))
     rollback = copy.deepcopy(runtime)
     rollback["temporary_rollback_profile"] = "claude-action-current-pinned"
     with mock.patch.object(runtime_config, "load_runtime_config", return_value=rollback):
-        check("selection: one rollback setting restores both schema repairs", all(resolve_selection(action)["profile"]["adapter"] == "claude-action-compat" for action in schema_actions))
-        check("selection: rollback leaves the other eight pinned", all(resolve_selection(action)["profile"]["adapter"] == "claude-action-compat" for action in runtime_config.ACTIONS - schema_actions))
+        check("selection: one rollback setting restores schema repair", all(resolve_selection(action)["profile"]["adapter"] == "claude-action-compat" for action in runtime_config.SCHEMA_REPAIR_ACTIONS))
+        check("selection: rollback disables public advisory fail closed", fails(lambda: resolve_selection("advisory-review.public"), ConfigError))
+        check("selection: rollback leaves the other eight pinned", all(resolve_selection(action)["profile"]["adapter"] == "claude-action-compat" for action in runtime_config.ACTIONS - direct_actions))
 
     with tempfile.TemporaryDirectory() as directory:
         task, _, _ = make_task(Path(directory), "triage.issue.local")

@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import signal
 import socket
 import socketserver
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -228,3 +230,333 @@ class SearchBroker:
             os.unlink(self.socket_path)
         except FileNotFoundError:
             pass
+
+
+class PublicReadBrokerProcess:
+    """Launch the anonymous public broker outside every credentialed process.
+
+    Production requires Bubblewrap and gives the broker a private PID/mount/user
+    namespace while deliberately retaining only public network egress. The
+    narrowly scoped local-test mode still launches the real broker module as a
+    separate scrubbed process, but cannot claim Linux mount isolation.
+    """
+
+    ALLOWED_ENVIRONMENT = {
+        "PATH",
+        "PYTHONPATH",
+        "HOME",
+        "TMPDIR",
+        "TZ",
+        "LC_ALL",
+        "LANG",
+    }
+
+    def __init__(
+        self,
+        root: str,
+        execution_id: str,
+        task_sha256: str,
+        *,
+        test_unsandboxed: bool = False,
+    ) -> None:
+        self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.socket_path = str(self.root / "public.sock")
+        self.receipt_dir = self.root / "receipts"
+        self.home = self.root / "empty-home"
+        self.attestation_path = self.root / "attestation.json"
+        self.runtime_root = self.root.parent / (self.root.name + "-runtime")
+        self.execution_id = execution_id
+        self.task_sha256 = task_sha256
+        self.test_unsandboxed = test_unsandboxed
+        self.process: subprocess.Popen[bytes] | None = None
+
+    def _stage_runtime(self) -> Path:
+        import shutil
+
+        package = self.runtime_root / "agent_runtime"
+        package.mkdir(parents=True, exist_ok=True, mode=0o700)
+        source = Path(__file__).resolve().parent
+        for name in (
+            "__init__.py",
+            "contract.py",
+            "public_read.py",
+            "public_read_broker.py",
+        ):
+            shutil.copyfile(source / name, package / name)
+            os.chmod(package / name, 0o444)
+        return self.runtime_root
+
+    def _direct(self) -> tuple[list[str], dict[str, str]]:
+        import platform
+        import shutil
+
+        runtime = self._stage_runtime()
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "PYTHONPATH": str(runtime),
+            "HOME": str(self.home),
+            "TMPDIR": str(self.root / "tmp"),
+            "TZ": "UTC",
+            "LC_ALL": "C.UTF-8",
+            "LANG": "C.UTF-8",
+        }
+        python_binary = str(Path(sys.executable).resolve())
+        broker_command = [
+            python_binary,
+            "-m",
+            "agent_runtime.public_read_broker",
+            "--socket",
+            self.socket_path,
+            "--receipts",
+            str(self.receipt_dir),
+            "--home",
+            str(self.home),
+            "--execution-id",
+            self.execution_id,
+            "--task-sha256",
+            self.task_sha256,
+            "--attestation",
+            str(self.attestation_path),
+            "--isolation-mode",
+            "macos-sandbox" if platform.system() == "Darwin" else "local-process-test",
+        ]
+        if platform.system() == "Darwin":
+            sandbox = shutil.which("sandbox-exec")
+            if not sandbox:
+                raise BrokerError("local public-read broker requires sandbox-exec")
+            profile = self.root / "broker.sb"
+            rules = [
+                "(version 1)",
+                "(allow default)",
+            ]
+            host_home = str(Path.home()).replace("\\", "\\\\").replace('"', '\\"')
+            rules.append('(deny file-read* (subpath "%s"))' % host_home)
+            python_root = str(Path(python_binary).parents[1]).replace("\\", "\\\\").replace('"', '\\"')
+            rules.append('(allow file-read* (subpath "%s"))' % python_root)
+            quoted_root = str(self.root).replace("\\", "\\\\").replace('"', '\\"')
+            rules.append('(allow file-read* (subpath "%s"))' % quoted_root)
+            rules.append('(allow file-write* (subpath "%s"))' % quoted_root)
+            quoted_runtime = str(self.runtime_root).replace("\\", "\\\\").replace('"', '\\"')
+            rules.append('(allow file-read* (subpath "%s"))' % quoted_runtime)
+            profile.write_text("\n".join(rules) + "\n", encoding="utf-8")
+            return [sandbox, "-f", str(profile), *broker_command], environment
+        return broker_command, environment
+
+    def _sandboxed(self) -> tuple[list[str], dict[str, str]]:
+        import platform
+        import shutil
+
+        if platform.system() != "Linux":
+            raise BrokerError("public-read broker production isolation requires Linux")
+        binary = shutil.which("bwrap")
+        if not binary:
+            raise BrokerError("public-read broker production isolation requires Bubblewrap")
+        prlimit = shutil.which("prlimit")
+        if not prlimit:
+            raise BrokerError("public-read broker production isolation requires prlimit")
+        runtime_root = str(self._stage_runtime())
+        command = [
+            "sudo",
+            "--non-interactive",
+            prlimit,
+            "--as=1073741824",
+            "--cpu=600",
+            "--fsize=314572800",
+            "--nofile=256",
+            "--nproc=64",
+            "--",
+            binary,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--uid",
+            str(os.getuid()),
+            "--gid",
+            str(os.getgid()),
+            "--cap-drop",
+            "ALL",
+            "--clearenv",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/runtime",
+            "--dir",
+            "/run",
+            "--dir",
+            "/run/wheelhouse",
+            "--dir",
+            "/home",
+            "--dir",
+            "/home/broker",
+            "--ro-bind",
+            runtime_root + "/agent_runtime",
+            "/runtime/agent_runtime",
+            "--bind",
+            str(self.root),
+            "/run/wheelhouse",
+        ]
+        for path in (
+            "/usr",
+            "/usr/local",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+        ):
+            if os.path.exists(path):
+                command.extend(["--ro-bind", path, path])
+        command.extend(
+            [
+                "--setenv",
+                "PATH",
+                "/usr/local/bin:/usr/bin:/bin",
+                "--setenv",
+                "PYTHONPATH",
+                "/runtime",
+                "--setenv",
+                "HOME",
+                "/home/broker",
+                "--setenv",
+                "TMPDIR",
+                "/tmp",
+                "--setenv",
+                "TZ",
+                "UTC",
+                "--setenv",
+                "LC_ALL",
+                "C.UTF-8",
+                "--setenv",
+                "LANG",
+                "C.UTF-8",
+                "--chdir",
+                "/tmp",
+                "--",
+                "python3",
+                "-m",
+                "agent_runtime.public_read_broker",
+                "--socket",
+                "/run/wheelhouse/public.sock",
+                "--receipts",
+                "/run/wheelhouse/receipts",
+                "--home",
+                "/home/broker",
+                "--execution-id",
+                self.execution_id,
+                "--task-sha256",
+                self.task_sha256,
+                "--attestation",
+                "/run/wheelhouse/attestation.json",
+                "--isolation-mode",
+                "bubblewrap",
+            ]
+        )
+        return command, {}
+
+    def start(self) -> None:
+        self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (self.root / "tmp").mkdir(parents=True, exist_ok=True, mode=0o700)
+        command, environment = (
+            self._direct() if self.test_unsandboxed else self._sandboxed()
+        )
+        if environment and set(environment) - self.ALLOWED_ENVIRONMENT:
+            raise BrokerError("public-read broker launch environment is not scrubbed")
+        self.process = subprocess.Popen(
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(self.root),
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10
+        socket_path = Path(self.socket_path)
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise BrokerError("public-read broker exited during admission")
+            if socket_path.exists() and self.attestation_path.is_file():
+                if not self.test_unsandboxed:
+                    try:
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "--non-interactive",
+                                "chown",
+                                "-R",
+                                "%d:%d" % (os.getuid(), os.getgid()),
+                                "--",
+                                self.socket_path,
+                                str(self.receipt_dir),
+                            ],
+                            check=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except (OSError, subprocess.SubprocessError) as error:
+                        self.close()
+                        raise BrokerError(
+                            "public-read broker capability ownership failed"
+                        ) from error
+                return
+            time.sleep(0.05)
+        self.close()
+        raise BrokerError("public-read broker admission timed out")
+
+    def close(self) -> None:
+        import shutil
+
+        process = self.process
+        self.process = None
+        if process is not None and process.poll() is None:
+            try:
+                if self.test_unsandboxed:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "--non-interactive",
+                            "kill",
+                            "-TERM",
+                            "--",
+                            "-%d" % process.pid,
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                try:
+                    if self.test_unsandboxed:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        subprocess.run(
+                            [
+                                "sudo",
+                                "--non-interactive",
+                                "kill",
+                                "-KILL",
+                                "--",
+                                "-%d" % process.pid,
+                            ],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                    pass
+        shutil.rmtree(self.runtime_root, ignore_errors=True)

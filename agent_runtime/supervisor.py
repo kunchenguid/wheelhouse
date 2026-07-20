@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import secrets
@@ -18,7 +19,7 @@ from typing import Any
 
 from . import API_VERSION
 from .adapters import ADAPTERS
-from .brokers import ProviderProxy, SearchBroker
+from .brokers import ProviderProxy, PublicReadBrokerProcess, SearchBroker
 from .capabilities import CapabilityError, negotiate
 from .contract import (
     ContractError,
@@ -34,6 +35,7 @@ from .contract import (
 from .events import EventWriter
 from .redaction import contains_secret, sanitize_message
 from .sandbox import SandboxError, build_command, host_proof
+from .vision_policy import VisionPolicyError, project_advisory_review
 
 
 class RuntimeFailure(Exception):
@@ -352,6 +354,7 @@ def _validate_worker(
     bundle: Path,
     worker: dict[str, Any],
     structured_output_mechanism: str = "",
+    public_receipt_dir: Path | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     candidate = task["spec"]["selection"]["candidates"][0]
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
@@ -400,17 +403,53 @@ def _validate_worker(
         return None, delivered, _error("output.schema_invalid", "Delivered result failed the trusted output schema.", spend_started=True)
     if not _anchor_ok(delivered_value, task, bundle):
         return None, delivered, _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
-    final = {
-        "schemaId": task["spec"]["output"]["schemaId"],
-        "value": delivered_value,
-        "valueSha256": delivered["valueSha256"],
-        "bytes": delivered["bytes"],
-        "validation": [
-            *([{"name": "native-schema", "status": "passed"}] if candidate["adapter"] == "claude-cli" else []),
-            {"name": "json-schema", "status": "passed"},
+    final_value = delivered_value
+    validation = [
+        *([{"name": "native-schema", "status": "passed"}] if candidate["adapter"] == "claude-cli" else []),
+        {"name": "json-schema", "status": "passed"},
+    ]
+    if task["spec"]["output"]["evidencePolicy"] == "public-evidence/v1":
+        if public_receipt_dir is None:
+            return None, delivered, _error(
+                "output.evidence_invalid",
+                "Credential-free public evidence receipts were unavailable.",
+                spend_started=True,
+            )
+        try:
+            final_value = project_advisory_review(
+                delivered_value,
+                task=task,
+                bundle=bundle,
+                receipt_dir=public_receipt_dir,
+            )
+        except VisionPolicyError:
+            return None, delivered, _error(
+                "output.evidence_invalid",
+                "Public advisory did not bind to trusted VISION obligations and immutable receipts.",
+                spend_started=True,
+            )
+        final_encoded = canonical_json_bytes(final_value)
+        if len(final_encoded) > task["spec"]["limits"]["maxFinalBytes"]:
+            return None, delivered, _error(
+                "output.schema_invalid",
+                "Trusted public advisory projection exceeded its final byte bound.",
+                spend_started=True,
+            )
+        validation.append({"name": "authority-separation", "status": "passed"})
+    else:
+        final_encoded = canonical_json_bytes(final_value)
+    validation.extend(
+        [
             {"name": task["spec"]["output"]["evidencePolicy"], "status": "passed" if task["spec"]["output"]["evidencePolicy"] != "none" else "not-applicable"},
             {"name": "observed-provenance", "status": "passed"},
-        ],
+        ]
+    )
+    final = {
+        "schemaId": task["spec"]["output"]["schemaId"],
+        "value": final_value,
+        "valueSha256": canonical_sha256(final_value),
+        "bytes": len(final_encoded),
+        "validation": validation,
     }
     return final, delivered, None
 
@@ -483,8 +522,10 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
 
     provider_proxy = None
     search_broker = None
+    public_broker = None
     provider_socket = ""
     search_socket = ""
+    public_socket = ""
     broker_dir = Path(tempfile.mkdtemp(prefix="wha-"))
     try:
         if adapter.id in ("claude-cli", "codex-app-server"):
@@ -500,6 +541,15 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             import wheelhouse_core
             search_broker = SearchBroker(search_socket, task["metadata"]["target"]["owner"], task["metadata"]["target"]["repo"], token, wheelhouse_core.load_config())
             search_broker.start()
+        if task["metadata"]["action"] == "advisory-review.public":
+            public_broker = PublicReadBrokerProcess(
+                str(broker_dir / "public-broker"),
+                execution_id,
+                request_sha256,
+                test_unsandboxed=bool(host.get("testOnly")),
+            )
+            public_broker.start()
+            public_socket = public_broker.socket_path
 
         auth_source = probe.auth_source
 
@@ -513,6 +563,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
             binary_path=probe.binary_path,
             provider_socket=provider_socket,
             search_socket=search_socket,
+            public_socket=public_socket,
             worker_command=worker_command,
             proof=host,
         )
@@ -525,6 +576,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                 "startedMonotonicMs": int(started * 1000),
                 "selection": _selection(task, probe),
                 "proof": _proof(task, probe.descriptor.value, negotiated.proof, host),
+                "publicBroker": public_broker is not None,
             }
         )
         with EventWriter(events_path, execution_id, task["spec"]["limits"]["maxEventBytes"]) as events:
@@ -595,6 +647,7 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                     bundle,
                     worker,
                     negotiated.proof["structuredOutputMechanism"],
+                    public_broker.receipt_dir if public_broker else None,
                 )
             except Exception:
                 final = None
@@ -632,10 +685,72 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
         event_file = Path(events_path)
         if event_file.is_file():
             result["artifacts"].append({"role": "normalized-events", "sha256": file_sha256(event_file), "mediaType": "application/x-ndjson", "bytes": event_file.stat().st_size, "retentionDays": task["spec"]["retention"]["normalizedEventsDays"], "redaction": "wheelhouse-agent/v1"})
+        if public_broker:
+            evidence_manifest = (
+                Path(result_path).resolve().parent / "public-evidence-manifest.json"
+            )
+            receipts = []
+            if public_broker.receipt_dir.is_dir():
+                for path in sorted(public_broker.receipt_dir.glob("*.json")):
+                    if path.is_file() and not path.is_symlink() and path.stat().st_size <= 262144:
+                        receipts.append(load_json_regular(path, max_bytes=262144))
+            excerpts = []
+            excerpt_bytes = 0
+            excerpt_dir = public_broker.receipt_dir / "excerpts"
+            if excerpt_dir.is_dir() and not excerpt_dir.is_symlink():
+                for path in sorted(excerpt_dir.glob("*.txt")):
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    payload = path.read_bytes()
+                    excerpt_bytes += len(payload)
+                    if excerpt_bytes > 64 * 1024 * 1024:
+                        raise RuntimeFailure(
+                            "context.exceeded",
+                            "validating-output",
+                            "Public evidence excerpts exceeded their artifact bound.",
+                        )
+                    digest = hashlib.sha256(payload).hexdigest()
+                    if path.name != digest + ".txt":
+                        raise RuntimeFailure(
+                            "output.evidence_invalid",
+                            "validating-output",
+                            "Public evidence excerpt identity was invalid.",
+                        )
+                    excerpts.append(
+                        {
+                            "sha256": digest,
+                            "bytes": len(payload),
+                            "content": payload.decode("utf-8", errors="strict"),
+                        }
+                    )
+            attestation = load_json_regular(public_broker.attestation_path, max_bytes=262144)
+            atomic_write_json(
+                evidence_manifest,
+                {
+                    "version": "wheelhouse/public-evidence-manifest/v1",
+                    "execution_id": execution_id,
+                    "task_sha256": request_sha256,
+                    "attestation": attestation,
+                    "receipts": receipts,
+                    "excerpts": excerpts,
+                },
+            )
+            result["artifacts"].append(
+                {
+                    "role": "public-evidence-receipts",
+                    "sha256": file_sha256(evidence_manifest),
+                    "mediaType": "application/vnd.wheelhouse.public-evidence-manifest+json",
+                    "bytes": evidence_manifest.stat().st_size,
+                    "retentionDays": task["spec"]["retention"]["normalizedEventsDays"],
+                    "redaction": "wheelhouse-agent/v1",
+                }
+            )
         validate_contract(result, "AgentResult")
         atomic_write_json(result_path, result)
         return result
     finally:
+        if public_broker:
+            public_broker.close()
         if search_broker:
             search_broker.close()
         if provider_proxy:
@@ -809,6 +924,9 @@ def run(task_path: str, bundle_dir: str, result_path: str, events_path: str) -> 
         return _run(task_path, bundle_dir, result_path, events_path, recovery)
     except Exception as error:
         try:
+            if recovery.get("publicBroker"):
+                manifest = Path(result_path).resolve().parent / "public-evidence-manifest.json"
+                manifest.unlink(missing_ok=True)
             return _write_rejected(task_path, bundle_dir, result_path, events_path, error, recovery)
         except Exception:
             raise error

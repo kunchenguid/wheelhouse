@@ -43,6 +43,7 @@ Covers:
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -744,8 +745,37 @@ STATE = {
 }
 
 
-def route(result, kind="pr-review"):
-    return ad.route_decision(result, kind, STATE)
+def authority_result(result, command, comment_id="99"):
+    if not isinstance(result, dict) or not result:
+        return result
+    bound = dict(result)
+    bound["result_kind"] = "AuthorityDecision"
+    bound["authority"] = {
+        "comment_id": comment_id,
+        "body_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+    }
+    return bound
+
+
+def route(result, kind="pr-review", command=None):
+    if command is None:
+        action = result.get("action") if isinstance(result, dict) else ""
+        command = {
+            "merge": "Please merge this.",
+            "close": "Please close this.",
+            "decline": "Please decline this.",
+            "comment": "Please comment on this.",
+            "request-changes": "Please request changes.",
+            "approve-ci": "Please approve CI.",
+            "hold": "Please hold this.",
+        }.get(action, "What is the current status?")
+    return ad.route_decision(
+        authority_result(result, command),
+        kind,
+        STATE,
+        owner_command=command,
+        authority_comment_id="99",
+    )
 
 
 def test_action_mode_drives_execute():
@@ -794,11 +824,17 @@ def test_answer_qualifies_cross_repo_refs_from_deterministic_state():
     """The card lives in a different repo than STATE['repo'], so a bare `#N`
     the model writes into `answer` must be qualified using STATE + owner -
     never left bare (would autolink into the CARDS repo)."""
+    command = "What is the current status?"
     r = ad.route_decision(
-        {"mode": "answer", "answer": "Already handled in #41, see also x/y#2."},
+        authority_result(
+            {"mode": "answer", "answer": "Already handled in #41, see also x/y#2."},
+            command,
+        ),
         "pr-review",
         STATE,
         owner="acme",
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "answer: bare ref qualified with STATE's target repo",
@@ -807,10 +843,14 @@ def test_answer_qualifies_cross_repo_refs_from_deterministic_state():
     check("answer: already-qualified ref elsewhere untouched", "x/y#2" in r["answer"])
 
     r_clarify = ad.route_decision(
-        {"mode": "clarify", "answer": "Did you mean #41 or #42?"},
+        authority_result(
+            {"mode": "clarify", "answer": "Did you mean #41 or #42?"}, command
+        ),
         "pr-review",
         STATE,
         owner="acme",
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "clarify: qualification also applies to clarify replies",
@@ -889,6 +929,113 @@ def test_request_changes_route_decision():
         "route: request-changes not allowed for issue-triage -> clarify",
         r["decision"] == "" and r["mode"] == "clarify",
     )
+
+
+def test_owner_authority_binding_and_public_condition():
+    command = "Please merge this."
+    valid = authority_result({"mode": "action", "action": "merge"}, command)
+    wrong_id = ad.route_decision(
+        valid,
+        "pr-review",
+        STATE,
+        owner_command=command,
+        authority_comment_id="100",
+    )
+    check(
+        "authority: stale comment binding cannot mutate",
+        wrong_id["decision"] == "" and wrong_id["mode"] == "clarify",
+    )
+    discussion = route(
+        {"mode": "action", "action": "merge"},
+        command="Should we merge this?",
+    )
+    check(
+        "authority: a question mentioning merge is not explicit authorization",
+        discussion["decision"] == "",
+    )
+    unsupported = route(
+        {"mode": "action", "action": "merge"},
+        command="If tests look okay, merge this.",
+    )
+    check(
+        "authority: an untrusted conditional interpretation cannot mutate",
+        unsupported["decision"] == "",
+    )
+    conditional_command = (
+        "If the current public evidence advisory is positive, merge this."
+    )
+    positive_state = {
+        **STATE,
+        "triaged_sha": STATE["head_sha"],
+        "triaged_base_sha": "b" * 40,
+        "triaged_vision_sha": "c" * 40,
+        "triage_status": "succeeded",
+        "public_evidence_influenced": True,
+        "advisory_review": {
+            "version": 1,
+            "plan_sha256": "a" * 64,
+            "verdict": "positive",
+            "policy_coverage_complete": True,
+            "acting_authority": False,
+            "auto_merge_eligible": False,
+            "obligations": [{"id": "O001", "status": "complete-pass"}],
+        },
+    }
+    conditional = ad.route_decision(
+        authority_result(
+            {"mode": "action", "action": "merge"}, conditional_command
+        ),
+        "pr-review",
+        positive_state,
+        owner_command=conditional_command,
+        authority_comment_id="99",
+    )
+    check(
+        "authority: fresh owner may explicitly authorize the one deterministic public condition",
+        conditional["decision"] == "merge"
+        and conditional["public_condition"] == "true"
+        and conditional["expected_base_sha"] == "b" * 40
+        and conditional["expected_vision_sha"] == "c" * 40,
+    )
+    negative_state = dict(positive_state)
+    negative_state["advisory_review"] = dict(
+        positive_state["advisory_review"], verdict="negative"
+    )
+    not_met = ad.route_decision(
+        authority_result(
+            {"mode": "action", "action": "merge"}, conditional_command
+        ),
+        "pr-review",
+        negative_state,
+        owner_command=conditional_command,
+        authority_comment_id="99",
+    )
+    check(
+        "authority: public evidence without a met fresh owner condition cannot mutate",
+        not_met["decision"] == "",
+    )
+
+    original_rest = ad.core.gh_rest
+
+    def current_policy(path, **_kwargs):
+        if path.endswith("/pulls/42"):
+            return {"base": {"sha": "b" * 40}}
+        if path.endswith("/contents/VISION.md"):
+            return {"type": "file", "sha": "c" * 40}
+        raise RuntimeError("unexpected path")
+
+    try:
+        ad.core.gh_rest = current_policy
+        current, _ = ad._public_condition_current(
+            "owner", "lavish-axi", 42, "b" * 40, "c" * 40
+        )
+        stale, _ = ad._public_condition_current(
+            "owner", "lavish-axi", 42, "b" * 40, "d" * 40
+        )
+    finally:
+        ad.core.gh_rest = original_rest
+    check("authority: current base and default-branch VISION preserve the condition", current)
+    check("authority: changed default-branch VISION fails the condition closed", not stale)
 
 
 def test_load_llm_result_tolerant():
@@ -2493,13 +2640,10 @@ def test_history_owner_scoped_and_ordered():
     check(
         "history: maintainer turns kept", "Maintainer: Does this rebase cleanly?" in h
     )
-    check(
-        "history: bot turns kept as Assistant",
-        "Assistant: Yes, it applies on top of main." in h,
-    )
+    check("history: prior bot output is excluded", "applies on top" not in h)
     check(
         "history: chronological order preserved",
-        h.index("rebase cleanly") < h.index("applies on top") < h.index("failing test"),
+        h.index("rebase cleanly") < h.index("failing test"),
     )
 
     # SECURITY: a non-owner/non-bot comment must NEVER enter the trusted context.
@@ -2793,11 +2937,29 @@ def test_decline_prose_contract_and_real_action_path():
         and schema["properties"]["free_text"] == {"type": "string", "maxLength": 32768},
     )
 
+    authority = {
+        "comment_id": "99",
+        "body_sha256": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
+    }
     omission_cases = (
-        ("omitted prose", {"mode": "action", "action": "decline"}),
+        (
+            "omitted prose",
+            {
+                "result_kind": "AuthorityDecision",
+                "authority": authority,
+                "mode": "action",
+                "action": "decline",
+            },
+        ),
         (
             "normalized action",
-            {"mode": "action", "action": " Decline ", "free_text": " \t"},
+            {
+                "result_kind": "AuthorityDecision",
+                "authority": authority,
+                "mode": "action",
+                "action": " Decline ",
+                "free_text": " \t",
+            },
         ),
     )
     for label, candidate in omission_cases:
@@ -2824,8 +2986,12 @@ def test_decline_prose_contract_and_real_action_path():
         "owner, who will add it to the community catalog when the time is right. "
         "Closing this PR."
     )
+    command = "Please decline this pull request with that explanation."
     routed = ad.route_decision(
-        {"mode": "action", "action": "decline", "free_text": contributor_note},
+        authority_result(
+            {"mode": "action", "action": "decline", "free_text": contributor_note},
+            command,
+        ),
         "pr-review",
         {
             "repo": "axi",
@@ -2833,6 +2999,8 @@ def test_decline_prose_contract_and_real_action_path():
             "kind": "pr-review",
             "head_sha": "deadbeefcafe",
         },
+        owner_command=command,
+        authority_comment_id="99",
     )
     check(
         "decline regression: structured result preserves decline plus rewritten note",
@@ -2951,6 +3119,7 @@ def main():
     test_answer_qualifies_cross_repo_refs_from_deterministic_state()
     test_trust_boundary()
     test_request_changes_route_decision()
+    test_owner_authority_binding_and_public_condition()
     test_load_llm_result_tolerant()
     test_thank_on_merge_posts_after_successful_merge()
     test_workflow_merge_gate_blocks_net_diff_workflow_touch()

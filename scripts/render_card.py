@@ -311,6 +311,7 @@ TRIAGE_BUDGET_DEFERRED = (
     "Automated advisory generation was deferred because the configured budget "
     "was unavailable."
 )
+PUBLIC_ADVISORY_STATE_VERSION = 1
 
 _STATE_BLOCK_RE = re.compile(
     r"<!--\s*(?:wheelhouse|triage)-state:\s*(\{.*?\})\s*-->",
@@ -1433,6 +1434,122 @@ def triage_section(triage=None, error=None, owner="", repo=""):
     return "\n".join(lines)
 
 
+def normalize_public_advisory(data):
+    """Accept only the trusted, authority-free public advisory projection."""
+    if not isinstance(data, dict) or data.get("result_kind") != "AdvisoryReview":
+        return None
+    if (
+        data.get("public_evidence_influenced") is not True
+        or data.get("acting_authority") is not False
+        or data.get("auto_merge_eligible") is not False
+        or data.get("policy_coverage_complete") is not True
+    ):
+        return None
+    plan_sha = data.get("plan_sha256")
+    verdict = data.get("verdict")
+    summary = data.get("summary")
+    rows = data.get("obligation_results")
+    if (
+        not isinstance(plan_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", plan_sha)
+        or verdict not in {"positive", "negative", "inconclusive"}
+        or not isinstance(summary, str)
+        or not summary.strip()
+        or not isinstance(rows, list)
+        or not rows
+        or len(rows) > 128
+    ):
+        return None
+    obligations = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        obligation_id = row.get("obligation_id")
+        status = row.get("trusted_status")
+        rationale = row.get("rationale")
+        if (
+            not isinstance(obligation_id, str)
+            or not re.fullmatch(r"O[0-9]{3}", obligation_id)
+            or status
+            not in {
+                "complete-pass",
+                "complete-fail",
+                "unavailable",
+                "not-applicable",
+            }
+            or not isinstance(rationale, str)
+            or not rationale.strip()
+        ):
+            return None
+        obligations.append(
+            {
+                "id": obligation_id,
+                "status": status,
+                "rationale": _clean_triage_text(rationale, limit=360),
+            }
+        )
+    if verdict == "positive" and any(
+        row["status"] != "complete-pass" for row in obligations
+    ):
+        return None
+    limitations = data.get("limitations")
+    requested = data.get("requested_evidence")
+    if not isinstance(limitations, list) or not isinstance(requested, list):
+        return None
+    return {
+        "plan_sha256": plan_sha,
+        "verdict": verdict,
+        "summary": _clean_triage_text(summary, limit=1200),
+        "obligations": obligations,
+        "limitations": [
+            _clean_triage_text(value, limit=500)
+            for value in limitations[:32]
+            if isinstance(value, str) and value.strip()
+        ],
+        "requested_evidence": [
+            _clean_triage_text(value, limit=500)
+            for value in requested[:32]
+            if isinstance(value, str) and value.strip()
+        ],
+    }
+
+
+def public_advisory_section(advisory):
+    icons = {
+        "complete-pass": "✅",
+        "complete-fail": "❌",
+        "unavailable": "⚪",
+        "not-applicable": "➖",
+    }
+    lines = [
+        TRIAGE_START,
+        "### Public evidence advisory",
+        "",
+        "> [!CAUTION]",
+        "> Public evidence is untrusted data. This advisory cannot authorize "
+        "an action or satisfy auto-merge.",
+        "",
+        "- **Verdict:** %s" % advisory["verdict"],
+        "- **Summary:** %s" % advisory["summary"],
+        "- **VISION plan:** `%s`" % advisory["plan_sha256"],
+    ]
+    if advisory["obligations"]:
+        lines.extend(["", "#### VISION evidence obligations", ""])
+        for row in advisory["obligations"]:
+            lines.append(
+                "- %s `%s` - **%s** - %s"
+                % (icons[row["status"]], row["id"], row["status"], row["rationale"])
+            )
+    if advisory["limitations"]:
+        lines.extend(["", "#### Limitations", ""])
+        lines.extend("- %s" % value for value in advisory["limitations"])
+    if advisory["requested_evidence"]:
+        lines.extend(["", "#### Requested evidence", ""])
+        lines.extend("- %s" % value for value in advisory["requested_evidence"])
+    lines.append(TRIAGE_END)
+    return "\n".join(lines)
+
+
 def remove_triage_section(body):
     return _TRIAGE_SECTION_RE.sub("\n", body or "").strip() + "\n"
 
@@ -1722,6 +1839,8 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_repair_reason",
         "triage_repair_candidate",
         "automerge_verdict",
+        "public_evidence_influenced",
+        "advisory_review",
         TRIAGE_ATTEMPTS_FIELD,
         "triage_replay",
     ):
@@ -1749,6 +1868,8 @@ def _state_with_triage(
     repair_candidate=None,
 ):
     new_state = dict(state or {})
+    new_state.pop("public_evidence_influenced", None)
+    new_state.pop("advisory_review", None)
     new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
     # Bounded schema-repair telemetry (NON-MATERIAL, like triaged_sha): set only
@@ -1942,6 +2063,44 @@ def body_with_triage_result(
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])
     updated = _set_recommendation_section_visible(updated, visible=not recommendation)
+    return _replace_state_block(updated, new_state)
+
+
+def body_with_public_advisory(body, revision, advisory, vision_sha="", base_sha=""):
+    state = parse_state_block(body)
+    kind = (state or {}).get("kind") if state else None
+    normalized = normalize_public_advisory(advisory)
+    if (
+        not state
+        or kind != "pr-review"
+        or state_revision(state, kind) != revision
+        or normalized is None
+    ):
+        return body
+    updated = _insert_triage_section(body, public_advisory_section(normalized))
+    new_state = _state_with_triage(
+        state,
+        revision,
+        "succeeded",
+        base_sha=base_sha,
+        vision_sha=vision_sha,
+    )
+    new_state["public_evidence_influenced"] = True
+    new_state["advisory_review"] = {
+        "version": PUBLIC_ADVISORY_STATE_VERSION,
+        "plan_sha256": normalized["plan_sha256"],
+        "verdict": normalized["verdict"],
+        "policy_coverage_complete": True,
+        "acting_authority": False,
+        "auto_merge_eligible": False,
+        "obligations": [
+            {"id": row["id"], "status": row["status"]}
+            for row in normalized["obligations"]
+        ],
+    }
+    new_state["options"] = options_for_state(kind, state.get("options"), new_state)
+    updated = _publish_decision_section(updated, kind, new_state["options"])
+    updated = _set_recommendation_section_visible(updated, visible=True)
     return _replace_state_block(updated, new_state)
 
 
@@ -4316,6 +4475,7 @@ def update_card_triage(
     repair_reason=None,
     repair_candidate=None,
     require_queued=False,
+    public_advisory=None,
 ):
     """Attach a completed auto-triage attempt's result to its card.
 
@@ -4356,19 +4516,28 @@ def update_card_triage(
         body = _replace_state_block(body, state)
         remove_labels.append(HOLD_LABEL)
 
-    new_body = body_with_triage_result(
-        body,
-        revision,
-        triage=triage,
-        error=error,
-        owner=owner,
-        vision_sha=vision_sha,
-        base_sha=base_sha,
-        automerge_behavior_available=automerge_behavior_available,
-        repair_status=repair_status,
-        repair_reason=repair_reason,
-        repair_candidate=repair_candidate,
-    )
+    if public_advisory is not None:
+        new_body = body_with_public_advisory(
+            body,
+            revision,
+            public_advisory,
+            vision_sha=vision_sha,
+            base_sha=base_sha,
+        )
+    else:
+        new_body = body_with_triage_result(
+            body,
+            revision,
+            triage=triage,
+            error=error,
+            owner=owner,
+            vision_sha=vision_sha,
+            base_sha=base_sha,
+            automerge_behavior_available=automerge_behavior_available,
+            repair_status=repair_status,
+            repair_reason=repair_reason,
+            repair_candidate=repair_candidate,
+        )
     if new_body == body and not held:
         return False
     new_body = _atomic_automerge_card_body(
@@ -4938,6 +5107,13 @@ def plan_triage_repair(result_text, kind):
             "reason": "no delivered result to repair",
             "prompt": "",
         }
+    candidate, _ = _extract_json_object(text)
+    if isinstance(candidate, dict) and candidate.get("result_kind") == "AdvisoryReview":
+        return {
+            "repair_needed": False,
+            "reason": "public advisory results are never routed through triage repair",
+            "prompt": "",
+        }
     if parse_triage_json(text) is not None:
         return {"repair_needed": False, "reason": "", "prompt": ""}
     reason = triage_schema_reason(text) or "delivered result failed schema validation"
@@ -4968,6 +5144,16 @@ def decide_triage_apply(
     update_card_triage, which re-normalizes), else None. For the repair paths the
     result also carries `candidate`, a redacted content-free shape of the
     original failed candidate (for diagnosis)."""
+    candidate, _ = _extract_json_object(result_text)
+    public_advisory = normalize_public_advisory(candidate)
+    if public_advisory is not None:
+        return {
+            "outcome": "public-advisory",
+            "triage": None,
+            "public_advisory": candidate,
+            "reason": "",
+            "candidate": "",
+        }
     triage = parse_triage_json(result_text)
     if triage is not None:
         if not _triage_evidence_verified(triage, target_file):
@@ -5169,7 +5355,20 @@ def main():
         )
         outcome = decision["outcome"]
         applied = False
-        if outcome == "success":
+        if outcome == "public-advisory":
+            applied = update_card_triage(
+                args.issue,
+                args.revision,
+                owner=owner,
+                vision_sha=args.vision_sha,
+                base_sha=args.base_sha,
+                public_advisory=decision["public_advisory"],
+            )
+            if applied:
+                print("updated public evidence advisory on card #%s" % args.issue)
+            else:
+                print("public evidence advisory skipped for card #%s" % args.issue)
+        elif outcome == "success":
             applied = update_card_triage(
                 args.issue,
                 args.revision,
@@ -5229,7 +5428,9 @@ def main():
         _github_output("applied", "true" if applied else "false")
         _github_output(
             "triage_status",
-            "succeeded" if outcome in {"success", "repaired"} else "error",
+            "succeeded"
+            if outcome in {"public-advisory", "success", "repaired"}
+            else "error",
         )
     elif args.cmd == "triage-repair-prep":
         # Decide whether the ORIGINAL delivered result is a schema-miss that

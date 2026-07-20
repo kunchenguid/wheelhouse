@@ -29,6 +29,13 @@ def claude_descriptor(binary_version: str, binary_digest: str, protocol_fixture_
         "protocolSchemaSha256": protocol_fixture_sha256,
         "capabilities": {
             "input.text": {"mechanism": "stdin", "maxBytes": 262144},
+            "fs.read": {"mechanism": "mcp-typed-tool", "writes": False},
+            "fs.grep": {"mechanism": "mcp-typed-tool"},
+            "fs.glob": {"mechanism": "mcp-typed-tool"},
+            "public.search": {"mechanism": "mcp-typed-tool-broker"},
+            "public.fetch": {"mechanism": "mcp-typed-tool-broker"},
+            "public.git_snapshot": {"mechanism": "mcp-typed-tool-broker"},
+            "public.artifact": {"mechanism": "mcp-typed-tool-broker"},
             "process.exec": {"mechanism": "external-deny", "mode": "none"},
             "tool.network": {"mechanism": "external-deny", "modes": ["none", "broker-only"]},
             "output.structured": {
@@ -122,6 +129,15 @@ def negotiate(task: dict[str, Any], descriptor: dict[str, Any], host_proof: dict
     allowed_tools = {"fs.read", "fs.grep", "fs.glob"}
     if task["metadata"]["action"].endswith(".search"):
         allowed_tools.add("github.search.readonly")
+    if task["metadata"]["action"] == "advisory-review.public":
+        allowed_tools.update(
+            {
+                "public.search",
+                "public.fetch",
+                "public.git_snapshot",
+                "public.artifact",
+            }
+        )
     _require(set(requested_tools).issubset(allowed_tools), "task requested a tool outside its action profile")
     _require(len(requested_tools) == len(set(requested_tools)), "task requested a duplicate tool")
     _require(task["spec"]["tools"]["default"] == "deny", "tool default must be deny")
