@@ -1420,9 +1420,42 @@ def build_task(
             proposed_plan.get("obligations"), list
         ):
             raise ArtifactError("CoverageAuditor requires a valid proposed plan")
+        validate_schema(
+            proposed_plan,
+            load_json_regular(
+                ACTION_SCHEMAS / "policy-derive-v1.schema.json", max_bytes=65536
+            ),
+        )
         obligation_count = len(proposed_plan["obligations"])
         schema_value["properties"]["obligations"]["minItems"] = obligation_count
         schema_value["properties"]["obligations"]["maxItems"] = obligation_count
+        obligation_schema = source_schema["definitions"]["obligation"]
+        bound_obligations = []
+        for obligation in proposed_plan["obligations"]:
+            bound_obligation = deepcopy(obligation_schema)
+            for name in (
+                "obligation_id",
+                "unit_id",
+                "operation",
+                "requirement",
+                "semantic_status",
+            ):
+                bound_obligation["properties"][name] = {
+                    "type": "string",
+                    "const": obligation[name],
+                }
+            if "expected_sha256" in obligation:
+                bound_obligation["properties"]["expected_sha256"] = {
+                    "type": "string",
+                    "const": obligation["expected_sha256"],
+                }
+                bound_obligation["required"].append("expected_sha256")
+            else:
+                bound_obligation["properties"].pop("expected_sha256", None)
+            bound_obligations.append(bound_obligation)
+        schema_value["properties"]["obligations"]["items"] = {
+            "oneOf": bound_obligations
+        }
 
     source_prompt = Path(prompt_path)
     try:
