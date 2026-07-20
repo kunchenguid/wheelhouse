@@ -61,6 +61,9 @@ _PREDICATES = {
     "request", "review", "satisfy", "verify", "verification", "verifies",
     "verifying", "validate", "validation", "distinguish",
 }
+_UNREGISTERED_BRANCH_VERBS = {
+    "approve", "authorize", "certify", "consent", "obtain", "permit", "sign",
+}
 
 
 class VisionPolicyError(ValueError):
@@ -171,11 +174,30 @@ def _normative_productions(text: str) -> list[str]:
     return productions
 
 
+def _predicate_operand(tokens: list[str], index: int) -> list[str]:
+    end = len(tokens)
+    for offset in range(index + 1, len(tokens)):
+        if tokens[offset] in {";", "."}:
+            end = offset
+            break
+        if tokens[offset] in {"and", "or"}:
+            cursor = offset + 1
+            while cursor < len(tokens) and tokens[cursor] in {",", "("}:
+                cursor += 1
+            if (
+                tokens[cursor : cursor + 1] == ["when"]
+                or (cursor < len(tokens) and tokens[cursor] in _PREDICATES)
+            ):
+                end = offset
+                break
+    return tokens[index + 1 : end]
+
+
 def _predicate_operations(
     predicate: str, tokens: list[str], index: int
 ) -> list[str] | None:
-    context = " ".join(tokens)
-    nearby = " ".join(tokens[max(0, index - 12) : index + 24])
+    operand_tokens = _predicate_operand(tokens, index)
+    operand = " ".join(operand_tokens)
     if predicate in {"inspect", "inspected", "inspection"}:
         return ["public.git_snapshot"]
     if predicate in {"fetch", "fetched", "fetches", "fetching"}:
@@ -183,31 +205,31 @@ def _predicate_operations(
     if predicate in {"execute", "executed", "execution", "exercise", "exercised"}:
         return ["public.artifact", "exercise.run"]
     if predicate == "review":
-        if re.search(r"\b(?:package|artifact|release)\b", nearby):
+        if re.search(r"\b(?:package|artifact|release)\b", operand):
             return ["public.artifact"]
-        if re.search(r"\b(?:source|repository|revision|commit)\b", nearby):
+        if re.search(r"\b(?:source|repository|revision|commit)\b", operand):
             return ["public.git_snapshot"]
         return ["policy.assess"]
     if predicate in {"verify", "verification", "verifies", "verifying"}:
         if (
             any(re.fullmatch(r"[0-9a-f]{64}", token) for token in tokens)
-            and re.search(r"\b(?:artifact|package|release)\b", nearby)
+            and re.search(r"\b(?:artifact|package|release)\b", operand)
         ):
             return ["public.artifact"]
-        if _DIGEST_LANGUAGE.search(nearby):
-            return ["public.artifact"] if _expected_sha256(context) else ["digest.verify"]
-        if re.search(r"\b(?:manifest|dataset|public\s+url)\b", nearby):
+        if _DIGEST_LANGUAGE.search(operand):
+            return ["public.artifact"] if _expected_sha256(" ".join(tokens)) else ["digest.verify"]
+        if re.search(r"\b(?:manifest|dataset|public\s+url)\b", operand):
             return ["public.fetch"]
-        if re.search(r"\b(?:source|repository|revision|commit)\b", nearby):
+        if re.search(r"\b(?:source|repository|revision|commit)\b", operand):
             return ["public.git_snapshot"]
         return ["policy.assess"]
     if predicate == "identify":
         operations = []
-        if re.search(r"\b(?:source|repository|revision|commit)\b", context):
+        if re.search(r"\b(?:source|repository|revision|commit)\b", operand):
             operations.append("public.git_snapshot")
-        if re.search(r"\b(?:package|artifact|release)\b", context):
+        if re.search(r"\b(?:package|artifact|release)\b", operand):
             operations.append("public.artifact")
-        if re.search(r"\b(?:execute|execution|exercise|exercised)\b", context):
+        if re.search(r"\b(?:execute|execution|exercise|exercised)\b", operand):
             operations.append("exercise.run")
         return operations or ["policy.assess"]
     if predicate == "receive":
@@ -219,14 +241,49 @@ def _predicate_operations(
     if predicate == "remain":
         return ["policy.assess"] if tokens[index + 1 : index + 2] == ["inconclusive"] else None
     if predicate in {"complete", "completed", "establish", "established"}:
-        if re.search(r"\b(?:source|inspection|revision|commit)\b", nearby):
+        if re.search(r"\b(?:source|inspection|revision|commit)\b", operand):
             return ["public.git_snapshot"]
-        if re.search(r"\b(?:execute|execution|package|artifact|release)\b", nearby):
+        if re.search(r"\b(?:execute|execution|package|artifact|release)\b", operand):
             return ["public.artifact", "exercise.run"]
-        if re.search(r"\b(?:manifest|dataset|ordering|fetched)\b", nearby):
+        if re.search(r"\b(?:manifest|dataset|ordering|fetched)\b", operand):
             return ["public.fetch"]
         return None
     return ["policy.assess"]
+
+
+def _leading_guard_end(tokens: list[str]) -> int:
+    if tokens[:1] != ["if"]:
+        return -1
+    for index, token in enumerate(tokens):
+        if token != ",":
+            continue
+        stop = next(
+            (
+                offset
+                for offset in range(index + 1, len(tokens))
+                if tokens[offset] in {",", ";", "."}
+            ),
+            len(tokens),
+        )
+        modal = next(
+            (
+                offset
+                for offset in range(index + 1, stop)
+                if tokens[offset] in _MODALS
+            ),
+            stop,
+        )
+        predicate = next(
+            (
+                offset
+                for offset in range(index + 1, stop)
+                if tokens[offset] in _PREDICATES
+            ),
+            stop,
+        )
+        if modal < predicate:
+            return index
+    return -1
 
 
 def _parse_production(production: str) -> tuple[list[str], str]:
@@ -235,7 +292,8 @@ def _parse_production(production: str) -> tuple[list[str], str]:
     if not tokens or len(tokens) > 160:
         return [], "unknown"
     ambiguous = bool(_AMBIGUOUS_CONDITION.search(production))
-    selected: set[int] = set()
+    selected: dict[int, str] = {}
+    connector_edges: list[tuple[str, int, int]] = []
     if re.search(r"\b(?:is|are)\s+insufficient\s+evidence\b", production, re.I):
         policy_marker = True
     else:
@@ -247,13 +305,15 @@ def _parse_production(production: str) -> tuple[list[str], str]:
         elif token not in _MODALS:
             continue
         cursor = modal_end + 1
+        polarity = "negative" if token == "cannot" else "positive"
         if tokens[cursor : cursor + 1] == ["not"]:
+            polarity = "negative"
             cursor += 1
         if tokens[cursor : cursor + 1] == ["be"]:
             cursor += 1
         if cursor >= len(tokens) or tokens[cursor] not in _PREDICATES:
             return [], "unknown"
-        selected.add(cursor)
+        selected[cursor] = polarity
     for index, token in enumerate(tokens):
         if token in {"require", "requires"}:
             candidates = [
@@ -263,8 +323,11 @@ def _parse_production(production: str) -> tuple[list[str], str]:
             ]
             if not candidates:
                 return [], "unknown"
-            selected.add(candidates[0])
+            selected[candidates[0]] = "positive"
         elif token == "required":
+            if tokens[max(0, index - 1) : index] == ["not"]:
+                policy_marker = True
+                continue
             candidates = [
                 offset
                 for offset in range(max(0, index - 6), min(len(tokens), index + 7))
@@ -272,8 +335,14 @@ def _parse_production(production: str) -> tuple[list[str], str]:
             ]
             if not candidates and tokens[max(0, index - 1) : index] != ["not"]:
                 return [], "unknown"
-            selected.update(candidates[:1])
+            for candidate in candidates[:1]:
+                selected[candidate] = "positive"
             policy_marker = policy_marker or not candidates
+    for index, token in enumerate(tokens):
+        if token == "not" and tokens[index + 1 : index + 2]:
+            candidate = index + 1
+            if tokens[candidate] in _PREDICATES:
+                selected[candidate] = "negative"
     for index, token in enumerate(tokens):
         if token in _CONDITIONS or token in {"contingent", "prerequisite"}:
             candidates = [
@@ -284,10 +353,7 @@ def _parse_production(production: str) -> tuple[list[str], str]:
             if not candidates:
                 return [], "unknown"
             if tokens[candidates[0]] in _PREDICATES:
-                selected.add(candidates[0])
-    fail_closed = bool(
-        re.search(r"\b(?:cannot|inconclusive|insufficient\s+evidence)\b", production, re.I)
-    )
+                selected.setdefault(candidates[0], "positive")
     for index, token in enumerate(tokens):
         if token not in {"and", "or"}:
             continue
@@ -303,11 +369,18 @@ def _parse_production(production: str) -> tuple[list[str], str]:
         else:
             candidates = [cursor] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
         if candidates:
-            if token == "or" and not fail_closed:
-                ambiguous = True
-            selected.add(candidates[0])
+            source = max((offset for offset in selected if offset < index), default=-1)
+            selected.setdefault(candidates[0], "positive")
+            connector_edges.append((token, source, candidates[0]))
+        elif (
+            cursor < len(tokens)
+            and tokens[cursor] in _UNREGISTERED_BRANCH_VERBS
+            and any(offset < index for offset in selected)
+        ):
+            return [], "unknown"
     ambiguous = ambiguous or "never" in tokens or "unless" in tokens or "and/or" in tokens
     operations = ["policy.assess"] if policy_marker else []
+    node_operations: dict[int, list[str]] = {}
     for index in sorted(selected):
         end = next(
             (
@@ -319,15 +392,40 @@ def _parse_production(production: str) -> tuple[list[str], str]:
         )
         if end - index > 48:
             return [], "unknown"
-        resolved = _predicate_operations(tokens[index], tokens, index)
+        resolved = (
+            ["policy.assess"]
+            if selected[index] == "negative"
+            else _predicate_operations(tokens[index], tokens, index)
+        )
         if resolved is None:
             return [], "unknown"
+        node_operations[index] = resolved
         for operation in resolved:
             if operation not in operations:
                 operations.append(operation)
+    guard_end = _leading_guard_end(tokens)
+    for connector, source, target in connector_edges:
+        if connector != "or":
+            continue
+        in_guard = guard_end >= 0 and source >= 0 and source < guard_end and target < guard_end
+        local_outcomes = (
+            guard_end >= 0
+            and source > guard_end
+            and node_operations.get(source) == ["policy.assess"]
+            and node_operations.get(target) == ["policy.assess"]
+        )
+        if not in_guard and not local_outcomes:
+            ambiguous = True
     if not operations:
         return [], "unknown"
-    if len(operations) > 1 and "policy.assess" in operations:
+    preserves_local_policy = policy_marker or any(
+        polarity == "negative" for polarity in selected.values()
+    )
+    if (
+        len(operations) > 1
+        and "policy.assess" in operations
+        and not preserves_local_policy
+    ):
         operations.remove("policy.assess")
     if ambiguous:
         return operations, "ambiguous"
@@ -352,8 +450,6 @@ def _parse_normative(text: str) -> tuple[list[str], str]:
                 operations.append(operation)
     if "digest.verify" in operations:
         return operations, "unknown"
-    if len(operations) > 1 and "policy.assess" in operations:
-        operations.remove("policy.assess")
     return operations, (
         "recognized-local" if operations == ["policy.assess"] else "recognized"
     )

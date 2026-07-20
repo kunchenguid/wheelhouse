@@ -560,7 +560,7 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     )
     check(
         "VISION B: unrelated manifest duty is derived without repository policy",
-        unrelated_operations == {"public.fetch"}
+        unrelated_operations == {"public.fetch", "policy.assess"}
         and all(
             row["operation"] == "policy.assess"
             or "stable key" in row["requirement"].casefold()
@@ -635,6 +635,21 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     disjunction_plan = derive_evidence_plan(
         "A reviewer must inspect source or execute a package."
     )
+    negative_action_plan = derive_evidence_plan(
+        "A reviewer must not execute an unreviewed package."
+    )
+    mixed_polarity_plan = derive_evidence_plan(
+        "A reviewer must inspect source and must not execute an unreviewed package."
+    )
+    unknown_conjunct_plan = derive_evidence_plan(
+        "A reviewer must inspect source and obtain legal approval."
+    )
+    masked_disjunction_plan = derive_evidence_plan(
+        "A reviewer must inspect source or execute a package; failures must remain inconclusive."
+    )
+    identify_subject_plan = derive_evidence_plan(
+        "Package metadata must identify owner."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -673,7 +688,28 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         "VISION: ordinary predicate disjunctions are explicitly ambiguous",
         all(
             row["semantic_status"] == "ambiguous"
-            for row in disjunction_plan["obligations"]
+            for plan in (disjunction_plan, masked_disjunction_plan)
+            for row in plan["obligations"]
+        ),
+    )
+    check(
+        "VISION: negative actions and predicate operands preserve authority",
+        {row["operation"] for row in negative_action_plan["obligations"]}
+        == {"policy.assess"}
+        and all(
+            row["semantic_status"] == "recognized-local"
+            for row in negative_action_plan["obligations"]
+        )
+        and {row["operation"] for row in identify_subject_plan["obligations"]}
+        == {"policy.assess"}
+        and {row["operation"] for row in mixed_polarity_plan["obligations"]}
+        == {"public.git_snapshot", "policy.assess"}
+    )
+    check(
+        "VISION: unknown conjuncts invalidate the complete production",
+        all(
+            row["semantic_status"] == "unknown"
+            for row in unknown_conjunct_plan["obligations"]
         ),
     )
     check(
@@ -857,7 +893,11 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 "obligation_id": row["obligation_id"],
                 "assessment": "pass",
                 "rationale": "The bounded manifest has a stable key and sorted rows.",
-                "citation_ids": [manifest_receipt["evidence_id"]],
+                "citation_ids": (
+                    [manifest_receipt["evidence_id"]]
+                    if row["operation"] == "public.fetch"
+                    else []
+                ),
             }
             for row in plan["obligations"]
         ],
