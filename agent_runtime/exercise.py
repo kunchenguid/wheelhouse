@@ -230,8 +230,6 @@ def _scenario_command(
         "--dir",
         "/work",
         "--dir",
-        "/adapter",
-        "--dir",
         "/etc",
         "--chmod",
         "0755",
@@ -241,7 +239,7 @@ def _scenario_command(
         "/work",
         "--ro-bind",
         node,
-        "/adapter/node",
+        "/node",
         "--dir",
         "/writable",
         "--bind",
@@ -262,7 +260,7 @@ def _scenario_command(
             "--setenv", "LC_ALL", "C.UTF-8",
             "--setenv", "NO_PROXY", "*",
             "--chdir", str(sandbox_cwd),
-            "--", "/adapter/node", str(sandbox_entrypoint), *arguments,
+            "--", "/node", str(sandbox_entrypoint), *arguments,
         ]
     )
     return command, "/"

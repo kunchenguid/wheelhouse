@@ -331,7 +331,7 @@ def main():
                 "--permission-mode",
                 "dontAsk",
                 "--tools",
-                "",
+                "StructuredOutput",
                 "--model",
                 "claude-sonnet-4-6",
                 "--max-turns",

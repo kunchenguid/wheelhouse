@@ -1570,7 +1570,7 @@ def test_public_task_contract():
             "--safe-mode" not in argv
             and argv[argv.index("--setting-sources") + 1] == ""
             and "--strict-mcp-config" in argv
-            and argv[argv.index("--tools") + 1] == ""
+            and argv[argv.index("--tools") + 1] == "StructuredOutput"
             and set(argv[allowed_index].split(","))
             == {
                 "StructuredOutput",
@@ -1920,11 +1920,11 @@ def test_production_launcher_contract():
             and readable_etc_mount_parent(scenario_command)
             and any(
                 scenario_command[index : index + 3]
-                == ["--ro-bind", "/usr/bin/node", "/adapter/node"]
+                == ["--ro-bind", "/usr/bin/node", "/node"]
                 for index in range(len(scenario_command) - 2)
             )
             and scenario_command[-3:]
-            == ["/adapter/node", "/work/application/cli.js", "--version"]
+            == ["/node", "/work/application/cli.js", "--version"]
             and "/run/exercise" not in scenario_command
             and "/evidence" not in scenario_command
             and "receipts" not in " ".join(scenario_command)

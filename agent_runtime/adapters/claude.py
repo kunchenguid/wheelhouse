@@ -774,7 +774,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
             "--permission-mode",
             "dontAsk",
             "--tools",
-            "",
+            "StructuredOutput",
             "--model",
             EXPECTED_MODEL,
             "--max-turns",
