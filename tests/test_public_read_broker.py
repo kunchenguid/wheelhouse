@@ -1568,10 +1568,16 @@ def test_public_task_contract():
                 encoding="utf-8"
             )
         )
+        schema_input = next(
+            row for row in task["spec"]["inputs"] if row["id"] == "output-schema"
+        )
         check(
             "task: auto-merge lane requires advisory eligibility facts in draft-07",
             bound_schema["$schema"] == "http://json-schema.org/draft-07/schema#"
-            and "eligibility_facts" in bound_schema["required"],
+            and "eligibility_facts" in bound_schema["required"]
+            and schema_input["artifact"]
+            == task["spec"]["output"]["schemaArtifact"]
+            and schema_input["trust"] == "trusted",
         )
         plan_input = next(
             row for row in task["spec"]["inputs"] if row["id"] == "vision-units"
@@ -1952,7 +1958,7 @@ def test_production_launcher_contract():
             and "receipts" not in " ".join(scenario_command)
             and scenario_cwd == str(app)
             and "_landlock_artifact(work, writable, node)" in exercise_source
-            and "allowed_paths = [(work, read_execute), (Path(node), read_execute)]"
+            and "allowed_paths = [(work, read_execute), (Path(node), read_file_execute)]"
             in exercise_source
             and "allowed_paths.append((writable, handled))" in exercise_source
             and "libc.syscall(restrict_self, ruleset_fd, 0)" in exercise_source,

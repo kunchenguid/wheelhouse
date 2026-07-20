@@ -1409,8 +1409,8 @@ def build_task(
         (
             "Your final turn MUST be exactly one StructuredOutput call. Encode the complete "
             "result instance required by the original action schema, not the schema definition, "
-            "as the native `json` carrier string. Never finish with plain text, Markdown, or a "
-            "raw JSON response."
+            "as the native `json` carrier string. Read output-schema.json and satisfy every "
+            "constraint in it. Never finish with plain text, Markdown, or a raw JSON response."
             if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),
@@ -1629,6 +1629,21 @@ def build_task(
         schema_digest, _, schema_artifact = _copy_file(schema_source, bundle, 65536)
     finally:
         canonical_schema.unlink(missing_ok=True)
+    if adapter == "claude-cli" and public_policy_action:
+        schema_size = (bundle / schema_artifact).stat().st_size
+        inputs.append(
+            {
+                "id": "output-schema",
+                "artifact": schema_artifact,
+                "logicalPath": "output-schema.json",
+                "sha256": schema_digest,
+                "mediaType": "application/schema+json",
+                "trust": "trusted",
+                "mount": "read-only",
+                "maxBytes": 65536,
+                "bytes": schema_size,
+            }
+        )
     soft, hard, turns, tool_calls, final_bytes = ACTION_LIMITS[action]
     profile = selection["profile"]
     shim_version = (

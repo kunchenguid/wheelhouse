@@ -168,7 +168,8 @@ def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
     restrict_self = 446
     version_flag = 1
     path_beneath_rule = 1
-    read_execute = (1 << 0) | (1 << 2) | (1 << 3)
+    read_file_execute = (1 << 0) | (1 << 2)
+    read_execute = read_file_execute | (1 << 3)
     write_v1 = sum(1 << bit for bit in range(1, 13) if bit not in {2, 3})
     libc = ctypes.CDLL(None, use_errno=True)
     abi = libc.syscall(create_ruleset, 0, 0, version_flag)
@@ -187,7 +188,7 @@ def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
         raise ExerciseError("exercise.isolation", "Landlock ruleset creation failed")
     opened: list[int] = []
     try:
-        allowed_paths = [(work, read_execute), (Path(node), read_execute)]
+        allowed_paths = [(work, read_execute), (Path(node), read_file_execute)]
         allowed_paths.extend(
             (Path(path), read_execute)
             for path in ("/usr", "/bin", "/lib", "/lib64")
