@@ -64,7 +64,7 @@ from agent_runtime.public_read import (  # noqa: E402
     _WireBudget,
     resolve_public_host,
 )
-from agent_runtime.task_builder import build_task  # noqa: E402
+from agent_runtime.task_builder import ACTION_LIMITS, build_task  # noqa: E402
 from agent_runtime.tools import CanonicalTools  # noqa: E402
 from agent_runtime.vision_policy import (  # noqa: E402
     AUDIT_VERSION,
@@ -1528,6 +1528,10 @@ def test_public_task_contract():
             and task["spec"]["output"]["evidencePolicy"]
             == "public-evidence/v1",
         )
+        check(
+            "task: policy auditor can read every input before native schema submission",
+            ACTION_LIMITS["policy-audit.public"][2:] == (6, 4, 131_072),
+        )
         bound_schema = json.loads(
             (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(
                 encoding="utf-8"
@@ -1743,15 +1747,18 @@ def test_uid_process_limit():
 
 
 def test_production_launcher_contract():
+    node_binary = str(Path(shutil.which("node") or sys.executable).resolve())
+
+    def mocked_tool(name):
+        if name == "node":
+            return node_binary
+        return "/usr/bin/" + name if name in {"bwrap", "prlimit", "setpriv"} else None
+
     with tempfile.TemporaryDirectory() as directory, mock.patch(
         "platform.system", return_value="Linux"
     ), mock.patch(
         "shutil.which",
-        side_effect=lambda name: (
-            "/usr/bin/" + name
-            if name in {"bwrap", "prlimit", "setpriv"}
-            else None
-        ),
+        side_effect=mocked_tool,
     ), mock.patch(
         "agent_runtime.brokers._uid_process_limit",
         side_effect=lambda allowance: 100 + allowance,
@@ -1856,6 +1863,16 @@ def test_production_launcher_contract():
             == "/run/exercise/receipts"
             and exercise_command[exercise_command.index("--artifact-sandbox") + 1]
             == "/usr/bin/bwrap"
+            and any(
+                exercise_command[index : index + 3]
+                == ["--ro-bind", node_binary, "/adapter/node"]
+                for index in range(len(exercise_command) - 2)
+            )
+            and any(
+                exercise_command[index : index + 3]
+                == ["--setenv", "PATH", "/adapter:/usr/bin:/bin"]
+                for index in range(len(exercise_command) - 2)
+            )
             and exercise_environment == {},
         )
         work = Path(directory) / "scenario"
@@ -1892,6 +1909,13 @@ def test_production_launcher_contract():
                 == ["--bind", str(writable), "/writable"]
                 for index in range(len(scenario_command) - 2)
             )
+            and any(
+                scenario_command[index : index + 3]
+                == ["--ro-bind", "/usr/bin/node", "/adapter/node"]
+                for index in range(len(scenario_command) - 2)
+            )
+            and scenario_command[-3:]
+            == ["/adapter/node", "/work/application/cli.js", "--version"]
             and "/run/exercise" not in scenario_command
             and "/evidence" not in scenario_command
             and "receipts" not in " ".join(scenario_command)

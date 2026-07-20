@@ -802,9 +802,22 @@ class ExerciseBrokerProcess:
         binary = shutil.which("bwrap")
         prlimit = shutil.which("prlimit")
         privilege_drop = shutil.which("setpriv")
-        if not binary or not prlimit or not privilege_drop:
+        node = shutil.which("node")
+        if not binary or not prlimit or not privilege_drop or not node:
             raise BrokerError(
-                "exercise broker production isolation requires Bubblewrap, prlimit, and setpriv"
+                "exercise broker production isolation requires Bubblewrap, prlimit, setpriv, and Node.js"
+            )
+        try:
+            node_path = Path(node).resolve(strict=True)
+        except OSError as error:
+            raise BrokerError("exercise broker Node.js adapter is unavailable") from error
+        node_metadata = node_path.lstat()
+        if (
+            not stat.S_ISREG(node_metadata.st_mode)
+            or not os.access(node_path, os.R_OK | os.X_OK)
+        ):
+            raise BrokerError(
+                "exercise broker Node.js adapter must be a readable executable file"
             )
         process_limit = _uid_process_limit(EXERCISE_BROKER_PROCESS_ALLOWANCE)
         command = [
@@ -849,6 +862,8 @@ class ExerciseBrokerProcess:
             "--dir",
             "/evidence",
             "--dir",
+            "/adapter",
+            "--dir",
             "/etc",
             "--ro-bind",
             str(runtime / "agent_runtime"),
@@ -859,6 +874,9 @@ class ExerciseBrokerProcess:
             "--ro-bind",
             str(self.evidence_root),
             "/evidence",
+            "--ro-bind",
+            str(node_path),
+            "/adapter/node",
         ]
         for path in (
             "/usr",
@@ -872,7 +890,7 @@ class ExerciseBrokerProcess:
                 command.extend(["--ro-bind", path, path])
         command.extend(
             [
-                "--setenv", "PATH", "/usr/bin:/bin",
+                "--setenv", "PATH", "/adapter:/usr/bin:/bin",
                 "--setenv", "PYTHONPATH", "/runtime",
                 "--setenv", "HOME", "/tmp",
                 "--setenv", "TMPDIR", "/tmp",
