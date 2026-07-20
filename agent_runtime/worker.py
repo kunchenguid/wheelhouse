@@ -620,7 +620,12 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
             stderr_matches += exact + pattern
             total += min(len(line), 4096)
 
-    parser = ClaudeStreamParser(expected_model=candidate["model"], require_structured_output=True)
+    parser = ClaudeStreamParser(
+        expected_model=candidate["model"],
+        require_structured_output=True,
+        allow_result_carrier=claude_plan.get("structuredOutputTransport")
+        == "draft-07-json-carrier-v1",
+    )
     stdout_thread: threading.Thread | None = None
     stderr_thread: threading.Thread | None = None
     cancelled = False

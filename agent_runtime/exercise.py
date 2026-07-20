@@ -455,6 +455,15 @@ def run_node_npm_cli(
                 diagnostic = ".module"
             elif stderr.startswith("wheelhouse-isolation:"):
                 diagnostic = ".landlock"
+                for marker, suffix in (
+                    ("Landlock is unavailable", "_unavailable"),
+                    ("Landlock ruleset creation failed", "_ruleset"),
+                    ("Landlock rule admission failed", "_admission"),
+                    ("Landlock confinement failed", "_restrict"),
+                ):
+                    if marker in stderr:
+                        diagnostic += suffix
+                        break
             elif stderr.startswith("node:") or stderr.startswith("/node"):
                 diagnostic = ".node"
         raise ExerciseError(

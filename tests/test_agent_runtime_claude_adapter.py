@@ -526,6 +526,29 @@ def main():
         and outcome.usage["inputTokens"] == 3
         and outcome.usage["outputTokens"] == 2,
     )
+    carrier_terminal = (
+        b'{"type":"result","subtype":"success","result":"{\\"json\\":'
+        b'\\"{\\\\\\"ok\\\\\\":true}\\"}","num_turns":2}\n'
+    )
+    carrier = parse_stream(
+        [init, carrier_terminal],
+        expected_model="claude-sonnet-4-6",
+        require_structured_output=True,
+        allow_result_carrier=True,
+    )
+    check(
+        "stream: strict terminal carrier compatibility is bounded and explicit",
+        decode_json_carrier(carrier.structured_output) == {"ok": True}
+        and fails(
+            lambda: parse_stream(
+                [init, b'{"type":"result","subtype":"success","result":"{}"}\n'],
+                expected_model="claude-sonnet-4-6",
+                require_structured_output=True,
+                allow_result_carrier=True,
+            ),
+            ClaudeProtocolError,
+        ),
+    )
     auth_failure = ClaudeStreamParser(
         expected_model="claude-sonnet-4-6",
         require_structured_output=True,

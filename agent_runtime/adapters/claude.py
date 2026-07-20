@@ -453,6 +453,7 @@ class ClaudeStreamParser:
         *,
         expected_model: str,
         require_structured_output: bool,
+        allow_result_carrier: bool = False,
         max_line_bytes: int = MAX_STREAM_LINE_BYTES,
         max_total_bytes: int = MAX_STREAM_BYTES,
     ) -> None:
@@ -460,6 +461,7 @@ class ClaudeStreamParser:
             raise ValueError("invalid Claude stream parser bounds")
         self.expected_model = expected_model
         self.require_structured_output = require_structured_output
+        self.allow_result_carrier = allow_result_carrier
         self.max_line_bytes = max_line_bytes
         self.max_total_bytes = max_total_bytes
         self.total_bytes = 0
@@ -529,7 +531,17 @@ class ClaudeStreamParser:
             raise ClaudeProtocolError(
                 "Claude stream terminal result was not successful"
             )
-        if self.require_structured_output and "structured_output" not in self.terminal:
+        structured = self.terminal.get("structured_output")
+        if self.require_structured_output and structured is None and self.allow_result_carrier:
+            result = self.terminal.get("result")
+            if isinstance(result, str) and len(result.encode("utf-8")) <= 131_072:
+                try:
+                    candidate = _strict_json(result)
+                except (json.JSONDecodeError, ValueError, RecursionError):
+                    candidate = None
+                if isinstance(candidate, dict) and set(candidate) == {"json"}:
+                    structured = candidate
+        if self.require_structured_output and structured is None:
             turns = self.terminal.get("num_turns")
             suffix = (
                 " after %d turns" % turns
@@ -538,11 +550,6 @@ class ClaudeStreamParser:
             )
             raise ClaudeProtocolError(
                 "Claude native schema result omitted structured output%s" % suffix
-            )
-        structured = self.terminal.get("structured_output")
-        if self.require_structured_output and structured is None:
-            raise ClaudeProtocolError(
-                "Claude native schema result omitted structured output"
             )
         return ClaudeStreamOutcome(
             structured_output=structured,
@@ -582,12 +589,14 @@ def parse_stream(
     *,
     expected_model: str,
     require_structured_output: bool,
+    allow_result_carrier: bool = False,
     max_line_bytes: int = MAX_STREAM_LINE_BYTES,
     max_total_bytes: int = MAX_STREAM_BYTES,
 ) -> ClaudeStreamOutcome:
     parser = ClaudeStreamParser(
         expected_model=expected_model,
         require_structured_output=require_structured_output,
+        allow_result_carrier=allow_result_carrier,
         max_line_bytes=max_line_bytes,
         max_total_bytes=max_total_bytes,
     )
