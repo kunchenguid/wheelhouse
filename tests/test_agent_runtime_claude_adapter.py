@@ -7,6 +7,8 @@ import copy
 import json
 import os
 import tempfile
+import subprocess
+import shutil
 from pathlib import Path
 from unittest import mock
 import sys
@@ -169,7 +171,7 @@ def main():
         )
         unsupported = json.dumps(
             {
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "additionalProperties": False,
                 "required": [],
@@ -181,7 +183,7 @@ def main():
             fails(lambda: validate_schema_subset(unsupported), ClaudeProbeError),
         )
         invalid = (
-            b'{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"'
+            b'{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"'
         )
         check(
             "schema: invalid JSON rejected",
@@ -193,6 +195,27 @@ def main():
                 lambda: validate_schema_subset(schema_bytes, "0" * 64), ClaudeProbeError
             ),
         )
+
+        # Real provider boundary: invalid auth stops accepted schemas before any spend.
+        claude = shutil.which("claude")
+        production_schema = Path("agent_runtime/schemas/actions/nl-decision-v1.schema.json").read_text()
+        old_schema = production_schema.replace(
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft/2020-12/schema",
+        )
+        if claude:
+            def probe(schema):
+                env = {"HOME": tempfile.mkdtemp(dir=directory), AUTH_ENVIRONMENT: "invalid"}
+                return subprocess.run(
+                    [claude, "--print", "--json-schema", schema, "return {}"],
+                    env=env, capture_output=True, text=True, timeout=30,
+                )
+            fixed = probe(production_schema)
+            old = probe(old_schema)
+            check("real 2.1.215 accepts fixed production schema before auth", "401 Invalid bearer token" in (fixed.stdout + fixed.stderr))
+            check("real 2.1.215 rejects old draft-2020-12 schema", "no schema with key or ref" in (old.stdout + old.stderr))
+        else:
+            check("real 2.1.215 boundary binary available", False)
 
         binary = root / "claude"
         binary.write_text(
