@@ -172,6 +172,8 @@ def main():
         check(
             "schema: native JSON carrier is strictly decoded",
             decode_json_carrier({"json": '{"ok":true}'}) == {"ok": True}
+            and decode_json_carrier({"json": '"{\\"ok\\":true}"'})
+            == {"ok": True}
             and fails(
                 lambda: decode_json_carrier({"json": '{"ok":true,"ok":false}'}),
                 ClaudeProtocolError,

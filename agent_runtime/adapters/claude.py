@@ -132,7 +132,12 @@ def decode_json_carrier(value: Any) -> Any:
     if not isinstance(text, str) or not text or len(text.encode("utf-8")) > 131_072:
         raise ClaudeProtocolError("Claude native JSON carrier exceeded its bound")
     try:
-        return _strict_json(text)
+        decoded = _strict_json(text)
+        if isinstance(decoded, str):
+            if not decoded or len(decoded.encode("utf-8")) > 131_072:
+                raise ClaudeProtocolError("Claude native JSON carrier exceeded its bound")
+            decoded = _strict_json(decoded)
+        return decoded
     except (json.JSONDecodeError, ValueError, RecursionError) as error:
         raise ClaudeProtocolError("Claude native JSON carrier was malformed") from error
 
