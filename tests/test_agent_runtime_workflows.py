@@ -14,7 +14,7 @@ WORKFLOWS = {
     "decision": Path(".github/workflows/decision-handler.yml"),
     "model": Path(".github/workflows/claude-model.yml"),
 }
-PIN = "anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd"
+PIN = "anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e"
 
 
 def check(name, condition):
@@ -217,7 +217,7 @@ def main():
         and model_steps[checkpoint].get("if")
         == "${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}"
         and model_steps[checkpoint_upload].get("if")
-        == "${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}"
+        == "${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || (steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success')) }}"
         and model_steps[checkpoint_stage].get("if")
         == model_steps[checkpoint_upload].get("if")
         and "steps.source.outputs.match == 'true'" in str(capture.get("if", "")),
@@ -330,10 +330,16 @@ def main():
     check("production: direct OAuth handoff is private and scrubbed before supervisor", "umask 077" in direct_step["run"] and "unset CLAUDE_CODE_OAUTH_TOKEN" in direct_step["run"] and "WHEELHOUSE_CLAUDE_CREDENTIAL_FILE" in direct_step["run"])
     check("production: direct runtime retains durable controller-failure normalization", "write_controller_failure_result" in model_text and "direct.json" in model_text and "lifecycle.timeout" in model_text)
     direct_install_failure = next(step for step in model_steps if step.get("name") == "Write direct-runtime install failure result")
+    direct_sandbox_failure = next(step for step in model_steps if step.get("name") == "Write direct-runtime sandbox prerequisite failure result")
     direct_checkpoint = next(step for step in model_steps if step.get("name") == "Write direct-runtime pre-invocation checkpoint")
+    check("production: direct model job pins the package-compatible runner image", docs["model"]["jobs"]["model"]["runs-on"] == "ubuntu-24.04")
+    check("production: Bubblewrap prerequisite is separately normalized before spend", "steps.direct_sandbox.outcome == 'failure'" in direct_sandbox_failure["if"] and "write_direct_sandbox_failure_result" in direct_sandbox_failure["run"] and "sandbox.violation" in Path("agent_runtime/schemas/v1alpha1/agent-result.schema.json").read_text())
     check("production: direct install failure is normalized before spend", "steps.direct_install.outcome == 'failure'" in direct_install_failure["if"] and "write_direct_install_failure_result" in direct_install_failure["run"] and "harness.install_failed" in Path("agent_runtime/schemas/v1alpha1/agent-result.schema.json").read_text())
-    check("production: direct checkpoint requires a verified runtime install", "steps.direct_install.outcome == 'success'" in direct_checkpoint["if"])
-    check("production: direct binary remains exact and digest verified", "2.1.197" in model_text and "sha256sum" in model_text and "runtime.lock.json" in model_text)
+    check("production: direct checkpoint requires verified sandbox and runtime install", "steps.direct_sandbox.outcome == 'success'" in direct_checkpoint["if"] and "steps.direct_install.outcome == 'success'" in direct_checkpoint["if"])
+    install_script = Path("agent_runtime/install_direct_runtime.sh").read_text()
+    canary_text = Path(".github/workflows/agent-runtime-canary.yml").read_text()
+    check("production: direct binary remains exact and digest verified", "sha256sum" in install_script and "runtime.lock.json" in model_text and "install_direct_runtime.sh" in model_text)
+    check("canary: production sandbox preflight and binary installer run model-free", "runs-on: ubuntu-24.04" in canary_text and canary_text.count("install_direct_runtime.sh") == 2 and 'host_proof("claude-cli")' in canary_text and "CLAUDE_CODE_OAUTH_TOKEN" not in canary_text)
 
     policy_text = "\n".join(Path(path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md", "docs/AGENT_RUNTIME.md"))
     check("docs: Claude is production primary without temporary rollback language", "Claude is the production primary" in policy_text and "selected future primary" not in policy_text and "temporary Claude" not in policy_text)

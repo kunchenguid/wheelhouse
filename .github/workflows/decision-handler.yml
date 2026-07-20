@@ -445,7 +445,6 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$NL_PROMPT" > prompt.txt
-          rm -f decision.json
           if [ "$SEARCH" = "true" ]; then action="nl-decision.search"; else action="nl-decision.local"; fi
           python scripts/agent_runtime.py build-task \
             --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \

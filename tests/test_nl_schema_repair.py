@@ -20,7 +20,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import apply_decision as decision  # noqa: E402
-from agent_runtime.claude_bridge import IMMUTABLE_MODEL, bridge  # noqa: E402
+from agent_runtime.claude_bridge import (  # noqa: E402
+    IMMUTABLE_MODEL,
+    _repair_candidate,
+    bridge,
+)
 from agent_runtime.claude_handoff import hydrate, pack  # noqa: E402
 from agent_runtime.contract import (  # noqa: E402
     canonical_json_bytes,
@@ -28,6 +32,7 @@ from agent_runtime.contract import (  # noqa: E402
     load_json_regular,
     validate_contract,
 )
+from agent_runtime.task_builder import claude_declared_outputs  # noqa: E402
 from agent_runtime_testlib import make_task, run_fake  # noqa: E402
 from test_agent_runtime_claude_bridge import (  # noqa: E402
     make_bundle,
@@ -52,6 +57,10 @@ MALFORMED_ESCAPE = (
 VALID_ANSWER = {
     "mode": "answer",
     "answer": "The budget is enforced by the `max_tokens` limit.",
+}
+QUOTED_ANSWER = {
+    "mode": "answer",
+    "answer": 'The "outside guarded clone refreshes" sentence is exact.',
 }
 
 
@@ -174,6 +183,32 @@ def test_pure_repair_contract():
         len(decision.build_nl_repair_prompt(huge).encode("utf-8")) < 30000,
     )
 
+    encoded = canonical_json_bytes(QUOTED_ANSWER)
+    check(
+        "carrier: trusted JSON serialization escapes and reparses the exact nested quotes",
+        b'\\"outside guarded clone refreshes\\"' in encoded
+        and json.loads(encoded) == QUOTED_ANSWER,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        malformed_file = Path(directory) / "decision.json"
+        malformed_file.write_text(
+            '{"mode":"answer","answer":"The "outside guarded clone refreshes" sentence is exact."}',
+            encoding="utf-8",
+        )
+        has_candidate, candidate = _repair_candidate(
+            "nl-decision.local",
+            {
+                "is_error": False,
+                "result": json.dumps(QUOTED_ANSWER),
+            },
+            str(malformed_file),
+            131072,
+        )
+    check(
+        "carrier: schema-shaped terminal JSON outranks a malformed legacy file",
+        has_candidate and candidate == QUOTED_ANSWER,
+    )
+
     repaired = decision.decide_nl_apply(MALFORMED_ESCAPE, valid)
     check(
         "apply: valid repair is selected only after strict re-validation",
@@ -237,6 +272,55 @@ def test_native_bridge_and_portable_fallback():
         check(
             "native: terminal prose and decision file are not the trusted success carrier",
             native_result["delivered"]["value"] != "ignored terminal prose",
+        )
+
+        production_answer = QUOTED_ANSWER
+        _, carrier_omission_bundle = make_bundle(
+            root / "carrier-omission", action="nl-decision.local"
+        )
+        carrier_omission_execution = root / "carrier-omission-execution.json"
+        transcript(
+            carrier_omission_execution,
+            IMMUTABLE_MODEL,
+            json.dumps(production_answer),
+        )
+        carrier_omission_result, _ = run_bridge(
+            carrier_omission_bundle,
+            carrier_omission_execution,
+            "carrier-omission",
+        )
+        check(
+            "trust contract: schema-valid plain terminal result survives absent native carrier",
+            carrier_omission_result["status"] == "succeeded"
+            and carrier_omission_result["final"]["value"] == production_answer
+            and carrier_omission_result["proof"]["structuredOutputMechanism"]
+            == "schema-validated-terminal-result"
+            and {row["name"] for row in carrier_omission_result["final"]["validation"]}
+            >= {
+                "schema-validated-terminal-result",
+                "json-schema",
+                "observed-provenance",
+            },
+        )
+
+        _, invalid_plain_bundle = make_bundle(
+            root / "invalid-plain", action="nl-decision.local"
+        )
+        invalid_plain_execution = root / "invalid-plain-execution.json"
+        transcript(
+            invalid_plain_execution,
+            IMMUTABLE_MODEL,
+            json.dumps({"mode": "invalid"}),
+        )
+        invalid_plain_result, _ = run_bridge(
+            invalid_plain_bundle,
+            invalid_plain_execution,
+            "invalid-plain",
+        )
+        check(
+            "trust contract: carrier omission never bypasses the bound schema",
+            invalid_plain_result["status"] == "failed"
+            and invalid_plain_result["error"]["code"] == "output.schema_invalid",
         )
 
         for label, invalid_value in (("null", None), ("empty", "")):
@@ -429,6 +513,46 @@ def test_bound_schema_is_passed_to_action():
     check(
         "workflow: pinned rollback repair does not claim native enforcement",
         "--json-schema" not in step_by_id(steps, "nl_repair")["with"]["claude_args"],
+    )
+    check(
+        "workflow: live NL output is native-only and no model-authored carrier is captured",
+        "decision.json" not in decision.build_nl_prompt(
+            "", "answer this", "pr-review", target_slug="owner/repo"
+        )
+        and "decision.json" not in (ROOT / ".github/workflows/claude-model.yml").read_text()
+        and claude_declared_outputs("nl-decision.local") == []
+        and claude_declared_outputs("nl-decision.search")
+        == ["search-request.json"],
+    )
+
+    lock = load_json_regular(ROOT / "agent_runtime/runtime.lock.json")
+    canary = yaml.safe_load(
+        (ROOT / ".github/workflows/agent-runtime-canary.yml").read_text()
+    )
+    canary_steps = canary["jobs"]["claude-action-native-output"]["steps"]
+    action_checkout = next(
+        step
+        for step in canary_steps
+        if (step.get("with") or {}).get("repository")
+        == "anthropics/claude-code-action"
+    )
+    fixture = (
+        ROOT / "tests/fixtures/claude-action-native-output.test.ts"
+    ).read_text()
+    check(
+        "canary: exact production action and >=2.1.205 SDK stack are pinned",
+        action_checkout["with"]["ref"]
+        == lock["claudeProduction"]["actionCommit"]
+        == "af0559ee4f514d1ef21826982bed13f7edc3c35e"
+        and lock["claudeProduction"]["claudeCodeVersion"] == "2.1.215"
+        and lock["claudeProduction"]["agentSdkVersion"] == "0.3.215",
+    )
+    check(
+        "canary: action-level schema fixture rejects omission and captures native output without spend",
+        "hasJsonSchema: true" in fixture
+        and "did not return structured_output" in fixture
+        and "structured_output: { ok: true }" in fixture
+        and "CLAUDE_CODE_OAUTH_TOKEN" not in json.dumps(canary_steps),
     )
 
 

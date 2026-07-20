@@ -257,9 +257,8 @@ Auto triage and deep review keep their action prompts independent of target size
 To set it up:
 
 1. Generate a **Claude subscription** token (requires a Claude Pro/Max subscription): run `claude setup-token` in the Claude Code CLI.
-   This is **not** an Anthropic API key - the workflows authenticate `anthropics/claude-code-action` with your subscription only.
-   The workflows pin `anthropics/claude-code-action` to `v1.0.161` at `fad22eb3fa582b7357fc0ea48af6645851b884fd` and pass immutable `--model claude-sonnet-4-6` to every Claude step.
-   The pinned action resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`.
+   This is **not** an Anthropic API key - the Claude Action and direct repair runtime use it only for Claude subscription authentication.
+   Reviewed immutable action and direct-runtime provenance is documented in [Agent runtime operations](docs/AGENT_RUNTIME.md).
    Trusted preflight and post-action bridge steps validate `AgentTask`, observed model identity, and atomic `AgentResult` before deterministic consumers run.
 2. Add it as an Actions secret named exactly `CLAUDE_CODE_OAUTH_TOKEN`.
 3. Optional: set `auto_triage: false` and/or `auto_triage_issues: false` in `wheelhouse.config.yml` if you do not want automatic PR-card or issue-card triage to spend Claude turns.
@@ -269,7 +268,7 @@ To set it up:
    permissions and no access to private repositories.
 
 In every case Claude only treats trusted workflow prompts and owner/maintainer-authored text as instructions; the target diff/issue/code and optional search output are untrusted data, and it never receives `FLEET_TOKEN`.
-When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob/Write, no shell tools, and no model `GH_TOKEN`.
+When `READONLY_TOKEN` is absent, `nl_decisions` runs with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 Auto triage and deep review's no-token branches run with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 When `READONLY_TOKEN` is present, search-enabled Claude steps receive it as GitHub CLI credentials for the scoped search wrapper.
 Auto triage's GitHub write is the workflow-owned card edit, deep review's GitHub write is the workflow-owned card comment, `nl_decisions` actions are performed by the deterministic handler, and `READONLY_TOKEN` never authorizes an action.
@@ -495,14 +494,14 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
     What it *does* is refuse to *silently* auto-clear a repo that has such a workflow (contributor PRs raise a card with a warning, while excluded-author PRs log `suppressed-card`), and it flags **loudly** the genuine exploit shape - a `pull_request_target` workflow that also checks out the PR head (`ref: github.event.pull_request.head.*` / `github.head_ref`), which runs attacker-controlled code with your secrets.
     Treat that flag as a prompt to fix the upstream workflow, not as something this approval can contain.
 - **LLM injection defense (all LLM features).** Only trusted workflow prompts and owner/maintainer-authored text reach the LLM as instructions; the target diff/issue/code and optional search output are passed as clearly-delimited untrusted data, and the LLM is never given `FLEET_TOKEN` or write access to a fleet repo.
-  For `nl_decisions`, both primary branches use native structured output for the canonical `nl-decision-v1` schema, while `decision.json` is only a bounded portable repair carrier.
+  For `nl_decisions`, both primary branches request native structured output for the canonical `nl-decision-v1` schema. If the native carrier alone is absent, trusted code may accept the plain terminal result only after it passes the same bound schema. The model never hand-serializes a decision file.
   The no-`READONLY_TOKEN` branch can read the bounded on-disk target with `Read`/`Grep`/`Glob`, but has no shell or model `GH_TOKEN`.
   For auto triage and deep review, the no-`READONLY_TOKEN` branch is Read/Grep/Glob only, no shell, and no model `GH_TOKEN`.
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
   It cannot run arbitrary `gh` or `git` commands.
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is normalized into `AgentResult` and re-validated against the per-kind allowlist before the deterministic handler acts.
-  Missing, multiple, or invalid native output fails closed into one separate tokenless, no-tool repair attempt, which trusted code re-validates before replying or acting.
+  An absent or genuinely invalid result fails closed into one separate, single-turn, no-tool repair attempt, which trusted code re-validates before replying or acting. The repair exposes no GitHub or search token to the model, but still uses the Claude subscription credential and model tokens.
   If that repair is still invalid, the card stays open with a content-free retryable note.
   For deep review, the trusted workflow posts only the verdict extracted from a validated `AgentResult`; no deterministic downstream step reads raw model output or model-written files.
 - **Cross-repo refs in LLM card text.** Auto triage summaries and structured recommendation reasons, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards or can later be posted to a target through *Accept recommendation* while referring to a different target repo.

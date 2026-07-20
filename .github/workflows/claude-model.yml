@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   model:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.child_timeout_minutes }}
     steps:
       - id: source
@@ -139,7 +139,7 @@ jobs:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           HANDOFF_SHA256: ${{ inputs.handoff_sha256 }}
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
-          ACTION_COMMIT: fad22eb3fa582b7357fc0ea48af6645851b884fd
+          ACTION_COMMIT: af0559ee4f514d1ef21826982bed13f7edc3c35e
           CHILD_TIMEOUT_MINUTES: ${{ inputs.child_timeout_minutes }}
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
@@ -197,35 +197,51 @@ jobs:
           (Path(os.environ["ATTEMPT"]) / "enforcement.json").write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")
           PY
 
-      - id: direct_install
-        name: Install pinned direct Claude runtime
+      - id: direct_sandbox
+        name: Provision and prove the pinned Bubblewrap sandbox
         if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' }}
         continue-on-error: true
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
         run: |
           set -euo pipefail
-          command -v bwrap >/dev/null
-          install_dir="$RUNNER_TEMP/wheelhouse-claude-cli"
-          mkdir -p "$install_dir"
-          read -r url digest < <(python - "$HANDOFF/runtime/agent_runtime/runtime.lock.json" <<'PY'
-          import json, sys
-          lock = json.load(open(sys.argv[1], encoding="utf-8"))["claude"]
-          artifact = lock["platforms"]["linux-x64"]
-          if lock["binaryVersion"] != "2.1.197":
-              raise SystemExit("Claude CLI version pin mismatch")
-          print(artifact["url"], artifact["sha256"])
+          bash "$HANDOFF/runtime/agent_runtime/install_direct_runtime.sh" \
+            sandbox "$HANDOFF/runtime/agent_runtime/runtime.lock.json"
+
+      - name: Write direct-runtime sandbox prerequisite failure result
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_sandbox.outcome == 'failure' }}
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+          OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-direct-pycache
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT" "$PYTHONPYCACHEPREFIX"
+          case "$PYTHONPYCACHEPREFIX" in
+            "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
+          esac
+          unset PYTHONDONTWRITEBYTECODE
+          PYTHONPATH="$HANDOFF/runtime" python - "$HANDOFF/bundle/task.json" "$HANDOFF/bundle" "$OUTPUT/result.json" "$OUTPUT/events.ndjson" <<'PY'
+          import sys
+          from agent_runtime.supervisor import write_direct_sandbox_failure_result
+          write_direct_sandbox_failure_result(*sys.argv[1:])
           PY
-          )
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            "$url" --output "$install_dir/claude"
-          observed="$(sha256sum "$install_dir/claude" | cut -d' ' -f1)"
-          test "$observed" = "$digest"
-          chmod 500 "$install_dir" "$install_dir/claude"
+
+      - id: direct_install
+        name: Install pinned direct Claude runtime
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_sandbox.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/wheelhouse-claude-cli"
+          bash "$HANDOFF/runtime/agent_runtime/install_direct_runtime.sh" \
+            claude "$HANDOFF/runtime/agent_runtime/runtime.lock.json" "$install_dir"
           echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Write direct-runtime install failure result
-        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_install.outcome == 'failure' }}
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'failure' }}
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           OUTPUT: ${{ runner.temp }}/wheelhouse-model-output
@@ -244,7 +260,7 @@ jobs:
           PY
 
       - name: Write direct-runtime pre-invocation checkpoint
-        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_install.outcome == 'success' }}
+        if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' }}
         env:
           ATTEMPT: ${{ runner.temp }}/wheelhouse-model-attempt
           TASK_SHA: ${{ steps.hydrate.outputs.taskSha256 }}
@@ -270,7 +286,7 @@ jobs:
           PY
 
       - name: Upload durable pre-invocation checkpoint
-        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}
+        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || (steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success')) }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.output_artifact }}-attempt
@@ -279,7 +295,7 @@ jobs:
           retention-days: 1
 
       - name: Record durable checkpoint stage
-        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || steps.direct_install.outcome == 'success') }}
+        if: ${{ steps.hydrate.outcome == 'success' && (steps.hydrate.outputs.adapter == 'claude-action-compat' || (steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success')) }}
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wheelhouse-pycache
@@ -297,7 +313,7 @@ jobs:
 
       - id: direct_schema_repair
         name: Run sandboxed direct Claude schema repair
-        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair') }}
+        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair') }}
         continue-on-error: true
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -327,7 +343,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         continue-on-error: true
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -340,7 +356,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -353,7 +369,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && steps.hydrate.outputs.action == 'triage.schema-repair' }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -367,7 +383,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.search') }}
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -380,7 +396,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'deep-review.') && endsWith(steps.hydrate.outputs.action, '.local') }}
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -393,7 +409,7 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.search') }}
         env: {GH_TOKEN: "${{ secrets.READONLY_TOKEN }}", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
@@ -406,20 +422,20 @@ jobs:
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'nl-decision.') && steps.hydrate.outputs.action != 'nl-decision.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
         continue-on-error: true
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           allowed_bots: github-actions[bot]
           allowed_non_write_users: ${{ github.actor }}
           prompt: ${{ steps.hydrate.outputs.prompt }}
-          claude_args: "--allowedTools Read,Grep,Glob,Write\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
+          claude_args: "--allowedTools Read,Grep,Glob\n--max-turns 32\n--model claude-sonnet-4-6\n--json-schema '${{ steps.hydrate.outputs.nativeSchema }}'"
 
       - id: nl_repair
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && steps.hydrate.outputs.action == 'nl-decision.schema-repair' }}
         continue-on-error: true
         env: {CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"}
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1.0.161
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e # v1.0.178
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -447,9 +463,6 @@ jobs:
             "$HANDOFF"|"$HANDOFF"/*) echo "PYTHONPYCACHEPREFIX collides with signed handoff" >&2; exit 1 ;;
           esac
           unset PYTHONDONTWRITEBYTECODE
-          if [[ "${ACTION:-}" == nl-decision.* ]] && [ "$ACTION" != "nl-decision.schema-repair" ] && [ -f decision.json ] && [ ! -L decision.json ] && [ "$(wc -c < decision.json)" -le 131072 ]; then
-            cp decision.json "$OUTPUT/decision.json"
-          fi
           # Pre-hydration / pre-checkpoint failures never reach the durable spend
           # checkpoint. Write one bounded content-free stage record so the parent
           # receives a trusted no-spend result instead of a missing-file cascade.
@@ -703,7 +716,6 @@ jobs:
               if [ -f "$RAW/enforcement.json" ] && [ ! -L "$RAW/enforcement.json" ]; then
                 proof="$RAW/enforcement.json"
                 execution="$RAW/execution.json"
-                if [ -f "$RAW/decision.json" ] && [ ! -L "$RAW/decision.json" ]; then delivered="$RAW/decision.json"; fi
                 conclusion="success"
                 termination="completed"
               elif [ -f "$ATTEMPT/enforcement.json" ] && [ ! -L "$ATTEMPT/enforcement.json" ]; then

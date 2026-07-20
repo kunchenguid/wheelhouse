@@ -32,7 +32,7 @@ Trusted parent jobs construct and validate an immutable `AgentTask`, upload a bo
 GitHub resolves that local reusable workflow from the caller's commit, and every caller also passes its exact `github.sha` as the expected source revision.
 That separate workflow has only `actions: read` and `contents: read`, receives no `FLEET_TOKEN`, and cannot write cards or target repositories.
 Before task construction, every spend-capable event creates a durable default-token claim whose key binds the action, target, decision card, exact target revision, and the trigger identity required for deep review and natural-language decisions.
-An eligible natural-language schema repair uses a distinct durable claim bound to the same authorized comment event, so a rerun cannot spend another repair turn.
+An eligible natural-language schema repair uses a distinct durable claim bound to the same authorized comment event, so a rerun cannot spend another repair turn. Its visible admission copy identifies the schema-repair phase while the hidden marker preserves the separate repair identity and idempotency key.
 Schema-repair actions are structurally ineligible to create another repair task.
 Duplicate delivery exits before task construction, and the claim key becomes the AgentTask `idempotencyKey`, so task, result, and terminal event evidence remain bound to the admitted event without retaining prompt or target content in lifecycle records.
 An operator-approved exact-revision auto-triage replay first tombstones only the matching primary-triage claim marker and directly verifies that admission can no longer discover it.
@@ -51,7 +51,8 @@ Malformed cap configuration fails closed to one, while malformed ceiling or ledg
 Deep-review and natural-language decision events remain outside this automatic-triage ceiling because each requires a deliberate owner action and its own durable claim.
 The model job verifies the complete handoff before hydrating a fresh workspace and initializes a local repository without a remote or network fetch.
 The action lane applies its exact action tool allowlist and leaves only a bounded transcript plus observed enforcement record for its finalizer.
-The direct repair lane verifies Claude CLI `2.1.197` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox.
+The direct repair lane pins the model job to `ubuntu-24.04`, installs and verifies Bubblewrap `0.9.0-1ubuntu0.1`, exercises a real namespace before provider admission, verifies Claude CLI `2.1.215` against the platform digest in `runtime.lock.json`, binds the OAuth credential through one mode-0600 file, and launches the existing supervisor and worker inside the Bubblewrap provider-only sandbox. Bubblewrap is launched through the runner's passwordless `sudo` solely because Ubuntu 24.04 denies unprivileged loopback setup in a new network namespace; it clears the environment and drops all worker capabilities before executing the model process. The root-mapped worker receives only a write-only output mount; after exit, the trusted supervisor restores ownership only on regular expected result and diagnostic files before validating them.
+Sandbox-prerequisite failure is recorded separately from Claude download or digest failure, and both remain pre-spend with zero provider requests.
 The action lane revalidates the signed target inputs after invocation and accepts success only when the post-action observation is non-null and exactly matches the pre-action observation for `target.txt`, `target-src/`, and `repository-provenance.json`.
 Declared outputs, `.git/**`, `vision.md`, and unrelated workspace scratch are outside that signed-input immutability proof; unexpected scratch can be diagnostic, but it does not by itself invalidate the read-only target-input proof.
 The reusable model workflow validates its observed `GITHUB_SHA` against the expected caller commit before hydration or provider admission.
@@ -69,7 +70,7 @@ The action lane records the pinned action source commit and a checked-out action
 ## Direct Claude schema-repair production profile
 
 `agent_runtime/adapters/claude.py` implements the minimum direct Claude CLI boundary used by both schema-repair actions.
-It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.197` platform digest before spend.
+It accepts only the `anthropic-subscription` profile and a private file handoff for the `CLAUDE_CODE_OAUTH_TOKEN` process binding, rejects ambient API, cloud, GitHub, alternate-provider, and fallback configuration, and verifies one regular executable against the exact `2.1.215` platform digest before spend.
 The runtime lock records the official release commit, immutable download URLs, Linux x64 and arm64 plus Darwin arm64 digests, and a checked protocol fixture digest.
 
 The adapter validates the bound action schema against the small pinned-CLI subset before exposing `output.structured: native-schema`.
@@ -153,7 +154,8 @@ Canonical contract and proof hashes use deterministic JSON plus SHA-256.
 The terminal event's `resultSha256` uses the explicit `agent-result-without-artifacts/v1` projection so the normalized-event artifact cannot create a cyclic or order-dependent digest.
 
 Codex is pinned to CLI `0.144.0`, source commit `767822446c7a594caa19609ca435281a9ec67e0d`, npm package integrity, architecture-specific Linux executable-package integrity, and vendored app-server schema digests.
-The direct Claude CLI adapter is pinned separately to CLI `2.1.197`, release commit `c8fd8048f30950a21d28734718275aa7e97f5143`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
+The direct Claude CLI adapter is pinned separately to CLI `2.1.215`, release commit `316ce99628e89900bf0b1328fed3b8fec0c0c92d`, official platform URLs and SHA-256 digests, and its bounded stream-JSON fixture digest.
+The model-free `Agent Runtime canary` job runs the same signed installer script on `ubuntu-24.04`, including the exact package preflight, a minimal Bubblewrap namespace command, binary download, digest check, and `--version` probe without any model credential.
 Run `python scripts/agent_runtime.py verify-pins` to verify the protocol files.
 Offline evidence verifies the exact wrapper and selected Linux executable tarballs against the committed SHA-512 integrity pins.
 Current production selection cannot reach the disabled Codex installation branches in workflows.
@@ -180,8 +182,8 @@ Canonical tools are:
 
 Codex uses its native `turn/start.outputSchema` mechanism.
 The fake adapter and future adapters use the same action schemas and trusted validation.
-Natural-language primary calls pass the canonical content-bound `nl-decision-v1` schema to the pinned Claude action and accept only one terminal `structured_output` value.
-The trusted Claude bridge independently revalidates its byte bound, task binding, and schema before it emits `AgentResult`, so native generation alone can never authorize a reply or action.
+Natural-language primary calls pass the canonical content-bound `nl-decision-v1` schema to the pinned Claude action and prefer one terminal `structured_output` value.
+If that carrier alone is absent, the bridge may parse the plain terminal `result`, but accepts it only when the object passes the same byte bound, task binding, and exact bound schema. The resulting proof records `schema-validated-terminal-result` rather than claiming native delivery. Neither native generation nor terminal JSON alone can authorize a reply or action.
 
 Path tools reject absolute paths, traversal, symlinks, devices, sockets, and escaping canonical paths.
 Results and call counts are bounded, including rejected tool attempts.
@@ -199,9 +201,9 @@ No symlink may reach the signed handoff or hydrated model workspace.
 Final-result delivery is independent of transcript retention.
 A bounded Claude transcript is transferred once within the read-only reusable workflow for trusted normalization with one-day artifact retention, then only the verified normalized result artifact crosses to the trusted consumer.
 A schema-invalid but delivered triage candidate remains available to its one-turn repair policy.
-Natural-language primary calls fail closed when the native carrier is missing, multiple, or invalid, including the pinned Claude CLI's pre-2.1.205 silent schema-ignore behavior.
-Those failures receive one separately claimed portable repair task, using only the bounded native candidate when available, then the bounded `decision.json` carrier, then terminal prose.
-Natural-language repair is tokenless, no-tool, and single-turn, and its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
+Natural-language primary calls fail closed when neither native output nor a schema-valid plain terminal result is available. A missing native carrier by itself no longer discards an otherwise schema-valid terminal result, covering the pre-2.1.205 carrier-omission class without weakening schema validation.
+Genuinely absent or invalid results receive one separately claimed repair task. Candidate precedence is bounded native output, then a JSON-parseable terminal result, then a legacy raw file or terminal prose. The live prompt never asks the model to hand-serialize `decision.json`.
+Natural-language repair has no GitHub or search token exposed to the model, is no-tool and single-turn, and cannot recurse. It still uses the Claude subscription credential and model tokens when it starts. Its output must pass the unchanged `nl-decision-v1` parser and schema before trusted code can reply or act.
 Missing triage output and evidence failure do not trigger schema repair.
 Trusted code still performs normalized triage, evidence anchoring, cross-repository reference qualification, natural-language action allowlisting, card claims, revision checks, PR head checks, and auto-merge G0-G7 checks.
 
@@ -269,7 +271,8 @@ For deep review, missing output posts the existing fixed no-verdict note and lea
 
 For natural-language mapping, missing or invalid output cannot produce an action.
 The primary call is native first, and only bridge-validated terminal `structured_output` is a native success.
-A missing, multiple, or invalid native carrier, or a result that fails strict JSON or `nl-decision-v1` validation, receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
+When that carrier alone is absent, a plain terminal result is accepted without repair only if it passes the unchanged byte bound, task binding, and exact `nl-decision-v1` validation; its proof records `schema-validated-terminal-result` rather than native delivery.
+An absent native carrier without such a valid plain terminal result, a multiple or invalid native carrier, or a result that fails strict JSON or `nl-decision-v1` validation, receives one separately claimed repair attempt; a still-invalid repair leaves the card open with a bounded, content-free retryable failure note.
 The marker-keyed failure note remains bounded and fire-once.
 A normalized `source.revision_mismatch` result uses the same precise retry explanation, while unknown failures keep the generic note.
 A successful mapped action still enters the existing card claim and deterministic executor.

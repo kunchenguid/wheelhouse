@@ -33,9 +33,9 @@ from .task_builder import (
     claude_native_structured_output,
 )
 
-ACTION_COMMIT = "fad22eb3fa582b7357fc0ea48af6645851b884fd"
-ACTION_VERSION = "1.0.161"
-CLAUDE_CODE_VERSION = "2.1.197"
+ACTION_COMMIT = "af0559ee4f514d1ef21826982bed13f7edc3c35e"
+ACTION_VERSION = "1.0.178"
+CLAUDE_CODE_VERSION = "2.1.215"
 IMMUTABLE_MODEL = "claude-sonnet-4-6"
 PROTOCOL = "claude-agent-sdk-json-v1"
 
@@ -88,11 +88,20 @@ def _result_text(terminal: dict[str, Any] | None) -> str:
 
 def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> Any:
     if claude_native_structured_output(action):
-        if "structured_output" not in terminal:
-            raise ContractError(
-                "Claude action omitted negotiated native structured output"
-            )
-        return terminal["structured_output"]
+        if "structured_output" in terminal:
+            return terminal["structured_output"]
+        # Claude Code 2.1.197 could omit the negotiated carrier while still
+        # returning the schema-shaped JSON through the terminal result field.
+        # The caller still applies the exact bound schema below, so carrier
+        # omission alone does not discard a valid answer and does not weaken
+        # independent schema validation.
+        text = _result_text(terminal)
+        if not text:
+            raise ContractError("Claude action delivered no final result")
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ContractError("Claude action result was not an object")
+        return value
     if delivered_file:
         return load_json_regular(delivered_file, max_bytes=131072)
     text = _result_text(terminal)
@@ -147,8 +156,21 @@ def _repair_candidate(
                 return True, value
         except (ContractError, RecursionError, TypeError, ValueError):
             pass
-    raw = _raw_delivered_file(delivered_file, max_bytes) or _result_text(terminal)
-    return (bool(raw), raw)
+    result_text = _result_text(terminal)
+    if result_text:
+        try:
+            value = json.loads(result_text)
+            if (
+                isinstance(value, dict)
+                and len(canonical_json_bytes(value)) <= max_bytes
+            ):
+                return True, value
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            pass
+    raw_file = _raw_delivered_file(delivered_file, max_bytes)
+    if raw_file:
+        return True, raw_file
+    return (bool(result_text), result_text)
 
 
 def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
@@ -583,10 +605,17 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                 error = _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
             else:
                 validation = []
-                if (
-                    claude_native_structured_output(task["metadata"]["action"])
-                ):
-                    validation.append({"name": "native-schema", "status": "passed"})
+                if claude_native_structured_output(task["metadata"]["action"]):
+                    validation.append(
+                        {
+                            "name": (
+                                "native-schema"
+                                if "structured_output" in terminal
+                                else "schema-validated-terminal-result"
+                            ),
+                            "status": "passed",
+                        }
+                    )
                 validation.extend(
                     [
                         {"name": "json-schema", "status": "passed"},
@@ -603,9 +632,10 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
                 }
         except (ContractError, json.JSONDecodeError, OSError, RecursionError, UnicodeError, ValueError):
             # Native NL failures retain the bounded structured value when one
-            # exists, then the portable decision.json carrier, then terminal
-            # prose. The candidate remains failed and can never become `final`
-            # until the separate repair task passes the same trusted validation.
+            # exists, then a JSON-parseable terminal result, then a legacy raw
+            # file or terminal prose. The candidate remains failed and can never
+            # become `final` until the separate repair task passes the same
+            # trusted validation.
             has_candidate, repair_value = _repair_candidate(
                 task["metadata"]["action"],
                 terminal,
@@ -662,7 +692,11 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             "isolationLevel": "github-readonly-artifact-bridge-v1",
             "sandboxImplementation": "github-readonly-artifact-bridge-v1",
             "credentialIsolation": "action-input+subprocess-env-scrub",
-            "structuredOutputMechanism": "native-schema"
+            "structuredOutputMechanism": (
+                "native-schema"
+                if terminal is not None and "structured_output" in terminal
+                else "schema-validated-terminal-result"
+            )
             if claude_native_structured_output(task["metadata"]["action"])
             else "trusted-post-action-bridge",
             "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),

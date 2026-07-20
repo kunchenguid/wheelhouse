@@ -324,10 +324,7 @@ triage_daily_ceiling: 1200
 # and configured fleet repos; without it deep review keeps the legacy no-shell,
 # Read/Grep/Glob-only behavior. Known claude-code-action harness polling/status
 # lines are preserved in the posted verdict but labeled as automated status.
-# All Claude-powered paths use the pinned
-# claude-code-action v1.0.161 commit and pass immutable
-# `--model claude-sonnet-4-6` to every Claude
-# step.
+# Runtime provenance and immutable pins: see docs/AGENT_RUNTIME.md.
 
 # Natural-language decisions. Leave false to keep the queue fully deterministic
 # (checkbox + slash-command only). Set true AND add the CLAUDE_CODE_OAUTH_TOKEN
@@ -337,8 +334,7 @@ triage_daily_ceiling: 1200
 # "request changes" -> request-changes on a PR-review card), answers a
 # question, or asks you to clarify. The optional READONLY_TOKEN secret also
 # enables read-only answer-mode search across the target repo and configured
-# fleet repos. Without it the Claude step keeps the legacy Write-only, no-shell
-# behavior.
+# fleet repos. Without it the Claude step is Read/Grep/Glob-only with no shell.
 # The LLM only proposes a structured result - the deterministic executor still
 # performs (and guards) any action. Inert until both the flag and the Claude token
 # are present.

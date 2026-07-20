@@ -18,7 +18,7 @@ from agent_runtime.adapters.claude import ClaudeCliAdapter, _load_lock
 from agent_runtime.capabilities import negotiate
 from agent_runtime.config import resolve_selection
 from agent_runtime.contract import ContractError, atomic_write_json, file_sha256, load_json_regular, verify_result_binding
-from agent_runtime.supervisor import _validate_worker, write_controller_failure_result, write_direct_install_failure_result
+from agent_runtime.supervisor import _validate_worker, write_controller_failure_result, write_direct_install_failure_result, write_direct_sandbox_failure_result
 from agent_runtime.task_builder import build_task
 from agent_runtime.worker import InternalEvents, _run_claude
 
@@ -79,7 +79,7 @@ def main() -> None:
             "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
             "if '--version' in sys.argv:\n"
-            "    print('2.1.197 (Claude Code)')\n"
+            "    print('2.1.215 (Claude Code)')\n"
             "    raise SystemExit(0)\n"
             "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN')\n"
             "assert not os.environ.get('GITHUB_TOKEN')\n"
@@ -191,6 +191,18 @@ def main() -> None:
         check("failure: direct failure is durable, classified, and non-consumed", failed["status"] == "failed" and failed["error"]["code"] == "harness.crash" and failed["error"]["spendStarted"] is True and "final" not in failed)
         check("failure: action and model fallback stay disabled", failed["selection"]["fallbackUsed"] is False and failed["selection"]["profile"] == "claude-cli-pinned" and failed["proof"]["executionProfile"] == "claude-cli-pinned")
         check("failure: durable record exposes missing provider evidence honestly", failed["selection"]["actualModel"] == "" and failed["proof"]["structuredOutputMechanism"] == "unavailable-after-controller-failure")
+
+        sandbox_failure_result = root / "sandbox-failure-result.json"
+        sandbox_failure_events = root / "sandbox-failure-events.ndjson"
+        sandbox_failed = write_direct_sandbox_failure_result(
+            str(bundle / "task.json"),
+            str(bundle),
+            str(sandbox_failure_result),
+            str(sandbox_failure_events),
+        )
+        verify_result_binding(task, sandbox_failed)
+        check("failure: sandbox prerequisite failure is accurate and pre-spend", sandbox_failed["status"] == "rejected" and sandbox_failed["error"]["code"] == "sandbox.violation" and "Bubblewrap sandbox prerequisite" in sandbox_failed["error"]["message"] and sandbox_failed["error"]["spendStarted"] is False and sandbox_failed["usage"]["providerRequests"] == 0 and task["spec"]["retry"]["repairTask"] is None and "final" not in sandbox_failed)
+        check("failure: sandbox prerequisite cannot claim runtime installation", sandbox_failed["proof"]["sandboxImplementation"] == "bubblewrap-prerequisite-failed" and sandbox_failed["proof"]["credentialIsolation"] == "not-materialized" and sandbox_failed["proof"]["structuredOutputMechanism"] == "unavailable-before-negotiation")
 
         install_failure_result = root / "install-failure-result.json"
         install_failure_events = root / "install-failure-events.ndjson"

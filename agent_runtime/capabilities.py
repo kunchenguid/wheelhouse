@@ -25,7 +25,7 @@ def claude_descriptor(binary_version: str, binary_digest: str, protocol_fixture_
         "harness": "claude-code",
         "harnessVersion": binary_version,
         "harnessDigest": binary_digest,
-        "protocol": "stream-json-v2.1.197",
+        "protocol": "stream-json-v2.1.215",
         "protocolSchemaSha256": protocol_fixture_sha256,
         "capabilities": {
             "input.text": {"mechanism": "stdin", "maxBytes": 262144},
@@ -35,7 +35,7 @@ def claude_descriptor(binary_version: str, binary_digest: str, protocol_fixture_
                 "mechanism": "native-schema",
                 "strict": True,
                 "maxSchemaBytes": 65536,
-                "schemaDialect": "wheelhouse-claude-2.1.197-subset",
+                "schemaDialect": "wheelhouse-claude-2.1.215-subset",
             },
             "lifecycle.cancel": {"mechanism": "sigterm+process-group", "ackMs": 10000},
             "provenance.actual-model": {"mechanism": "stream-json-system-init+exact-match"},

@@ -306,6 +306,26 @@ def _read_worker_events(path: Path, events: EventWriter) -> None:
         warn("adapter-events-unavailable", "Adapter event diagnostics were unavailable.")
 
 
+def _restore_direct_output_access(output_dir: Path) -> None:
+    """Return expected root-mapped direct-worker output to the runner safely."""
+
+    owner = "%d:%d" % (os.getuid(), os.getgid())
+    for name in ("worker-state.json", "worker-result.json", "adapter-events.ndjson"):
+        path = output_dir / name
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            continue
+        subprocess.run(
+            ["sudo", "--non-interactive", "chown", "--no-dereference", owner, "--", str(path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
     if task["spec"]["output"]["evidencePolicy"] != "target-anchor/v1":
         return True
@@ -442,6 +462,10 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
         raise RuntimeFailure("selection.no_candidate", "selecting", "Selected adapter is not in the trusted allowlist.")
     adapter = adapter_class()
     host = host_proof(adapter.id)
+    if not host.get("testOnly"):
+        # The root-launched Bubblewrap worker is mapped to host root.  It needs
+        # to create its mode-0600 result files, but must not enumerate output.
+        output_dir.chmod(0o733)
     schema_path = bundle / task["spec"]["output"]["schemaArtifact"]
     try:
         schema_bytes = schema_path.read_bytes()
@@ -544,6 +568,8 @@ def _run(task_path: str, bundle_dir: str, result_path: str, events_path: str, re
                 signal.signal(signal.SIGTERM, old_term)
                 signal.signal(signal.SIGINT, old_int)
 
+            if not host.get("testOnly"):
+                _restore_direct_output_access(output_dir)
             worker_path = output_dir / "worker-result.json"
             state_path = output_dir / "worker-state.json"
             try:
@@ -804,7 +830,7 @@ def _write_direct_failure_result(
     allowed_codes = (
         ("lifecycle.cancelled", "lifecycle.timeout", "harness.crash")
         if spend_started
-        else ("harness.install_failed",)
+        else ("harness.install_failed", "sandbox.violation")
     )
     if candidate["adapter"] != "claude-cli" or code not in allowed_codes:
         raise ContractError("direct controller failure request is invalid")
@@ -838,11 +864,16 @@ def _write_direct_failure_result(
         "fallbackUsed": False,
         "fallbackReason": None,
     }
+    pre_spend_failure = (
+        "bubblewrap-prerequisite-failed"
+        if code == "sandbox.violation"
+        else "direct-runtime-install-failed"
+    )
     proof = {
         "contractMajor": 1,
         "executionProfile": task["spec"]["selection"]["profile"],
         "isolationLevel": "sandboxed-adapter-worker-v1",
-        "sandboxImplementation": "unavailable-after-controller-failure" if spend_started else "direct-runtime-install-failed",
+        "sandboxImplementation": "unavailable-after-controller-failure" if spend_started else pre_spend_failure,
         "credentialIsolation": "mode-0600-file-handoff-attempted" if spend_started else "not-materialized",
         "structuredOutputMechanism": "unavailable-after-controller-failure" if spend_started else "unavailable-before-negotiation",
         "capabilitySnapshotSha256": canonical_sha256(task["spec"]["capabilities"]),
@@ -851,7 +882,7 @@ def _write_direct_failure_result(
         "compiledPromptSha256": task["spec"]["prompt"]["segments"][0]["sha256"],
         "inputManifestSha256": canonical_sha256(task["spec"]["inputs"]),
         "outputSchemaSha256": task["spec"]["output"]["schemaSha256"],
-        "sandboxPolicySha256": canonical_sha256({"status": "unavailable-after-controller-failure" if spend_started else "direct-runtime-install-failed"}),
+        "sandboxPolicySha256": canonical_sha256({"status": "unavailable-after-controller-failure" if spend_started else pre_spend_failure}),
         "limitEnforcement": task["spec"]["limits"]["enforcement"],
         "limitEnforcementSha256": canonical_sha256(task["spec"]["limits"]["enforcement"]),
     }
@@ -865,7 +896,13 @@ def _write_direct_failure_result(
         "proof": proof,
         "error": _error(
             code,
-            "Direct model execution ended after its conservative spend checkpoint without an atomic result." if spend_started else "Direct Claude runtime installation failed before model execution started.",
+            "Direct model execution ended after its conservative spend checkpoint without an atomic result."
+            if spend_started
+            else (
+                "Bubblewrap sandbox prerequisite failed before model execution started."
+                if code == "sandbox.violation"
+                else "Direct Claude runtime installation failed before model execution started."
+            ),
             phase="cancelling" if code.startswith("lifecycle.") else ("running" if spend_started else "sandboxing"),
             spend_started=spend_started,
         ),
@@ -926,6 +963,22 @@ def write_direct_install_failure_result(
         task_path,
         bundle_dir,
         "harness.install_failed",
+        result_path,
+        events_path,
+        spend_started=False,
+    )
+
+
+def write_direct_sandbox_failure_result(
+    task_path: str,
+    bundle_dir: str,
+    result_path: str,
+    events_path: str,
+) -> dict[str, Any]:
+    return _write_direct_failure_result(
+        task_path,
+        bundle_dir,
+        "sandbox.violation",
         result_path,
         events_path,
         spend_started=False,
