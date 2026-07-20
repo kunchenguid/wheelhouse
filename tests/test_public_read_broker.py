@@ -41,6 +41,7 @@ from agent_runtime.public_read import (  # noqa: E402
     PublicReadError,
     _BoundedHeaderReader,
     _GitProxy,
+    _TaskWireBudget,
     _WireBudget,
     resolve_public_host,
 )
@@ -192,10 +193,13 @@ def test_https_hard_bounds():
         def makefile(self, _mode):
             return io.BytesIO(oversized_headers)
 
-    charged = []
+    header_task_budget = _TaskWireBudget(MAX_RESPONSE_HEADER_BYTES)
+    header_budget = _WireBudget(
+        MAX_RESPONSE_HEADER_BYTES, header_task_budget
+    )
     response = http.client.HTTPResponse(HeaderSocket())
     response.fp = _BoundedHeaderReader(
-        response.fp, MAX_RESPONSE_HEADER_BYTES, charged.append
+        response.fp, MAX_RESPONSE_HEADER_BYTES, header_budget
     )
     try:
         response.begin()
@@ -205,7 +209,7 @@ def test_https_hard_bounds():
     check(
         "bounds: aggregate HTTPS response headers are capped and charged",
         header_rejected
-        and sum(charged) == MAX_RESPONSE_HEADER_BYTES,
+        and header_task_budget.used == MAX_RESPONSE_HEADER_BYTES,
     )
 
     observed = {}
@@ -314,8 +318,8 @@ def test_https_hard_bounds():
         def cancel(self):
             pass
 
-    charged = []
-    retry_budget = _WireBudget(200, charged.append)
+    retry_task_budget = _TaskWireBudget(200)
+    retry_budget = _WireBudget(200, retry_task_budget)
     context = FakeContext()
     with mock.patch(
         "agent_runtime.public_read.resolve_public_host",
@@ -344,7 +348,31 @@ def test_https_hard_bounds():
         retry_rejected
         and connections.call_count == 2
         and retry_budget.used == 200
-        and sum(charged) == 200,
+        and retry_task_budget.used == 200,
+    )
+
+    shared_task_budget = _TaskWireBudget(10)
+    first_budget = _WireBudget(10, shared_task_budget)
+    second_budget = _WireBudget(10, shared_task_budget)
+    first_reservation = first_budget.reserve(8)
+    second_reservation = second_budget.reserve(8)
+    first_budget.commit(first_reservation, 3)
+    second_budget.release(second_reservation)
+    replacement_reservation = second_budget.reserve(7)
+    second_budget.commit(replacement_reservation, replacement_reservation)
+    try:
+        first_budget.reserve(1)
+        task_exhausted = False
+    except PublicReadError as error:
+        task_exhausted = error.code == "task.bytes"
+    check(
+        "bounds: concurrent task reservations commit short reads and release capacity",
+        first_reservation == 8
+        and second_reservation == 2
+        and replacement_reservation == 7
+        and shared_task_budget.used == 10
+        and shared_task_budget.reserved == 0
+        and task_exhausted,
     )
 
 
@@ -361,7 +389,7 @@ def test_git_proxy_hard_bounds():
             time.sleep(0.01)
         return proxy.error
 
-    charged = []
+    git_task_budget = _TaskWireBudget(10)
     proxy_upstream, remote_peer = socket.socketpair()
     try:
         with _GitProxy(
@@ -369,7 +397,7 @@ def test_git_proxy_hard_bounds():
             ["1.1.1.1"],
             10,
             time.monotonic() + 1,
-            charged.append,
+            git_task_budget,
         ) as proxy:
             client = connect(proxy)
             try:
@@ -394,7 +422,8 @@ def test_git_proxy_hard_bounds():
             received == b"x" * 10
             and proxy_error == "bytes.wire"
             and proxy.bytes == 10
-            and sum(charged) == 10,
+            and git_task_budget.used == 10
+            and git_task_budget.reserved == 0,
         )
     finally:
         proxy_upstream.close()

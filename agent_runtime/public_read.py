@@ -377,11 +377,11 @@ class _BoundedHeaderReader:
         self,
         reader: Any,
         max_bytes: int,
-        account_bytes: Callable[[int], None] | None,
+        budget: "_WireBudget",
     ) -> None:
         self.reader = reader
         self.max_bytes = max_bytes
-        self.account_bytes = account_bytes
+        self.budget = budget
         self.bytes_read = 0
 
     def readline(self, limit: int = -1) -> bytes:
@@ -393,10 +393,14 @@ class _BoundedHeaderReader:
         read_limit = remaining
         if limit >= 0:
             read_limit = min(read_limit, limit)
-        value = self.reader.readline(read_limit)
+        reservation = self.budget.reserve(read_limit)
+        try:
+            value = self.reader.readline(reservation)
+        except Exception:
+            self.budget.release(reservation)
+            raise
+        self.budget.commit(reservation, len(value))
         self.bytes_read += len(value)
-        if self.account_bytes is not None:
-            self.account_bytes(len(value))
         if self.bytes_read == self.max_bytes and value not in (b"\r\n", b"\n"):
             raise PublicReadError(
                 "headers.wire", "public response headers exceeded their byte bound"
@@ -407,28 +411,84 @@ class _BoundedHeaderReader:
         return getattr(self.reader, name)
 
 
+class _TaskWireBudget:
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.used = 0
+        self.reserved = 0
+        self.lock = threading.Lock()
+
+    def reserve(self, byte_count: int) -> int:
+        with self.lock:
+            remaining = self.max_bytes - self.used - self.reserved
+            if remaining <= 0:
+                raise PublicReadError(
+                    "task.bytes", "public-read task byte bound exceeded"
+                )
+            reservation = min(byte_count, remaining)
+            self.reserved += reservation
+            return reservation
+
+    def commit(self, reservation: int, byte_count: int) -> None:
+        with self.lock:
+            if not 0 <= byte_count <= reservation or reservation > self.reserved:
+                raise RuntimeError("invalid task wire-byte reservation")
+            self.reserved -= reservation
+            self.used += byte_count
+
+    def release(self, reservation: int) -> None:
+        with self.lock:
+            if not 0 <= reservation <= self.reserved:
+                raise RuntimeError("invalid task wire-byte reservation")
+            self.reserved -= reservation
+
+
 class _WireBudget:
     def __init__(
         self,
         max_bytes: int,
-        account_bytes: Callable[[int], None] | None,
+        task_budget: _TaskWireBudget | None,
     ) -> None:
         self.max_bytes = max_bytes
-        self.account_bytes = account_bytes
+        self.task_budget = task_budget
         self.used = 0
+        self.reserved = 0
+        self.lock = threading.Lock()
 
     @property
     def remaining(self) -> int:
-        return self.max_bytes - self.used
+        with self.lock:
+            return self.max_bytes - self.used - self.reserved
 
-    def consume(self, byte_count: int) -> None:
-        self.used += byte_count
-        if self.account_bytes is not None:
-            self.account_bytes(byte_count)
-        if self.used > self.max_bytes:
-            raise PublicReadError(
-                "bytes.wire", "public response exceeded its byte bound"
-            )
+    def reserve(self, byte_count: int) -> int:
+        with self.lock:
+            remaining = self.max_bytes - self.used - self.reserved
+            if remaining <= 0:
+                raise PublicReadError(
+                    "bytes.wire", "public response exceeded its byte bound"
+                )
+            reservation = min(byte_count, remaining)
+            if self.task_budget is not None:
+                reservation = self.task_budget.reserve(reservation)
+            self.reserved += reservation
+            return reservation
+
+    def commit(self, reservation: int, byte_count: int) -> None:
+        with self.lock:
+            if not 0 <= byte_count <= reservation or reservation > self.reserved:
+                raise RuntimeError("invalid operation wire-byte reservation")
+            self.reserved -= reservation
+            self.used += byte_count
+            if self.task_budget is not None:
+                self.task_budget.commit(reservation, byte_count)
+
+    def release(self, reservation: int) -> None:
+        with self.lock:
+            if not 0 <= reservation <= self.reserved:
+                raise RuntimeError("invalid operation wire-byte reservation")
+            self.reserved -= reservation
+            if self.task_budget is not None:
+                self.task_budget.release(reservation)
 
 
 class PinnedHTTPSClient:
@@ -511,7 +571,7 @@ class PinnedHTTPSClient:
                 header_reader = _BoundedHeaderReader(
                     response.fp,
                     min(MAX_RESPONSE_HEADER_BYTES, budget.remaining),
-                    budget.consume,
+                    budget,
                 )
                 response.fp = header_reader
                 response.begin()
@@ -533,11 +593,16 @@ class PinnedHTTPSClient:
                         raise PublicReadError(
                             "bytes.wire", "public response exceeded its byte bound"
                         )
-                    chunk = response.read(min(65_536, budget.remaining))
+                    reservation = budget.reserve(65_536)
+                    try:
+                        chunk = response.read(reservation)
+                    except Exception:
+                        budget.release(reservation)
+                        raise
+                    budget.commit(reservation, len(chunk))
                     if not chunk:
                         break
                     body.extend(chunk)
-                    budget.consume(len(chunk))
                 certificate = tls.getpeercert()
                 proof = {
                     "host": host,
@@ -580,14 +645,14 @@ class PinnedHTTPSClient:
         max_bytes: int,
         wall_seconds: int,
         max_redirects: int = MAX_REDIRECTS,
-        account_bytes: Callable[[int], None] | None = None,
+        task_budget: _TaskWireBudget | None = None,
         account_redirect: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         requested = url
         current = canonical_public_url(url)
         redirects = []
         deadline = time.monotonic() + wall_seconds
-        budget = _WireBudget(max_bytes, account_bytes)
+        budget = _WireBudget(max_bytes, task_budget)
         for hop in range(max_redirects + 1):
             status, headers, body, proof = self._request_once(
                 current,
@@ -649,15 +714,14 @@ class _GitProxy:
         addresses: list[str],
         byte_limit: int,
         deadline: float,
-        account_bytes: Callable[[int], None] | None = None,
+        task_budget: _TaskWireBudget | None = None,
     ) -> None:
         proxy = self
         self.host = host
         self.addresses = tuple(addresses)
         self.byte_limit = byte_limit
         self.deadline = deadline
-        self.bytes = 0
-        self.lock = threading.Lock()
+        self.budget = _WireBudget(byte_limit, task_budget)
         self.error = ""
 
         class Server(socketserver.ThreadingTCPServer):
@@ -727,15 +791,13 @@ class _GitProxy:
                                     )
                                 source = key.fileobj
                                 destination = key.data
-                                with proxy.lock:
-                                    remaining = proxy.byte_limit - proxy.bytes
-                                    if remaining <= 0:
-                                        raise PublicReadError(
-                                            "bytes.wire",
-                                            "Git transfer exceeded its wire-byte bound",
-                                        )
-                                    data = source.recv(min(65_536, remaining))
-                                    proxy.bytes += len(data)
+                                reservation = proxy.budget.reserve(65_536)
+                                try:
+                                    data = source.recv(reservation)
+                                except Exception:
+                                    proxy.budget.release(reservation)
+                                    raise
+                                proxy.budget.commit(reservation, len(data))
                                 if not data:
                                     selector.unregister(source)
                                     try:
@@ -743,8 +805,6 @@ class _GitProxy:
                                     except OSError:
                                         pass
                                     continue
-                                if account_bytes is not None:
-                                    account_bytes(len(data))
                                 destination.sendall(data)
                     finally:
                         selector.close()
@@ -766,6 +826,10 @@ class _GitProxy:
     @property
     def url(self) -> str:
         return "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    @property
+    def bytes(self) -> int:
+        return self.budget.used
 
     def __enter__(self) -> "_GitProxy":
         self.thread.start()
@@ -912,7 +976,7 @@ def _git_output(
 def git_snapshot(
     url: str,
     ref: str,
-    account_bytes: Callable[[int], None] | None = None,
+    task_budget: _TaskWireBudget | None = None,
     account_extracted: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
@@ -949,7 +1013,7 @@ def git_snapshot(
             addresses,
             MAX_GIT_WIRE_BYTES,
             deadline,
-            account_bytes=account_bytes,
+            task_budget=task_budget,
         ) as proxy:
             environment = _git_environment(home, temporary, proxy.url)
             refspec = "+%s:refs/wheelhouse/snapshot" % selected_ref
@@ -1262,7 +1326,7 @@ class PublicReadService:
         self.client = PinnedHTTPSClient()
         self.started = time.monotonic()
         self.calls = 0
-        self.total_bytes = 0
+        self.wire_budget = _TaskWireBudget(MAX_TASK_BYTES)
         self.total_decoded_bytes = 0
         self.total_files = 0
         self.total_redirects = 0
@@ -1276,12 +1340,6 @@ class PublicReadService:
                 raise PublicReadError("task.calls", "public-read task call bound exceeded")
             if time.monotonic() - self.started > MAX_TASK_WALL_SECONDS:
                 raise PublicReadError("task.wall", "public-read task wall bound exceeded")
-
-    def _account_bytes(self, byte_count: int) -> None:
-        with self.lock:
-            self.total_bytes += byte_count
-            if self.total_bytes > MAX_TASK_BYTES:
-                raise PublicReadError("task.bytes", "public-read task byte bound exceeded")
 
     def _account_redirect(self) -> None:
         with self.lock:
@@ -1448,7 +1506,7 @@ class PublicReadService:
             str(arguments["url"]),
             max_bytes=MAX_FETCH_WIRE_BYTES,
             wall_seconds=FETCH_WALL_SECONDS,
-            account_bytes=self._account_bytes,
+            task_budget=self.wire_budget,
             account_redirect=self._account_redirect,
         )
         body = result["body"]
@@ -1496,7 +1554,7 @@ class PublicReadService:
             str(arguments["url"]),
             max_bytes=MAX_ARTIFACT_BYTES,
             wall_seconds=GIT_WALL_SECONDS,
-            account_bytes=self._account_bytes,
+            task_budget=self.wire_budget,
             account_redirect=self._account_redirect,
         )
         body = result["body"]
@@ -1544,7 +1602,7 @@ class PublicReadService:
         snapshot = git_snapshot(
             str(arguments["url"]),
             selected_ref,
-            account_bytes=self._account_bytes,
+            task_budget=self.wire_budget,
             account_extracted=self._account_extracted,
         )
         manifest = snapshot["manifest"]
@@ -1618,7 +1676,7 @@ class PublicReadService:
             url,
             max_bytes=MAX_FETCH_WIRE_BYTES,
             wall_seconds=FETCH_WALL_SECONDS,
-            account_bytes=self._account_bytes,
+            task_budget=self.wire_budget,
             account_redirect=self._account_redirect,
         )
         page = result["body"].decode("utf-8", "replace")
