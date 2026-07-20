@@ -638,6 +638,20 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     negative_action_plan = derive_evidence_plan(
         "A reviewer must not execute an unreviewed package."
     )
+    cannot_action_plan = derive_evidence_plan(
+        "A reviewer cannot execute a package."
+    )
+    uppercase_cannot_action_plan = derive_evidence_plan(
+        "A REVIEWER CANNOT EXECUTE A PACKAGE."
+    )
+    unsupported_prohibition_plans = [
+        derive_evidence_plan(text)
+        for text in (
+            "A reviewer is prohibited from executing a package.",
+            "A reviewer is FORBIDDEN to execute a package.",
+            "Package execution is disallowed.",
+        )
+    ]
     mixed_polarity_plan = derive_evidence_plan(
         "A reviewer must inspect source and must not execute an unreviewed package."
     )
@@ -668,6 +682,12 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     fetch_adjacent_plan = derive_evidence_plan(
         "A reviewer must fetch manifest obtain legal approval."
     )
+    preobject_unknown_plan = derive_evidence_plan(
+        "A reviewer must fetch authorize manifest."
+    )
+    preobject_morphology_plan = derive_evidence_plan(
+        "A reviewer must fetch certify manifest."
+    )
     opaque_remainder_plan = derive_evidence_plan(
         "A reviewer must fetch manifest authorize."
     )
@@ -679,6 +699,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     )
     short_or_variation_plan = derive_evidence_plan(
         "A reviewer must fetch manifest or approve."
+    )
+    object_or_predicate_plan = derive_evidence_plan(
+        "A reviewer must inspect source or release package."
+    )
+    uppercase_object_or_predicate_plan = derive_evidence_plan(
+        "A REVIEWER MUST INSPECT SOURCE OR RELEASE PACKAGE."
+    )
+    invalid_explicit_list_plan = derive_evidence_plan(
+        "A reviewer must inspect evidence including source and authorize merge."
+    )
+    invalid_explicit_list_variation_plan = derive_evidence_plan(
+        "A reviewer must inspect evidence such as source and certify results."
     )
     unsupported_obligation_plans = [
         derive_evidence_plan(text)
@@ -771,7 +803,12 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         == {"policy.assess"}
         and all(
             row["semantic_status"] == "recognized-local"
-            for row in negative_action_plan["obligations"]
+            for plan in (
+                negative_action_plan,
+                cannot_action_plan,
+                uppercase_cannot_action_plan,
+            )
+            for row in plan["obligations"]
         )
         and {row["operation"] for row in identify_subject_plan["obligations"]}
         == {"policy.assess"}
@@ -792,13 +829,20 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 unknown_then_plan,
                 adjacent_unknown_plan,
                 fetch_adjacent_plan,
+                preobject_unknown_plan,
+                preobject_morphology_plan,
                 opaque_remainder_plan,
                 opaque_remainder_variation_plan,
                 short_or_plan,
                 short_or_variation_plan,
+                object_or_predicate_plan,
+                uppercase_object_or_predicate_plan,
+                invalid_explicit_list_plan,
+                invalid_explicit_list_variation_plan,
                 semicolon_unknown_plan,
                 semicolon_partial_plan,
                 *unsupported_obligation_plans,
+                *unsupported_prohibition_plans,
             )
             for row in plan["obligations"]
         ),

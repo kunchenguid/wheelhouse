@@ -22,7 +22,8 @@ _NORMATIVE = re.compile(
     r"(?i)\b(?:must|required|requires?|requirement|shall|should|ought\s+to|can|may|"
     r"(?:have|has|had|got|need|needs|needed|expected|supposed)\s+to|"
     r"(?:is|are|was|were|be|being)\s+(?:obligated|required|mandatory|necessary|expected|supposed)|"
-    r"obligated|mandatory|necessary|only\s+after|cannot\s+(?:a\s+)?positive\b|"
+    r"obligated|mandatory|necessary|cannot|prohibit(?:ed|s)?|forbid(?:den|s)?|disallow(?:ed|s)?|"
+    r"only\s+after|"
     r"insufficient\s+evidence|remain\s+inconclusive|never|contingent\s+upon|prerequisite)\b"
 )
 _GENERIC_OPERATIONS = {
@@ -68,14 +69,28 @@ _OPERAND_QUALIFIERS = {
     "of", "on", "rather", "such", "than", "through", "to", "under", "using",
 }
 _LIST_INTRODUCERS = {"across", "including", "representative", "through"}
+_OPERAND_DETERMINERS = {
+    "a", "all", "an", "any", "every", "its", "other", "the", "their",
+    "these", "this", "those",
+}
+_OPERAND_MODIFIERS = {
+    "actual", "agent-oriented", "applicable", "available", "declared", "direct", "exact",
+    "independent", "missing", "nearly", "only", "pinned", "positive", "public",
+    "rather", "released", "relevant", "representative", "sorted", "specific",
+    "stable", "structured", "truthful", "unrelated", "unreviewed", "unverified",
+}
 _EVIDENCE_OBJECT_TERMS = {
     "artifact", "behavior", "checksum", "commit", "component", "concern", "data",
     "dataset", "digest", "error", "evidence", "execution", "exercise", "hash",
     "inspection", "integrity", "manifest", "output", "package", "path", "release",
-    "repository", "revision", "source", "url", "version",
+    "repository", "revision", "sha", "source", "url", "version",
 }
-
-
+_LOCAL_OBJECT_TERMS = {
+    "admission", "agent", "behavior", "claim", "code", "concern", "discoverability",
+    "discovery", "ergonomics", "error", "facility", "file", "inconclusive", "key",
+    "model", "need", "observation", "ordering", "output", "owner", "path", "policy",
+    "principle", "reviewer", "row", "success", "task", "verdict",
+}
 class VisionPolicyError(ValueError):
     pass
 
@@ -187,7 +202,7 @@ def _normative_productions(text: str) -> list[str]:
 def _predicate_operand(tokens: list[str], index: int) -> list[str]:
     end = len(tokens)
     for offset in range(index + 1, len(tokens)):
-        if tokens[offset] in {";", "."}:
+        if tokens[offset] in {"unless", ";", "."}:
             end = offset
             break
         if tokens[offset] == ",":
@@ -209,6 +224,12 @@ def _predicate_operand(tokens: list[str], index: int) -> list[str]:
             cursor = offset + 1
             while cursor < len(tokens) and tokens[cursor] in {",", "("}:
                 cursor += 1
+            if cursor < len(tokens) and tokens[cursor] in _MODALS:
+                cursor += 1
+                if tokens[cursor : cursor + 1] == ["not"]:
+                    cursor += 1
+                if tokens[cursor : cursor + 1] == ["be"]:
+                    cursor += 1
             if (
                 tokens[cursor : cursor + 1] == ["when"]
                 or (cursor < len(tokens) and tokens[cursor] in _PREDICATES)
@@ -311,11 +332,57 @@ def _leading_guard_end(tokens: list[str]) -> int:
     return -1
 
 
-def _operand_list_connector(
-    tokens: list[str], index: int, source: int
-) -> bool:
+def _singular_operand(token: str) -> str:
+    if token.endswith("ies"):
+        return token[:-3] + "y"
+    return token[:-1] if token.endswith("s") else token
+
+
+def _operand_node(token: str) -> bool:
+    singular = _singular_operand(token)
+    return singular in _EVIDENCE_OBJECT_TERMS | _LOCAL_OBJECT_TERMS
+
+
+def _domain_operand(token: str, following: str = "") -> bool:
+    if not re.fullmatch(r"[a-z]+(?:-[a-z]+)*", token):
+        return False
+    if re.search(r"(?:ate|ates|ated|ating|ize|izes|ized|izing|ise|ises|ised|ising|ify|ifies|ified|ifying)$", token):
+        return False
+    return token.endswith("s") or _operand_node(following)
+
+
+def _bounded_operand_element(tokens: list[str]) -> bool:
+    filtered = [token for token in tokens if token not in {",", "(", ")"}]
+    if not filtered:
+        return False
+    for offset, token in enumerate(filtered):
+        following = filtered[offset + 1] if offset + 1 < len(filtered) else ""
+        if (
+            token in _OPERAND_DETERMINERS
+            or token in _OPERAND_MODIFIERS
+            or token in _OPERAND_QUALIFIERS
+            or token in _CONDITIONS
+            or token in _LIST_INTRODUCERS
+            or token in _PREDICATES
+            or token in {"and", "or", "are", "be", "cannot", "is", "itself", "not", "required", "that", "themselves", "was", "were", "which", "whose"}
+            or _operand_node(token)
+            or _domain_operand(token, following)
+            or re.fullmatch(r"https?://\S+|[0-9a-f]{64}", token)
+            or token.endswith("ly")
+        ):
+            continue
+        return False
+    return True
+
+
+def _operand_list_connector(tokens: list[str], index: int, source: int) -> bool:
     if source < 0:
         return False
+    cursor = index + 1
+    while cursor < len(tokens) and tokens[cursor] in {",", "("}:
+        cursor += 1
+    if tokens[cursor : cursor + 1] == ["when"]:
+        return True
     span_start = max(
         [
             offset + 1
@@ -331,8 +398,6 @@ def _operand_list_connector(
         prefix[offset : offset + 2] == ["such", "as"]
         for offset in range(len(prefix) - 1)
     )
-    if explicitly_listed:
-        return True
     end = next(
         (
             offset
@@ -341,6 +406,9 @@ def _operand_list_connector(
         ),
         len(tokens),
     )
+    branch = tokens[index + 1 : end]
+    if explicitly_listed:
+        return _bounded_operand_element(branch)
     left = next(
         (
             tokens[offset]
@@ -349,17 +417,24 @@ def _operand_list_connector(
         ),
         "",
     )
-    right = tokens[index + 1] if index + 1 < end else ""
-    left_singular = left[:-1] if left.endswith("s") else left
-    right_singular = right[:-1] if right.endswith("s") else right
+    plain_alternative = len(branch) == 1
+    relative_alternative = (
+        len(branch) >= 3
+        and branch[1] in {"that", "which", "whose"}
+        and _bounded_operand_element(branch)
+    )
     typed_alternative = (
         tokens[index] == "or"
-        and left_singular in _EVIDENCE_OBJECT_TERMS
-        and right_singular in _EVIDENCE_OBJECT_TERMS
+        and (plain_alternative or relative_alternative)
+        and _operand_node(left)
+        and _operand_node(branch[0])
+        and any(
+            token in _OPERAND_QUALIFIERS | _OPERAND_DETERMINERS | _OPERAND_MODIFIERS
+            for token in prefix
+        )
     )
     relative_element = (
-        typed_alternative
-        and tokens[index + 2 : index + 3] in (["that"], ["which"], ["whose"])
+        relative_alternative
         and any(token in _PREDICATES for token in tokens[index + 3 : end])
     )
     return typed_alternative or relative_element
@@ -369,38 +444,7 @@ def _operand_span_valid(tokens: list[str], index: int) -> bool:
     operand = _predicate_operand(tokens, index)
     if not operand:
         return True
-    opaque_run = 0
-    saw_object = False
-    grammar = (
-        _OPERAND_QUALIFIERS
-        | _CONDITIONS
-        | _LIST_INTRODUCERS
-        | {
-            "a", "all", "an", "and", "any", "are", "every", "exact", "is",
-            "itself", "its", "only", "or", "other", "rather", "specific",
-            "stable", "that", "the", "their", "themselves", "these", "this",
-            "those", "was", "were", "which", "whose", ",", "(", ")",
-        }
-    )
-    for token in operand:
-        singular = token[:-1] if token.endswith("s") else token
-        is_object = token in _EVIDENCE_OBJECT_TERMS or singular in _EVIDENCE_OBJECT_TERMS
-        if is_object:
-            saw_object = True
-            opaque_run = 0
-            continue
-        if token in grammar or token in _PREDICATES or re.fullmatch(
-            r"https?://\S+|[0-9a-f]{64}", token
-        ):
-            saw_object = False
-            opaque_run = 0
-            continue
-        if saw_object:
-            return False
-        opaque_run += 1
-        if opaque_run > 3:
-            return False
-    return True
+    return _bounded_operand_element(operand)
 
 
 def _guard_or_is_negative(
