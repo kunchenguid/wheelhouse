@@ -403,6 +403,7 @@ def project_advisory_review(
         vision_blob_sha=binding.get("vision_blob_sha", ""),
     )
     expected = {row["obligation_id"]: row for row in plan["obligations"]}
+    units_by_id = {row["unit_id"]: row for row in plan["units"]}
     rows = value.get("obligation_results")
     if not isinstance(rows, list):
         raise VisionPolicyError("advisory obligation results are unavailable")
@@ -453,15 +454,26 @@ def project_advisory_review(
             )
         )
         assessment = row.get("assessment")
+        scoped_not_applicable = bool(
+            assessment == "not_applicable"
+            and coverage_complete
+            and obligation["semantic_status"]
+            in {"recognized", "recognized-local"}
+            and units_by_id[obligation["unit_id"]].get("conditions")
+        )
         trusted_status = (
             "complete-pass" if assessment == "pass" and receipts_complete
             else "complete-fail" if assessment == "fail" and receipts_complete
-            else "not-applicable" if assessment == "not_applicable"
+            else "not-applicable" if scoped_not_applicable
             else "unavailable"
         )
-        if trusted_status != "complete-pass":
+        if trusted_status not in {"complete-pass", "not-applicable"}:
             all_required_pass = False
-        if trusted_status not in {"complete-pass", "complete-fail"}:
+        if trusted_status not in {
+            "complete-pass",
+            "complete-fail",
+            "not-applicable",
+        }:
             all_evidence_complete = False
         projected_results.append({**row, "trusted_status": trusted_status})
     verdict = value.get("verdict")

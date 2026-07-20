@@ -1494,7 +1494,12 @@ def build_task(
     except (OSError, UnicodeDecodeError) as error:
         raise ArtifactError("prompt artifact must be bounded UTF-8 text") from error
     tool_instruction = (
-        "This direct Claude profile exposes only the exact typed filesystem and public-evidence tools declared by the task. It exposes no shell, WebFetch, browser, or raw network tool."
+        "This direct Claude profile exposes only exact typed MCP tools. Call canonical fs.read as "
+        "mcp__wheelhouse__fs_read, public.search as mcp__wheelhouse__public_search, "
+        "public.fetch as mcp__wheelhouse__public_fetch, public.git_snapshot as "
+        "mcp__wheelhouse__public_git_snapshot, public.artifact as "
+        "mcp__wheelhouse__public_artifact, and exercise.run as "
+        "mcp__wheelhouse__exercise_run. It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
         else "This isolated policy profile exposes the MCP tool mcp__wheelhouse__fs_read. "
         "Call it with exactly {\"path\":\"vision.md\"}, {\"path\":\"vision-units.json\"}, "
@@ -1544,7 +1549,9 @@ def build_task(
                 "target-local judgments to policy.assess. Clear supported public operations are "
                 "recognized; clear policy.assess operations are recognized-local. Use unknown only "
                 "when a required meaning or operation cannot be represented, and ambiguous only "
-                "when the clause has unresolved alternative meanings. For an audit agreement, copy "
+                "when the clause has unresolved alternative meanings. A list item inherits the "
+                "applicability conditions stated by its immediately preceding list introduction; "
+                "record that inherited scope in conditions. For an audit agreement, copy "
                 "the proposed semantic fields and obligations exactly; otherwise supply your "
                 "independent values, list every disagreement, and set complete false.",
             ]

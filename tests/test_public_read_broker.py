@@ -1545,6 +1545,8 @@ def test_public_task_contract():
             and "Use this canonical generic rubric" in derive_prompt
             and "Use unknown only when a required meaning or operation cannot be represented"
             in derive_prompt
+            and "A list item inherits the applicability conditions"
+            in derive_prompt
             and "For an audit agreement, copy the proposed semantic fields and obligations exactly"
             in derive_prompt
             and 'Call it with exactly {"path":"vision.md"}'
@@ -1676,6 +1678,16 @@ def test_public_task_contract():
             == "wheelhouse/advisory-review/v2"
             and task["spec"]["output"]["evidencePolicy"]
             == "public-evidence/v1",
+        )
+        compiled_prompt = (
+            bundle / task["spec"]["prompt"]["userArtifact"]
+        ).read_text(encoding="utf-8")
+        check(
+            "task: public advisory names exact callable MCP tools",
+            "public.git_snapshot as mcp__wheelhouse__public_git_snapshot"
+            in compiled_prompt
+            and "exercise.run as mcp__wheelhouse__exercise_run"
+            in compiled_prompt,
         )
         check(
             "task: isolated policy passes can read every input before native schema submission",
