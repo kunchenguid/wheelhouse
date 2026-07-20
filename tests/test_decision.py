@@ -2794,21 +2794,29 @@ def test_decline_prose_contract_and_real_action_path():
         == {"type": "string", "maxLength": 32768},
     )
 
-    omitted_note = json.dumps({"mode": "action", "action": "decline"})
-    omission_reason = ad.nl_schema_reason(omitted_note)
-    omission_plan = ad.plan_nl_repair(omitted_note)
-    omission_result = ad.decide_nl_apply(
-        omitted_note,
-        "",
-        repair_needed=omission_plan["repair_needed"],
+    omission_cases = (
+        ("omitted prose", {"mode": "action", "action": "decline"}),
+        (
+            "normalized action",
+            {"mode": "action", "action": " Decline ", "free_text": " \t"},
+        ),
     )
-    check(
-        "decline regression: omitted prose is rejected before deterministic routing",
-        omission_reason == "decline action requires non-empty field 'free_text'"
-        and omission_plan["repair_needed"] is True
-        and omission_result["outcome"] == "repair-failed"
-        and omission_result["result"] is None,
-    )
+    for label, candidate in omission_cases:
+        omitted_note = json.dumps(candidate)
+        omission_reason = ad.nl_schema_reason(omitted_note)
+        omission_plan = ad.plan_nl_repair(omitted_note)
+        omission_result = ad.decide_nl_apply(
+            omitted_note,
+            "",
+            repair_needed=omission_plan["repair_needed"],
+        )
+        check(
+            "decline regression: %s is rejected before deterministic routing" % label,
+            omission_reason == "decline action requires non-empty field 'free_text'"
+            and omission_plan["repair_needed"] is True
+            and omission_result["outcome"] == "repair-failed"
+            and omission_result["result"] is None,
+        )
 
     # Faithful no-spend replay of the observed model payload through the same
     # deterministic route + executor used by production run 29722388363.

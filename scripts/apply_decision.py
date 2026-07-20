@@ -1682,8 +1682,8 @@ def _nl_parse_with_reason(text):
         )
         return None, reason or "result failed nl-decision-v1 schema validation"
     if (
-        value.get("mode") == "action"
-        and value.get("action") == "decline"
+        str(value.get("mode", "") or "").strip().lower() == "action"
+        and str(value.get("action", "") or "").strip().lower() == "decline"
         and not str(value.get("free_text", "") or "").strip()
     ):
         return None, "decline action requires non-empty field 'free_text'"
