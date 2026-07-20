@@ -378,6 +378,7 @@ class ClaudeStreamParser:
         self.total_bytes = 0
         self.model: str | None = None
         self.terminal: dict[str, Any] | None = None
+        self.api_error_status: int | None = None
 
     def feed(self, line: bytes) -> None:
         if not isinstance(line, bytes):
@@ -420,6 +421,10 @@ class ClaudeStreamParser:
                     "Claude stream model did not match the immutable selection"
                 )
             self.model = model
+        elif event_type == "system" and event.get("subtype") == "api_retry":
+            status = event.get("error_status")
+            if isinstance(status, int) and not isinstance(status, bool):
+                self.api_error_status = status
         elif event_type == "result":
             if self.model is None:
                 raise ClaudeProtocolError(
@@ -454,11 +459,16 @@ class ClaudeStreamParser:
         )
 
     def terminal_failure(self) -> tuple[str, str] | None:
-        """Classify a bounded unsuccessful Claude terminal without its text."""
+        """Classify a bounded unsuccessful Claude API status without its text."""
 
-        if self.terminal is None or not self.terminal.get("is_error"):
+        if self.terminal is not None and self.terminal.get("is_error"):
+            status = self.terminal.get("api_error_status")
+        elif self.terminal is None:
+            status = self.api_error_status
+        else:
             return None
-        status = self.terminal.get("api_error_status")
+        if status is None:
+            return None
         if status in (401, 403):
             return (
                 "auth.invalid",

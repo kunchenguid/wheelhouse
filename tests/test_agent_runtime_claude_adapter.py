@@ -547,6 +547,22 @@ def main():
         "stream: provider pressure retains its retryable provider class",
         overloaded.terminal_failure()[0] == "provider.overloaded",
     )
+    preterminal_auth_failure = ClaudeStreamParser(
+        expected_model="claude-sonnet-4-6",
+        require_structured_output=True,
+    )
+    preterminal_auth_failure.feed(init)
+    preterminal_auth_failure.feed(
+        b'{"type":"system","subtype":"api_retry","error_status":401}\n'
+    )
+    check(
+        "stream: bounded preterminal API status retains auth classification",
+        preterminal_auth_failure.terminal_failure()
+        == (
+            "auth.invalid",
+            "Claude rejected the anthropic-subscription credential.",
+        ),
+    )
     check(
         "stream: invalid UTF-8 rejected",
         fails(
