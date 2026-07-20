@@ -1496,7 +1496,10 @@ def build_task(
     tool_instruction = (
         "This direct Claude profile exposes only the exact typed filesystem and public-evidence tools declared by the task. It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
-        else "This isolated policy profile exposes only typed read access to its declared pinned policy inputs. It has no target, public evidence, shell, WebFetch, browser, or raw network tool."
+        else "This isolated policy profile exposes the MCP tool mcp__wheelhouse__fs_read. "
+        "Call it to read vision.md, vision-units.json, and policy-binding.json, plus "
+        "policy-derivation.json for an audit. These are the declared pinned policy inputs. "
+        "It has no target, public evidence, shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action in {"policy-derive.public", "policy-audit.public"}
         else "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."
         if adapter == "claude-cli"

@@ -1546,6 +1546,8 @@ def test_public_task_contract():
             in derive_prompt
             and "For an audit agreement, copy the proposed semantic fields and obligations exactly"
             in derive_prompt
+            and "Call it to read vision.md, vision-units.json, and policy-binding.json"
+            in derive_prompt
             and derive_native_schema["required"] == ["json", "unit_semantics"]
             and derive_native_schema["properties"]["unit_semantics"]["minItems"]
             == len(document["units"])
