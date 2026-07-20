@@ -2790,8 +2790,7 @@ def test_decline_prose_contract_and_real_action_path():
     check(
         "decline contract: native schema keeps the strict bounded prose carrier",
         schema["additionalProperties"] is False
-        and schema["properties"]["free_text"]
-        == {"type": "string", "maxLength": 32768},
+        and schema["properties"]["free_text"] == {"type": "string", "maxLength": 32768},
     )
 
     omission_cases = (
@@ -2891,8 +2890,7 @@ def test_decline_prose_contract_and_real_action_path():
         "decline regression: executor posts contributor prose verbatim before close",
         len(mutations) == 2
         and mutations[0]["method"] == "POST"
-        and mutations[0]["path"]
-        == "/repos/kunchenguid/axi/issues/103/comments"
+        and mutations[0]["path"] == "/repos/kunchenguid/axi/issues/103/comments"
         and mutations[0]["fields"]["body"] == contributor_note
         and mutations[1]["method"] == "PATCH"
         and mutations[1]["path"] == "/repos/kunchenguid/axi/issues/103"
