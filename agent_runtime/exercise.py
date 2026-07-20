@@ -435,7 +435,8 @@ def run_node_npm_cli(
     if failed:
         diagnostic = ""
         if failed.endswith("_exit"):
-            stderr = scenarios[failed.removesuffix("_exit")]["stderr"].lstrip()
+            scenario = scenarios[failed.removesuffix("_exit")]
+            stderr = scenario["stderr"].lstrip()
             if stderr.startswith("bwrap:"):
                 diagnostic = ".sandbox"
                 if (
@@ -463,8 +464,13 @@ def run_node_npm_cli(
                     if marker in stderr:
                         diagnostic += suffix
                         break
-            elif stderr.startswith("node:") or stderr.startswith("/node"):
+            elif (
+                stderr.startswith("node:")
+                or stderr.startswith("/node")
+                or stderr.startswith("/adapter/node")
+            ):
                 diagnostic = ".node"
+            diagnostic += ".code_%d" % scenario["exit_code"]
         raise ExerciseError(
             "exercise.assertion.%s%s" % (failed, diagnostic),
             "representative CLI scenarios were not complete",

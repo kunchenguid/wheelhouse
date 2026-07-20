@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -423,6 +424,9 @@ def _validate_worker(
             ),
             "contract",
         )
+        missing = re.search(r"is missing required field ([A-Za-z0-9_-]+)$", reason)
+        if missing:
+            category += ":" + missing.group(1)
         return None, delivered, _error(
             "output.schema_invalid",
             "Delivered result failed the trusted output schema (%s)." % category,
