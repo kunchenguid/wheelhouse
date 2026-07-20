@@ -1500,7 +1500,11 @@ def test_public_task_contract():
             all(
                 derive_schema["properties"][name].get("const") == value
                 for name, value in {**binding, "vision_sha256": document["vision_sha256"]}.items()
-            ),
+            )
+            and derive_schema["properties"]["units"]["minItems"]
+            == len(document["units"])
+            and derive_schema["properties"]["units"]["maxItems"]
+            == len(document["units"]),
         )
         bundle = root / "bundle"
         task = build_task(

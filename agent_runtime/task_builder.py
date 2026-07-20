@@ -27,7 +27,11 @@ from .contract import (
     validate_schema,
 )
 from .tools import tool_schema_sha256
-from .vision_policy import validate_policy_artifacts, write_vision_units
+from .vision_policy import (
+    validate_policy_artifacts,
+    vision_unit_document,
+    write_vision_units,
+)
 
 ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
@@ -1403,6 +1407,10 @@ def build_task(
         require_vision_fields or bool(vision_file),
         policy_binding if public_policy_action else None,
     )
+    if policy_action:
+        unit_count = len(vision_unit_document(vision_text)["units"])
+        schema_value["properties"]["units"]["minItems"] = unit_count
+        schema_value["properties"]["units"]["maxItems"] = unit_count
 
     source_prompt = Path(prompt_path)
     try:
