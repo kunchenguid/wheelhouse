@@ -213,9 +213,13 @@ def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
 
 
 def _prepare_scenario(work: Path, writable: Path, node: str, confined: bool) -> None:
-    _limit_output()
-    if confined:
-        _landlock_artifact(work, writable, node)
+    try:
+        _limit_output()
+        if confined:
+            _landlock_artifact(work, writable, node)
+    except ExerciseError as error:
+        os.write(2, ("wheelhouse-isolation: " + error.message + "\n").encode())
+        os._exit(126)
 
 
 def _exercise_child(
@@ -449,6 +453,8 @@ def run_node_npm_cli(
                     diagnostic += "_uidmap"
             elif "ERR_MODULE_NOT_FOUND" in stderr:
                 diagnostic = ".module"
+            elif stderr.startswith("wheelhouse-isolation:"):
+                diagnostic = ".landlock"
             elif stderr.startswith("node:") or stderr.startswith("/node"):
                 diagnostic = ".node"
         raise ExerciseError(

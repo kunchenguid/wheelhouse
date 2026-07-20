@@ -1406,7 +1406,13 @@ def build_task(
         "describes the action compatibility path and",
         "is superseded for this adapter task. You have no shell or file-write tool.",
         "Submit the final value through the native strict output schema.",
-        "For a public policy action, encode the complete action-schema JSON object in the native `json` carrier field.",
+        (
+            "Your final turn MUST be exactly one StructuredOutput call. Encode the complete "
+            "action-schema JSON object as the native `json` carrier string. Never finish with "
+            "plain text, Markdown, or a raw JSON response."
+            if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
+            else "Return the complete action-schema JSON object through StructuredOutput."
+        ),
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]
