@@ -113,6 +113,37 @@ def execute_case(
                 "auto_merge_eligible",
             )
         }
+        projection["policy_coverage_complete"] = final.get(
+            "policy_coverage_complete"
+        )
+        projection["obligation_statuses"] = {
+            status: sorted(
+                row.get("obligation_id", "")
+                for row in final.get("obligation_results", [])
+                if isinstance(row, dict) and row.get("trusted_status") == status
+            )
+            for status in (
+                "complete-pass",
+                "complete-fail",
+                "not-applicable",
+                "unavailable",
+            )
+        }
+        eligibility = final.get("eligibility_facts")
+        projection["eligibility_facts"] = (
+            {
+                key: eligibility.get(key)
+                for key in (
+                    "behavior_class",
+                    "changes_existing_or_default_behavior",
+                    "optin_default_off",
+                    "aligns_with_vision",
+                    "recommendation",
+                )
+            }
+            if isinstance(eligibility, dict)
+            else None
+        )
         raise AssertionError(
             "%s real-model projection did not match the expected authority-free verdict: %s"
             % (name, json.dumps(projection, sort_keys=True))
