@@ -23,9 +23,10 @@ from .contract import (
     load_json_regular,
     sha256_bytes,
     validate_contract,
+    validate_schema,
 )
 from .tools import tool_schema_sha256
-from .vision_policy import write_vision_units
+from .vision_policy import validate_policy_artifacts, write_vision_units
 
 ROOT = Path(__file__).resolve().parent
 ACTION_SCHEMAS = ROOT / "schemas" / "actions"
@@ -56,6 +57,8 @@ ACTION_LIMITS = {
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
     "advisory-review.public": (540_000, 600_000, 64, 40, 131_072),
+    "policy-derive.public": (180_000, 210_000, 1, 4, 131_072),
+    "policy-audit.public": (180_000, 210_000, 1, 4, 131_072),
 }
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
@@ -916,9 +919,13 @@ def _schema_for(action: str, repair_kind: str) -> tuple[Path, str]:
         )
     if action == "advisory-review.public":
         return (
-            ACTION_SCHEMAS / "advisory-review-v1.schema.json",
-            "wheelhouse/advisory-review/v1",
+            ACTION_SCHEMAS / "advisory-review-v2.schema.json",
+            "wheelhouse/advisory-review/v2",
         )
+    if action == "policy-derive.public":
+        return ACTION_SCHEMAS / "policy-derive-v1.schema.json", "wheelhouse/evidence-plan/v3"
+    if action == "policy-audit.public":
+        return ACTION_SCHEMAS / "policy-audit-v1.schema.json", "wheelhouse/evidence-plan-audit/v2"
     raise ArtifactError("unsupported action output schema")
 
 
@@ -1099,7 +1106,7 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
             "name": "tool.network",
             "constraints": {
             "mode": "broker-only"
-            if action.endswith(".search") or action == "advisory-review.public"
+            if action.endswith(".search") or action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "none"
             },
         },
@@ -1125,24 +1132,32 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
         },
     ]
     if action not in SCHEMA_REPAIR_ACTIONS and (
-        adapter != "claude-cli" or action == "advisory-review.public"
+        adapter != "claude-cli"
+        or action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
     ):
+        roots = (
+            ["vision.md", "vision-units.json", "policy-derivation.json"]
+            if action in {"policy-derive.public", "policy-audit.public"}
+            else ["target.txt", "target-src", "policy-derivation.json", "policy-audit.json"]
+        )
         required.extend(
             [
                 {
                     "name": "fs.read",
                     "constraints": {
-                        "roots": ["target.txt", "target-src"],
+                        "roots": roots,
                         "writes": False,
                     },
-                },
-                {
+                }
+            ]
+        )
+        if not action.startswith("policy-"):
+            required.extend([{
                     "name": "fs.grep",
                     "constraints": {"roots": ["target.txt", "target-src"]},
                 },
                 {"name": "fs.glob", "constraints": {"roots": ["target-src"]}},
-            ]
-        )
+            ])
     if action.endswith(".search") and adapter != "claude-cli":
         required.append(
             {"name": "github.search.readonly", "constraints": {"broker": True}}
@@ -1171,11 +1186,13 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
 
 def _tools(action: str, adapter: str) -> dict[str, Any]:
     if adapter == "claude-action-compat" or (
-        adapter == "claude-cli" and action != "advisory-review.public"
+        adapter == "claude-cli" and action not in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
     ):
         return {"default": "deny", "parallel": False, "tools": []}
     names: list[str] = []
-    if action not in SCHEMA_REPAIR_ACTIONS:
+    if action in {"policy-derive.public", "policy-audit.public"}:
+        names = ["fs.read"]
+    elif action not in SCHEMA_REPAIR_ACTIONS:
         names = ["fs.read", "fs.grep", "fs.glob"]
     if action.endswith(".search"):
         names.append("github.search.readonly")
@@ -1308,6 +1325,8 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    policy_plan_file: str = "",
+    policy_audit_file: str = "",
     allow_automerge_behavior: bool = False,
     require_vision_fields: bool = False,
     repair_kind: str = "pr",
@@ -1316,6 +1335,15 @@ def build_task(
         raise ArtifactError("unsupported agent runtime action")
     if not DIGEST.fullmatch(event_key):
         raise ArtifactError("agent event key binding is invalid")
+    policy_action = action in {"policy-derive.public", "policy-audit.public"}
+    if policy_action and (target_file or repository_dir or policy_audit_file):
+        raise ArtifactError("policy model passes accept only pinned VISION artifacts")
+    if action == "policy-derive.public" and policy_plan_file:
+        raise ArtifactError("PolicyDeriver cannot receive a proposed plan")
+    if action == "policy-audit.public" and not policy_plan_file:
+        raise ArtifactError("CoverageAuditor requires the completed proposed plan")
+    if action == "advisory-review.public" and not (policy_plan_file and policy_audit_file):
+        raise ArtifactError("AdvisoryReview requires validated policy artifacts")
     adapter = (selection.get("profile") or {}).get("adapter")
     if (selection.get("mode"), adapter) not in (
         ("claude", "claude-action-compat"),
@@ -1338,6 +1366,8 @@ def build_task(
     tool_instruction = (
         "This direct Claude profile exposes only the exact typed filesystem and public-evidence tools declared by the task. It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
+        else "This isolated policy profile exposes only typed read access to its declared pinned policy inputs. It has no target, public evidence, shell, WebFetch, browser, or raw network tool."
+        if adapter == "claude-cli" and action in {"policy-derive.public", "policy-audit.public"}
         else "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."
         if adapter == "claude-cli"
         else "This schema-repair task exposes no tools. Work only from the bounded candidate in the prompt."
@@ -1358,14 +1388,6 @@ def build_task(
         "Do not add Markdown fences or prose outside that schema.",
         "</wheelhouse-adapter-shim>",
     ]
-    if action == "advisory-review.public":
-        shim_lines[1:1] = [
-            '<wheelhouse-policy-derivation trust="trusted" version="v2">',
-            "First act only as PolicyDeriver. Read pinned vision-units.json and VISION.md, classify every exact unit, fully interpret every normative clause and condition, and produce the generic policy_derivation. Mark unknown or ambiguous explicitly. Do not inspect the target or public evidence during this derivation.",
-            "Then independently act only as CoverageAuditor. Re-read the same pinned VISION units and the proposed derivation, checking omissions, condition strength, requiredness, operation mapping, and exact identity. Record every disagreement and set complete false on any uncertainty.",
-            "Only after both structured policy passes may you inspect the target or call typed public evidence tools and produce AdvisoryReview. Never weaken a VISION condition and never let public bytes influence policy interpretation.",
-            "</wheelhouse-policy-derivation>",
-        ]
     compiled_prompt = (
         prompt_text
         if adapter == "claude-action-compat"
@@ -1462,7 +1484,7 @@ def build_task(
                 "bytes": size,
             }
         )
-        if action == "advisory-review.public":
+        if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}:
             plan_source = bundle / ".vision-units.json"
             write_vision_units(Path(vision_file), plan_source)
             try:
@@ -1484,8 +1506,40 @@ def build_task(
                     "bytes": plan_size,
                 }
             )
-    elif action == "advisory-review.public":
-        raise ArtifactError("public advisory review requires trusted VISION input")
+    elif action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}:
+        raise ArtifactError("public policy actions require trusted VISION input")
+
+    policy_values: list[dict[str, Any]] = []
+    for input_id, source_name in (
+        ("policy-derivation", policy_plan_file),
+        ("policy-audit", policy_audit_file),
+    ):
+        if not source_name:
+            continue
+        source = Path(source_name)
+        value = load_json_regular(source, max_bytes=262144)
+        artifact_schema = (
+            ACTION_SCHEMAS / "policy-derive-v1.schema.json"
+            if input_id == "policy-derivation"
+            else ACTION_SCHEMAS / "policy-audit-v1.schema.json"
+        )
+        validate_schema(value, load_json_regular(artifact_schema, max_bytes=65536))
+        digest, size, artifact = _copy_file(source, bundle, 262144)
+        inputs.append({
+            "id": input_id,
+            "artifact": artifact,
+            "logicalPath": input_id + ".json",
+            "sha256": digest,
+            "mediaType": "application/json",
+            "trust": "trusted" if action == "advisory-review.public" else "untrusted",
+            "mount": "read-only",
+            "maxBytes": 262144,
+            "bytes": size,
+        })
+        policy_values.append(value)
+    if action == "advisory-review.public":
+        vision_text = Path(vision_file).read_text(encoding="utf-8")
+        validate_policy_artifacts(vision_text, *policy_values)
 
     schema_path, schema_id = _schema_for(action, repair_kind)
     source_schema = load_json_regular(schema_path, max_bytes=65536)
@@ -1602,7 +1656,7 @@ def build_task(
                 },
                 "toolNetwork": {
                     "mode": "broker-only"
-                    if action.endswith(".search") or action == "advisory-review.public"
+                    if action.endswith(".search") or action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
                     else "none"
                 },
                 "inheritEnvironment": False,

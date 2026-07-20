@@ -9,8 +9,8 @@ from typing import Any, Iterable
 
 from .contract import canonical_sha256, file_sha256, load_json_regular
 
-PLAN_VERSION = "wheelhouse/evidence-plan/v2"
-AUDIT_VERSION = "wheelhouse/evidence-plan-audit/v1"
+PLAN_VERSION = "wheelhouse/evidence-plan/v3"
+AUDIT_VERSION = "wheelhouse/evidence-plan-audit/v2"
 UNITS_VERSION = "wheelhouse/vision-units/v1"
 REVIEW_KIND = "AdvisoryReview"
 _OPERATIONS = {
@@ -23,6 +23,7 @@ _OPERATIONS = {
 }
 _CLASSIFICATIONS = {"context-only", "decision-criterion", "evidence-obligation"}
 _SEMANTIC_STATUSES = {"recognized", "recognized-local", "unknown", "ambiguous"}
+_CONDITION_STRENGTHS = {"none", "advisory", "required", "prohibited", "conditional"}
 
 
 class VisionPolicyError(ValueError):
@@ -105,9 +106,20 @@ def _plan_digest(plan: dict[str, Any]) -> str:
     return canonical_sha256(unsigned)
 
 
-def _validate_derivation(
+def _semantic_fields(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("classification"),
+        row.get("semantic_status"),
+        row.get("normative"),
+        row.get("decision_relevant"),
+        row.get("condition_strength"),
+        tuple(row.get("conditions") or ()),
+    )
+
+
+def validate_policy_artifacts(
     text: str, plan: Any, audit: Any
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
     if not isinstance(plan, dict) or plan.get("version") != PLAN_VERSION:
         raise VisionPolicyError("policy derivation version is invalid")
     document = vision_unit_document(text)
@@ -118,7 +130,7 @@ def _validate_derivation(
     planned_units = plan.get("units")
     if not isinstance(planned_units, list) or len(planned_units) != len(document["units"]):
         raise VisionPolicyError("policy derivation omitted a VISION unit")
-    unit_status: dict[str, tuple[str, str]] = {}
+    unit_status: dict[str, dict[str, Any]] = {}
     for trusted, proposed in zip(document["units"], planned_units):
         if not isinstance(proposed, dict) or any(
             proposed.get(name) != trusted[name]
@@ -127,9 +139,29 @@ def _validate_derivation(
             raise VisionPolicyError("policy derivation changed a VISION unit")
         classification = proposed.get("classification")
         semantic_status = proposed.get("semantic_status")
-        if classification not in _CLASSIFICATIONS or semantic_status not in _SEMANTIC_STATUSES:
+        conditions = proposed.get("conditions")
+        if (
+            classification not in _CLASSIFICATIONS
+            or semantic_status not in _SEMANTIC_STATUSES
+            or not isinstance(proposed.get("normative"), bool)
+            or not isinstance(proposed.get("decision_relevant"), bool)
+            or proposed.get("condition_strength") not in _CONDITION_STRENGTHS
+            or not isinstance(conditions, list)
+            or any(not isinstance(row, str) or not row for row in conditions)
+        ):
             raise VisionPolicyError("policy derivation classification is invalid")
-        unit_status[trusted["unit_id"]] = (classification, semantic_status)
+        if classification == "context-only" and (
+            proposed["normative"]
+            or proposed["decision_relevant"]
+            or proposed["condition_strength"] != "none"
+            or conditions
+        ):
+            raise VisionPolicyError("policy derivation context classification is inconsistent")
+        if classification != "context-only" and not (
+            proposed["normative"] or proposed["decision_relevant"]
+        ):
+            raise VisionPolicyError("policy derivation omitted normative significance")
+        unit_status[trusted["unit_id"]] = proposed
     obligations = plan.get("obligations")
     if not isinstance(obligations, list) or len(obligations) > 128:
         raise VisionPolicyError("policy derivation obligations are invalid")
@@ -148,9 +180,8 @@ def _validate_derivation(
             or obligation_id in obligation_ids
             or unit_id not in unit_status
             or operation not in _OPERATIONS
-            or not isinstance(row.get("required"), bool)
             or semantic_status not in _SEMANTIC_STATUSES
-            or semantic_status != unit_status[unit_id][1]
+            or semantic_status != unit_status[unit_id]["semantic_status"]
             or not isinstance(row.get("requirement"), str)
             or row.get("requirement") != next(
                 unit["text"] for unit in document["units"] if unit["unit_id"] == unit_id
@@ -171,45 +202,53 @@ def _validate_derivation(
         ):
             raise VisionPolicyError("policy derivation digest condition is invalid")
     if any(
-        classification == "evidence-obligation" and unit_id not in obligated_units
-        for unit_id, (classification, _) in unit_status.items()
+        row["classification"] != "context-only" and unit_id not in obligated_units
+        for unit_id, row in unit_status.items()
     ):
-        raise VisionPolicyError("policy derivation omitted an evidence obligation")
+        raise VisionPolicyError("policy derivation omitted a gating obligation")
+    if document["units"] and not obligated_units:
+        raise VisionPolicyError("policy derivation classified all VISION units as context")
 
     if not isinstance(audit, dict) or audit.get("version") != AUDIT_VERSION:
         raise VisionPolicyError("coverage audit version is invalid")
     if (
         audit.get("vision_sha256") != document["vision_sha256"]
-        or "plan_sha256" in audit
     ):
         raise VisionPolicyError("coverage audit binding is invalid")
     audit_units = audit.get("units")
     if not isinstance(audit_units, list) or len(audit_units) != len(planned_units):
         raise VisionPolicyError("coverage audit omitted a VISION unit")
+    audit_status: dict[str, dict[str, Any]] = {}
     audit_complete = True
-    for proposed, checked in zip(planned_units, audit_units):
+    for trusted, proposed, checked in zip(document["units"], planned_units, audit_units):
         if not isinstance(checked, dict) or any(
-            checked.get(name) != proposed[name]
-            for name in ("unit_id", "sha256", "classification", "semantic_status")
+            checked.get(name) != trusted[name]
+            for name in ("unit_id", "start_line", "end_line", "text", "sha256")
         ):
             raise VisionPolicyError("coverage auditor disagreed with unit identity")
-        expected_complete = proposed["semantic_status"] in {"recognized", "recognized-local"}
-        if checked.get("complete") is not expected_complete:
-            raise VisionPolicyError("coverage auditor completeness is inconsistent")
-        audit_complete = audit_complete and expected_complete
+        if (
+            checked.get("classification") not in _CLASSIFICATIONS
+            or checked.get("semantic_status") not in _SEMANTIC_STATUSES
+            or not isinstance(checked.get("normative"), bool)
+            or not isinstance(checked.get("decision_relevant"), bool)
+            or checked.get("condition_strength") not in _CONDITION_STRENGTHS
+            or not isinstance(checked.get("conditions"), list)
+            or any(not isinstance(row, str) or not row for row in checked["conditions"])
+        ):
+            raise VisionPolicyError("coverage auditor classification is invalid")
+        audit_status[trusted["unit_id"]] = checked
+        audit_complete = audit_complete and _semantic_fields(checked) == _semantic_fields(proposed)
+        audit_complete = audit_complete and checked["semantic_status"] in {"recognized", "recognized-local"}
     audit_obligations = audit.get("obligations")
     if not isinstance(audit_obligations, list) or len(audit_obligations) != len(obligations):
         raise VisionPolicyError("coverage audit omitted an obligation")
     for proposed, checked in zip(obligations, audit_obligations):
         if not isinstance(checked, dict) or any(
-            checked.get(name) != proposed[name]
-            for name in ("obligation_id", "unit_id", "operation", "required", "semantic_status")
+            checked.get(name) != proposed.get(name)
+            for name in ("obligation_id", "unit_id", "operation", "requirement", "semantic_status", "expected_sha256")
         ):
             raise VisionPolicyError("coverage auditor disagreed with an obligation")
-        expected_complete = proposed["semantic_status"] in {"recognized", "recognized-local"}
-        if checked.get("complete") is not expected_complete:
-            raise VisionPolicyError("coverage auditor obligation verdict is inconsistent")
-        audit_complete = audit_complete and expected_complete
+        audit_complete = audit_complete and proposed["semantic_status"] in {"recognized", "recognized-local"}
     disagreements = audit.get("disagreements")
     if not isinstance(disagreements, list) or any(not isinstance(row, str) for row in disagreements):
         raise VisionPolicyError("coverage audit disagreements are invalid")
@@ -225,7 +264,9 @@ def _validate_derivation(
         raise VisionPolicyError("coverage audit verdict is inconsistent")
     trusted_plan = {**plan, "coverage_complete": audit_complete}
     trusted_plan["plan_sha256"] = _plan_digest(trusted_plan)
-    return trusted_plan, audit_complete
+    trusted_audit = dict(audit)
+    trusted_audit["audit_sha256"] = canonical_sha256(audit)
+    return trusted_plan, trusted_audit, audit_complete
 
 
 def _receipt_index(
@@ -278,9 +319,21 @@ def project_advisory_review(
         text = vision_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         raise VisionPolicyError("trusted VISION input is unreadable") from error
-    plan, coverage_complete = _validate_derivation(
-        text, value.get("policy_derivation"), value.get("coverage_audit")
+    plan_input = next(
+        (item for item in task["spec"]["inputs"] if item.get("id") == "policy-derivation"), None
     )
+    audit_input = next(
+        (item for item in task["spec"]["inputs"] if item.get("id") == "policy-audit"), None
+    )
+    if not plan_input or not audit_input:
+        raise VisionPolicyError("validated policy artifacts are unavailable")
+    policy_values = []
+    for item in (plan_input, audit_input):
+        path = bundle / item["artifact"]
+        if file_sha256(path) != item["sha256"]:
+            raise VisionPolicyError("validated policy artifact changed")
+        policy_values.append(load_json_regular(path, max_bytes=262144))
+    plan, _, coverage_complete = validate_policy_artifacts(text, *policy_values)
     expected = {row["obligation_id"]: row for row in plan["obligations"]}
     rows = value.get("obligation_results")
     if not isinstance(rows, list):
@@ -338,9 +391,9 @@ def project_advisory_review(
             else "not-applicable" if assessment == "not_applicable"
             else "unavailable"
         )
-        if obligation["required"] and trusted_status != "complete-pass":
+        if trusted_status != "complete-pass":
             all_required_pass = False
-        if obligation["required"] and trusted_status not in {"complete-pass", "complete-fail"}:
+        if trusted_status not in {"complete-pass", "complete-fail"}:
             all_evidence_complete = False
         projected_results.append({**row, "trusted_status": trusted_status})
     verdict = value.get("verdict")
@@ -374,6 +427,6 @@ def project_advisory_review(
 
 __all__ = [
     "AUDIT_VERSION", "PLAN_VERSION", "REVIEW_KIND", "UNITS_VERSION",
-    "VisionPolicyError", "project_advisory_review", "vision_unit_document",
+    "VisionPolicyError", "project_advisory_review", "validate_policy_artifacts", "vision_unit_document",
     "vision_units", "write_vision_units",
 ]

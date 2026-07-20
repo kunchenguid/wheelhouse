@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "wheelhouse/evidence-plan/v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "vision_sha256", "units", "obligations"],
+  "properties": {
+    "version": {"const": "wheelhouse/evidence-plan/v3"},
+    "vision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "units": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/unit"}},
+    "obligations": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/obligation"}}
+  },
+  "definitions": {
+    "unit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit_id", "start_line", "end_line", "text", "sha256", "classification", "semantic_status", "normative", "decision_relevant", "condition_strength", "conditions"],
+      "properties": {
+        "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "text": {"type": "string", "minLength": 1, "maxLength": 40000},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "classification": {"enum": ["context-only", "decision-criterion", "evidence-obligation"]},
+        "semantic_status": {"enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+        "normative": {"type": "boolean"},
+        "decision_relevant": {"type": "boolean"},
+        "condition_strength": {"enum": ["none", "advisory", "required", "prohibited", "conditional"]},
+        "conditions": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 2000}}
+      }
+    },
+    "obligation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["obligation_id", "unit_id", "operation", "requirement", "semantic_status"],
+      "properties": {
+        "obligation_id": {"type": "string", "pattern": "^O[0-9]{3}$"},
+        "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
+        "operation": {"enum": ["public.git_snapshot", "public.fetch", "public.artifact", "digest.verify", "exercise.run", "policy.assess"]},
+        "requirement": {"type": "string", "minLength": 1, "maxLength": 40000},
+        "semantic_status": {"enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

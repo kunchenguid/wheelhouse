@@ -35,34 +35,50 @@ def execute_case(
         "</target-content>\n",
         encoding="utf-8",
     )
-    bundle = case / "bundle"
-    task = build_task(
-        action="advisory-review.public",
-        selection=resolve_selection("advisory-review.public"),
-        prompt_path=str(prompt_path),
-        bundle_dir=str(bundle),
-        output_path=str(bundle / "task.json"),
-        owner="kunchenguid",
-        repo="wheelhouse-public-model-e2e-" + name,
-        number=1,
-        target_kind="pr-review",
-        revision=revision,
-        wheelhouse_revision=os.environ.get("GITHUB_SHA", "f" * 40),
-        event_key=("a" if name == "axi" else "b") * 64,
-        target_file=str(target_path),
-        vision_file=str(vision),
-        allow_automerge_behavior=True,
+    common = {
+        "owner": "kunchenguid", "repo": "wheelhouse-public-model-e2e-" + name,
+        "number": 1, "target_kind": "pr-review", "revision": revision,
+        "wheelhouse_revision": os.environ.get("GITHUB_SHA", "f" * 40),
+        "vision_file": str(vision),
+    }
+
+    def invoke(action: str, invocation: str, model_prompt: str, **extra: str) -> tuple[dict, dict]:
+        invocation_root = case / invocation
+        invocation_root.mkdir(mode=0o700)
+        invocation_prompt = invocation_root / "prompt.txt"
+        invocation_prompt.write_text(model_prompt, encoding="utf-8")
+        bundle = invocation_root / "bundle"
+        task = build_task(
+            action=action, selection=resolve_selection(action),
+            prompt_path=str(invocation_prompt), bundle_dir=str(bundle),
+            output_path=str(bundle / "task.json"), event_key=(invocation[0] * 64),
+            **common, **extra,
+        )
+        schema = load_json_regular(bundle / task["spec"]["output"]["schemaArtifact"], max_bytes=65536)
+        if schema.get("$schema") != "http://json-schema.org/draft-07/schema#":
+            raise AssertionError("production transport is not draft-07")
+        result = run(str(bundle / "task.json"), str(bundle), str(invocation_root / "result.json"), str(invocation_root / "events.ndjson"))
+        if result.get("status") != "succeeded":
+            raise AssertionError("%s %s failed: %s" % (name, action, result.get("error")))
+        return task, result
+
+    derive_task, derive_result = invoke(
+        "policy-derive.public", "derive",
+        "Act only as PolicyDeriver. Read only vision.md and vision-units.json. Classify every exact unit and condition. Map every non-context criterion to gating generic operations. Mark every unknown or ambiguity explicitly.",
     )
-    schema = load_json_regular(
-        bundle / task["spec"]["output"]["schemaArtifact"], max_bytes=65536
+    plan_path = case / "policy-derivation.json"
+    plan_path.write_text(json.dumps(derive_result["final"]["value"], sort_keys=True) + "\n", encoding="utf-8")
+    audit_task, audit_result = invoke(
+        "policy-audit.public", "audit",
+        "Act only as an independent CoverageAuditor. Read only vision.md, vision-units.json, and policy-derivation.json. Produce your own exhaustive unit classifications, conditions, requiredness, and operation mapping. Report every disagreement.",
+        policy_plan_file=str(plan_path),
     )
-    if schema.get("$schema") != "http://json-schema.org/draft-07/schema#":
-        raise AssertionError("production advisory transport is not draft-07")
-    result = run(
-        str(bundle / "task.json"),
-        str(bundle),
-        str(case / "result.json"),
-        str(case / "events.ndjson"),
+    audit_path = case / "policy-audit.json"
+    audit_path.write_text(json.dumps(audit_result["final"]["value"], sort_keys=True) + "\n", encoding="utf-8")
+    task, result = invoke(
+        "advisory-review.public", "advisory", prompt,
+        target_file=str(target_path), policy_plan_file=str(plan_path),
+        policy_audit_file=str(audit_path), allow_automerge_behavior=True,
     )
     if result.get("status") != "succeeded":
         raise AssertionError("%s real-model run failed: %s" % (name, result.get("error")))
@@ -72,16 +88,14 @@ def execute_case(
         selection.get("actualModel") != "claude-sonnet-4-6"
         or selection.get("actualProvider") != "anthropic"
         or not isinstance(usage.get("providerRequests"), int)
-        or usage["providerRequests"] < 3
+        or usage["providerRequests"] < 1
     ):
         raise AssertionError("%s did not prove a fresh pinned real-model request" % name)
-    final = result.get("final") or {}
+    final = (result.get("final") or {}).get("value") or {}
     if not (
         final.get("result_kind") == "AdvisoryReview"
         and final.get("trusted_projection") is True
         and final.get("acting_authority") is False
-        and isinstance(final.get("policy_derivation"), dict)
-        and isinstance(final.get("coverage_audit"), dict)
         and final.get("verdict") == expected_verdict
         and final.get("projection_complete") is (expected_verdict == "positive")
         and final.get("auto_merge_eligible") is (expected_verdict == "positive")
@@ -123,11 +137,20 @@ def execute_case(
         "schema_sha256": task["spec"]["output"]["schemaSha256"],
         "model": selection["actualModel"],
         "provider": selection["actualProvider"],
-        "provider_requests": usage["providerRequests"],
+        "provider_requests": {
+            "derive": derive_result["usage"]["providerRequests"],
+            "audit": audit_result["usage"]["providerRequests"],
+            "advisory": usage["providerRequests"],
+        },
         "verdict": final["verdict"],
         "auto_merge_eligible": final["auto_merge_eligible"],
-        "policy_derivation_version": final["policy_derivation"]["version"],
-        "coverage_audit_version": final["coverage_audit"]["version"],
+        "policy_derivation_version": derive_result["final"]["value"]["version"],
+        "coverage_audit_version": audit_result["final"]["value"]["version"],
+        "invocations": [
+            {"action": derive_task["metadata"]["action"], "execution_id": derive_result["executionId"], "request_sha256": derive_result["requestSha256"], "schema_sha256": derive_task["spec"]["output"]["schemaSha256"]},
+            {"action": audit_task["metadata"]["action"], "execution_id": audit_result["executionId"], "request_sha256": audit_result["requestSha256"], "schema_sha256": audit_task["spec"]["output"]["schemaSha256"]},
+            {"action": task["metadata"]["action"], "execution_id": result["executionId"], "request_sha256": result["requestSha256"], "schema_sha256": task["spec"]["output"]["schemaSha256"]},
+        ],
         "operations": sorted(operations),
         "receipts": receipts,
         "plan_sha256": final["plan_sha256"],

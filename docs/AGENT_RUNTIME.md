@@ -19,7 +19,7 @@ The checked-in state is intentionally:
 - `fallback: none`
 - every action `target: claude`
 - every base action profile `claude-action-current-pinned`
-- `production_activation` maps `triage.schema-repair`, `nl-decision.schema-repair`, and `advisory-review.public` to `claude-cli-pinned`
+- `production_activation` maps `triage.schema-repair`, `nl-decision.schema-repair`, `policy-derive.public`, `policy-audit.public`, and `advisory-review.public` to `claude-cli-pinned`
 - `temporary_rollback_profile: null`; setting it to `claude-action-current-pinned` restores both repair actions for an explicit durable replay and disables public advisory review fail closed
 - `codex-app-server` recorded only under `disabled_adapters`
 

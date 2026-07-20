@@ -313,7 +313,7 @@ jobs:
 
       - id: direct_schema_repair
         name: Run sandboxed direct Claude task
-        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair' || steps.hydrate.outputs.action == 'advisory-review.public') }}
+        if: ${{ steps.hydrate.outcome == 'success' && steps.direct_sandbox.outcome == 'success' && steps.direct_install.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-cli' && (steps.hydrate.outputs.action == 'triage.schema-repair' || steps.hydrate.outputs.action == 'nl-decision.schema-repair' || steps.hydrate.outputs.action == 'policy-derive.public' || steps.hydrate.outputs.action == 'policy-audit.public' || steps.hydrate.outputs.action == 'advisory-review.public') }}
         continue-on-error: true
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

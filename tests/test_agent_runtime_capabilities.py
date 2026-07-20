@@ -51,7 +51,7 @@ def main():
     check("selection: unsupported emergency provider override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="codex"), ConfigError))
     check("selection: former legacy override rejected", fails(lambda: resolve_selection("triage.issue.local", emergency="legacy"), ConfigError))
     check("selection: Codex absent from active profiles", "codex-subscription-pinned" not in runtime["profiles"])
-    direct_actions = {"triage.schema-repair", "nl-decision.schema-repair", "advisory-review.public"}
+    direct_actions = {"triage.schema-repair", "nl-decision.schema-repair", "policy-derive.public", "policy-audit.public", "advisory-review.public"}
     direct = {action: resolve_selection(action) for action in direct_actions}
     pinned = {action: resolve_selection(action) for action in runtime_config.ACTIONS - direct_actions}
     check("selection: direct actions use direct Claude CLI", all(row["profileName"] == "claude-cli-pinned" and row["profile"]["adapter"] == "claude-cli" for row in direct.values()))

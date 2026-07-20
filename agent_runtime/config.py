@@ -24,12 +24,15 @@ ACTIONS = frozenset(
         "nl-decision.search",
         "nl-decision.schema-repair",
         "advisory-review.public",
+        "policy-derive.public",
+        "policy-audit.public",
     }
 )
 SCHEMA_REPAIR_ACTIONS = frozenset(
     {"triage.schema-repair", "nl-decision.schema-repair"}
 )
-DIRECT_ACTIONS = SCHEMA_REPAIR_ACTIONS | {"advisory-review.public"}
+POLICY_ACTIONS = frozenset({"policy-derive.public", "policy-audit.public"})
+DIRECT_ACTIONS = SCHEMA_REPAIR_ACTIONS | POLICY_ACTIONS | {"advisory-review.public"}
 PRIMARY_PROFILE = "claude-action-current-pinned"
 DIRECT_PROFILE = "claude-cli-pinned"
 
@@ -107,7 +110,7 @@ def resolve_selection(action: str, repo: str = "", emergency: str = "") -> dict[
     rollback = runtime.get("temporary_rollback_profile")
     if rollback not in (None, PRIMARY_PROFILE):
         raise ConfigError("temporary rollback must select the pinned action profile")
-    if action == "advisory-review.public" and rollback is not None:
+    if action in POLICY_ACTIONS | {"advisory-review.public"} and rollback is not None:
         raise ConfigError(
             "public advisory review is disabled while the direct runtime is rolled back"
         )

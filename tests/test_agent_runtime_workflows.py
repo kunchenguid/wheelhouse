@@ -343,7 +343,7 @@ def main():
     check("selection: every action explicitly targets Claude", config["target"] == "claude" and all(row["target"] == "claude" for row in config["actions"].values()))
     check("selection: fallback globally disabled", config["fallback"] == "none")
     check("selection: immutable Claude model forbids aliases", config["profiles"][config["primary_profile"]]["model"] == "claude-sonnet-4-6" and config["profiles"][config["primary_profile"]]["allow_model_alias"] is False)
-    check("selection: bounded direct actions are the only direct activation", config["production_activation"] == {"triage.schema-repair": "claude-cli-pinned", "nl-decision.schema-repair": "claude-cli-pinned", "advisory-review.public": "claude-cli-pinned"} and config["temporary_rollback_profile"] is None)
+    check("selection: bounded direct actions are the only direct activation", config["production_activation"] == {"triage.schema-repair": "claude-cli-pinned", "nl-decision.schema-repair": "claude-cli-pinned", "policy-derive.public": "claude-cli-pinned", "policy-audit.public": "claude-cli-pinned", "advisory-review.public": "claude-cli-pinned"} and config["temporary_rollback_profile"] is None)
     check("selection: Codex remains disabled non-target evidence", config["disabled_adapters"] == {"codex-app-server": "unsupported-public-chatgpt-pro-auth"} and all(row["profile"] != "codex-subscription-pinned" for row in config["actions"].values()))
     check("selection: direct Claude CLI profile is exact", config["profiles"]["claude-cli-pinned"]["adapter"] == "claude-cli" and config["profiles"]["claude-cli-pinned"]["auth_profile"] == "anthropic-subscription")
     direct_step = next(step for step in model_steps if step.get("id") == "direct_schema_repair")

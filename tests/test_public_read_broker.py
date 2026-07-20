@@ -1141,6 +1141,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                     **row,
                     "classification": "evidence-obligation" if evidence else "context-only",
                     "semantic_status": status,
+                    "normative": evidence,
+                    "decision_relevant": evidence,
+                    "condition_strength": "required" if evidence else "none",
+                    "conditions": ["gating evidence"] if evidence else [],
                 }
             )
         obligations = []
@@ -1151,7 +1155,6 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                     "obligation_id": "O%03d" % (len(obligations) + 1),
                     "unit_id": unit_id,
                     "operation": operation,
-                    "required": True,
                     "requirement": unit["text"],
                     "semantic_status": unit["semantic_status"],
                 }
@@ -1162,32 +1165,13 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             "units": units,
             "obligations": obligations,
         }
-        audit_units = [
-            {
-                "unit_id": row["unit_id"],
-                "sha256": row["sha256"],
-                "classification": row["classification"],
-                "semantic_status": row["semantic_status"],
-                "complete": row["semantic_status"] in {"recognized", "recognized-local"},
-            }
-            for row in units
-        ]
+        audit_units = [dict(row) for row in units]
         audit = {
             "version": AUDIT_VERSION,
             "vision_sha256": document["vision_sha256"],
             "units": audit_units,
-            "obligations": [
-                {
-                    "obligation_id": row["obligation_id"],
-                    "unit_id": row["unit_id"],
-                    "operation": row["operation"],
-                    "required": row["required"],
-                    "semantic_status": row["semantic_status"],
-                    "complete": row["semantic_status"] in {"recognized", "recognized-local"},
-                }
-                for row in obligations
-            ],
-            "complete": all(row["complete"] for row in audit_units),
+            "obligations": [dict(row) for row in obligations],
+            "complete": all(row["semantic_status"] in {"recognized", "recognized-local"} for row in audit_units),
             "disagreements": [],
         }
         return plan, audit
@@ -1199,17 +1183,21 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             shutil.copyfile(path, copied)
             target = bundle / "target.txt"
             target.write_text("Bound target change under review.\n", encoding="utf-8")
+            plan_path = bundle / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            audit_path = bundle / "audit.json"
+            audit_path.write_text(json.dumps(audit), encoding="utf-8")
             task = {
                 "metadata": {"executionId": EXECUTION_ID},
                 "spec": {"inputs": [
                     {"id": "vision", "artifact": "VISION.md", "sha256": file_sha256(copied)},
                     {"id": "target", "artifact": "target.txt", "sha256": file_sha256(target)},
+                    {"id": "policy-derivation", "artifact": "plan.json", "sha256": file_sha256(plan_path)},
+                    {"id": "policy-audit", "artifact": "audit.json", "sha256": file_sha256(audit_path)},
                 ]},
             }
             raw = {
                 "result_kind": "AdvisoryReview",
-                "policy_derivation": plan,
-                "coverage_audit": audit,
                 "verdict": "positive",
                 "summary": "Structured policy derivation was independently audited.",
                 "obligation_results": rows,
@@ -1336,6 +1324,10 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
             **row,
             "classification": "evidence-obligation" if row["unit_id"] == evidence_unit else "context-only",
             "semantic_status": "recognized" if row["unit_id"] == evidence_unit else "recognized-local",
+            "normative": row["unit_id"] == evidence_unit,
+            "decision_relevant": row["unit_id"] == evidence_unit,
+            "condition_strength": "required" if row["unit_id"] == evidence_unit else "none",
+            "conditions": ["gating evidence"] if row["unit_id"] == evidence_unit else [],
         }
         for row in document["units"]
     ]
@@ -1344,7 +1336,6 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
             "obligation_id": "O%03d" % (index + 1),
             "unit_id": evidence_unit,
             "operation": operation,
-            "required": True,
             "requirement": next(row["text"] for row in units if row["unit_id"] == evidence_unit),
             "semantic_status": "recognized",
         }
@@ -1359,22 +1350,8 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
     audit = {
         "version": AUDIT_VERSION,
         "vision_sha256": document["vision_sha256"],
-        "units": [
-            {
-                "unit_id": row["unit_id"], "sha256": row["sha256"],
-                "classification": row["classification"],
-                "semantic_status": row["semantic_status"], "complete": True,
-            }
-            for row in units
-        ],
-        "obligations": [
-            {
-                "obligation_id": row["obligation_id"], "unit_id": row["unit_id"],
-                "operation": row["operation"], "required": row["required"],
-                "semantic_status": row["semantic_status"], "complete": True,
-            }
-            for row in obligations
-        ],
+        "units": [dict(row) for row in units],
+        "obligations": [dict(row) for row in obligations],
         "complete": True,
         "disagreements": [],
     }
@@ -1384,16 +1361,21 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
         copied.write_text(text, encoding="utf-8")
         target = bundle / "target.txt"
         target.write_text("Bound target change under review.\n", encoding="utf-8")
+        plan_path = bundle / "plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        audit_path = bundle / "audit.json"
+        audit_path.write_text(json.dumps(audit), encoding="utf-8")
         task = {
             "metadata": {"executionId": EXECUTION_ID},
             "spec": {"inputs": [
                 {"id": "vision", "artifact": "VISION.md", "sha256": file_sha256(copied)},
                 {"id": "target", "artifact": "target.txt", "sha256": file_sha256(target)},
+                {"id": "policy-derivation", "artifact": "plan.json", "sha256": file_sha256(plan_path)},
+                {"id": "policy-audit", "artifact": "audit.json", "sha256": file_sha256(audit_path)},
             ]},
         }
         raw = {
-            "result_kind": "AdvisoryReview", "policy_derivation": plan,
-            "coverage_audit": audit, "verdict": "positive",
+            "result_kind": "AdvisoryReview", "verdict": "positive",
             "summary": "Structured policy derivation was independently audited.",
             "obligation_results": result_rows(plan), "citations": citations,
             "limitations": [], "requested_evidence": [],
@@ -1417,10 +1399,12 @@ def test_public_task_contract():
     check(
         "workflow: VISION always enters isolated model derivation",
         "PUBLIC_REVIEW_REQUIRED=true" in triage_workflow
-        and "isolated PolicyDeriver pass" in triage_workflow
-        and "independent CoverageAuditor" in triage_workflow
+        and "action=\"policy-derive.public\"" in triage_workflow
+        and "--action policy-audit.public" in triage_workflow
+        and "--action advisory-review.public" in triage_workflow
         and 'steps.prepare.outputs.public_review_required' in triage_workflow
-        and 'action="advisory-review.public"' in triage_workflow,
+        and "policy-audit-model:" in triage_workflow
+        and "advisory-model:" in triage_workflow,
     )
     check(
         "workflow: action authority re-reads the exact current owner comment",
@@ -1437,6 +1421,20 @@ def test_public_task_contract():
         target = root / "target.txt"
         prompt.write_text("Produce an authority-free AdvisoryReview.\n", encoding="utf-8")
         target.write_text("untrusted target data\n", encoding="utf-8")
+        vision = FIXTURES / "reproducible-data-vision.md"
+        document = vision_unit_document(vision.read_text(encoding="utf-8"))
+        units = [{
+            **row, "classification": "evidence-obligation" if index == 0 else "context-only",
+            "semantic_status": "recognized" if index == 0 else "recognized-local",
+            "normative": index == 0, "decision_relevant": index == 0,
+            "condition_strength": "required" if index == 0 else "none",
+            "conditions": ["gating evidence"] if index == 0 else [],
+        } for index, row in enumerate(document["units"])]
+        obligation = {"obligation_id": "O001", "unit_id": units[0]["unit_id"], "operation": "public.fetch", "requirement": units[0]["text"], "semantic_status": "recognized"}
+        plan = {"version": PLAN_VERSION, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation]}
+        audit = {"version": AUDIT_VERSION, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation], "complete": True, "disagreements": []}
+        plan_path = root / "plan.json"; plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        audit_path = root / "audit.json"; audit_path.write_text(json.dumps(audit), encoding="utf-8")
         bundle = root / "bundle"
         task = build_task(
             action="advisory-review.public",
@@ -1452,7 +1450,9 @@ def test_public_task_contract():
             wheelhouse_revision="b" * 40,
             event_key="c" * 64,
             target_file=str(target),
-            vision_file=str(FIXTURES / "reproducible-data-vision.md"),
+            vision_file=str(vision),
+            policy_plan_file=str(plan_path),
+            policy_audit_file=str(audit_path),
             allow_automerge_behavior=True,
         )
         names = [row["name"] for row in task["spec"]["tools"]["tools"]]
@@ -1485,7 +1485,7 @@ def test_public_task_contract():
                 "exercise.run",
             ]
             and task["spec"]["output"]["schemaId"]
-            == "wheelhouse/advisory-review/v1"
+            == "wheelhouse/advisory-review/v2"
             and task["spec"]["output"]["evidencePolicy"]
             == "public-evidence/v1",
         )

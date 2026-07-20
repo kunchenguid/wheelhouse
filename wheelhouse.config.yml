@@ -218,6 +218,8 @@ agent_runtime:
     triage.schema-repair: claude-cli-pinned
     nl-decision.schema-repair: claude-cli-pinned
     advisory-review.public: claude-cli-pinned
+    policy-derive.public: claude-cli-pinned
+    policy-audit.public: claude-cli-pinned
   temporary_rollback_profile: null
   disabled_adapters:
     codex-app-server: unsupported-public-chatgpt-pro-auth
@@ -265,6 +267,8 @@ agent_runtime:
     nl-decision.search: {target: claude, profile: claude-action-current-pinned}
     nl-decision.schema-repair: {target: claude, profile: claude-action-current-pinned}
     advisory-review.public: {target: claude, profile: claude-action-current-pinned}
+    policy-derive.public: {target: claude, profile: claude-action-current-pinned}
+    policy-audit.public: {target: claude, profile: claude-action-current-pinned}
 
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
