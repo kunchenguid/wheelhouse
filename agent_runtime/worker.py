@@ -711,7 +711,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
                     final = decode_json_carrier(final)
                 if (
                     isinstance(final, dict)
-                    and set(final) in ({"value"}, {"result"}, {"output"})
+                    and len(final) == 1
                     and isinstance(next(iter(final.values())), dict)
                 ):
                     final = next(iter(final.values()))

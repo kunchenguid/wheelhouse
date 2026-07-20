@@ -430,7 +430,9 @@ def _validate_worker(
             if isinstance(delivered_value, dict):
                 if "$schema" in delivered_value:
                     category += ":schema-definition"
-                elif set(delivered_value) in ({"value"}, {"result"}, {"output"}, {"json"}):
+                elif len(delivered_value) == 1 and isinstance(
+                    next(iter(delivered_value.values())), dict
+                ):
                     category += ":wrapper"
         return None, delivered, _error(
             "output.schema_invalid",

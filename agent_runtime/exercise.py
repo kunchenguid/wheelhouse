@@ -191,7 +191,7 @@ def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
         allowed_paths = [(work, read_execute), (Path(node), read_file_execute)]
         allowed_paths.extend(
             (Path(path), read_execute)
-            for path in ("/usr", "/bin", "/lib", "/lib64")
+            for path in ("/usr", "/bin", "/lib", "/lib64", "/etc")
             if Path(path).exists()
         )
         allowed_paths.append((writable, handled))

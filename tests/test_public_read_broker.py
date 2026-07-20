@@ -1961,6 +1961,8 @@ def test_production_launcher_contract():
             and "allowed_paths = [(work, read_execute), (Path(node), read_file_execute)]"
             in exercise_source
             and "allowed_paths.append((writable, handled))" in exercise_source
+            and '("/usr", "/bin", "/lib", "/lib64", "/etc")'
+            in exercise_source
             and "libc.syscall(restrict_self, ruleset_fd, 0)" in exercise_source,
         )
         oversized = writable / "oversized"
