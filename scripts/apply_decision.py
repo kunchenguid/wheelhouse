@@ -210,7 +210,11 @@ VERB_HELP = {
     "merge": "merge the target PR",
     "approve-ci": "approve the held fork-CI run (security-gated; CI/action-file changes hard-hold, while non-default bases and pull_request_target posture warn)",
     "close": "close the target PR/issue with no note",
-    "decline": "post a short reason on the target, then close it (put the reason in free_text)",
+    "decline": (
+        "post a respectful, unambiguous contributor-facing note that preserves the "
+        "maintainer's factual rationale, then close the target (put the final note "
+        "in free_text)"
+    ),
     "hold": "park this card for manual handling (no action on the target)",
     "comment": "post a comment on the target and leave the card open (put the text in free_text)",
     "request-changes": (
@@ -1336,7 +1340,7 @@ def build_nl_prompt(
     schema = (
         '{"mode":"action|answer|clarify",'
         '"action":"<one allowed verb, required only when mode=action>",'
-        '"free_text":"<optional: decline reason or comment body>",'
+        '"free_text":"<optional: final target-facing prose; for decline follow the contract below>",'
         '"answer":"<required when mode=answer or clarify: the text to post>"}'
     )
     parts = [
@@ -1375,6 +1379,23 @@ def build_nl_prompt(
         parts += [
             "  - For `%s`, put the prose to post on the target in `free_text`."
             % "`/`".join(text_bearing),
+        ]
+    if "decline" in allowed:
+        parts += [
+            "  - A reason-bearing close/reject instruction maps to `decline`; use",
+            "    `close` only when the maintainer wants no target note.",
+            "  - For `decline`, `free_text` is the final public note to the contributor.",
+            "    Interpret the instruction with the trusted card and the target reference",
+            "    data so actors and nouns are clear, then rewrite it as concise, respectful",
+            "    contributor-facing prose. Respect changes the tone, not the decision.",
+            "  - State the decision unambiguously: the contribution is declined and the",
+            "    target is being closed. Never soften it into maybe, might, perhaps, a",
+            "    suggestion, or an invitation to keep the current target open.",
+            "  - Preserve the meaning and every factual rationale in the maintainer's NEW",
+            "    comment. Do not omit, contradict, or replace that rationale. Do not invent",
+            "    or infer any reason the maintainer did not state; target data may clarify",
+            "    context, but it must not supply a new rationale. If no rationale was given,",
+            "    state only the respectful decline and close.",
         ]
     if target_slug:
         parts += [
