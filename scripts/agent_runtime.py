@@ -138,6 +138,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
         vision_file=args.vision_file,
+        base_revision=args.base_revision,
+        vision_blob_sha=args.vision_blob_sha,
         policy_plan_file=args.policy_plan_file,
         policy_audit_file=args.policy_audit_file,
         allow_automerge_behavior=args.allow_automerge_behavior,
@@ -399,6 +401,8 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")
     build.add_argument("--vision-file", default="")
+    build.add_argument("--base-revision", default="")
+    build.add_argument("--vision-blob-sha", default="")
     build.add_argument("--policy-plan-file", default="")
     build.add_argument("--policy-audit-file", default="")
     build.add_argument("--allow-automerge-behavior", action="store_true")

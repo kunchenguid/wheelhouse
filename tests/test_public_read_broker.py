@@ -1129,7 +1129,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
 
 def test_generic_vision(receipt_dir, manifest_result=None):
     def outputs(text, evidence_units, operations, unavailable=False):
-        document = vision_unit_document(text)
+        document = vision_unit_document(
+            text, target_head_sha="a" * 40, target_base_sha="b" * 40,
+            vision_blob_sha="c" * 40,
+        )
         units = []
         for row in document["units"]:
             evidence = row["unit_id"] in evidence_units
@@ -1161,6 +1164,9 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             )
         plan = {
             "version": PLAN_VERSION,
+            "target_head_sha": "a" * 40,
+            "target_base_sha": "b" * 40,
+            "vision_blob_sha": "c" * 40,
             "vision_sha256": document["vision_sha256"],
             "units": units,
             "obligations": obligations,
@@ -1168,6 +1174,9 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         audit_units = [dict(row) for row in units]
         audit = {
             "version": AUDIT_VERSION,
+            "target_head_sha": "a" * 40,
+            "target_base_sha": "b" * 40,
+            "vision_blob_sha": "c" * 40,
             "vision_sha256": document["vision_sha256"],
             "units": audit_units,
             "obligations": [dict(row) for row in obligations],
@@ -1187,11 +1196,20 @@ def test_generic_vision(receipt_dir, manifest_result=None):
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
             audit_path = bundle / "audit.json"
             audit_path.write_text(json.dumps(audit), encoding="utf-8")
+            binding_path = bundle / "binding.json"
+            binding_path.write_text(json.dumps({
+                "version": "wheelhouse/policy-binding/v1",
+                "target_head_sha": "a" * 40,
+                "target_base_sha": "b" * 40,
+                "vision_blob_sha": "c" * 40,
+                "vision_sha256": plan["vision_sha256"],
+            }), encoding="utf-8")
             task = {
-                "metadata": {"executionId": EXECUTION_ID},
+                "metadata": {"executionId": EXECUTION_ID, "target": {"revision": "a" * 40}},
                 "spec": {"inputs": [
                     {"id": "vision", "artifact": "VISION.md", "sha256": file_sha256(copied)},
                     {"id": "target", "artifact": "target.txt", "sha256": file_sha256(target)},
+                    {"id": "policy-binding", "artifact": "binding.json", "sha256": file_sha256(binding_path)},
                     {"id": "policy-derivation", "artifact": "plan.json", "sha256": file_sha256(plan_path)},
                     {"id": "policy-audit", "artifact": "audit.json", "sha256": file_sha256(audit_path)},
                 ]},
@@ -1309,7 +1327,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
 
 def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_facts=None):
     text = Path(vision_path).read_text(encoding="utf-8")
-    document = vision_unit_document(text)
+    document = vision_unit_document(
+        text, target_head_sha="a" * 40, target_base_sha="b" * 40,
+        vision_blob_sha="c" * 40,
+    )
     evidence_ids = {
         row.get("evidence_id") for row in citations if isinstance(row, dict)
     }
@@ -1343,12 +1364,18 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
     ]
     plan = {
         "version": PLAN_VERSION,
+        "target_head_sha": "a" * 40,
+        "target_base_sha": "b" * 40,
+        "vision_blob_sha": "c" * 40,
         "vision_sha256": document["vision_sha256"],
         "units": units,
         "obligations": obligations,
     }
     audit = {
         "version": AUDIT_VERSION,
+        "target_head_sha": "a" * 40,
+        "target_base_sha": "b" * 40,
+        "vision_blob_sha": "c" * 40,
         "vision_sha256": document["vision_sha256"],
         "units": [dict(row) for row in units],
         "obligations": [dict(row) for row in obligations],
@@ -1365,11 +1392,20 @@ def vision_review(vision_path, result_rows, citations, receipt_dir, eligibility_
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         audit_path = bundle / "audit.json"
         audit_path.write_text(json.dumps(audit), encoding="utf-8")
+        binding_path = bundle / "binding.json"
+        binding_path.write_text(json.dumps({
+            "version": "wheelhouse/policy-binding/v1",
+            "target_head_sha": "a" * 40,
+            "target_base_sha": "b" * 40,
+            "vision_blob_sha": "c" * 40,
+            "vision_sha256": plan["vision_sha256"],
+        }), encoding="utf-8")
         task = {
-            "metadata": {"executionId": EXECUTION_ID},
+            "metadata": {"executionId": EXECUTION_ID, "target": {"revision": "a" * 40}},
             "spec": {"inputs": [
                 {"id": "vision", "artifact": "VISION.md", "sha256": file_sha256(copied)},
                 {"id": "target", "artifact": "target.txt", "sha256": file_sha256(target)},
+                {"id": "policy-binding", "artifact": "binding.json", "sha256": file_sha256(binding_path)},
                 {"id": "policy-derivation", "artifact": "plan.json", "sha256": file_sha256(plan_path)},
                 {"id": "policy-audit", "artifact": "audit.json", "sha256": file_sha256(audit_path)},
             ]},
@@ -1431,8 +1467,9 @@ def test_public_task_contract():
             "conditions": ["gating evidence"] if index == 0 else [],
         } for index, row in enumerate(document["units"])]
         obligation = {"obligation_id": "O001", "unit_id": units[0]["unit_id"], "operation": "public.fetch", "requirement": units[0]["text"], "semantic_status": "recognized"}
-        plan = {"version": PLAN_VERSION, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation]}
-        audit = {"version": AUDIT_VERSION, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation], "complete": True, "disagreements": []}
+        binding = {"target_head_sha": "a" * 40, "target_base_sha": "b" * 40, "vision_blob_sha": "c" * 40}
+        plan = {"version": PLAN_VERSION, **binding, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation]}
+        audit = {"version": AUDIT_VERSION, **binding, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation], "complete": True, "disagreements": []}
         plan_path = root / "plan.json"; plan_path.write_text(json.dumps(plan), encoding="utf-8")
         audit_path = root / "audit.json"; audit_path.write_text(json.dumps(audit), encoding="utf-8")
         bundle = root / "bundle"
@@ -1447,6 +1484,8 @@ def test_public_task_contract():
             number=1,
             target_kind="pr-review",
             revision="a" * 40,
+            base_revision="b" * 40,
+            vision_blob_sha="c" * 40,
             wheelhouse_revision="b" * 40,
             event_key="c" * 64,
             target_file=str(target),
@@ -1558,14 +1597,32 @@ def test_authority_separation(advisory):
     )
     incomplete_positive = dict(advisory)
     incomplete_positive["verdict"] = "positive"
+    incomplete_positive["projection_complete"] = False
+    incomplete_positive["summary"] = "INJECTED CLAIM"
+    incomplete_positive["obligation_results"] = [{
+        "obligation_id": "O001", "trusted_status": "unavailable",
+        "rationale": "INJECTED RATIONALE",
+    }]
+    incomplete = render_card.normalize_public_advisory(incomplete_positive)
     check(
-        "consumer: a positive advisory with any incomplete obligation is rejected",
-        render_card.normalize_public_advisory(incomplete_positive) is None
-        if any(
-            row.get("trusted_status") != "complete-pass"
-            for row in advisory.get("obligation_results", [])
-        )
-        else True,
+        "consumer: incomplete advisory claims are replaced by neutral unavailable status",
+        incomplete is not None
+        and incomplete["projection_complete"] is False
+        and incomplete["verdict"] == "inconclusive"
+        and incomplete["obligations"] == []
+        and "INJECTED" not in json.dumps(incomplete),
+    )
+    complete_negative = dict(advisory)
+    complete_negative.update({
+        "verdict": "negative", "summary": "Complete negative evidence result.",
+        "auto_merge_eligible": False, "eligibility_facts": None,
+        "projection_complete": True,
+    })
+    negative = render_card.normalize_public_advisory(complete_negative)
+    check(
+        "consumer: complete negative projections remain informative but non-acting",
+        negative is not None and negative["summary"] == complete_negative["summary"]
+        and negative["auto_merge_eligible"] is False,
     )
     routed = apply_decision.route_decision(
         advisory,

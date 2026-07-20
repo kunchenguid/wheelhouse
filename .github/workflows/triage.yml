@@ -647,7 +647,7 @@ jobs:
               fi
             } > advisory-prompt.txt
             {
-              echo "Act only as PolicyDeriver. Read only vision.md and vision-units.json."
+              echo "Act only as PolicyDeriver. Read only vision.md, vision-units.json, and policy-binding.json."
               echo "Classify every exact unit, normative clause, condition, and strength."
               echo "Map every non-context criterion to gating generic evidence operations."
               echo "Mark every unknown or ambiguity explicitly. Do not inspect target data."
@@ -815,6 +815,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           PUBLIC_REVIEW_REQUIRED: ${{ steps.prepare.outputs.public_review_required }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
@@ -830,6 +831,9 @@ jobs:
           repository_commit="$(git -C target-src rev-parse HEAD)"
           vision_args=()
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then vision_args=(--vision-file vision.md); fi
+          if [ "$action" = "policy-derive.public" ]; then
+            vision_args+=(--base-revision "$BASE_SHA" --vision-blob-sha "$VISION_SHA")
+          fi
           behavior_args=()
           if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--allow-automerge-behavior); fi
           target_args=(--target-file target.txt --repository-dir target-src --repository-commit "$repository_commit")
@@ -1673,7 +1677,7 @@ jobs:
           python scripts/agent_runtime.py export-final --result "$RESULT" --out policy-derivation.json
           {
             echo "Act only as an independent CoverageAuditor."
-            echo "Read only vision.md, vision-units.json, and policy-derivation.json."
+            echo "Read only vision.md, vision-units.json, policy-binding.json, and policy-derivation.json."
             echo "Produce your own exhaustive classifications, normative and decision status,"
             echo "condition strength, gating requiredness, and generic operation mappings."
             echo "Report every omission, unknown, ambiguity, or disagreement."
@@ -1684,6 +1688,8 @@ jobs:
             --owner '${{ github.repository_owner }}' --repo '${{ needs.triage.outputs.repo }}' \
             --number '${{ needs.triage.outputs.number }}' --kind pr-review \
             --revision '${{ needs.triage.outputs.revision }}' \
+            --base-revision '${{ needs.triage.outputs.base_sha }}' \
+            --vision-blob-sha '${{ needs.triage.outputs.vision_sha }}' \
             --wheelhouse-revision '${{ github.sha }}' \
             --event-key '${{ needs.triage.outputs.event_key }}' \
             --vision-file vision.md --policy-plan-file policy-derivation.json
@@ -1760,6 +1766,8 @@ jobs:
             --owner '${{ github.repository_owner }}' --repo '${{ needs.triage.outputs.repo }}' \
             --number '${{ needs.triage.outputs.number }}' --kind pr-review \
             --revision '${{ needs.triage.outputs.revision }}' \
+            --base-revision '${{ needs.triage.outputs.base_sha }}' \
+            --vision-blob-sha '${{ needs.triage.outputs.vision_sha }}' \
             --wheelhouse-revision '${{ github.sha }}' \
             --event-key '${{ needs.triage.outputs.event_key }}' \
             --target-file target.txt --vision-file vision.md \
@@ -2077,20 +2085,36 @@ jobs:
           NUMBER: ${{ needs.triage.outputs.number }}
           KIND: ${{ needs.triage.outputs.kind }}
           EXPECTED_REVISION: ${{ needs.triage.outputs.revision }}
+          EXPECTED_BASE_SHA: ${{ needs.triage.outputs.base_sha }}
+          EXPECTED_VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
         run: |
           set -euo pipefail
           observed=""
+          observed_base=""
+          observed_vision=""
           if [ "$KIND" = "issue-triage" ]; then
             observed="$(gh api "repos/$SLUG/issues/$NUMBER" --jq '.updated_at // empty' 2>/dev/null || true)"
           else
-            observed="$(gh api "repos/$SLUG/pulls/$NUMBER" --jq '.head.sha // empty' 2>/dev/null || true)"
+            pr_state="$(gh api "repos/$SLUG/pulls/$NUMBER" 2>/dev/null || true)"
+            observed="$(jq -r '.head.sha // empty' <<<"$pr_state" 2>/dev/null || true)"
+            observed_base="$(jq -r '.base.sha // empty' <<<"$pr_state" 2>/dev/null || true)"
+            if [ -n "$EXPECTED_VISION_SHA" ]; then
+              default_branch="$(gh api "repos/$SLUG" --jq '.default_branch // empty' 2>/dev/null || true)"
+              if [ -n "$default_branch" ]; then
+                observed_vision="$(gh api --method GET "repos/$SLUG/contents/VISION.md" -f "ref=$default_branch" --jq '.sha // empty' 2>/dev/null || true)"
+              fi
+            fi
           fi
-          if [ -n "$observed" ] && [ "$observed" = "$EXPECTED_REVISION" ]; then
+          fresh=true
+          if [ -z "$observed" ] || [ "$observed" != "$EXPECTED_REVISION" ]; then fresh=false; fi
+          if [ -n "$EXPECTED_BASE_SHA" ] && { [ -z "$observed_base" ] || [ "$observed_base" != "$EXPECTED_BASE_SHA" ]; }; then fresh=false; fi
+          if [ -n "$EXPECTED_VISION_SHA" ] && { [ -z "$observed_vision" ] || [ "$observed_vision" != "$EXPECTED_VISION_SHA" ]; }; then fresh=false; fi
+          if [ "$fresh" = true ]; then
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           else
             {
               echo "fresh=false"
-              echo "message=Auto triage output was rejected because the target revision moved or could not be verified."
+              echo "message=Auto triage output was rejected because its head, base, or trusted VISION binding moved or could not be verified."
             } >> "$GITHUB_OUTPUT"
             python scripts/agent_runtime.py stage \
               --action "${{ needs.triage.outputs.event_action }}" \

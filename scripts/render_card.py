@@ -1443,17 +1443,31 @@ def normalize_public_advisory(data):
         or data.get("acting_authority") is not False
         or data.get("trusted_projection") is not True
         or not isinstance(data.get("auto_merge_eligible"), bool)
-        or data.get("policy_coverage_complete") is not True
+        or not isinstance(data.get("projection_complete"), bool)
     ):
         return None
     plan_sha = data.get("plan_sha256")
+    if not isinstance(plan_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_sha):
+        return None
+    if data["projection_complete"] is False:
+        return {
+            "plan_sha256": plan_sha,
+            "verdict": "inconclusive",
+            "summary": "Trusted public advisory unavailable because its current projection is incomplete.",
+            "obligations": [],
+            "limitations": ["No advisory claims were published."],
+            "requested_evidence": [],
+            "auto_merge_eligible": False,
+            "eligibility_facts": None,
+            "projection_complete": False,
+        }
+    if data.get("policy_coverage_complete") is not True:
+        return None
     verdict = data.get("verdict")
     summary = data.get("summary")
     rows = data.get("obligation_results")
     if (
-        not isinstance(plan_sha, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", plan_sha)
-        or verdict not in {"positive", "negative", "inconclusive"}
+        verdict not in {"positive", "negative", "inconclusive"}
         or not isinstance(summary, str)
         or not summary.strip()
         or not isinstance(rows, list)
@@ -1529,6 +1543,7 @@ def normalize_public_advisory(data):
         ],
         "auto_merge_eligible": auto_merge_eligible,
         "eligibility_facts": dict(eligibility) if isinstance(eligibility, dict) else None,
+        "projection_complete": True,
     }
 
 
@@ -1549,8 +1564,11 @@ def public_advisory_section(advisory):
         "",
         "- **Verdict:** %s" % advisory["verdict"],
         "- **Summary:** %s" % advisory["summary"],
-        "- **VISION plan:** `%s`" % advisory["plan_sha256"],
     ]
+    if not advisory["projection_complete"]:
+        lines.append(TRIAGE_END)
+        return "\n".join(lines)
+    lines.append("- **VISION plan:** `%s`" % advisory["plan_sha256"])
     if advisory["obligations"]:
         lines.extend(["", "#### VISION evidence obligations", ""])
         for row in advisory["obligations"]:
@@ -2092,6 +2110,12 @@ def body_with_public_advisory(body, revision, advisory, vision_sha="", base_sha=
         not state
         or kind != "pr-review"
         or state_revision(state, kind) != revision
+        or not isinstance(advisory, dict)
+        or advisory.get("target_head_sha") != revision
+        or advisory.get("target_base_sha") != base_sha
+        or advisory.get("vision_blob_sha") != vision_sha
+        or not re.fullmatch(r"[0-9a-f]{40}", str(base_sha or ""))
+        or not re.fullmatch(r"[0-9a-f]{40}", str(vision_sha or ""))
         or normalized is None
     ):
         return body
@@ -2103,18 +2127,15 @@ def body_with_public_advisory(body, revision, advisory, vision_sha="", base_sha=
         base_sha=base_sha,
         vision_sha=vision_sha,
     )
-    new_state["public_evidence_influenced"] = True
+    new_state["public_evidence_influenced"] = normalized["projection_complete"]
     new_state["advisory_review"] = {
         "version": PUBLIC_ADVISORY_STATE_VERSION,
         "plan_sha256": normalized["plan_sha256"],
         "verdict": normalized["verdict"],
-        "policy_coverage_complete": True,
+        "policy_coverage_complete": normalized["projection_complete"],
         "acting_authority": False,
         "trusted_projection": True,
-        "projection_complete": all(
-            row["status"] in {"complete-pass", "complete-fail"}
-            for row in normalized["obligations"]
-        ),
+        "projection_complete": normalized["projection_complete"],
         "auto_merge_eligible": normalized["auto_merge_eligible"],
         "eligibility_facts": normalized.get("eligibility_facts"),
         "head_sha": str(state.get("head_sha") or ""),

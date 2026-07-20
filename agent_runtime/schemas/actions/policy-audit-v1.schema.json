@@ -2,9 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "wheelhouse/evidence-plan-audit/v2",
   "type": "object", "additionalProperties": false,
-  "required": ["version", "vision_sha256", "units", "obligations", "complete", "disagreements"],
+  "required": ["version", "target_head_sha", "target_base_sha", "vision_blob_sha", "vision_sha256", "units", "obligations", "complete", "disagreements"],
   "properties": {
     "version": {"const": "wheelhouse/evidence-plan-audit/v2"},
+    "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "vision_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "vision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "units": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/unit"}},
     "obligations": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/obligation"}},

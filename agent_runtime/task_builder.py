@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -935,7 +936,13 @@ def _bound_output_schema(
     repair_kind: str,
     allow_automerge_behavior: bool,
     require_vision_fields: bool,
+    policy_binding: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    if action in {"policy-derive.public", "policy-audit.public"}:
+        bound = deepcopy(schema)
+        for name in ("target_head_sha", "target_base_sha", "vision_blob_sha"):
+            bound["properties"][name] = {"type": "string", "const": policy_binding[name]}
+        return bound
     if action == "advisory-review.public":
         bound = deepcopy(schema)
         if allow_automerge_behavior:
@@ -1136,9 +1143,9 @@ def _capabilities(action: str, schema_digest: str, adapter: str) -> dict[str, An
         or action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
     ):
         roots = (
-            ["vision.md", "vision-units.json", "policy-derivation.json"]
+            ["vision.md", "vision-units.json", "policy-binding.json", "policy-derivation.json"]
             if action in {"policy-derive.public", "policy-audit.public"}
-            else ["target.txt", "target-src", "policy-derivation.json", "policy-audit.json"]
+            else ["target.txt", "target-src", "policy-binding.json", "policy-derivation.json", "policy-audit.json"]
         )
         required.extend(
             [
@@ -1325,6 +1332,8 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    base_revision: str = "",
+    vision_blob_sha: str = "",
     policy_plan_file: str = "",
     policy_audit_file: str = "",
     allow_automerge_behavior: bool = False,
@@ -1336,6 +1345,13 @@ def build_task(
     if not DIGEST.fullmatch(event_key):
         raise ArtifactError("agent event key binding is invalid")
     policy_action = action in {"policy-derive.public", "policy-audit.public"}
+    public_policy_action = policy_action or action == "advisory-review.public"
+    if public_policy_action and (
+        not re.fullmatch(r"[0-9a-f]{40}", revision)
+        or not re.fullmatch(r"[0-9a-f]{40}", base_revision)
+        or not re.fullmatch(r"[0-9a-f]{40}", vision_blob_sha)
+    ):
+        raise ArtifactError("public policy revision bindings are invalid")
     if policy_action and (target_file or repository_dir or policy_audit_file):
         raise ArtifactError("policy model passes accept only pinned VISION artifacts")
     if action == "policy-derive.public" and policy_plan_file:
@@ -1471,6 +1487,14 @@ def build_task(
         )
     if vision_file:
         digest, size, artifact = _copy_file(Path(vision_file), bundle, 40000)
+        vision_text = Path(vision_file).read_text(encoding="utf-8")
+        policy_binding = {
+            "version": "wheelhouse/policy-binding/v1",
+            "target_head_sha": revision,
+            "target_base_sha": base_revision,
+            "vision_blob_sha": vision_blob_sha,
+            "vision_sha256": canonical_sha256(vision_text),
+        }
         inputs.append(
             {
                 "id": "vision",
@@ -1485,8 +1509,35 @@ def build_task(
             }
         )
         if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}:
+            binding_source = bundle / ".policy-binding.json"
+            atomic_write_json(binding_source, policy_binding)
+            try:
+                binding_digest, binding_size, binding_artifact = _copy_file(
+                    binding_source, bundle, 4096
+                )
+            finally:
+                binding_source.unlink(missing_ok=True)
+            inputs.append(
+                {
+                    "id": "policy-binding",
+                    "artifact": binding_artifact,
+                    "logicalPath": "policy-binding.json",
+                    "sha256": binding_digest,
+                    "mediaType": "application/vnd.wheelhouse.policy-binding+json",
+                    "trust": "trusted",
+                    "mount": "read-only",
+                    "maxBytes": 4096,
+                    "bytes": binding_size,
+                }
+            )
             plan_source = bundle / ".vision-units.json"
-            write_vision_units(Path(vision_file), plan_source)
+            write_vision_units(
+                Path(vision_file),
+                plan_source,
+                target_head_sha=revision,
+                target_base_sha=base_revision,
+                vision_blob_sha=vision_blob_sha,
+            )
             try:
                 plan_digest, plan_size, plan_artifact = _copy_file(
                     plan_source, bundle, 262144
@@ -1538,8 +1589,13 @@ def build_task(
         })
         policy_values.append(value)
     if action == "advisory-review.public":
-        vision_text = Path(vision_file).read_text(encoding="utf-8")
-        validate_policy_artifacts(vision_text, *policy_values)
+        validate_policy_artifacts(
+            vision_text,
+            *policy_values,
+            target_head_sha=revision,
+            target_base_sha=base_revision,
+            vision_blob_sha=vision_blob_sha,
+        )
 
     schema_path, schema_id = _schema_for(action, repair_kind)
     source_schema = load_json_regular(schema_path, max_bytes=65536)
@@ -1549,6 +1605,7 @@ def build_task(
         repair_kind,
         allow_automerge_behavior,
         require_vision_fields or bool(vision_file),
+        policy_binding if public_policy_action else None,
     )
     schema_source = schema_path
     canonical_schema = bundle / ".canonical-output-schema"

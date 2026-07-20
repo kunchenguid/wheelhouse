@@ -40,6 +40,8 @@ def execute_case(
         "number": 1, "target_kind": "pr-review", "revision": revision,
         "wheelhouse_revision": os.environ.get("GITHUB_SHA", "f" * 40),
         "vision_file": str(vision),
+        "base_revision": "e" * 40,
+        "vision_blob_sha": "d" * 40,
     }
 
     def invoke(action: str, invocation: str, model_prompt: str, **extra: str) -> tuple[dict, dict]:
@@ -64,13 +66,13 @@ def execute_case(
 
     derive_task, derive_result = invoke(
         "policy-derive.public", "derive",
-        "Act only as PolicyDeriver. Read only vision.md and vision-units.json. Classify every exact unit and condition. Map every non-context criterion to gating generic operations. Mark every unknown or ambiguity explicitly.",
+        "Act only as PolicyDeriver. Read only vision.md, vision-units.json, and policy-binding.json. Classify every exact unit and condition. Map every non-context criterion to gating generic operations. Mark every unknown or ambiguity explicitly.",
     )
     plan_path = case / "policy-derivation.json"
     plan_path.write_text(json.dumps(derive_result["final"]["value"], sort_keys=True) + "\n", encoding="utf-8")
     audit_task, audit_result = invoke(
         "policy-audit.public", "audit",
-        "Act only as an independent CoverageAuditor. Read only vision.md, vision-units.json, and policy-derivation.json. Produce your own exhaustive unit classifications, conditions, requiredness, and operation mapping. Report every disagreement.",
+        "Act only as an independent CoverageAuditor. Read only vision.md, vision-units.json, policy-binding.json, and policy-derivation.json. Produce your own exhaustive unit classifications, conditions, requiredness, and operation mapping. Report every disagreement.",
         policy_plan_file=str(plan_path),
     )
     audit_path = case / "policy-audit.json"
@@ -101,7 +103,35 @@ def execute_case(
         and final.get("auto_merge_eligible") is (expected_verdict == "positive")
     ):
         raise AssertionError("%s real-model projection was not complete positive" % name)
-    manifest = load_json_regular(case / "public-evidence-manifest.json")
+    manifest_path = case / "advisory" / "public-evidence-manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise AssertionError("%s production evidence manifest is missing" % name)
+    manifest = load_json_regular(manifest_path)
+    if (
+        manifest.get("execution_id") != result.get("executionId")
+        or manifest.get("task_sha256") != result.get("requestSha256")
+    ):
+        raise AssertionError("%s evidence manifest is not bound to the advisory request" % name)
+    invocations = (
+        (derive_task, derive_result),
+        (audit_task, audit_result),
+        (task, result),
+    )
+    if (
+        len({row[1]["executionId"] for row in invocations}) != 3
+        or len({row[1]["requestSha256"] for row in invocations}) != 3
+        or len({row[0]["spec"]["output"]["schemaSha256"] for row in invocations}) != 3
+        or any(row[1]["usage"]["providerRequests"] < 1 for row in invocations)
+    ):
+        raise AssertionError("%s did not prove three separate model invocations" % name)
+    expected_inputs = (
+        {"vision", "vision-units", "policy-binding"},
+        {"vision", "vision-units", "policy-binding", "policy-derivation"},
+        {"vision", "vision-units", "policy-binding", "target", "policy-derivation", "policy-audit"},
+    )
+    for (invocation_task, _), expected in zip(invocations, expected_inputs):
+        if {row["id"] for row in invocation_task["spec"]["inputs"]} != expected:
+            raise AssertionError("%s model invocation input isolation changed" % name)
     operations = {
         row.get("operation")
         for row in manifest.get("receipts", [])

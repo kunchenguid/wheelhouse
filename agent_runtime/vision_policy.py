@@ -76,23 +76,45 @@ def vision_units(text: str) -> list[dict[str, Any]]:
     return units
 
 
-def vision_unit_document(text: str) -> dict[str, Any]:
+def vision_unit_document(
+    text: str,
+    *,
+    target_head_sha: str = "",
+    target_base_sha: str = "",
+    vision_blob_sha: str = "",
+) -> dict[str, Any]:
     units = vision_units(text)
     value = {
         "version": UNITS_VERSION,
         "vision_sha256": canonical_sha256(text),
         "units": units,
     }
+    if target_head_sha or target_base_sha or vision_blob_sha:
+        value["target_head_sha"] = target_head_sha
+        value["target_base_sha"] = target_base_sha
+        value["vision_blob_sha"] = vision_blob_sha
     value["document_sha256"] = canonical_sha256(value)
     return value
 
 
-def write_vision_units(vision_path: Path, destination: Path) -> dict[str, Any]:
+def write_vision_units(
+    vision_path: Path,
+    destination: Path,
+    *,
+    target_head_sha: str = "",
+    target_base_sha: str = "",
+    vision_blob_sha: str = "",
+) -> dict[str, Any]:
     try:
         text = vision_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         raise VisionPolicyError("VISION is unreadable") from error
-    value = vision_unit_document(text)
+    value = vision_unit_document(
+        text,
+        target_head_sha=target_head_sha,
+        target_base_sha=target_base_sha,
+        vision_blob_sha=vision_blob_sha,
+    )
     destination.write_text(
         json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -118,11 +140,27 @@ def _semantic_fields(row: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def validate_policy_artifacts(
-    text: str, plan: Any, audit: Any
+    text: str,
+    plan: Any,
+    audit: Any,
+    *,
+    target_head_sha: str = "",
+    target_base_sha: str = "",
+    vision_blob_sha: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     if not isinstance(plan, dict) or plan.get("version") != PLAN_VERSION:
         raise VisionPolicyError("policy derivation version is invalid")
     document = vision_unit_document(text)
+    expected_binding = {
+        "target_head_sha": target_head_sha,
+        "target_base_sha": target_base_sha,
+        "vision_blob_sha": vision_blob_sha,
+    }
+    if any(expected_binding.values()) and (
+        not all(expected_binding.values())
+        or any(plan.get(name) != value for name, value in expected_binding.items())
+    ):
+        raise VisionPolicyError("policy derivation revision binding is invalid")
     if plan.get("vision_sha256") != document["vision_sha256"]:
         raise VisionPolicyError("policy derivation is stale")
     if "plan_sha256" in plan:
@@ -211,6 +249,10 @@ def validate_policy_artifacts(
 
     if not isinstance(audit, dict) or audit.get("version") != AUDIT_VERSION:
         raise VisionPolicyError("coverage audit version is invalid")
+    if any(expected_binding.values()) and any(
+        audit.get(name) != value for name, value in expected_binding.items()
+    ):
+        raise VisionPolicyError("coverage audit revision binding is invalid")
     if (
         audit.get("vision_sha256") != document["vision_sha256"]
     ):
@@ -312,6 +354,15 @@ def project_advisory_review(
     )
     if not vision_input:
         raise VisionPolicyError("trusted VISION input is unavailable")
+    binding_input = next(
+        (item for item in task["spec"]["inputs"] if item.get("id") == "policy-binding"), None
+    )
+    if not binding_input:
+        raise VisionPolicyError("trusted policy revision binding is unavailable")
+    binding_path = bundle / binding_input["artifact"]
+    if file_sha256(binding_path) != binding_input["sha256"]:
+        raise VisionPolicyError("trusted policy revision binding changed")
+    binding = load_json_regular(binding_path, max_bytes=4096)
     vision_path = bundle / vision_input["artifact"]
     if file_sha256(vision_path) != vision_input["sha256"]:
         raise VisionPolicyError("trusted VISION input changed")
@@ -333,7 +384,19 @@ def project_advisory_review(
         if file_sha256(path) != item["sha256"]:
             raise VisionPolicyError("validated policy artifact changed")
         policy_values.append(load_json_regular(path, max_bytes=262144))
-    plan, _, coverage_complete = validate_policy_artifacts(text, *policy_values)
+    if (
+        binding.get("version") != "wheelhouse/policy-binding/v1"
+        or binding.get("target_head_sha") != task["metadata"]["target"]["revision"]
+        or binding.get("vision_sha256") != canonical_sha256(text)
+    ):
+        raise VisionPolicyError("trusted policy revision binding is inconsistent")
+    plan, _, coverage_complete = validate_policy_artifacts(
+        text,
+        *policy_values,
+        target_head_sha=binding.get("target_head_sha", ""),
+        target_base_sha=binding.get("target_base_sha", ""),
+        vision_blob_sha=binding.get("vision_blob_sha", ""),
+    )
     expected = {row["obligation_id"]: row for row in plan["obligations"]}
     rows = value.get("obligation_results")
     if not isinstance(rows, list):
@@ -413,6 +476,10 @@ def project_advisory_review(
     return {
         **value,
         "plan_sha256": plan["plan_sha256"],
+        "target_head_sha": binding["target_head_sha"],
+        "target_base_sha": binding["target_base_sha"],
+        "vision_blob_sha": binding["vision_blob_sha"],
+        "vision_sha256": binding["vision_sha256"],
         "verdict": verdict,
         "obligation_results": projected_results,
         "limitations": limitations,

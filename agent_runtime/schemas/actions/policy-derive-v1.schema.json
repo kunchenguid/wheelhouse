@@ -3,9 +3,12 @@
   "$id": "wheelhouse/evidence-plan/v3",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "vision_sha256", "units", "obligations"],
+  "required": ["version", "target_head_sha", "target_base_sha", "vision_blob_sha", "vision_sha256", "units", "obligations"],
   "properties": {
     "version": {"const": "wheelhouse/evidence-plan/v3"},
+    "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "vision_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "vision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "units": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/unit"}},
     "obligations": {"type": "array", "maxItems": 128, "items": {"$ref": "#/definitions/obligation"}}
