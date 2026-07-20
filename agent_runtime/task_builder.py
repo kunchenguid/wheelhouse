@@ -58,8 +58,8 @@ ACTION_LIMITS = {
     "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
     "advisory-review.public": (540_000, 600_000, 64, 40, 131_072),
-    "policy-derive.public": (180_000, 210_000, 5, 4, 131_072),
-    "policy-audit.public": (180_000, 210_000, 6, 4, 131_072),
+    "policy-derive.public": (180_000, 210_000, 8, 4, 131_072),
+    "policy-audit.public": (180_000, 210_000, 8, 4, 131_072),
 }
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})

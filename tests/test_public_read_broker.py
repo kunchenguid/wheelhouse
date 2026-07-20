@@ -1529,8 +1529,9 @@ def test_public_task_contract():
             == "public-evidence/v1",
         )
         check(
-            "task: policy auditor can read every input before native schema submission",
-            ACTION_LIMITS["policy-audit.public"][2:] == (6, 4, 131_072),
+            "task: isolated policy passes can read every input before native schema submission",
+            ACTION_LIMITS["policy-derive.public"][2:] == (8, 4, 131_072)
+            and ACTION_LIMITS["policy-audit.public"][2:] == (8, 4, 131_072),
         )
         bound_schema = json.loads(
             (bundle / task["spec"]["output"]["schemaArtifact"]).read_text(
@@ -1812,8 +1813,14 @@ def test_production_launcher_contract():
 
         def readable_etc_mount_parent(candidate):
             parent = candidate.index("/etc")
-            return candidate[parent - 1] == "--dir" and parent < candidate.index(
-                "/etc/ssl"
+            return (
+                candidate[parent - 1] == "--dir"
+                and candidate[parent + 1 : parent + 4]
+                == ["--chmod", "0755", "/etc"]
+                and (
+                    "/etc/ssl" not in candidate
+                    or parent < candidate.index("/etc/ssl")
+                )
             )
 
         check(
@@ -1909,6 +1916,8 @@ def test_production_launcher_contract():
                 == ["--bind", str(writable), "/writable"]
                 for index in range(len(scenario_command) - 2)
             )
+            and private_writable_tmp(scenario_command)
+            and readable_etc_mount_parent(scenario_command)
             and any(
                 scenario_command[index : index + 3]
                 == ["--ro-bind", "/usr/bin/node", "/adapter/node"]
