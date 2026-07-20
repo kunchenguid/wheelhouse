@@ -52,6 +52,7 @@ from agent_runtime.exercise import (  # noqa: E402
     ExerciseError,
     ExerciseService,
     _scenario_command,
+    _writable_usage,
 )
 from agent_runtime.public_read import (  # noqa: E402
     MAX_RESPONSE_HEADER_BYTES,
@@ -1173,6 +1174,7 @@ def test_production_launcher_contract():
             and '"chown"' not in source
             and "os.chmod(self.root.parent" not in source
             and '"-%d" % process.pid' not in source
+            and "--artifact-sandbox" not in command
             and environment == {},
         )
         broker.receipt_dir.mkdir(mode=0o700)
@@ -1211,6 +1213,9 @@ def test_production_launcher_contract():
         work = Path(directory) / "scenario"
         app = work / "application"
         app.mkdir(parents=True)
+        writable = Path(directory) / "scenario-runtime"
+        (writable / "home").mkdir(parents=True)
+        (writable / "tmp").mkdir()
         entrypoint = app / "cli.js"
         entrypoint.touch()
         scenario_command, scenario_cwd = _scenario_command(
@@ -1218,6 +1223,7 @@ def test_production_launcher_contract():
             entrypoint,
             app,
             work,
+            writable,
             ["--version"],
             "/usr/bin/bwrap",
         )
@@ -1225,11 +1231,32 @@ def test_production_launcher_contract():
             "exercise: artifact process receives a private filesystem namespace",
             "--unshare-user" in scenario_command
             and "--unshare-net" in scenario_command
-            and scenario_command[scenario_command.index("--bind") + 2] == "/work"
+            and any(
+                scenario_command[index : index + 3]
+                == ["--ro-bind", str(work), "/work"]
+                for index in range(len(scenario_command) - 2)
+            )
+            and any(
+                scenario_command[index : index + 3]
+                == ["--bind", str(writable), "/writable"]
+                for index in range(len(scenario_command) - 2)
+            )
             and "/run/exercise" not in scenario_command
             and "/evidence" not in scenario_command
             and "receipts" not in " ".join(scenario_command)
             and scenario_cwd == "/",
+        )
+        oversized = writable / "oversized"
+        oversized.write_bytes(b"x" * (exercise_module.MAX_RUNTIME_BYTES + 1))
+        try:
+            _writable_usage(writable)
+        except ExerciseError as error:
+            runtime_bound = error.code == "exercise.runtime_bound"
+        else:
+            runtime_bound = False
+        check(
+            "exercise: aggregate writable state fails closed before receipt acceptance",
+            runtime_bound,
         )
         check(
             "broker: staged runtime roots stay private under the CI umask",

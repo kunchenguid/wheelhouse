@@ -27,6 +27,8 @@ MAX_ARTIFACTS = 16
 MAX_FILES = 10_000
 MAX_EXTRACTED_BYTES = 200 * 1024 * 1024
 MAX_OUTPUT_BYTES = 65_536
+MAX_RUNTIME_BYTES = 4 * 1024 * 1024
+MAX_RUNTIME_FILES = 256
 MAX_WALL_SECONDS = 30
 MAX_CALLS = 8
 PACKAGE_NAME = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+")
@@ -191,6 +193,7 @@ def _scenario_command(
     entrypoint: Path,
     cwd: Path,
     work: Path,
+    writable: Path,
     arguments: list[str],
     artifact_sandbox: str,
 ) -> tuple[list[str], str]:
@@ -217,13 +220,21 @@ def _scenario_command(
         "/proc",
         "--dev",
         "/dev",
-        "--tmpfs",
+        "--dir",
         "/tmp",
         "--dir",
         "/work",
-        "--bind",
+        "--ro-bind",
         str(work),
         "/work",
+        "--dir",
+        "/writable",
+        "--bind",
+        str(writable),
+        "/writable",
+        "--bind",
+        str(writable / "tmp"),
+        "/tmp",
     ]
     for path in ("/usr", "/bin", "/lib", "/lib64"):
         if Path(path).exists():
@@ -231,7 +242,7 @@ def _scenario_command(
     command.extend(
         [
             "--setenv", "PATH", "/usr/bin:/bin",
-            "--setenv", "HOME", "/work/home",
+            "--setenv", "HOME", "/writable/home",
             "--setenv", "LANG", "C.UTF-8",
             "--setenv", "LC_ALL", "C.UTF-8",
             "--setenv", "NO_PROXY", "*",
@@ -240,6 +251,23 @@ def _scenario_command(
         ]
     )
     return command, "/"
+
+
+def _writable_usage(root: Path) -> tuple[int, int]:
+    total_bytes = 0
+    total_files = 0
+    for base, directories, files in os.walk(root, followlinks=False):
+        for name in [*directories, *files]:
+            path = Path(base) / name
+            metadata = path.lstat()
+            total_files += 1
+            total_bytes += metadata.st_size
+            if total_files > MAX_RUNTIME_FILES or total_bytes > MAX_RUNTIME_BYTES:
+                raise ExerciseError(
+                    "exercise.runtime_bound",
+                    "exercise writable state exceeded its aggregate bound",
+                )
+    return total_bytes, total_files
 
 
 def _run_scenario(
@@ -256,26 +284,41 @@ def _run_scenario(
         raise ExerciseError("exercise.deadline", "exercise deadline expired")
     stdout_path = cwd.parent / ("stdout-%s" % canonical_sha256(arguments))
     stderr_path = cwd.parent / ("stderr-%s" % canonical_sha256(arguments))
+    runtime_root = work.parent / (work.name + "-runtime")
+    writable = runtime_root / canonical_sha256(arguments)
+    (writable / "home").mkdir(parents=True, mode=0o700)
+    (writable / "tmp").mkdir(mode=0o700)
     command, process_cwd = _scenario_command(
-        node, entrypoint, cwd, work, arguments, artifact_sandbox
+        node, entrypoint, cwd, work, writable, arguments, artifact_sandbox
     )
     with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
         process = subprocess.Popen(
             command,
             cwd=process_cwd,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(cwd.parent / "home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_PROXY": "*"},
+            env={"PATH": "/usr/bin:/bin", "HOME": str(writable / "home"), "TMPDIR": str(writable / "tmp"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_PROXY": "*"},
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
             preexec_fn=_limit_output,
         )
+        scenario_deadline = time.monotonic() + min(10, remaining)
         try:
-            return_code = process.wait(timeout=min(10, remaining))
-        except subprocess.TimeoutExpired as error:
-            process.kill()
-            process.wait(timeout=2)
-            raise ExerciseError("exercise.deadline", "exercise scenario exceeded its deadline") from error
+            while process.poll() is None:
+                _writable_usage(runtime_root)
+                if time.monotonic() >= scenario_deadline:
+                    raise ExerciseError(
+                        "exercise.deadline",
+                        "exercise scenario exceeded its deadline",
+                    )
+                time.sleep(0.01)
+            return_code = process.returncode
+            runtime_bytes, runtime_files = _writable_usage(runtime_root)
+        except ExerciseError:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+            raise
     stdout_data = stdout_path.read_bytes()
     stderr_data = stderr_path.read_bytes()
     if len(stdout_data) > MAX_OUTPUT_BYTES or len(stderr_data) > MAX_OUTPUT_BYTES:
@@ -285,6 +328,8 @@ def _run_scenario(
         "exit_code": return_code,
         "stdout": sanitize_untrusted_text(stdout_data),
         "stderr": sanitize_untrusted_text(stderr_data),
+        "runtime_bytes": runtime_bytes,
+        "runtime_files": runtime_files,
     }
 
 
@@ -342,7 +387,6 @@ def run_node_npm_cli(
     node = shutil.which("node")
     if not node:
         raise ExerciseError("adapter.unavailable", "reviewed Node.js adapter is unavailable")
-    (work / "home").mkdir(mode=0o700)
     deadline = time.monotonic() + MAX_WALL_SECONDS
     scenarios = {
         "discovery": _run_scenario(node, entrypoint, app, work, ["--help"], deadline, artifact_sandbox),
@@ -493,6 +537,8 @@ class ExerciseService:
                 "artifacts": MAX_ARTIFACTS,
                 "files": MAX_FILES,
                 "decoded_bytes": MAX_EXTRACTED_BYTES,
+                "runtime_bytes": MAX_RUNTIME_BYTES,
+                "runtime_files": MAX_RUNTIME_FILES,
             },
             "source_evidence_ids": source_ids,
             "adapter": str(arguments.get("adapter") or "")[:80],
@@ -602,7 +648,7 @@ class ExerciseService:
             "decoded_bytes": len(canonical_json_bytes(result)),
             "sha256": canonical_sha256(result),
             "truncated": False,
-            "bounds": {"network": "none", "wall_seconds": MAX_WALL_SECONDS, "output_bytes_per_stream": MAX_OUTPUT_BYTES, "artifacts": MAX_ARTIFACTS, "files": MAX_FILES, "decoded_bytes": MAX_EXTRACTED_BYTES},
+            "bounds": {"network": "none", "wall_seconds": MAX_WALL_SECONDS, "output_bytes_per_stream": MAX_OUTPUT_BYTES, "artifacts": MAX_ARTIFACTS, "files": MAX_FILES, "decoded_bytes": MAX_EXTRACTED_BYTES, "runtime_bytes": MAX_RUNTIME_BYTES, "runtime_files": MAX_RUNTIME_FILES},
             "source_evidence_ids": ids,
             "adapter": result["adapter"],
             "scenario_set": arguments["scenario_set"],
