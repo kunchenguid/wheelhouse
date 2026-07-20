@@ -19,9 +19,11 @@ PLAN_VERSION = "wheelhouse/evidence-plan/v1"
 REVIEW_KIND = "AdvisoryReview"
 
 _NORMATIVE = re.compile(
-    r"(?i)\b(?:must|required|requires?|shall|should|ought\s+to|can|may|only\s+after|cannot"
-    r"\s+(?:a\s+)?positive\b|insufficient\s+evidence|remain\s+inconclusive|"
-    r"never|contingent\s+upon|prerequisite)\b"
+    r"(?i)\b(?:must|required|requires?|requirement|shall|should|ought\s+to|can|may|"
+    r"(?:have|has|had|got|need|needs|needed|expected|supposed)\s+to|"
+    r"(?:is|are|was|were|be|being)\s+(?:obligated|required|mandatory|necessary|expected|supposed)|"
+    r"obligated|mandatory|necessary|only\s+after|cannot\s+(?:a\s+)?positive\b|"
+    r"insufficient\s+evidence|remain\s+inconclusive|never|contingent\s+upon|prerequisite)\b"
 )
 _GENERIC_OPERATIONS = {
     "public.git_snapshot",
@@ -67,10 +69,10 @@ _OPERAND_QUALIFIERS = {
 }
 _LIST_INTRODUCERS = {"across", "including", "representative", "through"}
 _EVIDENCE_OBJECT_TERMS = {
-    "artifact", "behavior", "commit", "component", "data", "dataset", "error",
-    "evidence", "execution", "exercise", "inspection", "manifest", "output",
-    "package", "path", "release", "repository", "revision", "source", "url",
-    "version",
+    "artifact", "behavior", "checksum", "commit", "component", "concern", "data",
+    "dataset", "digest", "error", "evidence", "execution", "exercise", "hash",
+    "inspection", "integrity", "manifest", "output", "package", "path", "release",
+    "repository", "revision", "source", "url", "version",
 }
 
 
@@ -339,12 +341,28 @@ def _operand_list_connector(
         ),
         len(tokens),
     )
-    relative_element = (
+    left = next(
+        (
+            tokens[offset]
+            for offset in range(index - 1, source, -1)
+            if tokens[offset] not in {",", "("}
+        ),
+        "",
+    )
+    right = tokens[index + 1] if index + 1 < end else ""
+    left_singular = left[:-1] if left.endswith("s") else left
+    right_singular = right[:-1] if right.endswith("s") else right
+    typed_alternative = (
         tokens[index] == "or"
+        and left_singular in _EVIDENCE_OBJECT_TERMS
+        and right_singular in _EVIDENCE_OBJECT_TERMS
+    )
+    relative_element = (
+        typed_alternative
         and tokens[index + 2 : index + 3] in (["that"], ["which"], ["whose"])
         and any(token in _PREDICATES for token in tokens[index + 3 : end])
     )
-    return tokens[index] == "or" and (end == index + 2 or relative_element)
+    return typed_alternative or relative_element
 
 
 def _operand_span_valid(tokens: list[str], index: int) -> bool:
@@ -353,7 +371,6 @@ def _operand_span_valid(tokens: list[str], index: int) -> bool:
         return True
     opaque_run = 0
     saw_object = False
-    post_object_run = 0
     grammar = (
         _OPERAND_QUALIFIERS
         | _CONDITIONS
@@ -370,21 +387,16 @@ def _operand_span_valid(tokens: list[str], index: int) -> bool:
         is_object = token in _EVIDENCE_OBJECT_TERMS or singular in _EVIDENCE_OBJECT_TERMS
         if is_object:
             saw_object = True
-            post_object_run = 0
             opaque_run = 0
             continue
         if token in grammar or token in _PREDICATES or re.fullmatch(
             r"https?://\S+|[0-9a-f]{64}", token
         ):
             saw_object = False
-            post_object_run = 0
             opaque_run = 0
             continue
         if saw_object:
-            post_object_run += 1
-            if post_object_run > 1:
-                return False
-            continue
+            return False
         opaque_run += 1
         if opaque_run > 3:
             return False

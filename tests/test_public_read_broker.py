@@ -668,6 +668,31 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     fetch_adjacent_plan = derive_evidence_plan(
         "A reviewer must fetch manifest obtain legal approval."
     )
+    opaque_remainder_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest authorize."
+    )
+    opaque_remainder_variation_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest certify."
+    )
+    short_or_plan = derive_evidence_plan(
+        "A reviewer must inspect source or merge."
+    )
+    short_or_variation_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest or approve."
+    )
+    unsupported_obligation_plans = [
+        derive_evidence_plan(text)
+        for text in (
+            "Artifacts have to receive legal approval before release.",
+            "An artifact has to receive legal approval before release.",
+            "Artifacts had to receive legal approval before release.",
+            "Artifacts need to receive legal approval before release.",
+            "Artifacts are obligated to receive legal approval before release.",
+            "Artifact release is mandatory.",
+            "Reviewing artifacts is necessary.",
+            "Artifacts are expected to receive legal approval before release.",
+        )
+    ]
     semicolon_unknown_plan = derive_evidence_plan(
         "A reviewer must fetch manifest; obtain legal approval."
     )
@@ -767,8 +792,13 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 unknown_then_plan,
                 adjacent_unknown_plan,
                 fetch_adjacent_plan,
+                opaque_remainder_plan,
+                opaque_remainder_variation_plan,
+                short_or_plan,
+                short_or_variation_plan,
                 semicolon_unknown_plan,
                 semicolon_partial_plan,
+                *unsupported_obligation_plans,
             )
             for row in plan["obligations"]
         ),
