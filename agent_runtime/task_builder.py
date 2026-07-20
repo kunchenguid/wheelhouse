@@ -1412,6 +1412,8 @@ def build_task(
         unit_count = len(vision_units)
         schema_value["properties"]["units"]["minItems"] = unit_count
         schema_value["properties"]["units"]["maxItems"] = unit_count
+        if action == "policy-derive.public" and unit_count:
+            schema_value["properties"]["obligations"]["minItems"] = 1
     if action == "policy-audit.public":
         proposed_plan = load_json_regular(Path(policy_plan_file), max_bytes=262144)
         if not isinstance(proposed_plan, dict) or not isinstance(

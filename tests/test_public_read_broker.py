@@ -1504,7 +1504,8 @@ def test_public_task_contract():
             and derive_schema["properties"]["units"]["minItems"]
             == len(document["units"])
             and derive_schema["properties"]["units"]["maxItems"]
-            == len(document["units"]),
+            == len(document["units"])
+            and derive_schema["properties"]["obligations"]["minItems"] == 1,
         )
         bundle = root / "bundle"
         task = build_task(
