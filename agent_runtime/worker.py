@@ -761,7 +761,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         final = outcome.structured_output
         if claude_plan.get("structuredOutputTransport") == "draft-07-json-carrier-v1":
             try:
-                final = _decode_claude_carrier(final, str(claude_plan.get("action")))
+                final = _decode_claude_carrier(final, str(plan.get("action")))
             except ClaudeProtocolError as error:
                 raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
         final_bytes = canonical_json_bytes(final)
