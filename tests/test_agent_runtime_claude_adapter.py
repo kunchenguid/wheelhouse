@@ -517,6 +517,36 @@ def main():
         and outcome.usage["inputTokens"] == 3
         and outcome.usage["outputTokens"] == 2,
     )
+    auth_failure = ClaudeStreamParser(
+        expected_model="claude-sonnet-4-6",
+        require_structured_output=True,
+    )
+    auth_failure.feed(init)
+    auth_failure.feed(
+        b'{"type":"result","subtype":"success","is_error":true,'
+        b'"api_error_status":401}\n'
+    )
+    check(
+        "stream: OAuth rejection is a non-retryable auth failure",
+        auth_failure.terminal_failure()
+        == (
+            "auth.invalid",
+            "Claude rejected the anthropic-subscription credential.",
+        ),
+    )
+    overloaded = ClaudeStreamParser(
+        expected_model="claude-sonnet-4-6",
+        require_structured_output=True,
+    )
+    overloaded.feed(init)
+    overloaded.feed(
+        b'{"type":"result","subtype":"success","is_error":true,'
+        b'"api_error_status":529}\n'
+    )
+    check(
+        "stream: provider pressure retains its retryable provider class",
+        overloaded.terminal_failure()[0] == "provider.overloaded",
+    )
     check(
         "stream: invalid UTF-8 rejected",
         fails(

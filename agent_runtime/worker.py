@@ -682,6 +682,10 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         if cancelled:
             raise WorkerFailure("lifecycle.cancelled", "Agent runtime was cancelled.", spend_started=True)
         if return_code != 0:
+            terminal_failure = parser.terminal_failure()
+            if terminal_failure is not None:
+                code, message = terminal_failure
+                raise WorkerFailure(code, message, str(return_code), spend_started=True)
             raise WorkerFailure("provider.unavailable", "Claude CLI exited without a successful terminal result.", str(return_code), spend_started=True)
         try:
             outcome = parser.finish()

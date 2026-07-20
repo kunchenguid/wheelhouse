@@ -453,6 +453,26 @@ class ClaudeStreamParser:
             terminal_subtype=subtype,
         )
 
+    def terminal_failure(self) -> tuple[str, str] | None:
+        """Classify a bounded unsuccessful Claude terminal without its text."""
+
+        if self.terminal is None or not self.terminal.get("is_error"):
+            return None
+        status = self.terminal.get("api_error_status")
+        if status in (401, 403):
+            return (
+                "auth.invalid",
+                "Claude rejected the anthropic-subscription credential.",
+            )
+        if status == 429:
+            return ("provider.rate_limited", "Claude rate-limited the model request.")
+        if status in (502, 503, 529):
+            return (
+                "provider.overloaded",
+                "Claude was unavailable for the model request.",
+            )
+        return ("provider.unavailable", "Claude rejected the model request.")
+
 
 def parse_stream(
     source: BinaryIO | Iterable[bytes],
