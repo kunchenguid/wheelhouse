@@ -359,6 +359,17 @@ def _unwrap_policy_value(value: Any) -> Any:
         for child in value.values()
         if isinstance(child, dict) and isinstance(child.get("units"), list)
     ]
+    from .adapters.claude import ClaudeProtocolError, decode_json_carrier
+
+    for child in value.values():
+        if not isinstance(child, str):
+            continue
+        try:
+            decoded = decode_json_carrier({"json": child})
+        except ClaudeProtocolError:
+            continue
+        if isinstance(decoded, dict) and isinstance(decoded.get("units"), list):
+            candidates.append(decoded)
     return candidates[0] if len(candidates) == 1 else value
 
 

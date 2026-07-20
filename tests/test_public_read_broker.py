@@ -1581,6 +1581,10 @@ def test_public_task_contract():
             "task: one wrapped policy result is normalized before identity validation",
             _unwrap_policy_value({"result": plan, "presentation": "complete"})
             == plan
+            and _unwrap_policy_value(
+                {"result": json.dumps(plan), "presentation": "complete"}
+            )
+            == plan
             and _unwrap_policy_value({"first": plan, "second": audit})
             != plan,
         )
