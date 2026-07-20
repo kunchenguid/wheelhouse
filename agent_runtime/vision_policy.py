@@ -66,8 +66,12 @@ _OPERAND_QUALIFIERS = {
     "of", "on", "rather", "such", "than", "through", "to", "under", "using",
 }
 _LIST_INTRODUCERS = {"across", "including", "representative", "through"}
-_COORDINATED_OBJECT_PREDICATES = {"identify"}
-_COORDINATING_PREPOSITIONS = {"against", "at", "by", "from", "of", "to", "under"}
+_EVIDENCE_OBJECT_TERMS = {
+    "artifact", "behavior", "commit", "component", "data", "dataset", "error",
+    "evidence", "execution", "exercise", "inspection", "manifest", "output",
+    "package", "path", "release", "repository", "revision", "source", "url",
+    "version",
+}
 
 
 class VisionPolicyError(ValueError):
@@ -184,6 +188,21 @@ def _predicate_operand(tokens: list[str], index: int) -> list[str]:
         if tokens[offset] in {";", "."}:
             end = offset
             break
+        if tokens[offset] == ",":
+            modal = next(
+                (
+                    cursor
+                    for cursor in range(offset + 1, min(len(tokens), offset + 9))
+                    if tokens[cursor] in _MODALS
+                ),
+                -1,
+            )
+            if modal >= 0 and any(
+                tokens[cursor] in _PREDICATES
+                for cursor in range(modal + 1, min(len(tokens), modal + 5))
+            ):
+                end = offset
+                break
         if tokens[offset] in {"and", "or"}:
             cursor = offset + 1
             while cursor < len(tokens) and tokens[cursor] in {",", "("}:
@@ -304,32 +323,101 @@ def _operand_list_connector(
         default=source + 1,
     )
     prefix = tokens[span_start:index]
-    explicitly_listed = tokens[source] in (
-        _LIST_INTRODUCERS | _COORDINATED_OBJECT_PREDICATES
-    ) or any(
+    explicitly_listed = tokens[source] in _LIST_INTRODUCERS or any(
         token in _LIST_INTRODUCERS for token in prefix
     ) or any(
         prefix[offset : offset + 2] == ["such", "as"]
         for offset in range(len(prefix) - 1)
     )
-    return explicitly_listed or any(
-        token in _COORDINATING_PREPOSITIONS for token in prefix
+    if explicitly_listed:
+        return True
+    end = next(
+        (
+            offset
+            for offset in range(index + 1, len(tokens))
+            if tokens[offset] in {"and", "or", ",", ";", "."}
+        ),
+        len(tokens),
     )
+    relative_element = (
+        tokens[index] == "or"
+        and tokens[index + 2 : index + 3] in (["that"], ["which"], ["whose"])
+        and any(token in _PREDICATES for token in tokens[index + 3 : end])
+    )
+    return tokens[index] == "or" and (end == index + 2 or relative_element)
+
+
+def _operand_span_valid(tokens: list[str], index: int) -> bool:
+    operand = _predicate_operand(tokens, index)
+    if not operand:
+        return True
+    opaque_run = 0
+    saw_object = False
+    post_object_run = 0
+    grammar = (
+        _OPERAND_QUALIFIERS
+        | _CONDITIONS
+        | _LIST_INTRODUCERS
+        | {
+            "a", "all", "an", "and", "any", "are", "every", "exact", "is",
+            "itself", "its", "only", "or", "other", "rather", "specific",
+            "stable", "that", "the", "their", "themselves", "these", "this",
+            "those", "was", "were", "which", "whose", ",", "(", ")",
+        }
+    )
+    for token in operand:
+        singular = token[:-1] if token.endswith("s") else token
+        is_object = token in _EVIDENCE_OBJECT_TERMS or singular in _EVIDENCE_OBJECT_TERMS
+        if is_object:
+            saw_object = True
+            post_object_run = 0
+            opaque_run = 0
+            continue
+        if token in grammar or token in _PREDICATES or re.fullmatch(
+            r"https?://\S+|[0-9a-f]{64}", token
+        ):
+            saw_object = False
+            post_object_run = 0
+            opaque_run = 0
+            continue
+        if saw_object:
+            post_object_run += 1
+            if post_object_run > 1:
+                return False
+            continue
+        opaque_run += 1
+        if opaque_run > 3:
+            return False
+    return True
 
 
 def _guard_or_is_negative(
-    tokens: list[str], source: int, target: int, guard_end: int, selected: dict[int, str]
+    tokens: list[str], edge: int, source: int, target: int, guard_end: int,
+    selected: dict[int, str]
 ) -> bool:
     if selected.get(source) == selected.get(target) == "negative":
         return True
-    nominal_branches = all(
-        tokens[index].endswith(("ing", "ion")) for index in (source, target)
+    modal = next(
+        (
+            index
+            for index in range(target + 1, guard_end)
+            if tokens[index] == "cannot"
+        ),
+        -1,
     )
-    shared_negative = any(
-        target < index < guard_end and polarity == "negative"
-        for index, polarity in selected.items()
+    if modal < 0 or any(
+        token in {"and", "or", ";"} for token in tokens[target + 1 : modal]
+    ):
+        return False
+    governed = next(
+        (
+            index
+            for index in range(modal + 1, min(guard_end, modal + 5))
+            if selected.get(index) == "negative"
+        ),
+        -1,
     )
-    return nominal_branches and shared_negative
+    return governed >= 0 and edge < target < modal
 
 
 def _fail_closed_guard(tokens: list[str], guard_end: int, selected: dict[int, str]) -> bool:
@@ -384,7 +472,7 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
         return {}, "unknown"
     ambiguous = bool(_AMBIGUOUS_CONDITION.search(production))
     selected: dict[int, str] = {}
-    connector_edges: list[tuple[str, int, int]] = []
+    connector_edges: list[tuple[str, int, int, int]] = []
     policy_marker = bool(
         re.search(r"\b(?:is|are)\s+insufficient\s+evidence\b", production, re.I)
     )
@@ -485,6 +573,8 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
         if token not in {"and", "or", "then"}:
             continue
         source = max((offset for offset in selected if offset < index), default=-1)
+        if source < 0:
+            continue
         cursor = index + 1
         while cursor < len(tokens) and tokens[cursor] in {",", "("}:
             cursor += 1
@@ -534,7 +624,7 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             ] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
         if candidates:
             selected.setdefault(candidates[0], polarity)
-            connector_edges.append((token, source, candidates[0]))
+            connector_edges.append((token, index, source, candidates[0]))
         elif source >= 0 and (
             token == "then" or not _operand_list_connector(tokens, index, source)
         ):
@@ -575,17 +665,8 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
                 return {}, "unknown"
 
     for index in selected:
-        if tokens[index] == "review":
-            operand = _predicate_operand(tokens, index)
-            opaque = [
-                token
-                for token in operand
-                if token not in _OPERAND_QUALIFIERS
-                | _CONDITIONS
-                | {"a", "an", "the", "that", "which", "whose", ",", "(", ")"}
-            ]
-            if len(opaque) > 2:
-                return {}, "unknown"
+        if not _operand_span_valid(tokens, index):
+            return {}, "unknown"
         if tokens[index] != "inspect":
             continue
         operand = _predicate_operand(tokens, index)
@@ -631,7 +712,7 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
 
     guard_end = _leading_guard_end(tokens)
     fail_closed_guard = _fail_closed_guard(tokens, guard_end, selected)
-    for connector, source, target in connector_edges:
+    for connector, edge, source, target in connector_edges:
         if connector != "or":
             continue
         in_guard = (
@@ -640,7 +721,7 @@ def _parse_production(production: str) -> tuple[dict[str, str], str]:
             and source < guard_end
             and target < guard_end
             and _guard_or_is_negative(
-                tokens, source, target, guard_end, selected
+                tokens, edge, source, target, guard_end, selected
             )
         )
         fail_closed_outcome = (

@@ -656,11 +656,17 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     operand_verb_plan = derive_evidence_plan(
         "A reviewer must inspect source and release package."
     )
+    identify_branch_plan = derive_evidence_plan(
+        "The verdict must identify source and authorize merge."
+    )
     unknown_then_plan = derive_evidence_plan(
         "A reviewer must inspect source then obtain approval."
     )
     adjacent_unknown_plan = derive_evidence_plan(
         "A reviewer must inspect source obtain approval."
+    )
+    fetch_adjacent_plan = derive_evidence_plan(
+        "A reviewer must fetch manifest obtain legal approval."
     )
     semicolon_unknown_plan = derive_evidence_plan(
         "A reviewer must fetch manifest; obtain legal approval."
@@ -681,6 +687,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     unrelated_negative_guard_plan = derive_evidence_plan(
         "If a reviewer inspects source or executes a package and verification cannot "
         "be completed, the verdict must remain inconclusive or request missing evidence."
+    )
+    morphological_guard_plan = derive_evidence_plan(
+        "If source inspection or execution are available, and verification cannot be "
+        "completed, the verdict must remain inconclusive or request missing evidence."
     )
     masked_disjunction_plan = derive_evidence_plan(
         "A reviewer must inspect source or execute a package; failures must remain inconclusive."
@@ -753,8 +763,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 punctuated_secure_plan,
                 short_secure_plan,
                 operand_verb_plan,
+                identify_branch_plan,
                 unknown_then_plan,
                 adjacent_unknown_plan,
+                fetch_adjacent_plan,
                 semicolon_unknown_plan,
                 semicolon_partial_plan,
             )
@@ -778,6 +790,7 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 permissive_guard_plan,
                 unrelated_local_or_plan,
                 unrelated_negative_guard_plan,
+                morphological_guard_plan,
             )
             for row in plan["obligations"]
         ),
