@@ -474,6 +474,14 @@ def _validate_worker(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     candidate = task["spec"]["selection"]["candidates"][0]
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
+    if worker.get("status") != "succeeded" and delivered_value is None:
+        error = worker.get("error") or {}
+        return None, None, _error(
+            str(error.get("code") or "internal.error"),
+            str(error.get("message") or "Sandboxed adapter worker failed."),
+            spend_started=bool(worker.get("spendStarted")),
+            adapter_code=error.get("adapterCode"),
+        )
     if task["metadata"]["action"] in {"policy-derive.public", "policy-audit.public"}:
         delivered_value = _unwrap_policy_value(delivered_value)
         if task["metadata"]["action"] == "policy-audit.public":
