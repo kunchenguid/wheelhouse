@@ -881,7 +881,9 @@ class ClaudeCliAdapter(AgentAdapterV1):
         completion_instruction = (
             "End every successful run with exactly one StructuredOutput call. Its json field "
             "must contain a JSON-encoded result instance satisfying the trusted output schema "
-            "in the user prompt. Fill every other native carrier field from that same result. "
+            "in the user prompt, except that policy derivation and audit results omit units from "
+            "the json string and supply them only through unit_semantics. Fill every other native "
+            "carrier field from that same result. "
             "Never return the result as plain text or Markdown."
             if transport == "draft-07-json-carrier-v1"
             else "End every successful run with exactly one StructuredOutput call."

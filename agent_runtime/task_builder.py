@@ -1518,16 +1518,19 @@ def build_task(
         (
             "Your final turn MUST be exactly one StructuredOutput call. Encode the complete "
             "result instance required by the original action schema, not the schema definition, "
-            "as the native `json` carrier string. Read output-schema.json and satisfy every "
-            "constraint in it. The units array MUST correspond one-for-one in the exact same "
-            "order as vision-units.json. Never finish with plain text, Markdown, or a raw JSON response."
+            "as the native `json` carrier string. For a policy derivation or audit, omit only the "
+            "top-level units field from that string because the required native unit_semantics "
+            "field carries those values without duplication. Read output-schema.json and satisfy "
+            "every other constraint in it. The native unit_semantics array MUST correspond "
+            "one-for-one in the exact same order as vision-units.json. Never finish with plain "
+            "text, Markdown, or a raw JSON response."
             if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),
         *(
             [
-                "A policy result without a top-level units array is invalid. Include exactly "
-                "%d unit entries, one for every vision-units.json entry." % unit_count,
+                "Include exactly %d native unit_semantics entries, one for every "
+                "vision-units.json entry; do not duplicate them in the json string." % unit_count,
                 "Use this canonical generic rubric. Markdown headings alone are context-only. "
                 "Every unit that states an acceptance, review, evidence, behavior, or prohibition "
                 "criterion is decision-relevant and MUST have at least one obligation. Map pinned "

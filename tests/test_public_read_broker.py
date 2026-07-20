@@ -1536,10 +1536,11 @@ def test_public_task_contract():
         )
         check(
             "task: policy transport binds unit semantics to deterministic order",
-            "units array MUST correspond one-for-one in the exact same order as vision-units.json"
+            "native unit_semantics array MUST correspond one-for-one in the exact same order as vision-units.json"
             in derive_prompt
-            and "Include exactly %d unit entries" % len(document["units"])
+            and "Include exactly %d native unit_semantics entries" % len(document["units"])
             in derive_prompt
+            and "do not duplicate them in the json string" in derive_prompt
             and "Use this canonical generic rubric" in derive_prompt
             and "Use unknown only when a required meaning or operation cannot be represented"
             in derive_prompt
