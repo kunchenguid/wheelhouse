@@ -71,7 +71,7 @@ def main() -> None:
         provider_steps = [step for step in called["jobs"]["model"]["steps"] if str(step.get("uses", "")).startswith("anthropics/claude-code-action@")]
 
         check("race: fixture advances main from source A to distinct source B", source_a != source_b and git(repo, "rev-parse", "main") == source_b)
-        check("race: source-A caller uses the same-commit relative workflow boundary", len(jobs) == 2 and all(job.get("uses") == "./.github/workflows/claude-model.yml" for job in jobs))
+        check("race: source-A caller uses the same-commit relative workflow boundary", len(jobs) == 4 and all(job.get("uses") == "./.github/workflows/claude-model.yml" for job in jobs))
         check("race: source-B workflow bytes differ after main advances", called_at_a != called_at_b and "source B marker" not in called_at_a and "source B marker" in called_at_b)
         check("race: admitted source-A caller still loads model workflow source A", yaml.safe_load(called_at_a) == called and source_a != source_b)
         check("race: source gate legitimately observes source A equal expected A", bind.get("env", {}).get("EXPECTED_COMMIT_SHA") == "${{ inputs.expected_commit_sha }}" and 'GITHUB_SHA" = "$EXPECTED_COMMIT_SHA' in bind.get("run", ""))

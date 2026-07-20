@@ -4,15 +4,15 @@
   "type": "object", "additionalProperties": false,
   "required": ["result_kind", "verdict", "summary", "obligation_results", "citations", "limitations", "requested_evidence"],
   "properties": {
-    "result_kind": {"const": "AdvisoryReview"},
-    "verdict": {"enum": ["positive", "negative", "inconclusive"]},
+    "result_kind": {"type": "string", "const": "AdvisoryReview"},
+    "verdict": {"type": "string", "enum": ["positive", "negative", "inconclusive"]},
     "summary": {"type": "string", "minLength": 1, "maxLength": 8000},
     "obligation_results": {"type": "array", "maxItems": 128, "items": {
       "type": "object", "additionalProperties": false,
       "required": ["obligation_id", "assessment", "rationale", "citation_ids"],
       "properties": {
         "obligation_id": {"type": "string", "pattern": "^O[0-9]{3}$"},
-        "assessment": {"enum": ["pass", "fail", "unavailable", "not_applicable"]},
+        "assessment": {"type": "string", "enum": ["pass", "fail", "unavailable", "not_applicable"]},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
         "citation_ids": {"type": "array", "maxItems": 32, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
       }
@@ -30,11 +30,11 @@
     "eligibility_facts": {"type": "object", "additionalProperties": false,
       "required": ["behavior_class", "changes_existing_or_default_behavior", "optin_default_off", "aligns_with_vision", "recommendation"],
       "properties": {
-        "behavior_class": {"enum": ["A", "B", "C", "ineligible"]},
+        "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
         "changes_existing_or_default_behavior": {"type": "boolean"},
         "optin_default_off": {"type": "boolean"},
         "aligns_with_vision": {"type": "boolean"},
-        "recommendation": {"enum": ["eligible", "hold"]}
+        "recommendation": {"type": "string", "enum": ["eligible", "hold"]}
       }
     }
   }

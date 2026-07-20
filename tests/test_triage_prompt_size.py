@@ -70,7 +70,12 @@ def _extract_prompt_block(rel):
     block."""
     lines = _prepare_run(rel).splitlines()
     end = next(
-        (i for i, ln in enumerate(lines) if ln.strip() == "} > prompt.txt"), None
+        (
+            i
+            for i in range(len(lines) - 1, -1, -1)
+            if lines[i].strip() == "} > prompt.txt"
+        ),
+        None,
     )
     if end is None:
         return ""

@@ -205,7 +205,7 @@ def main():
             except ClaudeProbeError:
                 return False
         production_schema = Path(
-            "agent_runtime/schemas/actions/advisory-review-v1.schema.json"
+            "agent_runtime/schemas/actions/advisory-review-v2.schema.json"
         ).read_text()
         canonical = json.loads(production_schema)
         old = dict(canonical)

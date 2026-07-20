@@ -169,9 +169,14 @@ def validate_schema_subset(
         "items",
         "minItems",
         "maxItems",
+        "minimum",
+        "maximum",
+        "$ref",
+        "definitions",
     }
 
     node_count = 0
+    definitions = schema.get("definitions", {})
 
     def visit(node: Any, root: bool = False, depth: int = 0) -> None:
         nonlocal node_count
@@ -185,6 +190,16 @@ def validate_schema_subset(
         unknown = set(node) - allowed
         if unknown:
             raise ClaudeProbeError("Claude output schema uses an unsupported keyword")
+        if "$ref" in node:
+            reference = node["$ref"]
+            if (
+                set(node) != {"$ref"}
+                or not isinstance(reference, str)
+                or not reference.startswith("#/definitions/")
+                or reference.removeprefix("#/definitions/") not in definitions
+            ):
+                raise ClaudeProbeError("Claude output schema reference is invalid")
+            return
         if not root and any(name in node for name in ("$schema", "$id")):
             raise ClaudeProbeError(
                 "Claude output schema metadata is allowed only at the root"
@@ -196,7 +211,7 @@ def validate_schema_subset(
         ):
             raise ClaudeProbeError("Claude output schema identity is invalid")
         node_type = node.get("type")
-        if node_type not in ("object", "array", "string", "boolean"):
+        if node_type not in ("object", "array", "string", "boolean", "integer"):
             raise ClaudeProbeError("Claude output schema uses an unsupported type")
         if "const" in node and "enum" in node:
             raise ClaudeProbeError("Claude output schema cannot combine const and enum")
@@ -230,6 +245,13 @@ def validate_schema_subset(
             raise ClaudeProbeError(
                 "Claude boolean schema uses a non-boolean value constraint"
             )
+        if node_type == "integer" and any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in scalar_values
+        ):
+            raise ClaudeProbeError(
+                "Claude integer schema uses a non-integer value constraint"
+            )
         if node_type == "object":
             if node.get("additionalProperties") is not False:
                 raise ClaudeProbeError(
@@ -258,6 +280,26 @@ def validate_schema_subset(
                 raise ClaudeProbeError("Claude object schema property name is invalid")
             for child in properties.values():
                 visit(child, depth=depth + 1)
+            if root and "definitions" in node:
+                if (
+                    not isinstance(definitions, dict)
+                    or not definitions
+                    or any(
+                        not isinstance(name, str)
+                        or not name
+                        or not isinstance(child, dict)
+                        for name, child in definitions.items()
+                    )
+                ):
+                    raise ClaudeProbeError(
+                        "Claude output schema definitions are invalid"
+                    )
+                for child in definitions.values():
+                    visit(child, depth=depth + 1)
+            elif "definitions" in node:
+                raise ClaudeProbeError(
+                    "Claude output schema definitions are allowed only at the root"
+                )
             if any(
                 name in node
                 for name in (
@@ -269,6 +311,8 @@ def validate_schema_subset(
                     "maxItems",
                     "enum",
                     "const",
+                    "minimum",
+                    "maximum",
                 )
             ):
                 raise ClaudeProbeError("Claude object schema uses a scalar constraint")
@@ -284,6 +328,8 @@ def validate_schema_subset(
                     "pattern",
                     "enum",
                     "const",
+                    "minimum",
+                    "maximum",
                 )
             ):
                 raise ClaudeProbeError("Claude array schema uses an incompatible constraint")
@@ -309,6 +355,10 @@ def validate_schema_subset(
             ):
                 raise ClaudeProbeError("Claude scalar schema uses an object constraint")
             if node_type == "string":
+                if any(name in node for name in ("minimum", "maximum")):
+                    raise ClaudeProbeError(
+                        "Claude string schema uses an integer constraint"
+                    )
                 minimum = _require_int(node.get("minLength", 0), "minLength")
                 maximum = _require_int(node.get("maxLength", 131072), "maxLength")
                 if maximum > 131072 or minimum > maximum:
@@ -329,8 +379,26 @@ def validate_schema_subset(
                         raise ClaudeProbeError(
                             "Claude string schema pattern is invalid"
                         ) from error
-            elif any(name in node for name in ("minLength", "maxLength")):
-                raise ClaudeProbeError("Claude boolean schema uses a string constraint")
+            elif node_type == "integer":
+                minimum = _require_int(node.get("minimum", -(2**63)), "minimum")
+                maximum = _require_int(node.get("maximum", 2**63 - 1), "maximum")
+                if minimum > maximum:
+                    raise ClaudeProbeError(
+                        "Claude integer schema bounds are invalid"
+                    )
+            elif any(
+                name in node
+                for name in (
+                    "minLength",
+                    "maxLength",
+                    "pattern",
+                    "minimum",
+                    "maximum",
+                )
+            ):
+                raise ClaudeProbeError(
+                    "Claude non-string schema uses a string constraint"
+                )
 
     visit(schema, root=True)
     return schema, text

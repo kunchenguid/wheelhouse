@@ -1036,7 +1036,13 @@ def test_one_reservation_prices_the_bounded_two_call_schema_repair():
         for step in steps
         if step.get("uses") == "./.github/actions/claude-model-call"
     ]
-    assert len(model_calls) == 2
+    assert len(
+        [
+            step
+            for step in model_calls
+            if step.get("id") in {"claude-model", "claude-repair-model"}
+        ]
+    ) == 2
     repair = next(
         step for step in model_calls if step.get("id") == "claude-repair-model"
     )

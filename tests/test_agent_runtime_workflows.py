@@ -207,17 +207,19 @@ def main():
     check("runtime: primary and repair paths all invoke one CLI", len(runtime_runs) == 5)
     check("runtime: every invocation consumes AgentTask plus bundle", all("--task" in step["run"] and "--bundle" in step["run"] for step in runtime_runs))
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
-    claude_build_steps = [step for step in build_steps if "claude" in str(step.get("id", ""))]
-    codex_build_steps = [step for step in build_steps if step not in claude_build_steps]
+    codex_build_steps = [
+        step for step in build_steps if "codex" in str(step.get("if", ""))
+    ]
+    claude_build_steps = [step for step in build_steps if step not in codex_build_steps]
     model_calls = [step for _, step in all_steps if step.get("uses") == "./.github/actions/claude-model-call"]
-    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 5 and len(codex_build_steps) == 5)
-    check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 5)
+    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 7 and len(codex_build_steps) == 5)
+    check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 7)
     model_text = WORKFLOWS["model"].read_text()
     check("runtime: trusted bridge requires observed enforcement proof", "from agent_runtime.claude_bridge import bridge" in model_text and 'proof="$RAW/enforcement.json"' in model_text)
     check("runtime: handoff has byte and file bounds plus complete digest verification", "MAX_HANDOFF_BYTES" in handoff and "MAX_HANDOFF_FILES" in handoff and "_verify_bundle" in handoff and "manifest verification failed" in handoff)
     check("runtime: model job receives a trusted manifest identity", "handoff_sha256" in WORKFLOWS["model"].read_text() and "steps.pack.outputs.manifestSha256" in component)
     reusable_calls = [job for doc in docs.values() for job in doc.get("jobs", {}).values() if job.get("uses") == "./.github/workflows/claude-model.yml"]
-    check("runtime: caller binds reusable model job to its own commit", len(reusable_calls) == 5 and all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for job in reusable_calls))
+    check("runtime: caller binds reusable model job to its own commit", len(reusable_calls) == 7 and all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for job in reusable_calls))
     check("runtime: local workflow reference eliminates mutable branch resolution", all(job.get("uses") == "./.github/workflows/claude-model.yml" for job in reusable_calls) and "github.ref_name" not in text and "gh workflow run" not in component)
     check(
         "runtime: source validation remains distinct from job binding",

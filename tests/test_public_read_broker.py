@@ -2096,7 +2096,9 @@ def test_public_internet_broker():
                     and not attestation["home_entries"]
                     and len(attestation["process_tree"]) >= 1,
                 )
-                advisory, _ = test_generic_vision(broker.receipt_dir)
+                _, advisory = test_generic_vision(
+                    broker.receipt_dir, manifest_result=value
+                )
                 test_authority_separation(advisory)
             finally:
                 broker.close()

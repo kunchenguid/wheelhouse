@@ -902,7 +902,7 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: repair model and projection follow the caller-bound job graph",
-        prepare_job.get("needs") == ["triage", "triage-model"]
+        prepare_job.get("needs") == ["triage", "triage-model", "advisory-model"]
         and repair_job.get("needs") == "triage-repair-prepare"
         and repair_job.get("uses") == "./.github/workflows/claude-model.yml"
         and all(

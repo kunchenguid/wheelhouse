@@ -50,9 +50,9 @@ def main() -> None:
     call = on.get("workflow_call") or {}
     check("dispatch: workflow call exposes bounded scalar outputs", set((call.get("outputs") or {})) == {"result_artifact", "status", "error_code", "observed_commit_sha"})
     check("dispatch: model workflow keeps exact read-only permissions", model.get("permissions") == {"actions": "read", "contents": "read"})
-    check("dispatch: all five Claude families use the local reusable workflow", len(call_jobs) == 5 and {name for name, _ in call_jobs} == {"triage", "deep", "decision"})
+    check("dispatch: all seven Claude families use the local reusable workflow", len(call_jobs) == 7 and {name for name, _ in call_jobs} == {"triage", "deep", "decision"})
     check("dispatch: every local call binds expected source to github.sha", all((job.get("with") or {}).get("expected_commit_sha") == "${{ github.sha }}" for _, job in call_jobs))
-    check("dispatch: every local call passes only model and read-only broker secrets", all(set(job.get("secrets") or {}) == {"CLAUDE_CODE_OAUTH_TOKEN", "READONLY_TOKEN"} for _, job in call_jobs))
+    check("dispatch: every local call passes only model and read-only broker secrets", all("CLAUDE_CODE_OAUTH_TOKEN" in (job.get("secrets") or {}) and set(job.get("secrets") or {}) <= {"CLAUDE_CODE_OAUTH_TOKEN", "READONLY_TOKEN"} for _, job in call_jobs))
     check("dispatch: no caller inherits FLEET_TOKEN into the model boundary", all("FLEET_TOKEN" not in str(job.get("secrets") or {}) and job.get("secrets") != "inherit" for _, job in call_jobs))
     check("dispatch: mutable branch dispatch is absent", "github.ref_name" not in model_text + prepare_text and "gh workflow run" not in model_text + prepare_text and "workflow_dispatch" not in on)
     check("dispatch: obsolete branch-polling controller is removed", not (ROOT / "scripts/claude_model_dispatch.py").exists())
@@ -70,14 +70,14 @@ def main() -> None:
     ]
     check(
         "dispatch: each normalized result receiver has a disjoint static workspace",
-        len(receiver_calls) == 7
+        len(receiver_calls) == 10
         and len(
             {
                 (step.get("with") or {}).get("invocation-id")
                 for step in receiver_calls
             }
         )
-        == 7,
+        == 10,
     )
     check("dispatch: preparer uploads hidden signed paths", "include-hidden-files: true" in prepare_text and "agent_runtime.claude_handoff pack" in prepare_text)
 

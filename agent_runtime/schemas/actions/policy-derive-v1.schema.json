@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["version", "target_head_sha", "target_base_sha", "vision_blob_sha", "vision_sha256", "units", "obligations"],
   "properties": {
-    "version": {"const": "wheelhouse/evidence-plan/v3"},
+    "version": {"type": "string", "const": "wheelhouse/evidence-plan/v3"},
     "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "vision_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -23,11 +23,11 @@
         "end_line": {"type": "integer", "minimum": 1},
         "text": {"type": "string", "minLength": 1, "maxLength": 40000},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "classification": {"enum": ["context-only", "decision-criterion", "evidence-obligation"]},
-        "semantic_status": {"enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+        "classification": {"type": "string", "enum": ["context-only", "decision-criterion", "evidence-obligation"]},
+        "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
         "normative": {"type": "boolean"},
         "decision_relevant": {"type": "boolean"},
-        "condition_strength": {"enum": ["none", "advisory", "required", "prohibited", "conditional"]},
+        "condition_strength": {"type": "string", "enum": ["none", "advisory", "required", "prohibited", "conditional"]},
         "conditions": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 2000}}
       }
     },
@@ -37,9 +37,9 @@
       "properties": {
         "obligation_id": {"type": "string", "pattern": "^O[0-9]{3}$"},
         "unit_id": {"type": "string", "pattern": "^P[0-9]{3}$"},
-        "operation": {"enum": ["public.git_snapshot", "public.fetch", "public.artifact", "digest.verify", "exercise.run", "policy.assess"]},
+        "operation": {"type": "string", "enum": ["public.git_snapshot", "public.fetch", "public.artifact", "digest.verify", "exercise.run", "policy.assess"]},
         "requirement": {"type": "string", "minLength": 1, "maxLength": 40000},
-        "semantic_status": {"enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
+        "semantic_status": {"type": "string", "enum": ["recognized", "recognized-local", "unknown", "ambiguous"]},
         "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     }
