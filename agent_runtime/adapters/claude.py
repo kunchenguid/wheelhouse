@@ -511,8 +511,14 @@ class ClaudeStreamParser:
                 "Claude stream terminal result was not successful"
             )
         if self.require_structured_output and "structured_output" not in self.terminal:
+            turns = self.terminal.get("num_turns")
+            suffix = (
+                " after %d turns" % turns
+                if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0
+                else ""
+            )
             raise ClaudeProtocolError(
-                "Claude native schema result omitted structured output"
+                "Claude native schema result omitted structured output%s" % suffix
             )
         structured = self.terminal.get("structured_output")
         if self.require_structured_output and structured is None:

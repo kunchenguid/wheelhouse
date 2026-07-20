@@ -656,6 +656,9 @@ def main():
         ),
     )
     _, missing_structured = protocol_lines(structured=False)
+    missing_structured = missing_structured.replace(
+        b'"usage":', b'"num_turns":3,"usage":'
+    )
     check(
         "stream: missing native structured output rejected",
         fails(

@@ -427,6 +427,14 @@ def run_node_npm_cli(
             stderr = scenarios[failed.removesuffix("_exit")]["stderr"].lstrip()
             if stderr.startswith("bwrap:"):
                 diagnostic = ".sandbox"
+                if "No permissions to creating new namespace" in stderr:
+                    diagnostic += "_namespace"
+                elif "Can't bind mount" in stderr or "No such file" in stderr:
+                    diagnostic += "_mount"
+                elif "execvp" in stderr:
+                    diagnostic += "_exec"
+                elif "uid map" in stderr:
+                    diagnostic += "_uidmap"
             elif "ERR_MODULE_NOT_FOUND" in stderr:
                 diagnostic = ".module"
             elif stderr.startswith("node:") or stderr.startswith("/node"):
