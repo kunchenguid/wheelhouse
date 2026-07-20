@@ -1340,7 +1340,7 @@ def build_nl_prompt(
     schema = (
         '{"mode":"action|answer|clarify",'
         '"action":"<one allowed verb, required only when mode=action>",'
-        '"free_text":"<optional: final target-facing prose; for decline follow the contract below>",'
+        '"free_text":"<required and non-empty for decline; optional final target-facing prose otherwise>",'
         '"answer":"<required when mode=answer or clarify: the text to post>"}'
     )
     parts = [
@@ -1384,7 +1384,9 @@ def build_nl_prompt(
         parts += [
             "  - A reason-bearing close/reject instruction maps to `decline`; use",
             "    `close` only when the maintainer wants no target note.",
-            "  - For `decline`, `free_text` is the final public note to the contributor.",
+            "  - For `decline`, `free_text` is required, must be non-empty, and is the",
+            "    final public note to the contributor. Never return a `decline` action",
+            "    without it.",
             "    Interpret the instruction with the trusted card and the target reference",
             "    data so actors and nouns are clear, then rewrite it as concise, respectful",
             "    contributor-facing prose. Respect changes the tone, not the decision.",
@@ -1679,6 +1681,12 @@ def _nl_parse_with_reason(text):
             "$ has", "result JSON has"
         )
         return None, reason or "result failed nl-decision-v1 schema validation"
+    if (
+        value.get("mode") == "action"
+        and value.get("action") == "decline"
+        and not str(value.get("free_text", "") or "").strip()
+    ):
+        return None, "decline action requires non-empty field 'free_text'"
     return value, ""
 
 
@@ -1718,7 +1726,7 @@ def build_nl_repair_prompt(
             "{",
             '  "mode": "action | answer | clarify" (required),',
             '  "action": "string up to 80 characters" (optional),',
-            '  "free_text": "string up to 32768 characters" (optional),',
+            '  "free_text": "string up to 32768 characters" (required and non-empty for decline; optional otherwise),',
             '  "answer": "string up to 65536 characters" (optional)',
             "}",
             "No other keys are allowed.",

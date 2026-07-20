@@ -2780,8 +2780,9 @@ def test_decline_prose_contract_and_real_action_path():
     )
     check(
         "decline contract: prompt's schema-shaped guidance binds free_text to the rules",
-        '"free_text":"<optional: final target-facing prose; for decline follow the contract below>"'
-        in prompt,
+        '"free_text":"<required and non-empty for decline; optional final target-facing prose otherwise>"'
+        in prompt
+        and "Never return a `decline` action" in prompt,
     )
 
     with open(ad.NL_SCHEMA_PATH, encoding="utf-8") as schema_file:
@@ -2791,6 +2792,22 @@ def test_decline_prose_contract_and_real_action_path():
         schema["additionalProperties"] is False
         and schema["properties"]["free_text"]
         == {"type": "string", "maxLength": 32768},
+    )
+
+    omitted_note = json.dumps({"mode": "action", "action": "decline"})
+    omission_reason = ad.nl_schema_reason(omitted_note)
+    omission_plan = ad.plan_nl_repair(omitted_note)
+    omission_result = ad.decide_nl_apply(
+        omitted_note,
+        "",
+        repair_needed=omission_plan["repair_needed"],
+    )
+    check(
+        "decline regression: omitted prose is rejected before deterministic routing",
+        omission_reason == "decline action requires non-empty field 'free_text'"
+        and omission_plan["repair_needed"] is True
+        and omission_result["outcome"] == "repair-failed"
+        and omission_result["result"] is None,
     )
 
     # Faithful no-spend replay of the observed model payload through the same
