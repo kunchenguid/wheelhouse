@@ -387,10 +387,25 @@ def _validate_worker(
                 spend_started=bool(worker.get("spendStarted")),
             )
         normalized = deepcopy(delivered_value)
+        semantic_by_id: dict[str, Any] = {}
         for unit in normalized["units"]:
             identity = by_id[unit["unit_id"]]
             for name in ("start_line", "end_line", "text", "sha256"):
                 unit[name] = identity[name]
+            semantic_by_id[unit["unit_id"]] = unit.get("semantic_status")
+        obligations = normalized.get("obligations")
+        if isinstance(obligations, list):
+            for index, obligation in enumerate(obligations, start=1):
+                unit_id = obligation.get("unit_id") if isinstance(obligation, dict) else None
+                if unit_id not in by_id:
+                    return None, None, _error(
+                        "output.schema_invalid",
+                        "Policy result referenced an unknown VISION unit.",
+                        spend_started=bool(worker.get("spendStarted")),
+                    )
+                obligation["obligation_id"] = "O%03d" % index
+                obligation["requirement"] = by_id[unit_id]["text"]
+                obligation["semantic_status"] = semantic_by_id[unit_id]
         delivered_value = normalized
     delivered = None
     secret_match = False
