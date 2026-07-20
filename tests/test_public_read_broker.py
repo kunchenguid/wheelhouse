@@ -547,8 +547,8 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         )
     )
     check(
-        "VISION: runtime contains no fixture-specific AXI or catalog policy",
-        re.search(r"(?i)\b(?:axi|catalog)\b", runtime_policy) is None,
+        "VISION: runtime contains no repository-specific policy",
+        re.search(r"(?i)\baxi\b", runtime_policy) is None,
     )
     axi_operations = {row["operation"] for row in axi_plan["obligations"]}
     unrelated_operations = {row["operation"] for row in unrelated_plan["obligations"]}
@@ -599,6 +599,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     modifier_plan = derive_evidence_plan(
         "Artifacts must be released with legal approval."
     )
+    prefix_plan = derive_evidence_plan(
+        "Artifacts must receive legal approval before release."
+    )
+    mixed_known_unknown_plan = derive_evidence_plan(
+        "A positive review requires fetching the public manifest after legal approval."
+    )
+    negated_plan = derive_evidence_plan(
+        "Artifacts must not bypass legal approval before release."
+    )
+    conditional_plan = derive_evidence_plan(
+        "Artifacts may receive a positive review if legal approval exists."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -614,8 +626,59 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         and any(
             row["semantic_status"] == "unknown"
             for row in modifier_plan["obligations"]
+        )
+        and any(
+            row["semantic_status"] == "unknown"
+            for plan in (
+                prefix_plan,
+                mixed_known_unknown_plan,
+                negated_plan,
+                conditional_plan,
+            )
+            for row in plan["obligations"]
         ),
     )
+    check(
+        "VISION: known generic fixtures have no unclassified semantic remainder",
+        all(
+            row["semantic_status"] not in {"unknown", "ambiguous"}
+            for plan in (axi_plan, unrelated_plan)
+            for row in plan["obligations"]
+        ),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        adversarial_path = Path(directory) / "vision.md"
+        adversarial_path.write_text(
+            "Artifacts must receive legal approval before release.\n",
+            encoding="utf-8",
+        )
+        adversarial_plan, adversarial_review = vision_review(
+            adversarial_path,
+            lambda plan: [
+                {
+                    "obligation_id": row["obligation_id"],
+                    "assessment": "pass",
+                    "rationale": "A positive interpretation was attempted.",
+                    "citation_ids": [],
+                }
+                for row in plan["obligations"]
+            ],
+            [],
+            Path(directory),
+        )
+        check(
+            "VISION: unclassified conditions prevent every positive projection",
+            adversarial_review["verdict"] == "inconclusive"
+            and adversarial_review["projection_complete"] is False
+            and all(
+                row["semantic_status"] == "unknown"
+                for row in adversarial_plan["obligations"]
+            )
+            and all(
+                row["trusted_status"] == "unavailable"
+                for row in adversarial_review["obligation_results"]
+            ),
+        )
     digest = hashlib.sha256(b"policy-bound-artifact").hexdigest()
     digest_plan = derive_evidence_plan(
         "A positive review requires verifying the release artifact at "

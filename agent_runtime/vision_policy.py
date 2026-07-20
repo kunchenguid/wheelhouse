@@ -49,6 +49,28 @@ _DIGEST_LANGUAGE = re.compile(
 _SHA256_VALUE = re.compile(
     r"(?i)\bsha-?256\s*[:=]?\s*([0-9a-f]{64})\b"
 )
+_SEMANTIC_TOKEN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+_UNDERSTOOD_NORMATIVE_TERMS = frozenset(
+    """
+    a across actual admission after against agent agents all an and applicable are artifact
+    artifacts as assertions at attributing auditing avoid be before behavior behavioral benchmark by can
+    cannot catalog changes checks claims clarity code common-denominator completed
+    components concerns contributor contributor-provided data dataset declared direct
+    discoverability discovery diffs distinguish either entrypoints ergonomics error errors established every
+    evidence exact execute executed execution exercise exercised exhaustive existing existence exists
+    fetched fetches fetching files for from generated https identified identify if
+    including inconclusive independent insufficient inspect inspected inspection integrity interface
+    is it its itself key maintain manifest may meaning metadata missing models must new not
+    observations observed of on only open ordering oriented or other output outputs own
+    package pasted paths pinned policy positive principle principles proposed prose
+    provided public published rather receive recommend release released relevant remain
+    representative request required require requires review reviewer revision rigorous
+    row runnable satisfy screenshot screenshots sdk shall should similar sorted source
+    specific stable strengthen structured success such tasks than that the their through
+    to transcripts truthful under unrelated unverified validation verdict verification
+    verifies verify verifying version was welcome when without with every
+    """.split()
+)
 
 
 class VisionPolicyError(ValueError):
@@ -141,15 +163,22 @@ def _operations(text: str) -> list[str]:
     return operations
 
 
-def _normative_clauses(sentence: str) -> list[str]:
-    return [
-        clause.strip(" ,;:")
-        for clause in re.split(
-            r"(?i)\s*(?:;|\b(?:and|but|with(?:out)?|only\s+after|provided\s+that|contingent\s+upon)\b)\s*",
-            sentence,
-        )
-        if clause.strip(" ,;:")
-    ]
+def _normative_remainders(text: str) -> list[str]:
+    prose = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    remainders = []
+    for sentence in re.split(r"(?<=[.!?])\s+", prose):
+        if not _NORMATIVE.search(sentence):
+            continue
+        scrubbed = re.sub(r"https?://\S+|\b[0-9a-fA-F]{64}\b|sha-?256", " ", sentence)
+        for match in _SEMANTIC_TOKEN.finditer(scrubbed):
+            token = match.group(0)
+            if token.isupper() and len(token) > 1:
+                continue
+            if token.casefold() not in _UNDERSTOOD_NORMATIVE_TERMS:
+                remainders.append(token.casefold())
+    return remainders
 
 
 def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
@@ -164,17 +193,8 @@ def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
         return "ambiguous"
     if "digest.verify" in operations:
         return "unknown"
-    sentences = [
-        value.strip()
-        for value in re.split(r"(?<=[.!?])\s+", text)
-        if value.strip() and not value.lstrip().startswith("#")
-    ]
-    for sentence in sentences or [text]:
-        sentence_normative = bool(_NORMATIVE.search(sentence))
-        if sentence_normative:
-            for clause in _normative_clauses(sentence):
-                if not _operations(clause) and not _LOCAL_POLICY_RULE.search(clause):
-                    return "unknown"
+    if _normative_remainders(text):
+        return "unknown"
     if not operations:
         return "recognized-local" if not normative or _LOCAL_POLICY_RULE.search(text) else "unknown"
     return "recognized"
