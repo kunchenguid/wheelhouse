@@ -713,9 +713,31 @@ class ClaudeCliAdapter(AgentAdapterV1):
         credential = _oauth_file()
         if schema_bytes is None:
             raise ClaudeProbeError("Claude output schema probe is unavailable")
-        _, schema_text = validate_schema_subset(
-            schema_bytes, str(task["spec"]["output"]["schemaSha256"])
-        )
+        expected_schema_sha256 = str(task["spec"]["output"]["schemaSha256"])
+        if task["metadata"]["action"] in PUBLIC_POLICY_ACTIONS:
+            if (
+                not schema_bytes
+                or len(schema_bytes) > MAX_SCHEMA_BYTES
+                or not hmac.compare_digest(
+                    hashlib.sha256(schema_bytes).hexdigest(), expected_schema_sha256
+                )
+            ):
+                raise ClaudeProbeError("Claude output schema digest is invalid")
+            try:
+                schema_text = schema_bytes.decode("utf-8", errors="strict")
+                schema_value = _strict_json(schema_text)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
+                raise ClaudeProbeError("Claude output schema is invalid") from error
+            if (
+                not isinstance(schema_value, dict)
+                or schema_value.get("$schema")
+                != "http://json-schema.org/draft-07/schema#"
+            ):
+                raise ClaudeProbeError("Claude output schema is not draft-07")
+        else:
+            _, schema_text = validate_schema_subset(
+                schema_bytes, expected_schema_sha256
+            )
 
         binary = shutil.which("claude")
         if not binary:
