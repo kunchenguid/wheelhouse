@@ -401,6 +401,21 @@ def _policy_shape_category(value: Any) -> str:
     return "scalar"
 
 
+def _restore_agreed_audit_units(value: Any, proposed_plan: Any) -> Any:
+    if (
+        not isinstance(value, dict)
+        or isinstance(value.get("units"), list)
+        or value.get("complete") is not True
+        or value.get("disagreements") != []
+        or not isinstance(proposed_plan, dict)
+        or not isinstance(proposed_plan.get("units"), list)
+    ):
+        return value
+    restored = deepcopy(value)
+    restored["units"] = deepcopy(proposed_plan["units"])
+    return restored
+
+
 def _validate_worker(
     task: dict[str, Any],
     bundle: Path,
@@ -412,6 +427,24 @@ def _validate_worker(
     delivered_value = worker.get("final") if "final" in worker else worker.get("delivered")
     if task["metadata"]["action"] in {"policy-derive.public", "policy-audit.public"}:
         delivered_value = _unwrap_policy_value(delivered_value)
+        if task["metadata"]["action"] == "policy-audit.public":
+            proposed_source = next(
+                (
+                    row
+                    for row in task["spec"]["inputs"]
+                    if row["id"] == "policy-derivation"
+                ),
+                None,
+            )
+            try:
+                proposed_plan = load_json_regular(
+                    bundle / proposed_source["artifact"], max_bytes=262144
+                )
+            except (ContractError, KeyError, TypeError):
+                proposed_plan = None
+            delivered_value = _restore_agreed_audit_units(
+                delivered_value, proposed_plan
+            )
         source = next(
             (row for row in task["spec"]["inputs"] if row["id"] == "vision-units"),
             None,
