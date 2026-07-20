@@ -1456,6 +1456,34 @@ def build_task(
         schema_value["properties"]["obligations"]["items"] = {
             "oneOf": bound_obligations
         }
+    if action == "advisory-review.public":
+        proposed_plan = load_json_regular(Path(policy_plan_file), max_bytes=262144)
+        validate_schema(
+            proposed_plan,
+            load_json_regular(
+                ACTION_SCHEMAS / "policy-derive-v1.schema.json", max_bytes=65536
+            ),
+        )
+        obligations = proposed_plan["obligations"]
+        schema_value["properties"]["obligation_results"]["minItems"] = len(
+            obligations
+        )
+        schema_value["properties"]["obligation_results"]["maxItems"] = len(
+            obligations
+        )
+        result_schema = source_schema["properties"]["obligation_results"]["items"]
+        bound_results = []
+        for obligation in obligations:
+            bound_result = deepcopy(result_schema)
+            bound_result["properties"]["obligation_id"] = {
+                "type": "string",
+                "const": obligation["obligation_id"],
+            }
+            bound_results.append(bound_result)
+        if bound_results:
+            schema_value["properties"]["obligation_results"]["items"] = {
+                "oneOf": bound_results
+            }
 
     source_prompt = Path(prompt_path)
     try:
