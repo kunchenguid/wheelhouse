@@ -17,7 +17,6 @@ import json
 import os
 import re
 import selectors
-import shutil
 import signal
 import socket
 import socketserver

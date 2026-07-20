@@ -87,7 +87,7 @@ Before another profile is promoted, production observation uses the durable resu
 
 ### Credential-free public evidence
 
-`advisory-review.public` is a distinct, authority-free result path for PR triage when the target default branch has a readable `VISION.md`, the complete PR diff is available, and a VISION-derived obligation needs external public evidence. Trusted task construction copies that exact VISION and derives a generic evidence plan from all of its review units. A VISION whose obligations can be assessed entirely from trusted local inputs stays on the existing local triage path. No project, package, catalog, or domain policy is encoded in the runtime. A missing or unreadable VISION, omitted obligation, unavailable receipt, or truncated required source prevents a positive projected verdict.
+`advisory-review.public` is a distinct, authority-free result path for PR triage when the target default branch has a readable `VISION.md`, the complete PR diff is available, and a VISION-derived obligation needs public evidence or has unknown or ambiguous normative language. Trusted task construction copies that exact VISION and derives a generic evidence plan from all of its review units. A VISION whose obligations can be assessed entirely from trusted local inputs stays on the existing local triage path. No project, package, catalog, or domain policy is encoded in the runtime. A missing or unreadable VISION, omitted obligation, unavailable receipt, truncated required source, or unknown or ambiguous normative clause prevents a positive projected verdict.
 
 The model sees only the exact typed MCP operations `public.search`, `public.fetch`, `public.git_snapshot`, `public.artifact`, and `exercise.run`, plus bounded read-only input tools. It never receives a shell, WebFetch, caller-selected headers, credentials, or a raw network socket. `agent_runtime/public_read.py` owns URL validation, resolve-all and reject-any address admission, IP-pinned TLS with original SNI and Host, per-redirect revalidation, hard byte/time/count bounds, depth-1 data-only Git extraction, immutable receipts, and explicit UNTRUSTED evidence envelopes. `exercise.run` accepts only complete staged-artifact receipt IDs and a small reviewed adapter identifier. Its Node npm CLI adapter extracts regular files under cumulative file/byte limits, installs no scripts, accepts no arbitrary command or arguments, and runs fixed discovery, success, and error scenarios behind a separate cumulative wall bound in a no-network Bubblewrap process.
 
@@ -192,6 +192,7 @@ Canonical tools are:
 - `public.fetch`
 - `public.git_snapshot`
 - `public.artifact`
+- `exercise.run`
 - typed `final.*` schemas for adapters that need terminating final tools
 
 Codex uses its native `turn/start.outputSchema` mechanism.
