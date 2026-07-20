@@ -532,10 +532,27 @@ def _validate_worker(
                 bundle=bundle,
                 receipt_dir=public_receipt_dir,
             )
-        except VisionPolicyError:
+        except VisionPolicyError as error:
+            reason = str(error)
+            category = next(
+                (
+                    label
+                    for marker, label in (
+                        ("obligation", "obligation-binding"),
+                        ("citation", "citation-binding"),
+                        ("receipt", "receipt-binding"),
+                        ("revision", "revision-binding"),
+                        ("policy", "policy-binding"),
+                        ("VISION", "vision-binding"),
+                    )
+                    if marker in reason
+                ),
+                "projection",
+            )
             return None, delivered, _error(
                 "output.evidence_invalid",
-                "Public advisory did not bind to trusted VISION obligations and immutable receipts.",
+                "Public advisory did not bind to trusted VISION obligations and immutable receipts (%s)."
+                % category,
                 spend_started=True,
             )
         final_encoded = canonical_json_bytes(final_value)
