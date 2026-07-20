@@ -370,16 +370,41 @@ def _validate_worker(
             trusted = load_json_regular(bundle / source["artifact"], max_bytes=262144)
             trusted_units = trusted["units"]
             by_id = {row["unit_id"]: row for row in trusted_units}
-            actual_ids = [row.get("unit_id") for row in units]
-        except (ContractError, KeyError, TypeError):
+            duplicate_shas = {
+                value
+                for value in {row["sha256"] for row in trusted_units}
+                if sum(row["sha256"] == value for row in trusted_units) > 1
+            }
+            duplicate_texts = {
+                value
+                for value in {row["text"] for row in trusted_units}
+                if sum(row["text"] == value for row in trusted_units) > 1
+            }
+            by_sha = {
+                row["sha256"]: row
+                for row in trusted_units
+                if row["sha256"] not in duplicate_shas
+            }
+            by_text = {
+                row["text"]: row
+                for row in trusted_units
+                if row["text"] not in duplicate_texts
+            }
+            resolved_units = [
+                by_sha.get(row.get("sha256"))
+                or by_text.get(row.get("text"))
+                or by_id.get(row.get("unit_id"))
+                for row in units
+            ]
+        except (AttributeError, ContractError, KeyError, TypeError):
             trusted_units = []
             by_id = {}
-            actual_ids = []
+            resolved_units = []
         if (
             not isinstance(units, list)
-            or not all(isinstance(unit_id, str) for unit_id in actual_ids)
-            or len(actual_ids) != len(set(actual_ids))
-            or set(actual_ids) != set(by_id)
+            or any(unit is None for unit in resolved_units)
+            or len({unit["unit_id"] for unit in resolved_units}) != len(resolved_units)
+            or {unit["unit_id"] for unit in resolved_units} != set(by_id)
         ):
             return None, None, _error(
                 "output.schema_invalid",
@@ -388,9 +413,8 @@ def _validate_worker(
             )
         normalized = deepcopy(delivered_value)
         semantic_by_id: dict[str, Any] = {}
-        for unit in normalized["units"]:
-            identity = by_id[unit["unit_id"]]
-            for name in ("start_line", "end_line", "text", "sha256"):
+        for unit, identity in zip(normalized["units"], resolved_units):
+            for name in ("unit_id", "start_line", "end_line", "text", "sha256"):
                 unit[name] = identity[name]
             if unit.get("classification") == "context-only":
                 unit["normative"] = False
