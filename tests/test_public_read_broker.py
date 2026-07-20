@@ -1472,6 +1472,36 @@ def test_public_task_contract():
         audit = {"version": AUDIT_VERSION, **binding, "vision_sha256": document["vision_sha256"], "units": units, "obligations": [obligation], "complete": True, "disagreements": []}
         plan_path = root / "plan.json"; plan_path.write_text(json.dumps(plan), encoding="utf-8")
         audit_path = root / "audit.json"; audit_path.write_text(json.dumps(audit), encoding="utf-8")
+        derive_bundle = root / "derive-bundle"
+        derive_task = build_task(
+            action="policy-derive.public",
+            selection=resolve_selection("policy-derive.public"),
+            prompt_path=str(prompt),
+            bundle_dir=str(derive_bundle),
+            output_path=str(derive_bundle / "task.json"),
+            owner="owner",
+            repo="target",
+            number=1,
+            target_kind="pr-review",
+            revision="a" * 40,
+            base_revision="b" * 40,
+            vision_blob_sha="c" * 40,
+            wheelhouse_revision="b" * 40,
+            event_key="d" * 64,
+            vision_file=str(vision),
+        )
+        derive_schema = json.loads(
+            (derive_bundle / derive_task["spec"]["output"]["schemaArtifact"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        check(
+            "task: policy schema const-binds every freshness field",
+            all(
+                derive_schema["properties"][name].get("const") == value
+                for name, value in {**binding, "vision_sha256": document["vision_sha256"]}.items()
+            ),
+        )
         bundle = root / "bundle"
         task = build_task(
             action="advisory-review.public",

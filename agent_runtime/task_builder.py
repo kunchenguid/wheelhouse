@@ -940,7 +940,12 @@ def _bound_output_schema(
 ) -> dict[str, Any]:
     if action in {"policy-derive.public", "policy-audit.public"}:
         bound = deepcopy(schema)
-        for name in ("target_head_sha", "target_base_sha", "vision_blob_sha"):
+        for name in (
+            "target_head_sha",
+            "target_base_sha",
+            "vision_blob_sha",
+            "vision_sha256",
+        ):
             bound["properties"][name] = {"type": "string", "const": policy_binding[name]}
         return bound
     if action == "advisory-review.public":
