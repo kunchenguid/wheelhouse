@@ -709,6 +709,12 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
                 final = decode_json_carrier(final)
                 if isinstance(final, dict) and set(final) == {"json"}:
                     final = decode_json_carrier(final)
+                if (
+                    isinstance(final, dict)
+                    and set(final) in ({"value"}, {"result"}, {"output"})
+                    and isinstance(next(iter(final.values())), dict)
+                ):
+                    final = next(iter(final.values()))
             except ClaudeProtocolError as error:
                 raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
         final_bytes = canonical_json_bytes(final)

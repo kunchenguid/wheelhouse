@@ -472,6 +472,18 @@ def run_node_npm_cli(
                 diagnostic = ".node"
                 if "EACCES" in stderr or "permission denied" in stderr.lower():
                     diagnostic += "_permission"
+                    for path, suffix in (
+                        ("/proc", "_proc"),
+                        ("/dev", "_dev"),
+                        ("/etc", "_etc"),
+                        ("/run/exercise", "_broker"),
+                        ("/evidence", "_evidence"),
+                        ("/work", "_work"),
+                        ("/writable", "_writable"),
+                    ):
+                        if path in stderr:
+                            diagnostic += suffix
+                            break
                 elif "ENOENT" in stderr or "no such file" in stderr.lower():
                     diagnostic += "_missing"
             diagnostic += ".code_%d" % scenario["exit_code"]
