@@ -1514,6 +1514,8 @@ def test_public_task_contract():
         check(
             "task: policy transport binds unit semantics to deterministic order",
             "units array MUST correspond one-for-one in the exact same order as vision-units.json"
+            in derive_prompt
+            and "Include exactly %d unit entries" % len(document["units"])
             in derive_prompt,
         )
         bundle = root / "bundle"

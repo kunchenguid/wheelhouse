@@ -1524,6 +1524,14 @@ def build_task(
             if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),
+        *(
+            [
+                "A policy result without a top-level units array is invalid. Include exactly "
+                "%d unit entries, one for every vision-units.json entry." % unit_count
+            ]
+            if policy_action
+            else []
+        ),
         "Do not add Markdown fences or prose outside that schema.",
         *(
             [
