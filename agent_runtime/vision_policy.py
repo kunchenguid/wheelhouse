@@ -49,27 +49,36 @@ _DIGEST_LANGUAGE = re.compile(
 _SHA256_VALUE = re.compile(
     r"(?i)\bsha-?256\s*[:=]?\s*([0-9a-f]{64})\b"
 )
-_SEMANTIC_TOKEN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
-_UNDERSTOOD_NORMATIVE_TERMS = frozenset(
-    """
-    a across actual admission after against agent agents all an and applicable are artifact
-    artifacts as assertions at attributing auditing avoid be before behavior behavioral benchmark by can
-    cannot catalog changes checks claims clarity code common-denominator completed
-    components concerns contributor contributor-provided data dataset declared direct
-    discoverability discovery diffs distinguish either entrypoints ergonomics error errors established every
-    evidence exact execute executed execution exercise exercised exhaustive existing existence exists
-    fetched fetches fetching files for from generated https identified identify if
-    including inconclusive independent insufficient inspect inspected inspection integrity interface
-    is it its itself key maintain manifest may meaning metadata missing models must new not
-    observations observed of on only open ordering oriented or other output outputs own
-    package pasted paths pinned policy positive principle principles proposed prose
-    provided public published rather receive recommend release released relevant remain
-    representative request required require requires review reviewer revision rigorous
-    row runnable satisfy screenshot screenshots sdk shall should similar sorted source
-    specific stable strengthen structured success such tasks than that the their through
-    to transcripts truthful under unrelated unverified validation verdict verification
-    verifies verify verifying version was welcome when without with every
-    """.split()
+_GRAMMAR_PRODUCTIONS = (
+    (re.compile(r".+\brequires?\s+(?:rigorous\s+)?validation\s+across\s+.+", re.I), ("policy.assess",)),
+    (re.compile(r".+\bmay\s+receive\s+(?:a\s+)?positive\s+(?:[\w-]+\s+){0,3}verdict\s+only\s+after\s+(?:[\w-]+\s+){0,4}review\s+of\s+(?:[\w-]+\s+){0,4}(?:package|artifact|release)(?:\s+itself)?", re.I), ("public.artifact",)),
+    (re.compile(r".+\bmay\s+receive\s+(?:a\s+)?positive\s+(?:review|verdict)\s+only\s+after\s+(?:[\w-]+\s+){0,5}fetches?\s+.+\b(?:manifest|dataset|public\s+url)\b\s+and\s+verifies?\s+.+", re.I), ("public.fetch",)),
+    (re.compile(r".+\bmust\s+inspect\s+.+\bsource\b.+(?:\band\b.+\bexecute\s+.+\b(?:package|artifact|release)\b.+)?", re.I), ("public.git_snapshot", "public.artifact", "exercise.run")),
+    (re.compile(r".+\bmust\s+satisfy\s+.+", re.I), ("policy.assess",)),
+    (re.compile(r".+\b(?:are|is)\s+insufficient\s+evidence(?:\s+.+)?", re.I), ("policy.assess",)),
+    (re.compile(r".+\bmust\s+identify\s+.+\b(?:source|revision|release)\b.+", re.I), ("public.git_snapshot", "public.artifact", "exercise.run")),
+    (re.compile(r".+\bmust\s+distinguish\s+direct\s+observations\s+from\s+unverified\s+claims\s+and\s+avoid\s+attributing\s+observations\s+to\s+.+\bthat\s+was\s+not\s+inspected", re.I), ("policy.assess",)),
+    (re.compile(r"if\s+.+\bcannot\s+be\s+(?:completed|fetched|established)(?:\s+.+)?\s*,\s*.+\bmust\s+remain\s+inconclusive(?:\s+.+)?", re.I), ()),
+    (re.compile(r".+\bshould\s+be\s+representative\s+of\s+.+;\s*exhaustive\s+auditing\s+of\s+.+\bis\s+not\s+required", re.I), ("policy.assess",)),
+    (re.compile(r".+\brequires?\s+verifying\s+.+\b(?:artifact|package|release)\b.+\bsha-?256\b\s+[0-9a-f]{64}", re.I), ("public.artifact",)),
+    (re.compile(r".+\brequires?\s+verifying\s+.+\b(?:artifact|package|release)\b.+\b(?:checksum|digest|integrity|hash)\b", re.I), ("digest.verify",)),
+)
+_GRAMMAR_LIMITS = (
+    (1, frozenset()),
+    (2, frozenset({"after"})),
+    (2, frozenset({"after"})),
+    (1, frozenset({"when"})),
+    (1, frozenset()),
+    (1, frozenset()),
+    (2, frozenset({"when"})),
+    (1, frozenset({"not"})),
+    (4, frozenset({"if", "when", "cannot"})),
+    (1, frozenset({"not"})),
+    (1, frozenset()),
+    (1, frozenset()),
+)
+_SEMANTIC_CONTROLS = re.compile(
+    r"(?i)(?<!-)\b(?:if|when|unless|after|before|with|without|cannot|not|never|except|provided|contingent)\b(?!-)"
 )
 
 
@@ -163,22 +172,62 @@ def _operations(text: str) -> list[str]:
     return operations
 
 
-def _normative_remainders(text: str) -> list[str]:
-    prose = "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
+def _normative_productions(text: str) -> list[str]:
+    productions = []
+    prose = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if _NORMATIVE.search(heading):
+                productions.append(heading)
+        else:
+            prose.append(stripped)
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(prose)):
+        normalized = re.sub(r"\s+", " ", sentence).strip(" .")
+        if normalized and _NORMATIVE.search(normalized):
+            productions.append(normalized)
+    return productions
+
+
+def _parse_normative(text: str) -> tuple[list[str], str]:
+    if _AMBIGUOUS_CONDITION.search(text):
+        return _operations(text), "ambiguous"
+    operations = []
+    productions = _normative_productions(text)
+    if not productions:
+        return [], "unknown"
+    for production in productions:
+        matched = None
+        for index, (pattern, mapped) in enumerate(_GRAMMAR_PRODUCTIONS):
+            if pattern.fullmatch(production):
+                expected_count, allowed_controls = _GRAMMAR_LIMITS[index]
+                controls = {
+                    match.group(0).casefold()
+                    for match in _SEMANTIC_CONTROLS.finditer(production)
+                }
+                if (
+                    len(_NORMATIVE.findall(production)) != expected_count
+                    or not controls.issubset(allowed_controls)
+                ):
+                    continue
+                matched = mapped
+                break
+        if matched is None:
+            return [], "unknown"
+        resolved = list(matched) or _operations(production)
+        if not resolved:
+            resolved = ["policy.assess"]
+        for operation in resolved:
+            if operation not in operations:
+                operations.append(operation)
+    if "digest.verify" in operations:
+        return operations, "unknown"
+    if len(operations) > 1 and "policy.assess" in operations:
+        operations.remove("policy.assess")
+    return operations, (
+        "recognized-local" if operations == ["policy.assess"] else "recognized"
     )
-    remainders = []
-    for sentence in re.split(r"(?<=[.!?])\s+", prose):
-        if not _NORMATIVE.search(sentence):
-            continue
-        scrubbed = re.sub(r"https?://\S+|\b[0-9a-fA-F]{64}\b|sha-?256", " ", sentence)
-        for match in _SEMANTIC_TOKEN.finditer(scrubbed):
-            token = match.group(0)
-            if token.isupper() and len(token) > 1:
-                continue
-            if token.casefold() not in _UNDERSTOOD_NORMATIVE_TERMS:
-                remainders.append(token.casefold())
-    return remainders
 
 
 def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
@@ -189,11 +238,9 @@ def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
     language remains structurally mapped, but its evidence can never become a
     complete positive observation.
     """
-    if _AMBIGUOUS_CONDITION.search(text):
-        return "ambiguous"
+    if normative:
+        return _parse_normative(text)[1]
     if "digest.verify" in operations:
-        return "unknown"
-    if _normative_remainders(text):
         return "unknown"
     if not operations:
         return "recognized-local" if not normative or _LOCAL_POLICY_RULE.search(text) else "unknown"
@@ -292,8 +339,11 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
     for unit in units:
         normative = bool(_NORMATIVE.search(unit["text"]))
         heading_only = unit["text"].lstrip().startswith("#")
-        operations = _operations(unit["text"]) if not heading_only or normative else []
-        semantic_status = _semantic_status(unit["text"], operations, normative)
+        if normative:
+            operations, semantic_status = _parse_normative(unit["text"])
+        else:
+            operations = _operations(unit["text"]) if not heading_only else []
+            semantic_status = _semantic_status(unit["text"], operations, normative)
         if not operations and (not heading_only or normative):
             operations = ["policy.assess"]
         classification = (

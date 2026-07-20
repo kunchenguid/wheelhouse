@@ -547,8 +547,8 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         )
     )
     check(
-        "VISION: runtime contains no repository-specific policy",
-        re.search(r"(?i)\baxi\b", runtime_policy) is None,
+        "VISION: runtime contains no fixture-specific AXI or catalog policy",
+        re.search(r"(?i)\b(?:axi|catalog|sdk|common-denominator|entrypoints)\b", runtime_policy) is None,
     )
     axi_operations = {row["operation"] for row in axi_plan["obligations"]}
     unrelated_operations = {row["operation"] for row in unrelated_plan["obligations"]}
@@ -611,6 +611,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     conditional_plan = derive_evidence_plan(
         "Artifacts may receive a positive review if legal approval exists."
     )
+    heading_plan = derive_evidence_plan(
+        "# LEGAL APPROVAL is required before release"
+    )
+    uppercase_plan = derive_evidence_plan(
+        "Artifacts must receive LEGAL APPROVAL before release."
+    )
+    false_subject_plan = derive_evidence_plan(
+        "Artifacts must receive reviewer assertions."
+    )
+    known_words_unknown_condition_plan = derive_evidence_plan(
+        "Artifacts must be released if reviewer assertions are required."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -634,9 +646,18 @@ def test_generic_vision(receipt_dir, manifest_result=None):
                 mixed_known_unknown_plan,
                 negated_plan,
                 conditional_plan,
+                heading_plan,
+                uppercase_plan,
+                false_subject_plan,
+                known_words_unknown_condition_plan,
             )
             for row in plan["obligations"]
         ),
+    )
+    check(
+        "VISION: operation nouns in subjects grant no evidence operation",
+        {row["operation"] for row in false_subject_plan["obligations"]}
+        == {"policy.assess"},
     )
     check(
         "VISION: known generic fixtures have no unclassified semantic remainder",
