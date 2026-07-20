@@ -399,8 +399,35 @@ def _validate_worker(
     schema = load_json_regular(bundle / task["spec"]["output"]["schemaArtifact"], max_bytes=65536)
     try:
         validate_schema(delivered_value, schema)
-    except ContractError:
-        return None, delivered, _error("output.schema_invalid", "Delivered result failed the trusted output schema.", spend_started=True)
+    except ContractError as error:
+        reason = str(error)
+        category = next(
+            (
+                label
+                for marker, label in (
+                    ("must equal the contract constant", "constant"),
+                    ("is not an allowed value", "enum"),
+                    ("has the wrong type", "type"),
+                    ("is missing required field", "missing-required"),
+                    ("has unknown field", "unknown-field"),
+                    ("does not match", "alternative"),
+                    ("has too many", "upper-bound"),
+                    ("is too long", "upper-bound"),
+                    ("exceeds its maximum", "upper-bound"),
+                    ("has too few", "lower-bound"),
+                    ("is too short", "lower-bound"),
+                    ("is below its minimum", "lower-bound"),
+                    ("has an invalid format", "format"),
+                )
+                if marker in reason
+            ),
+            "contract",
+        )
+        return None, delivered, _error(
+            "output.schema_invalid",
+            "Delivered result failed the trusted output schema (%s)." % category,
+            spend_started=True,
+        )
     if not _anchor_ok(delivered_value, task, bundle):
         return None, delivered, _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
     final_value = delivered_value

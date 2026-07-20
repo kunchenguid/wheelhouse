@@ -1408,8 +1408,9 @@ def build_task(
         "Submit the final value through the native strict output schema.",
         (
             "Your final turn MUST be exactly one StructuredOutput call. Encode the complete "
-            "action-schema JSON object as the native `json` carrier string. Never finish with "
-            "plain text, Markdown, or a raw JSON response."
+            "result instance required by the original action schema, not the schema definition, "
+            "as the native `json` carrier string. Never finish with plain text, Markdown, or a "
+            "raw JSON response."
             if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),

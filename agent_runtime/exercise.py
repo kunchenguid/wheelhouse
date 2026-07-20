@@ -179,8 +179,6 @@ def _landlock_artifact(work: Path, writable: Path, node: str) -> None:
         handled |= 1 << 13
     if abi >= 3:
         handled |= 1 << 14
-    if abi >= 5:
-        handled |= 1 << 15
     ruleset_attr = RulesetAttr(handled)
     ruleset_fd = libc.syscall(
         create_ruleset, ctypes.byref(ruleset_attr), ctypes.sizeof(ruleset_attr), 0
