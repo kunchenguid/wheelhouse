@@ -825,20 +825,55 @@ class ClaudeCliAdapter(AgentAdapterV1):
         native_schema_text = schema_text
         if task["metadata"]["action"] in PUBLIC_POLICY_ACTIONS:
             transport = "draft-07-json-carrier-v1"
+            carrier_properties: dict[str, Any] = {
+                "json": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 131_072,
+                }
+            }
+            carrier_required = ["json"]
+            if task["metadata"]["action"] in {
+                "policy-derive.public",
+                "policy-audit.public",
+            }:
+                action_schema = _strict_json(schema_text)
+                unit_schema = action_schema["definitions"]["unit"]
+                semantic_names = (
+                    "classification",
+                    "semantic_status",
+                    "normative",
+                    "decision_relevant",
+                    "condition_strength",
+                    "conditions",
+                )
+                carrier_properties["unit_semantics"] = {
+                    "type": "array",
+                    "minItems": action_schema["properties"]["units"]["minItems"],
+                    "maxItems": action_schema["properties"]["units"]["maxItems"],
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(semantic_names),
+                        "properties": {
+                            name: unit_schema["properties"][name]
+                            for name in semantic_names
+                        },
+                    },
+                }
+                carrier_required.append("unit_semantics")
+                if task["metadata"]["action"] == "policy-audit.public":
+                    for name in ("complete", "disagreements"):
+                        carrier_properties[name] = action_schema["properties"][name]
+                        carrier_required.append(name)
             native_schema_text = json.dumps(
                 {
                     "$schema": "http://json-schema.org/draft-07/schema#",
                     "$id": "wheelhouse/claude-json-carrier/v1",
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["json"],
-                    "properties": {
-                        "json": {
-                            "type": "string",
-                            "minLength": 2,
-                            "maxLength": 131_072,
-                        }
-                    },
+                    "required": carrier_required,
+                    "properties": carrier_properties,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -846,7 +881,8 @@ class ClaudeCliAdapter(AgentAdapterV1):
         completion_instruction = (
             "End every successful run with exactly one StructuredOutput call. Its json field "
             "must contain a JSON-encoded result instance satisfying the trusted output schema "
-            "in the user prompt. Never return the result as plain text or Markdown."
+            "in the user prompt. Fill every other native carrier field from that same result. "
+            "Never return the result as plain text or Markdown."
             if transport == "draft-07-json-carrier-v1"
             else "End every successful run with exactly one StructuredOutput call."
         )

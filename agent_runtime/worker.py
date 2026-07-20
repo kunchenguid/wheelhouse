@@ -41,6 +41,34 @@ CLAUDE_CANONICAL_TOOLS = frozenset(
 )
 
 
+def _decode_claude_carrier(carrier: Any, action: str) -> Any:
+    expected_fields = {"json"}
+    if action in {"policy-derive.public", "policy-audit.public"}:
+        expected_fields.add("unit_semantics")
+    if action == "policy-audit.public":
+        expected_fields.update({"complete", "disagreements"})
+    if not isinstance(carrier, dict) or set(carrier) != expected_fields:
+        raise ClaudeProtocolError("Claude native JSON carrier was invalid")
+    final = decode_json_carrier({"json": carrier["json"]})
+    if isinstance(final, dict) and set(final) == {"json"}:
+        final = decode_json_carrier(final)
+    if (
+        isinstance(final, dict)
+        and len(final) == 1
+        and isinstance(next(iter(final.values())), dict)
+    ):
+        final = next(iter(final.values()))
+    if action in {"policy-derive.public", "policy-audit.public"}:
+        if not isinstance(final, dict):
+            raise ClaudeProtocolError("Claude native JSON carrier was invalid")
+        final = dict(final)
+        final["units"] = carrier["unit_semantics"]
+    if action == "policy-audit.public":
+        final["complete"] = carrier["complete"]
+        final["disagreements"] = carrier["disagreements"]
+    return final
+
+
 class WorkerFailure(Exception):
     def __init__(
         self,
@@ -706,15 +734,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         final = outcome.structured_output
         if claude_plan.get("structuredOutputTransport") == "draft-07-json-carrier-v1":
             try:
-                final = decode_json_carrier(final)
-                if isinstance(final, dict) and set(final) == {"json"}:
-                    final = decode_json_carrier(final)
-                if (
-                    isinstance(final, dict)
-                    and len(final) == 1
-                    and isinstance(next(iter(final.values())), dict)
-                ):
-                    final = next(iter(final.values()))
+                final = _decode_claude_carrier(final, str(claude_plan.get("action")))
             except ClaudeProtocolError as error:
                 raise WorkerFailure("harness.protocol", str(error), spend_started=True) from error
         final_bytes = canonical_json_bytes(final)

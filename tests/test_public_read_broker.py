@@ -77,7 +77,10 @@ from agent_runtime.vision_policy import (  # noqa: E402
     project_advisory_review,
     vision_unit_document,
 )
-from agent_runtime.worker import CLAUDE_CANONICAL_TOOLS  # noqa: E402
+from agent_runtime.worker import (  # noqa: E402
+    CLAUDE_CANONICAL_TOOLS,
+    _decode_claude_carrier,
+)
 import apply_decision  # noqa: E402
 import auto_merge  # noqa: E402
 import render_card  # noqa: E402
@@ -1514,12 +1517,56 @@ def test_public_task_contract():
         derive_prompt = (
             derive_bundle / derive_task["spec"]["prompt"]["userArtifact"]
         ).read_text(encoding="utf-8")
+        derive_probe = AdapterProbe(
+            descriptor=AdapterDescriptor(
+                {"harnessVersion": "test", "protocol": "claude-cli-json"}
+            ),
+            binary_path="/nonexistent/claude",
+            auth_source="/nonexistent/oauth",
+            supplemental={
+                "schemaText": canonical_json_bytes(derive_schema).decode("utf-8"),
+                "schemaSha256": derive_task["spec"]["output"]["schemaSha256"],
+            },
+        )
+        derive_compiled = ClaudeCliAdapter().compile(derive_task, {}, derive_probe)
+        derive_argv = derive_compiled["claude"]["argv"]
+        derive_native_schema = json.loads(
+            derive_argv[derive_argv.index("--json-schema") + 1]
+        )
         check(
             "task: policy transport binds unit semantics to deterministic order",
             "units array MUST correspond one-for-one in the exact same order as vision-units.json"
             in derive_prompt
             and "Include exactly %d unit entries" % len(document["units"])
-            in derive_prompt,
+            in derive_prompt
+            and derive_native_schema["required"] == ["json", "unit_semantics"]
+            and derive_native_schema["properties"]["unit_semantics"]["minItems"]
+            == len(document["units"])
+            and derive_native_schema["properties"]["unit_semantics"]["maxItems"]
+            == len(document["units"]),
+        )
+        unit_semantics = [
+            {
+                name: unit[name]
+                for name in (
+                    "classification",
+                    "semantic_status",
+                    "normative",
+                    "decision_relevant",
+                    "condition_strength",
+                    "conditions",
+                )
+            }
+            for unit in units
+        ]
+        decoded_policy = _decode_claude_carrier(
+            {"json": '{"version":"transported"}', "unit_semantics": unit_semantics},
+            "policy-derive.public",
+        )
+        check(
+            "task: trusted worker merges native policy semantics into the full carrier result",
+            decoded_policy["version"] == "transported"
+            and decoded_policy["units"] == unit_semantics,
         )
         bundle = root / "bundle"
         task = build_task(
