@@ -54,15 +54,16 @@ _MODALS = {"must", "shall", "should", "may", "can", "cannot"}
 _CONDITIONS = {"if", "when", "after", "before", "with", "without"}
 _PREDICATES = {
     "attribute", "attributing", "audit", "auditing", "avoid", "complete",
-    "completed", "establish", "established", "evolve", "execute", "executed",
+    "completed", "establish", "established", "evolve", "execute", "executed", "executes",
     "execution", "exercise", "exercised", "exist", "exists", "fetch", "fetched",
-    "fetches", "fetching", "identify", "inspect", "inspected", "inspection",
+    "fetches", "fetching", "identify", "inspect", "inspected", "inspection", "inspects",
     "maintain", "provide", "receive", "recommend", "remain", "representative",
     "request", "review", "satisfy", "verify", "verification", "verifies",
     "verifying", "validate", "validation", "distinguish",
 }
-_UNREGISTERED_BRANCH_VERBS = {
-    "approve", "authorize", "certify", "consent", "obtain", "permit", "sign",
+_OPERAND_QUALIFIERS = {
+    "across", "against", "as", "at", "by", "for", "from", "in", "including", "into",
+    "of", "on", "rather", "such", "than", "through", "to", "under", "using",
 }
 
 
@@ -198,11 +199,11 @@ def _predicate_operations(
 ) -> list[str] | None:
     operand_tokens = _predicate_operand(tokens, index)
     operand = " ".join(operand_tokens)
-    if predicate in {"inspect", "inspected", "inspection"}:
+    if predicate in {"inspect", "inspected", "inspection", "inspects"}:
         return ["public.git_snapshot"]
     if predicate in {"fetch", "fetched", "fetches", "fetching"}:
         return ["public.fetch"]
-    if predicate in {"execute", "executed", "execution", "exercise", "exercised"}:
+    if predicate in {"execute", "executed", "executes", "execution", "exercise", "exercised"}:
         return ["public.artifact", "exercise.run"]
     if predicate == "review":
         if re.search(r"\b(?:package|artifact|release)\b", operand):
@@ -269,14 +270,14 @@ def _leading_guard_end(tokens: list[str]) -> int:
             (
                 offset
                 for offset in range(index + 1, stop)
-                if tokens[offset] in _MODALS
+                if tokens[offset] in _MODALS - {"cannot"}
             ),
             stop,
         )
         predicate = next(
             (
                 offset
-                for offset in range(index + 1, stop)
+                for offset in range(modal + 1, stop)
                 if tokens[offset] in _PREDICATES
             ),
             stop,
@@ -286,18 +287,61 @@ def _leading_guard_end(tokens: list[str]) -> int:
     return -1
 
 
-def _parse_production(production: str) -> tuple[list[str], str]:
-    raw = [match.group(0) for match in _VISION_TOKEN.finditer(production)]
-    tokens = [token.casefold() for token in raw]
+def _noun_connector_is_consumed(tokens: list[str], index: int) -> bool:
+    if index > 0 and tokens[index - 1] == ",":
+        return True
+    end = next(
+        (
+            offset
+            for offset in range(index + 1, len(tokens))
+            if tokens[offset] in {"and", "or", ",", ";", "."}
+        ),
+        len(tokens),
+    )
+    branch = tokens[index + 1 : end]
+    return 0 < len(branch) <= 2 or (
+        len(branch) >= 2 and branch[1] in {"that", "which", "whose"}
+    )
+
+
+def _fail_closed_guard(tokens: list[str], guard_end: int, selected: dict[int, str]) -> bool:
+    if guard_end < 0 or not any(
+        index < guard_end and polarity == "negative"
+        for index, polarity in selected.items()
+    ):
+        return False
+    remain = next(
+        (
+            index
+            for index in selected
+            if index > guard_end
+            and tokens[index] == "remain"
+            and tokens[index + 1 : index + 2] == ["inconclusive"]
+        ),
+        -1,
+    )
+    request = next(
+        (
+            index
+            for index in selected
+            if index > remain and tokens[index] == "request"
+        ),
+        -1,
+    )
+    return remain >= 0 and request >= 0 and "evidence" in tokens[request + 1 :]
+
+
+def _parse_production(production: str) -> tuple[dict[str, str], str]:
+    tokens = [match.group(0).casefold() for match in _VISION_TOKEN.finditer(production)]
     if not tokens or len(tokens) > 160:
-        return [], "unknown"
+        return {}, "unknown"
     ambiguous = bool(_AMBIGUOUS_CONDITION.search(production))
     selected: dict[int, str] = {}
     connector_edges: list[tuple[str, int, int]] = []
-    if re.search(r"\b(?:is|are)\s+insufficient\s+evidence\b", production, re.I):
-        policy_marker = True
-    else:
-        policy_marker = False
+    policy_marker = bool(
+        re.search(r"\b(?:is|are)\s+insufficient\s+evidence\b", production, re.I)
+    )
+
     for index, token in enumerate(tokens):
         modal_end = index
         if token == "ought" and tokens[index + 1 : index + 2] == ["to"]:
@@ -312,8 +356,9 @@ def _parse_production(production: str) -> tuple[list[str], str]:
         if tokens[cursor : cursor + 1] == ["be"]:
             cursor += 1
         if cursor >= len(tokens) or tokens[cursor] not in _PREDICATES:
-            return [], "unknown"
+            return {}, "unknown"
         selected[cursor] = polarity
+
     for index, token in enumerate(tokens):
         if token in {"require", "requires"}:
             candidates = [
@@ -322,64 +367,185 @@ def _parse_production(production: str) -> tuple[list[str], str]:
                 if tokens[offset] in _PREDICATES
             ]
             if not candidates:
-                return [], "unknown"
+                return {}, "unknown"
             selected[candidates[0]] = "positive"
         elif token == "required":
             if tokens[max(0, index - 1) : index] == ["not"]:
                 policy_marker = True
+                candidates = [
+                    offset
+                    for offset in range(max(0, index - 10), index)
+                    if tokens[offset] in _PREDICATES
+                ]
+                if candidates:
+                    selected[candidates[-1]] = "negative"
                 continue
             candidates = [
                 offset
                 for offset in range(max(0, index - 6), min(len(tokens), index + 7))
                 if tokens[offset] in _PREDICATES and offset != index
             ]
-            if not candidates and tokens[max(0, index - 1) : index] != ["not"]:
-                return [], "unknown"
-            for candidate in candidates[:1]:
-                selected[candidate] = "positive"
-            policy_marker = policy_marker or not candidates
+            if not candidates:
+                return {}, "unknown"
+            selected[candidates[0]] = "positive"
+
     for index, token in enumerate(tokens):
         if token == "not" and tokens[index + 1 : index + 2]:
             candidate = index + 1
             if tokens[candidate] in _PREDICATES:
                 selected[candidate] = "negative"
+
     for index, token in enumerate(tokens):
-        if token in _CONDITIONS or token in {"contingent", "prerequisite"}:
-            candidates = [
+        if token not in _CONDITIONS | {"contingent", "prerequisite"}:
+            continue
+        candidates = [
+            offset
+            for offset in range(index + 1, min(len(tokens), index + 14))
+            if tokens[offset] in _PREDICATES or tokens[offset] == "required"
+        ]
+        if not candidates:
+            return {}, "unknown"
+        if tokens[candidates[0]] in _PREDICATES:
+            selected.setdefault(
+                candidates[0], "negative" if token == "without" else "positive"
+            )
+        comma = next(
+            (
                 offset
-                for offset in range(index + 1, min(len(tokens), index + 14))
-                if tokens[offset] in _PREDICATES or tokens[offset] == "required"
-            ]
-            if not candidates:
-                return [], "unknown"
-            if tokens[candidates[0]] in _PREDICATES:
-                selected.setdefault(candidates[0], "positive")
+                for offset in range(candidates[0] + 1, min(len(tokens), index + 18))
+                if tokens[offset] == ","
+            ),
+            -1,
+        )
+        if comma >= 0:
+            modal = next(
+                (
+                    offset
+                    for offset in range(comma + 1, min(len(tokens), comma + 8))
+                    if tokens[offset] in _MODALS
+                ),
+                -1,
+            )
+            consequences = [
+                offset
+                for offset in range(modal + 1, min(len(tokens), comma + 10))
+                if tokens[offset] in _PREDICATES
+            ] if modal >= 0 else []
+            if consequences:
+                selected.setdefault(consequences[0], "positive")
+
     for index, token in enumerate(tokens):
-        if token not in {"and", "or"}:
+        if token not in {"and", "or", "then"}:
             continue
         cursor = index + 1
         while cursor < len(tokens) and tokens[cursor] in {",", "("}:
             cursor += 1
+        polarity = "positive"
         if tokens[cursor : cursor + 1] == ["when"]:
-            candidates = [
+            condition_candidates = [
                 offset
                 for offset in range(cursor + 1, min(len(tokens), cursor + 7))
                 if tokens[offset] in _PREDICATES
             ][:1]
+            if condition_candidates:
+                selected.setdefault(condition_candidates[0], "positive")
+            comma = next(
+                (
+                    offset
+                    for offset in range(cursor + 1, min(len(tokens), cursor + 10))
+                    if tokens[offset] == ","
+                ),
+                -1,
+            )
+            candidates = [
+                offset
+                for offset in range(comma + 1, min(len(tokens), comma + 7))
+                if tokens[offset] in _PREDICATES
+            ][:1] if comma >= 0 else condition_candidates
         else:
-            candidates = [cursor] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
+            modal = -1 if cursor < len(tokens) and tokens[cursor] in _PREDICATES else next(
+                (
+                    offset
+                    for offset in range(cursor, min(len(tokens), cursor + 7))
+                    if tokens[offset] in _MODALS
+                ),
+                -1,
+            )
+            if modal >= 0:
+                cursor = modal
+            if cursor < len(tokens) and tokens[cursor] in _MODALS:
+                polarity = "negative" if tokens[cursor] == "cannot" else "positive"
+                cursor += 1
+                if tokens[cursor : cursor + 1] == ["not"]:
+                    polarity = "negative"
+                    cursor += 1
+                if tokens[cursor : cursor + 1] == ["be"]:
+                    cursor += 1
+            candidates = [
+                cursor
+            ] if cursor < len(tokens) and tokens[cursor] in _PREDICATES else []
         if candidates:
             source = max((offset for offset in selected if offset < index), default=-1)
-            selected.setdefault(candidates[0], "positive")
+            selected.setdefault(candidates[0], polarity)
             connector_edges.append((token, source, candidates[0]))
-        elif (
-            cursor < len(tokens)
-            and tokens[cursor] in _UNREGISTERED_BRANCH_VERBS
-            and any(offset < index for offset in selected)
+        elif any(offset < index for offset in selected) and (
+            token == "then" or not _noun_connector_is_consumed(tokens, index)
         ):
-            return [], "unknown"
+            return {}, "unknown"
+
+    for index in list(selected):
+        if tokens[index] == "avoid" and tokens[index + 1 : index + 2]:
+            candidate = index + 1
+            if tokens[candidate] in _PREDICATES:
+                selected[candidate] = "negative"
+
+    semantic_start = min(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if token in _MODALS | {"ought", "require", "requires", "required"}
+        ),
+        default=len(tokens),
+    )
+    for index, token in enumerate(tokens):
+        if index < semantic_start:
+            continue
+        if token in _PREDICATES and index not in selected:
+            if policy_marker and not selected:
+                continue
+            if any(
+                tokens[offset] in _MODALS
+                for offset in range(index + 1, min(len(tokens), index + 4))
+            ):
+                continue
+            if token == "review" and any(
+                tokens[offset] == "receive" and 0 < index - offset <= 5
+                for offset in selected
+            ):
+                continue
+            previous = tokens[index - 1] if index else ""
+            if previous not in _OPERAND_QUALIFIERS and not token.endswith("ed"):
+                return {}, "unknown"
+
+    for index in selected:
+        if tokens[index] != "inspect":
+            continue
+        operand = _predicate_operand(tokens, index)
+        for anchor in ("source", "repository", "revision", "commit"):
+            if anchor not in operand:
+                continue
+            anchor_index = index + 1 + operand.index(anchor)
+            trailing = tokens[anchor_index + 1 :]
+            if trailing and trailing[0] not in (
+                _OPERAND_QUALIFIERS
+                | _CONDITIONS
+                | {"and", "or", ",", ";", ".", ")"}
+            ):
+                return {}, "unknown"
+            break
+
     ambiguous = ambiguous or "never" in tokens or "unless" in tokens or "and/or" in tokens
-    operations = ["policy.assess"] if policy_marker else []
+    operation_statuses = {"policy.assess": "recognized-local"} if policy_marker else {}
     node_operations: dict[int, list[str]] = {}
     for index in sorted(selected):
         end = next(
@@ -391,67 +557,78 @@ def _parse_production(production: str) -> tuple[list[str], str]:
             len(tokens),
         )
         if end - index > 48:
-            return [], "unknown"
+            return {}, "unknown"
         resolved = (
             ["policy.assess"]
             if selected[index] == "negative"
             else _predicate_operations(tokens[index], tokens, index)
         )
         if resolved is None:
-            return [], "unknown"
+            return {}, "unknown"
         node_operations[index] = resolved
         for operation in resolved:
-            if operation not in operations:
-                operations.append(operation)
+            operation_statuses[operation] = (
+                "recognized-local" if operation == "policy.assess" else "recognized"
+            )
+
     guard_end = _leading_guard_end(tokens)
+    fail_closed_guard = _fail_closed_guard(tokens, guard_end, selected)
     for connector, source, target in connector_edges:
         if connector != "or":
             continue
-        in_guard = guard_end >= 0 and source >= 0 and source < guard_end and target < guard_end
+        in_guard = (
+            fail_closed_guard
+            and source >= 0
+            and source < guard_end
+            and target < guard_end
+        )
         local_outcomes = (
-            guard_end >= 0
+            fail_closed_guard
             and source > guard_end
             and node_operations.get(source) == ["policy.assess"]
             and node_operations.get(target) == ["policy.assess"]
         )
         if not in_guard and not local_outcomes:
             ambiguous = True
-    if not operations:
-        return [], "unknown"
+
+    if not operation_statuses:
+        return {}, "unknown"
     preserves_local_policy = policy_marker or any(
         polarity == "negative" for polarity in selected.values()
     )
     if (
-        len(operations) > 1
-        and "policy.assess" in operations
+        len(operation_statuses) > 1
+        and "policy.assess" in operation_statuses
         and not preserves_local_policy
     ):
-        operations.remove("policy.assess")
+        operation_statuses.pop("policy.assess")
     if ambiguous:
-        return operations, "ambiguous"
-    if "digest.verify" in operations:
-        return operations, "unknown"
-    return operations, (
-        "recognized-local" if operations == ["policy.assess"] else "recognized"
+        return {operation: "ambiguous" for operation in operation_statuses}, "ambiguous"
+    if "digest.verify" in operation_statuses:
+        return {operation: "unknown" for operation in operation_statuses}, "unknown"
+    return operation_statuses, (
+        "recognized-local"
+        if set(operation_statuses) == {"policy.assess"}
+        else "recognized"
     )
 
 
-def _parse_normative(text: str) -> tuple[list[str], str]:
-    operations = []
+def _parse_normative(text: str) -> tuple[dict[str, str], str]:
+    operation_statuses: dict[str, str] = {}
     productions = _normative_productions(text)
     if not productions:
-        return [], "unknown"
+        return {}, "unknown"
     for production in productions:
         resolved, status = _parse_production(production)
         if status in {"unknown", "ambiguous"}:
             return resolved, status
-        for operation in resolved:
-            if operation not in operations:
-                operations.append(operation)
-    if "digest.verify" in operations:
-        return operations, "unknown"
-    return operations, (
-        "recognized-local" if operations == ["policy.assess"] else "recognized"
+        operation_statuses.update(resolved)
+    if "digest.verify" in operation_statuses:
+        return operation_statuses, "unknown"
+    return operation_statuses, (
+        "recognized-local"
+        if set(operation_statuses) == {"policy.assess"}
+        else "recognized"
     )
 
 
@@ -565,12 +742,17 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
         normative = bool(_NORMATIVE.search(unit["text"]))
         heading_only = unit["text"].lstrip().startswith("#")
         if normative:
-            operations, semantic_status = _parse_normative(unit["text"])
+            operation_statuses, semantic_status = _parse_normative(unit["text"])
+            operations = list(operation_statuses)
         else:
             operations = _operations(unit["text"]) if not heading_only else []
             semantic_status = _semantic_status(unit["text"], operations, normative)
+            operation_statuses = {
+                operation: semantic_status for operation in operations
+            }
         if not operations and (not heading_only or normative):
             operations = ["policy.assess"]
+            operation_statuses = {"policy.assess": semantic_status}
         classification = (
             "evidence-obligation"
             if operations
@@ -595,7 +777,7 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
                 "source_location": "VISION.md:L%d-L%d"
                 % (unit["start_line"], unit["end_line"]),
                 "requirement": unit["text"],
-                "semantic_status": semantic_status,
+                "semantic_status": operation_statuses[operation],
             }
             expected_sha256 = (
                 _expected_sha256(unit["text"])

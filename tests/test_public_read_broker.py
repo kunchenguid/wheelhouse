@@ -644,6 +644,21 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     unknown_conjunct_plan = derive_evidence_plan(
         "A reviewer must inspect source and obtain legal approval."
     )
+    unknown_secure_plan = derive_evidence_plan(
+        "A reviewer must inspect source and secure legal approval."
+    )
+    unknown_then_plan = derive_evidence_plan(
+        "A reviewer must inspect source then obtain approval."
+    )
+    adjacent_unknown_plan = derive_evidence_plan(
+        "A reviewer must inspect source obtain approval."
+    )
+    without_plan = derive_evidence_plan(
+        "A reviewer must inspect source without execution of the package."
+    )
+    permissive_guard_plan = derive_evidence_plan(
+        "If a reviewer inspects source or executes a package, release must satisfy policy."
+    )
     masked_disjunction_plan = derive_evidence_plan(
         "A reviewer must inspect source or execute a package; failures must remain inconclusive."
     )
@@ -709,7 +724,29 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         "VISION: unknown conjuncts invalidate the complete production",
         all(
             row["semantic_status"] == "unknown"
-            for row in unknown_conjunct_plan["obligations"]
+            for plan in (
+                unknown_conjunct_plan,
+                unknown_secure_plan,
+                unknown_then_plan,
+                adjacent_unknown_plan,
+            )
+            for row in plan["obligations"]
+        ),
+    )
+    check(
+        "VISION: negative conditions cannot create positive evidence duties",
+        {row["operation"] for row in without_plan["obligations"]}
+        == {"public.git_snapshot", "policy.assess"}
+        and next(
+            row for row in without_plan["obligations"]
+            if row["operation"] == "policy.assess"
+        )["semantic_status"] == "recognized-local",
+    )
+    check(
+        "VISION: only proven fail-closed guards admit prerequisite disjunctions",
+        all(
+            row["semantic_status"] == "ambiguous"
+            for row in permissive_guard_plan["obligations"]
         ),
     )
     check(
@@ -721,6 +758,15 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         "VISION: known generic fixtures have no unclassified semantic remainder",
         all(
             row["semantic_status"] not in {"unknown", "ambiguous"}
+            for plan in (axi_plan, unrelated_plan)
+            for row in plan["obligations"]
+        ),
+    )
+    check(
+        "VISION: mixed units retain operation-specific semantic status",
+        all(
+            row["semantic_status"]
+            == ("recognized-local" if row["operation"] == "policy.assess" else "recognized")
             for plan in (axi_plan, unrelated_plan)
             for row in plan["obligations"]
         ),
