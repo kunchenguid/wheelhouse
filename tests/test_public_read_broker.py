@@ -593,6 +593,106 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         )
         and any(row["operation"] == "public.fetch" for row in mixed_plan["obligations"]),
     )
+    digest = hashlib.sha256(b"policy-bound-artifact").hexdigest()
+    digest_plan = derive_evidence_plan(
+        "A positive review requires verifying the release artifact at "
+        "https://example.com/package.tgz against SHA-256 %s." % digest
+    )
+    missing_digest_plan = derive_evidence_plan(
+        "A positive review requires verifying the release artifact checksum."
+    )
+    check(
+        "VISION: explicit digests compile to reachable typed artifact proof",
+        len(digest_plan["obligations"]) == 1
+        and digest_plan["obligations"][0]["operation"] == "public.artifact"
+        and digest_plan["obligations"][0]["expected_sha256"] == digest
+        and digest_plan["obligations"][0]["semantic_status"] == "recognized",
+    )
+    check(
+        "VISION: digest policy without one explicit expected SHA-256 is unavailable",
+        any(
+            row["operation"] == "digest.verify"
+            and row["semantic_status"] == "unknown"
+            for row in missing_digest_plan["obligations"]
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        digest_root = Path(directory)
+        vision_path = digest_root / "digest-vision.md"
+        vision_path.write_text(
+            "A positive review requires verifying the release artifact at "
+            "https://example.com/package.tgz against SHA-256 %s.\n" % digest,
+            encoding="utf-8",
+        )
+        core = {
+            "version": "wheelhouse/public-evidence-receipt/v1",
+            "execution_id": EXECUTION_ID,
+            "task_sha256": TASK_SHA256,
+            "operation": "public.artifact",
+            "status": "complete",
+            "truncated": False,
+            "staged": True,
+            "artifact_sha256": digest,
+            "sha256": digest,
+        }
+        evidence_id = canonical_sha256({"receipt": core})
+        artifact_receipt = {"evidence_id": evidence_id, **core}
+        artifact_receipt["receipt_sha256"] = canonical_sha256(artifact_receipt)
+        (digest_root / (evidence_id + ".json")).write_bytes(
+            canonical_json_bytes(artifact_receipt) + b"\n"
+        )
+        citation = {
+            "evidence_id": evidence_id,
+            "location": "https://example.com/package.tgz",
+            "claim": "The immutable artifact matches the policy-owned digest.",
+        }
+        _, digest_review = vision_review(
+            vision_path,
+            lambda plan: [
+                {
+                    "obligation_id": row["obligation_id"],
+                    "assessment": "pass",
+                    "rationale": "The immutable receipt digest matches policy.",
+                    "citation_ids": [evidence_id],
+                }
+                for row in plan["obligations"]
+            ],
+            [citation],
+            digest_root,
+        )
+        check(
+            "VISION: matching immutable artifact digest permits a positive projection",
+            digest_review["verdict"] == "positive"
+            and digest_review["projection_complete"] is True,
+        )
+        wrong_vision_path = digest_root / "wrong-digest-vision.md"
+        wrong_vision_path.write_text(
+            "A positive review requires verifying the release artifact at "
+            "https://example.com/package.tgz against SHA-256 %s.\n" % ("f" * 64),
+            encoding="utf-8",
+        )
+        _, wrong_digest_review = vision_review(
+            wrong_vision_path,
+            lambda plan: [
+                {
+                    "obligation_id": row["obligation_id"],
+                    "assessment": "pass",
+                    "rationale": "The model asserted a digest match.",
+                    "citation_ids": [evidence_id],
+                }
+                for row in plan["obligations"]
+            ],
+            [citation],
+            digest_root,
+        )
+        check(
+            "VISION: model assertion cannot override a mismatched receipt digest",
+            wrong_digest_review["verdict"] == "inconclusive"
+            and wrong_digest_review["projection_complete"] is False
+            and wrong_digest_review["obligation_results"][0]["trusted_status"]
+            == "unavailable",
+        )
 
     _, axi_review = vision_review(
         axi_path,
@@ -700,6 +800,7 @@ def test_public_task_contract():
     check(
         "workflow: public broker lane is selected from generic plan operations",
         'row["operation"] != "policy.assess"' in triage_workflow
+        and 'row["semantic_status"] in {"unknown", "ambiguous"}' in triage_workflow
         and 'PUBLIC_REVIEW_REQUIRED="$(python - vision.md' in triage_workflow
         and 'steps.prepare.outputs.public_review_required' in triage_workflow
         and 'action="advisory-review.public"' in triage_workflow,

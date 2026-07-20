@@ -43,6 +43,12 @@ _AMBIGUOUS_CONDITION = re.compile(
     r"(?i)\b(?:unless|except\s+when|provided\s+that|either\b[^.]{0,160}\bor|"
     r"and\s*/\s*or)\b"
 )
+_DIGEST_LANGUAGE = re.compile(
+    r"(?i)\b(?:checksum|digest|integrity|hash|sha-?256)\b"
+)
+_SHA256_VALUE = re.compile(
+    r"(?i)\bsha-?256\s*[:=]?\s*([0-9a-f]{64})\b"
+)
 
 
 class VisionPolicyError(ValueError):
@@ -97,9 +103,19 @@ def vision_units(text: str) -> list[dict[str, Any]]:
     return units
 
 
+def _expected_sha256(text: str) -> str | None:
+    if not _DIGEST_LANGUAGE.search(text):
+        return None
+    matches = {match.group(1).casefold() for match in _SHA256_VALUE.finditer(text)}
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def _operations(text: str) -> list[str]:
     lowered = text.casefold()
     operations: list[str] = []
+    artifact_language = any(
+        word in lowered for word in ("release", "artifact", "package", "distribution")
+    )
 
     def add(name: str) -> None:
         if name not in operations:
@@ -110,12 +126,14 @@ def _operations(text: str) -> list[str]:
         and any(word in lowered for word in ("inspect", "review", "verify", "fetch"))
     ):
         add("public.git_snapshot")
-    if any(word in lowered for word in ("dataset", "manifest", "public url", "https")):
+    if any(word in lowered for word in ("dataset", "manifest", "public url")) or (
+        "https" in lowered and not artifact_language
+    ):
         add("public.fetch")
-    if any(word in lowered for word in ("release", "artifact", "package", "distribution")):
+    if artifact_language:
         add("public.artifact")
-    if any(word in lowered for word in ("checksum", "digest", "integrity", "hash")):
-        add("digest.verify")
+    if _DIGEST_LANGUAGE.search(text):
+        add("public.artifact" if _expected_sha256(text) else "digest.verify")
     if any(word in lowered for word in ("execute", "run ", "running", "verifier", "exercise")):
         add("exercise.run")
     if "validat" in lowered and "representative" in lowered:
@@ -133,6 +151,8 @@ def _semantic_status(text: str, operations: list[str], normative: bool) -> str:
     """
     if _AMBIGUOUS_CONDITION.search(text):
         return "ambiguous"
+    if "digest.verify" in operations:
+        return "unknown"
     sentences = [
         value.strip()
         for value in re.split(r"(?<=[.!?])\s+", text)
@@ -181,6 +201,14 @@ def _coverage_audit(
             or row.get("source_location")
             != "VISION.md:L%d-L%d"
             % (source["start_line"], source["end_line"])
+            or (
+                row.get("expected_sha256")
+                != (
+                    _expected_sha256(source["text"])
+                    if row.get("operation") == "public.artifact"
+                    else None
+                )
+            )
         ):
             obligations_valid = False
         if isinstance(obligation_id, str):
@@ -255,18 +283,24 @@ def derive_evidence_plan(text: str) -> dict[str, Any]:
             }
         )
         for operation in operations:
-            obligations.append(
-                {
-                    "obligation_id": "O%03d" % (len(obligations) + 1),
-                    "unit_id": unit["unit_id"],
-                    "operation": operation,
-                    "required": True,
-                    "source_location": "VISION.md:L%d-L%d"
-                    % (unit["start_line"], unit["end_line"]),
-                    "requirement": unit["text"],
-                    "semantic_status": semantic_status,
-                }
+            obligation = {
+                "obligation_id": "O%03d" % (len(obligations) + 1),
+                "unit_id": unit["unit_id"],
+                "operation": operation,
+                "required": True,
+                "source_location": "VISION.md:L%d-L%d"
+                % (unit["start_line"], unit["end_line"]),
+                "requirement": unit["text"],
+                "semantic_status": semantic_status,
+            }
+            expected_sha256 = (
+                _expected_sha256(unit["text"])
+                if operation == "public.artifact"
+                else None
             )
+            if expected_sha256:
+                obligation["expected_sha256"] = expected_sha256
+            obligations.append(obligation)
     if not obligations:
         raise VisionPolicyError("VISION contains no policy clauses")
     coverage_audit = _coverage_audit(units, planned_units, obligations)
@@ -393,6 +427,7 @@ def project_advisory_review(
         assessment = row.get("assessment")
         row_citations = row.get("citation_ids")
         citation_ids = row_citations if isinstance(row_citations, list) else []
+        expected_sha256 = obligation.get("expected_sha256")
         receipts_complete = (
             bound_local_evidence
             and obligation.get("semantic_status") == "recognized-local"
@@ -407,6 +442,16 @@ def project_advisory_review(
                 == obligation["operation"]
                 and receipts[evidence_id].get("status") == "complete"
                 and receipts[evidence_id].get("truncated") is False
+                and (
+                    expected_sha256 is None
+                    or (
+                        receipts[evidence_id].get("artifact_sha256")
+                        == expected_sha256
+                        and receipts[evidence_id].get("sha256")
+                        == expected_sha256
+                        and receipts[evidence_id].get("staged") is True
+                    )
+                )
                 for evidence_id in citation_ids
             )
         )
