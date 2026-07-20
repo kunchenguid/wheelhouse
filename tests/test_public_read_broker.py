@@ -67,6 +67,7 @@ from agent_runtime.public_read import (  # noqa: E402
 from agent_runtime.task_builder import ACTION_LIMITS, build_task  # noqa: E402
 from agent_runtime.supervisor import (  # noqa: E402
     _restore_agreed_audit_units,
+    _restore_policy_envelope,
     _unwrap_policy_value,
 )
 from agent_runtime.tools import CanonicalTools  # noqa: E402
@@ -1544,6 +1545,22 @@ def test_public_task_contract():
             == len(document["units"])
             and derive_native_schema["properties"]["unit_semantics"]["maxItems"]
             == len(document["units"]),
+        )
+        restored_envelope = _restore_policy_envelope(
+            {"units": units, "obligations": [obligation]},
+            derive_task,
+            derive_bundle,
+        )
+        check(
+            "task: trusted supervisor restores policy transport bindings",
+            restored_envelope["version"] == PLAN_VERSION
+            and all(
+                restored_envelope[name] == value
+                for name, value in {
+                    **binding,
+                    "vision_sha256": document["vision_sha256"],
+                }.items()
+            ),
         )
         unit_semantics = [
             {

@@ -37,7 +37,12 @@ from .contract import (
 from .events import EventWriter
 from .redaction import contains_secret, sanitize_message
 from .sandbox import SandboxError, build_command, host_proof
-from .vision_policy import VisionPolicyError, project_advisory_review
+from .vision_policy import (
+    AUDIT_VERSION,
+    PLAN_VERSION,
+    VisionPolicyError,
+    project_advisory_review,
+)
 
 
 class RuntimeFailure(Exception):
@@ -453,15 +458,53 @@ def _compact_audit_category(value: Any) -> str:
 def _restore_agreed_audit_units(value: Any, proposed_plan: Any) -> Any:
     if (
         not isinstance(value, dict)
-        or isinstance(value.get("units"), list)
         or value.get("complete") is not True
         or value.get("disagreements") != []
         or not isinstance(proposed_plan, dict)
         or not isinstance(proposed_plan.get("units"), list)
+        or not isinstance(proposed_plan.get("obligations"), list)
     ):
         return value
     restored = deepcopy(value)
-    restored["units"] = deepcopy(proposed_plan["units"])
+    if not isinstance(restored.get("units"), list):
+        restored["units"] = deepcopy(proposed_plan["units"])
+    if not isinstance(restored.get("obligations"), list):
+        restored["obligations"] = deepcopy(proposed_plan["obligations"])
+    return restored
+
+
+def _restore_policy_envelope(
+    value: Any, task: dict[str, Any], bundle: Path
+) -> Any:
+    if not isinstance(value, dict):
+        return value
+    binding_source = next(
+        (row for row in task["spec"]["inputs"] if row["id"] == "policy-binding"),
+        None,
+    )
+    try:
+        binding = load_json_regular(
+            bundle / binding_source["artifact"], max_bytes=4096
+        )
+        binding_values = {
+            name: binding[name]
+            for name in (
+                "target_head_sha",
+                "target_base_sha",
+                "vision_blob_sha",
+                "vision_sha256",
+            )
+        }
+    except (ContractError, KeyError, TypeError):
+        return value
+    restored = deepcopy(value)
+    restored["version"] = (
+        PLAN_VERSION
+        if task["metadata"]["action"] == "policy-derive.public"
+        else AUDIT_VERSION
+    )
+    for name, bound_value in binding_values.items():
+        restored[name] = bound_value
     return restored
 
 
@@ -502,6 +545,7 @@ def _validate_worker(
             delivered_value = _restore_agreed_audit_units(
                 delivered_value, proposed_plan
             )
+        delivered_value = _restore_policy_envelope(delivered_value, task, bundle)
         source = next(
             (row for row in task["spec"]["inputs"] if row["id"] == "vision-units"),
             None,
