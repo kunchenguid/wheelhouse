@@ -390,13 +390,19 @@ def _validate_worker(
                 for row in trusted_units
                 if row["text"] not in duplicate_texts
             }
+            actual_ids = [row.get("unit_id") for row in units]
+            exact_id_set = (
+                len(actual_ids) == len(set(actual_ids))
+                and set(actual_ids) == set(by_id)
+            )
             resolved_units = [
                 by_sha.get(row.get("sha256"))
                 or by_text.get(row.get("text"))
-                or by_id.get(row.get("unit_id"))
-                for row in units
+                or (by_id.get(row.get("unit_id")) if exact_id_set else None)
+                or trusted_units[index]
+                for index, row in enumerate(units)
             ]
-        except (AttributeError, ContractError, KeyError, TypeError):
+        except (AttributeError, ContractError, IndexError, KeyError, TypeError):
             trusted_units = []
             by_id = {}
             resolved_units = []

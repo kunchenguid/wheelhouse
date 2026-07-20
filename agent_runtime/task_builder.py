@@ -1519,7 +1519,8 @@ def build_task(
             "Your final turn MUST be exactly one StructuredOutput call. Encode the complete "
             "result instance required by the original action schema, not the schema definition, "
             "as the native `json` carrier string. Read output-schema.json and satisfy every "
-            "constraint in it. Never finish with plain text, Markdown, or a raw JSON response."
+            "constraint in it. The units array MUST correspond one-for-one in the exact same "
+            "order as vision-units.json. Never finish with plain text, Markdown, or a raw JSON response."
             if action in {"advisory-review.public", "policy-derive.public", "policy-audit.public"}
             else "Return the complete action-schema JSON object through StructuredOutput."
         ),

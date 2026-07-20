@@ -1507,6 +1507,14 @@ def test_public_task_contract():
             == len(document["units"])
             and derive_schema["properties"]["obligations"]["minItems"] == 1,
         )
+        derive_prompt = (
+            derive_bundle / derive_task["spec"]["prompt"]["userArtifact"]
+        ).read_text(encoding="utf-8")
+        check(
+            "task: policy transport binds unit semantics to deterministic order",
+            "units array MUST correspond one-for-one in the exact same order as vision-units.json"
+            in derive_prompt,
+        )
         bundle = root / "bundle"
         task = build_task(
             action="advisory-review.public",
