@@ -119,7 +119,18 @@ def build_command(
         "--ro-bind", plan_path, "/run/wheelhouse/plan.json",
         "--bind", output_dir, "/run/wheelhouse/output",
     ]
-    for path in ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/opt", "/etc/ssl", "/etc/ca-certificates"):
+    for path in (
+        "/usr",
+        "/usr/local",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/ssl",
+        "/etc/ca-certificates",
+    ):
         _bind_if_exists(command, path)
     worker_path = "/usr/local/bin:/usr/bin:/bin"
     binary = Path(binary_path)

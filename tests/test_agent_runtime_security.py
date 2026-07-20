@@ -162,6 +162,13 @@ def main():
             "--bind %s /run/wheelhouse/output" % output in joined
             and "--tmpfs /tmp --chmod 1777 /tmp" in joined,
         )
+        check(
+            "sandbox: Claude can resolve the fixed runner identity read-only",
+            all(
+                "--ro-bind %s %s" % (path, path) in joined
+                for path in ("/etc/passwd", "/etc/group")
+            ),
+        )
         check("sandbox: provider network is a Unix capability socket", "/run/wheelhouse/provider.sock" in joined)
         check("sandbox: search is a separate Unix capability socket", "/run/wheelhouse/search.sock" in joined)
         check("sandbox: credential is one read-only file", "/auth-source/credential" in joined)
