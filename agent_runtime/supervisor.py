@@ -401,6 +401,36 @@ def _policy_shape_category(value: Any) -> str:
     return "scalar"
 
 
+def _compact_audit_category(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _policy_shape_category(value)
+    complete = value.get("complete")
+    disagreements = value.get("disagreements")
+    complete_label = (
+        "true"
+        if complete is True
+        else "false"
+        if complete is False
+        else "string"
+        if isinstance(complete, str)
+        else "missing"
+        if complete is None
+        else "malformed"
+    )
+    disagreement_label = (
+        "empty"
+        if disagreements == []
+        else "nonempty"
+        if isinstance(disagreements, list)
+        else "string"
+        if isinstance(disagreements, str)
+        else "missing"
+        if disagreements is None
+        else "malformed"
+    )
+    return "audit-%s-%s" % (complete_label, disagreement_label)
+
+
 def _restore_agreed_audit_units(value: Any, proposed_plan: Any) -> Any:
     if (
         not isinstance(value, dict)
@@ -506,13 +536,16 @@ def _validate_worker(
             or {unit["unit_id"] for unit in resolved_units} != set(by_id)
         )
         if not isinstance(units, list) or identity_failure:
-            category = (
-                _policy_shape_category(delivered_value)
-                if not isinstance(units, list)
-                else "count"
-                if len(units) != len(trusted_units)
-                else "identity"
-            )
+            if not isinstance(units, list):
+                category = (
+                    _compact_audit_category(delivered_value)
+                    if task["metadata"]["action"] == "policy-audit.public"
+                    else _policy_shape_category(delivered_value)
+                )
+            elif len(units) != len(trusted_units):
+                category = "count"
+            else:
+                category = "identity"
             return None, None, _error(
                 "output.schema_invalid",
                 "Policy result did not preserve the exact VISION unit identities (%s)."
