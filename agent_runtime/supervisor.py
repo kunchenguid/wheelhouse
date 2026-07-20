@@ -309,7 +309,7 @@ def _read_worker_events(path: Path, events: EventWriter) -> None:
 
 
 def _restore_direct_output_access(output_dir: Path) -> None:
-    """Return expected root-mapped direct-worker output to the runner safely."""
+    """Restrict ownership normalization to expected regular output files."""
 
     owner = "%d:%d" % (os.getuid(), os.getgid())
     for name in ("worker-state.json", "worker-result.json", "adapter-events.ndjson"):

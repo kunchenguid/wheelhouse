@@ -1158,8 +1158,8 @@ still appears where it's plain English, e.g. "triage the queue".)
 All agent-assisted paths now share Agent Runtime Contract `wheelhouse.agent-runtime/v1alpha1` as the provider-portability boundary.
 The contract, action schemas, pinned Codex app-server protocol, capability negotiation, canonical tools, brokers, sandbox supervisor, adapters, consumers, and tests live under `agent_runtime/`, with the trusted CLI at `scripts/agent_runtime.py` and operator runbook at `docs/AGENT_RUNTIME.md`.
 Claude is the named production primary.
-The two schema-repair actions plus `advisory-review.public` resolve to the direct `claude-cli-pinned` profile, while the other eight actions remain on `claude-action-current-pinned`.
-`agent_runtime/config.py` guards that exact split. `temporary_rollback_profile` is the reviewed one-setting schema-repair rollback for an explicit durable replay; public advisory review fails closed while rollback is active because the action-compatible runtime cannot expose the credential-free broker.
+The schema-repair actions and the credential-free public advisory pipeline resolve to the direct `claude-cli-pinned` profile, while the standard agent paths remain on `claude-action-current-pinned`.
+`agent_runtime/config.py` guards the exact split, which is documented in `docs/AGENT_RUNTIME.md`. `temporary_rollback_profile` is the reviewed one-setting schema-repair rollback for an explicit durable replay; public advisory review fails closed while rollback is active because the action-compatible runtime cannot expose the credential-free broker.
 Codex CLI `0.144.0` app-server remains implemented and tested only as disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription path.
 No Codex secret is requested, no action targets Codex, and current selection cannot reach a Codex workflow installation path.
 Provider environment overrides are rejected; secret presence cannot select a provider, model, effort, billing path, or stronger tool policy.
