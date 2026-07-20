@@ -92,6 +92,23 @@ class PublicAdvisoryFreshnessTests(unittest.TestCase):
         self.assertEqual(normalized["summary"], value["summary"])
         self.assertFalse(normalized["auto_merge_eligible"])
 
+    def test_caution_describes_option_b_authority_boundary(self):
+        section = render_card.public_advisory_section(
+            render_card.normalize_public_advisory(advisory())
+        )
+        self.assertIn(
+            "cannot authorize, initiate, bypass, or replace auto-merge or any mutation",
+            section,
+        )
+        self.assertIn(
+            "trusted, current, complete projection may supply validated advisory facts",
+            section,
+        )
+        self.assertIn("G6 eligibility gates", section)
+        self.assertIn("remain independently enforced", section)
+        self.assertIn("Incomplete, stale, or unavailable projections supply no facts", section)
+        self.assertIn("fresh genuine owner authority", section)
+
     def test_head_base_vision_and_lookup_failures_publish_nothing(self):
         current = body()
         for field in ("target_head_sha", "target_base_sha", "vision_blob_sha"):

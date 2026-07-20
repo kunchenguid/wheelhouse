@@ -1659,7 +1659,7 @@ def test_authority_separation(advisory):
         "a" * 40,
     )
     check(
-        "authority: raw or injected advisory state cannot satisfy auto-merge",
+        "authority: raw or injected advisory state cannot authorize or bypass auto-merge",
         facts["g6_triage_success"]["status"] == "unmet"
         and "public-evidence" in facts["g6_triage_success"]["reason"],
     )

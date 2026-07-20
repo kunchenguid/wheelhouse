@@ -1559,8 +1559,13 @@ def public_advisory_section(advisory):
         "### Public evidence advisory",
         "",
         "> [!CAUTION]",
-        "> Public evidence is untrusted data. This advisory cannot authorize "
-        "an action or satisfy auto-merge.",
+        "> Raw public evidence and AdvisoryReview cannot authorize, initiate, "
+        "bypass, or replace auto-merge or any mutation.",
+        "> Only a trusted, current, complete projection may supply validated "
+        "advisory facts to the existing deterministic G6 eligibility gates, "
+        "which remain independently enforced.",
+        "> Incomplete, stale, or unavailable projections supply no facts. "
+        "Owner-command mutations still require fresh genuine owner authority.",
         "",
         "- **Verdict:** %s" % advisory["verdict"],
         "- **Summary:** %s" % advisory["summary"],
