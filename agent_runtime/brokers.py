@@ -595,6 +595,8 @@ class PublicReadBrokerProcess:
                 self.execution_id,
                 "--task-sha256",
                 self.task_sha256,
+                "--artifact-sandbox",
+                "",
                 "--attestation",
                 "/run/wheelhouse/attestation.json",
                 "--isolation-mode",
@@ -896,6 +898,7 @@ class ExerciseBrokerProcess:
                 "--scratch", "/run/exercise/scratch",
                 "--execution-id", self.execution_id,
                 "--task-sha256", self.task_sha256,
+                "--artifact-sandbox", binary,
                 "--attestation", "/run/exercise/attestation.json",
             ]
         )

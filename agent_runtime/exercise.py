@@ -151,6 +151,7 @@ def _exercise_child(
     scratch: str,
     receipts: list[dict[str, Any]],
     binary_name: str,
+    artifact_sandbox: str,
     output_path: str,
 ) -> None:
     """Run one fixed adapter behind a killable hard wall-clock boundary."""
@@ -167,7 +168,11 @@ def _exercise_child(
         value = {
             "ok": True,
             "result": run_node_npm_cli(
-                Path(evidence_root), Path(scratch), receipts, binary_name
+                Path(evidence_root),
+                Path(scratch),
+                receipts,
+                binary_name,
+                artifact_sandbox,
             ),
         }
     except ExerciseError as error:
@@ -181,16 +186,83 @@ def _exercise_child(
     Path(output_path).write_bytes(canonical_json_bytes(value) + b"\n")
 
 
-def _run_scenario(node: str, entrypoint: Path, cwd: Path, arguments: list[str], deadline: float) -> dict[str, Any]:
+def _scenario_command(
+    node: str,
+    entrypoint: Path,
+    cwd: Path,
+    work: Path,
+    arguments: list[str],
+    artifact_sandbox: str,
+) -> tuple[list[str], str]:
+    if not artifact_sandbox:
+        return [node, str(entrypoint), *arguments], str(cwd)
+    try:
+        sandbox_entrypoint = Path("/work") / entrypoint.relative_to(work)
+        sandbox_cwd = Path("/work") / cwd.relative_to(work)
+    except ValueError as error:
+        raise ExerciseError("exercise.isolation", "exercise path escaped its sandbox") from error
+    command = [
+        artifact_sandbox,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/work",
+        "--bind",
+        str(work),
+        "/work",
+    ]
+    for path in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(path).exists():
+            command.extend(["--ro-bind", path, path])
+    command.extend(
+        [
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "HOME", "/work/home",
+            "--setenv", "LANG", "C.UTF-8",
+            "--setenv", "LC_ALL", "C.UTF-8",
+            "--setenv", "NO_PROXY", "*",
+            "--chdir", str(sandbox_cwd),
+            "--", node, str(sandbox_entrypoint), *arguments,
+        ]
+    )
+    return command, "/"
+
+
+def _run_scenario(
+    node: str,
+    entrypoint: Path,
+    cwd: Path,
+    work: Path,
+    arguments: list[str],
+    deadline: float,
+    artifact_sandbox: str,
+) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ExerciseError("exercise.deadline", "exercise deadline expired")
     stdout_path = cwd.parent / ("stdout-%s" % canonical_sha256(arguments))
     stderr_path = cwd.parent / ("stderr-%s" % canonical_sha256(arguments))
+    command, process_cwd = _scenario_command(
+        node, entrypoint, cwd, work, arguments, artifact_sandbox
+    )
     with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
         process = subprocess.Popen(
-            [node, str(entrypoint), *arguments],
-            cwd=str(cwd),
+            command,
+            cwd=process_cwd,
             env={"PATH": "/usr/bin:/bin", "HOME": str(cwd.parent / "home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "NO_PROXY": "*"},
             stdin=subprocess.DEVNULL,
             stdout=stdout,
@@ -216,7 +288,13 @@ def _run_scenario(node: str, entrypoint: Path, cwd: Path, arguments: list[str], 
     }
 
 
-def run_node_npm_cli(evidence_root: Path, scratch: Path, receipts: list[dict[str, Any]], binary_name: str) -> dict[str, Any]:
+def run_node_npm_cli(
+    evidence_root: Path,
+    scratch: Path,
+    receipts: list[dict[str, Any]],
+    binary_name: str,
+    artifact_sandbox: str = "",
+) -> dict[str, Any]:
     if not _valid_package_name(binary_name):
         raise ExerciseError("request.schema", "npm binary name is invalid")
     work = Path(tempfile.mkdtemp(prefix="exercise-", dir=scratch))
@@ -267,9 +345,9 @@ def run_node_npm_cli(evidence_root: Path, scratch: Path, receipts: list[dict[str
     (work / "home").mkdir(mode=0o700)
     deadline = time.monotonic() + MAX_WALL_SECONDS
     scenarios = {
-        "discovery": _run_scenario(node, entrypoint, app, ["--help"], deadline),
-        "success": _run_scenario(node, entrypoint, app, ["--version"], deadline),
-        "error": _run_scenario(node, entrypoint, app, ["--wheelhouse-invalid-option"], deadline),
+        "discovery": _run_scenario(node, entrypoint, app, work, ["--help"], deadline, artifact_sandbox),
+        "success": _run_scenario(node, entrypoint, app, work, ["--version"], deadline, artifact_sandbox),
+        "error": _run_scenario(node, entrypoint, app, work, ["--wheelhouse-invalid-option"], deadline, artifact_sandbox),
     }
     complete = bool(
         scenarios["discovery"]["exit_code"] == 0
@@ -285,12 +363,13 @@ def run_node_npm_cli(evidence_root: Path, scratch: Path, receipts: list[dict[str
 
 
 class ExerciseService:
-    def __init__(self, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str) -> None:
+    def __init__(self, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str, artifact_sandbox: str = "") -> None:
         self.evidence_root = evidence_root
         self.receipt_dir = receipt_dir
         self.scratch = scratch
         self.execution_id = execution_id
         self.task_sha256 = task_sha256
+        self.artifact_sandbox = artifact_sandbox
         self.scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.calls = 0
@@ -443,6 +522,7 @@ class ExerciseService:
                 str(call_root),
                 source_receipts,
                 str(arguments.get("binary") or ""),
+                self.artifact_sandbox,
                 str(output_path),
             ),
         )
@@ -535,12 +615,12 @@ class ExerciseService:
         )
 
 
-def serve(socket_path: Path, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str, attestation_path: Path) -> None:
+def serve(socket_path: Path, evidence_root: Path, receipt_dir: Path, scratch: Path, execution_id: str, task_sha256: str, artifact_sandbox: str, attestation_path: Path) -> None:
     socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
     attestation = {"version": 1, "isolation_mode": "bubblewrap-no-network", "uid": os.getuid(), "environment_names": sorted(os.environ), "credential_reachable": any(re.search(r"(?i)(token|credential|secret|password|oauth|authorization)", name) for name in os.environ), "network_namespace": os.readlink("/proc/self/ns/net") if Path("/proc/self/ns/net").exists() else "unavailable"}
     attestation_path.write_bytes(canonical_json_bytes(attestation) + b"\n")
-    service = ExerciseService(evidence_root, receipt_dir, scratch, execution_id, task_sha256)
+    service = ExerciseService(evidence_root, receipt_dir, scratch, execution_id, task_sha256, artifact_sandbox)
 
     class Server(socketserver.UnixStreamServer):
         pass

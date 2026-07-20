@@ -16,9 +16,10 @@ def main() -> None:
     parser.add_argument("--scratch", required=True)
     parser.add_argument("--execution-id", required=True)
     parser.add_argument("--task-sha256", required=True)
+    parser.add_argument("--artifact-sandbox", default="")
     parser.add_argument("--attestation", required=True)
     args = parser.parse_args()
-    serve(Path(args.socket), Path(args.evidence), Path(args.receipts), Path(args.scratch), args.execution_id, args.task_sha256, Path(args.attestation))
+    serve(Path(args.socket), Path(args.evidence), Path(args.receipts), Path(args.scratch), args.execution_id, args.task_sha256, args.artifact_sandbox, Path(args.attestation))
 
 
 if __name__ == "__main__":

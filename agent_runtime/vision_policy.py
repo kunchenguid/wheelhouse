@@ -145,7 +145,7 @@ def _normative_clauses(sentence: str) -> list[str]:
     return [
         clause.strip(" ,;:")
         for clause in re.split(
-            r"(?i)\s*(?:;|\b(?:and|but|only\s+after|provided\s+that|contingent\s+upon)\b)\s*",
+            r"(?i)\s*(?:;|\b(?:and|but|with(?:out)?|only\s+after|provided\s+that|contingent\s+upon)\b)\s*",
             sentence,
         )
         if clause.strip(" ,;:")

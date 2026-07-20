@@ -48,7 +48,11 @@ from agent_runtime.contract import (  # noqa: E402
     file_sha256,
 )
 from agent_runtime import exercise as exercise_module  # noqa: E402
-from agent_runtime.exercise import ExerciseError, ExerciseService  # noqa: E402
+from agent_runtime.exercise import (  # noqa: E402
+    ExerciseError,
+    ExerciseService,
+    _scenario_command,
+)
 from agent_runtime.public_read import (  # noqa: E402
     MAX_RESPONSE_HEADER_BYTES,
     PinnedHTTPSClient,
@@ -591,6 +595,9 @@ def test_generic_vision(receipt_dir, manifest_result=None):
     partial_plan = derive_evidence_plan(
         "Artifacts must be released only after legal approval."
     )
+    modifier_plan = derive_evidence_plan(
+        "Artifacts must be released with legal approval."
+    )
     check(
         "VISION: unfamiliar and mixed normative language is explicitly unavailable",
         any(row["semantic_status"] == "unknown" for row in unfamiliar_plan["obligations"])
@@ -602,6 +609,10 @@ def test_generic_vision(receipt_dir, manifest_result=None):
         and any(
             row["semantic_status"] == "unknown"
             for row in partial_plan["obligations"]
+        )
+        and any(
+            row["semantic_status"] == "unknown"
+            for row in modifier_plan["obligations"]
         ),
     )
     digest = hashlib.sha256(b"policy-bound-artifact").hexdigest()
@@ -1193,7 +1204,32 @@ def test_production_launcher_contract():
             and "--receipts" in exercise_command
             and exercise_command[exercise_command.index("--receipts") + 1]
             == "/run/exercise/receipts"
+            and exercise_command[exercise_command.index("--artifact-sandbox") + 1]
+            == "/usr/bin/bwrap"
             and exercise_environment == {},
+        )
+        work = Path(directory) / "scenario"
+        app = work / "application"
+        app.mkdir(parents=True)
+        entrypoint = app / "cli.js"
+        entrypoint.touch()
+        scenario_command, scenario_cwd = _scenario_command(
+            "/usr/bin/node",
+            entrypoint,
+            app,
+            work,
+            ["--version"],
+            "/usr/bin/bwrap",
+        )
+        check(
+            "exercise: artifact process receives a private filesystem namespace",
+            "--unshare-user" in scenario_command
+            and "--unshare-net" in scenario_command
+            and scenario_command[scenario_command.index("--bind") + 2] == "/work"
+            and "/run/exercise" not in scenario_command
+            and "/evidence" not in scenario_command
+            and "receipts" not in " ".join(scenario_command)
+            and scenario_cwd == "/",
         )
         check(
             "broker: staged runtime roots stay private under the CI umask",
