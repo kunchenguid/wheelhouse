@@ -54,7 +54,12 @@ def main():
                 env=child_env,
                 text=True,
                 capture_output=True,
-                timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS + 15,
+                timeout=(
+                    nls.PUBLIC_CLONE_TIMEOUT_SECONDS
+                    + nls.PUBLIC_DNS_TIMEOUT_SECONDS
+                    + nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS
+                    + 60
+                ),
             )
             if clone.returncode != 0:
                 raise SystemExit("wheelhouse-search failed: %s" % clone.stderr.strip())
