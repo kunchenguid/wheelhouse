@@ -1683,7 +1683,7 @@ def test_public_task_contract():
             "task: exhaustive public advisory retains a bounded execution window",
             ACTION_LIMITS["advisory-review.public"]
             == (1_800_000, 1_860_000, 64, 16, 131_072)
-            and task["spec"]["limits"]["maxOutputTokens"] == 64_000,
+            and task["spec"]["limits"]["maxOutputTokens"] == 128_000,
         )
         compiled_prompt = (
             bundle / task["spec"]["prompt"]["userArtifact"]

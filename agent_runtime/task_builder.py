@@ -1915,7 +1915,7 @@ def build_task(
                 else (
                     32000
                     if action in {"policy-derive.public", "policy-audit.public"}
-                    else 64000
+                    else 128000
                     if action == "advisory-review.public"
                     else 16000
                     if action.startswith("deep-review")
