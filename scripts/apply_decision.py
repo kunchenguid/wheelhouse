@@ -1026,12 +1026,17 @@ def do_merge(
             if stale:
                 return outcome(*stale)
         if "conflict" in detail.lower():
+            # Recoverable: post the conflict note and leave the card pure
+            # pending (terminal "none" does not add blocked / drop
+            # needs-decision). A later clean head reactivates via the normal
+            # scan/reconcile refresh path. Generic non-conflict failures stay
+            # durable "error" (#447 / a8b0989).
             return outcome(
                 "Merge of %s#%s failed because the PR has a merge conflict. "
                 "The contributor must rebase or merge the base branch, resolve "
                 "the conflict, and push before this can be merged. (%s)"
                 % (repo, number, detail),
-                "error",
+                "none",
             )
         return outcome("Merge of %s#%s failed: %s" % (repo, number, detail), "error")
     _thank_contributor(owner, repo, number, pr)

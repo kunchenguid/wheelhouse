@@ -358,6 +358,7 @@ An item is **consumed** when the handler closes its card after a successful reso
 A `/hold` or a non-retryable action error leaves the card open with the `blocked` label for manual follow-up.
 A workflow-touch or unable-to-verify workflow-history refusal from a direct owner merge decision also lands `blocked` (will not API-merge; merge by hand in the GitHub UI, or retry after a rebase drops the workflow touch).
 A retryable merge refusal for a stale head leaves the card as `needs-decision` so you can retry after the card is current.
+A merge attempt that GitHub rejects because the PR has a merge conflict also leaves the card as `needs-decision`; after the contributor pushes a clean new head, the normal scan refreshes that same card in place.
 For the "what changed most recently?" view, use the Issues list sorted by Recently updated, or bookmark `https://github.com/<owner>/<wheelhouse-repo>/issues?q=is%3Aissue%20is%3Aopen%20label%3Aneeds-decision%20sort%3Aupdated-desc`.
 Wheelhouse bumps a pure pending card's own updated time when the target PR or issue's GitHub `updatedAt` advances, so recently active targets rise to the top.
 That signal is target-level GitHub activity and may include owner, maintainer, or bot activity.

@@ -2205,7 +2205,9 @@ def act_merge(
     if terminal == "resolved":
         # do_merge saw already-merged / not-open (a race) - not our merge.
         return ("held", message, "", workflow_gate)
-    if terminal in ("blocked", "retryable"):
+    # "none" covers recoverable do_merge outcomes (e.g. merge conflict) that
+    # leave the decision card pending without durable blocked; treat like held.
+    if terminal in ("blocked", "retryable", "none"):
         return ("held", message, "", workflow_gate)
     return ("error", message, "", workflow_gate)
 

@@ -2759,6 +2759,31 @@ def test_do_merge_race_and_error_outcomes():
         "act: blocked workflow outcome emits a ::warning::", "auto-merge held" in err3
     )
 
+    # Recoverable merge-conflict terminal "none" is held (claim released), not
+    # an ambiguous error outcome that withholds release.
+    w4, items4, cards4 = default_world(head="cf" * 20)
+    w4.do_merge_returns = {
+        ("fmt", "5"): (
+            "Merge of fmt#5 failed because the PR has a merge conflict.",
+            "none",
+        )
+    }
+    payload4, err4 = run_act(w4, items4, cards4)
+    check(
+        "act: recoverable merge conflict is held, not recorded merge",
+        not payload4["merges"]
+        and payload4["holds"]
+        and not payload4["ambiguous_outcomes"],
+    )
+    check(
+        "act: recoverable merge conflict releases the claim",
+        any(r.get("card_issue") for r in payload4.get("releases") or []),
+    )
+    check(
+        "act: recoverable merge conflict emits a ::warning::",
+        "auto-merge held" in err4,
+    )
+
 
 # --------------------------------------------------------------------------- #
 # DELIBERATE ABSENCE of an overlap gate and any rate cap (captain override)
