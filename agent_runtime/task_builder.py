@@ -1571,7 +1571,11 @@ def build_task(
                 "attach an obligation to a context-only unit or bulk-default unread units to unknown. "
                 "For an audit agreement, copy "
                 "the proposed semantic fields and obligations exactly; otherwise supply your "
-                "independent values, list every disagreement, and set complete false.",
+                "independent values, list every disagreement, and set complete false. Audit "
+                "complete is true if and only if every proposed semantic field and obligation "
+                "is copied exactly, every semantic_status is recognized or recognized-local, "
+                "and disagreements is empty. Any unknown, ambiguity, changed field, changed "
+                "obligation, or listed disagreement requires complete false.",
             ]
             if policy_action
             else []

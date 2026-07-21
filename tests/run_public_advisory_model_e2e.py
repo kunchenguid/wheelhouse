@@ -93,11 +93,36 @@ def execute_case(
     )
     audit_path = case / "policy-audit.json"
     audit_path.write_text(json.dumps(audit_result["final"]["value"], sort_keys=True) + "\n", encoding="utf-8")
-    task, result = invoke(
-        "advisory-review.public", "advisory", prompt,
-        target_file=str(target_path), policy_plan_file=str(plan_path),
-        policy_audit_file=str(audit_path), allow_automerge_behavior=True,
-    )
+    try:
+        task, result = invoke(
+            "advisory-review.public", "advisory", prompt,
+            target_file=str(target_path), policy_plan_file=str(plan_path),
+            policy_audit_file=str(audit_path), allow_automerge_behavior=True,
+        )
+    except Exception as error:
+        audit = audit_result["final"]["value"]
+        raise AssertionError(
+            "%s advisory construction failed: %s audit=%s"
+            % (
+                name,
+                error,
+                json.dumps(
+                    {
+                        "complete": audit.get("complete"),
+                        "disagreements": audit.get("disagreements"),
+                        "unit_semantics": [
+                            {
+                                "unit_id": row.get("unit_id"),
+                                "semantic_status": row.get("semantic_status"),
+                            }
+                            for row in audit.get("units", [])
+                            if isinstance(row, dict)
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+            )
+        ) from error
     if result.get("status") != "succeeded":
         raise AssertionError("%s real-model run failed: %s" % (name, result.get("error")))
     selection = result.get("selection") or {}

@@ -1708,6 +1708,10 @@ def test_public_task_contract():
             and "a structural-similarity criterion still maps only to policy.assess"
             in (
                 derive_bundle / derive_task["spec"]["prompt"]["userArtifact"]
+            ).read_text(encoding="utf-8")
+            and "Any unknown, ambiguity, changed field, changed obligation"
+            in (
+                derive_bundle / derive_task["spec"]["prompt"]["userArtifact"]
             ).read_text(encoding="utf-8"),
         )
         check(
