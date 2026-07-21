@@ -1695,7 +1695,9 @@ def test_public_task_contract():
             in compiled_prompt
             and "exercise.run as mcp__wheelhouse__exercise_run"
             in compiled_prompt
-            and "Do not retry an unavailable result" in compiled_prompt,
+            and "Do not retry an unavailable result" in compiled_prompt
+            and "First read exactly /work/vision.md" in compiled_prompt
+            and "For each policy.assess obligation" in compiled_prompt,
         )
         check(
             "task: isolated policy passes can read every input before native schema submission",
