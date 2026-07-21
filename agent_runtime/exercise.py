@@ -414,9 +414,17 @@ def run_node_npm_cli(
         raise ExerciseError("adapter.unavailable", "reviewed Node.js adapter is unavailable")
     deadline = time.monotonic() + MAX_WALL_SECONDS
     scenarios = {
-        "discovery": _run_scenario(node, entrypoint, app, work, ["--help"], deadline, artifact_sandbox),
-        "success": _run_scenario(node, entrypoint, app, work, ["--version"], deadline, artifact_sandbox),
-        "error": _run_scenario(node, entrypoint, app, work, ["--wheelhouse-invalid-option"], deadline, artifact_sandbox),
+        "discovery": _run_scenario(
+            node, entrypoint, app, work, ["search", "--help"], deadline,
+            artifact_sandbox,
+        ),
+        "success": _run_scenario(
+            node, entrypoint, app, work, [], deadline, artifact_sandbox,
+        ),
+        "error": _run_scenario(
+            node, entrypoint, app, work, ["wheelhouse-unknown-command"], deadline,
+            artifact_sandbox,
+        ),
     }
     assertions = (
         ("discovery_exit", scenarios["discovery"]["exit_code"] == 0),

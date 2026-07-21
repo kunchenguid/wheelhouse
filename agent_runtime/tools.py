@@ -481,7 +481,7 @@ class CanonicalTools:
         request = canonical_json_bytes({"version": 1, "execution_id": self.execution_id, "task_sha256": self.task_sha256, "operation": "exercise.run", "arguments": args})
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(35)
+                client.settimeout(65)
                 client.connect(self.exercise_socket)
                 client.sendall(request)
                 chunks = []
