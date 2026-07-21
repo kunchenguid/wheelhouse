@@ -345,7 +345,16 @@ def _public_addresses(host, port=443, resolver=socket.getaddrinfo):
             raise ValueError("public Git host resolved to a malformed address") from exc
         if address.version == 6 and address.ipv4_mapped is not None:
             address = address.ipv4_mapped
-        if not address.is_global:
+        if (
+            not address.is_global
+            or address.is_private
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+            or address.is_loopback
+            or address.is_link_local
+            or getattr(address, "is_site_local", False)
+        ):
             raise ValueError("public Git host resolved to a non-public address")
         normalized = address.compressed
         if normalized not in addresses:
@@ -478,6 +487,68 @@ def _limit_public_git_files():
         pass
 
 
+def _kill_public_git_process(process):
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        process.kill()
+
+
+def _public_clone_usage(root):
+    stack = [root]
+    entry_count = 0
+    file_count = 0
+    retained_bytes = 0
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except FileNotFoundError:
+            continue
+        for entry in entries:
+            try:
+                child = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            entry_count += 1
+            if stat.S_ISDIR(child.st_mode):
+                stack.append(entry.path)
+                continue
+            if not (stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)):
+                raise ValueError("public clone contains a special file")
+            file_count += 1
+            retained_bytes += child.st_size
+    return entry_count, file_count, retained_bytes
+
+
+def _monitor_public_clone_quota(root, process, stop, violations, errors):
+    while not stop.is_set():
+        try:
+            entry_count, file_count, retained_bytes = _public_clone_usage(root)
+        except Exception as exc:
+            errors.append(exc)
+            _kill_public_git_process(process)
+            return
+        if entry_count > MAX_PUBLIC_CLONE_ENTRIES:
+            violations.append("entry")
+            _kill_public_git_process(process)
+            return
+        if file_count > MAX_PUBLIC_CLONE_FILES:
+            violations.append("file")
+            _kill_public_git_process(process)
+            return
+        if retained_bytes > MAX_PUBLIC_CLONE_BYTES:
+            violations.append("byte")
+            _kill_public_git_process(process)
+            return
+        stop.wait(0.01)
+
+
 def run_public_git(
     args,
     *,
@@ -485,6 +556,7 @@ def run_public_git(
     cwd=None,
     timeout=PUBLIC_CLONE_TIMEOUT_SECONDS,
     output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
+    quota_root=None,
 ):
     process = subprocess.Popen(
         list(args),
@@ -512,22 +584,41 @@ def run_public_git(
 
     reader = threading.Thread(target=drain_output, name="wheelhouse-public-git-output")
     reader.start()
+    quota_stop = threading.Event()
+    quota_violations = []
+    quota_errors = []
+    quota_monitor = None
+    if quota_root is not None:
+        quota_monitor = threading.Thread(
+            target=_monitor_public_clone_quota,
+            args=(quota_root, process, quota_stop, quota_violations, quota_errors),
+            name="wheelhouse-public-clone-quota",
+        )
+        quota_monitor.start()
+    timed_out = None
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:
-            process.kill()
+        timed_out = exc
+        _kill_public_git_process(process)
         process.wait()
-        reader.join()
+    finally:
+        quota_stop.set()
+        if quota_monitor is not None:
+            quota_monitor.join()
+    reader.join()
+    if timed_out is not None:
         raise ValueError(
             "public Git operation timed out after %s seconds" % timeout
-        ) from exc
-    reader.join()
+        ) from timed_out
+    if quota_errors:
+        raise ValueError(
+            "public clone quota could not be enforced"
+        ) from quota_errors[0]
+    if quota_violations:
+        raise ValueError(
+            "public clone exceeds the retained %s limit" % quota_violations[0]
+        )
     output = bytes(captured).decode("utf-8", errors="replace")
     if truncated:
         output += "\n[git output truncated]"
@@ -552,11 +643,14 @@ def _run_public_git_checked(
     cwd=None,
     output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
     error_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
+    quota_root=None,
 ):
     try:
         kwargs = {"env": env, "cwd": cwd, "timeout": timeout}
         if runner is run_public_git:
             kwargs["output_limit"] = output_limit
+            if quota_root is not None:
+                kwargs["quota_root"] = quota_root
         result = runner(args, **kwargs)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
@@ -658,18 +752,6 @@ def _bounded_public_tree_manifest(output):
         "retained_bytes": retained_bytes,
         "entries": entries,
     }
-
-
-def _kill_public_git_process(process):
-    if process.poll() is not None:
-        return
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    else:
-        process.kill()
 
 
 def _materialize_public_clone_raw(git, env, source, entries, metadata, timeout):
@@ -974,6 +1056,12 @@ def _public_clone_request(
             "-c",
             "protocol.https.allow=always",
             "-c",
+            "protocol.version=0",
+            "-c",
+            "transfer.bundleURI=false",
+            "-c",
+            "fetch.bundleURI=",
+            "-c",
             "submodule.recurse=false",
             "-c",
             "fetch.recurseSubmodules=false",
@@ -998,7 +1086,11 @@ def _public_clone_request(
             args,
             env,
             PUBLIC_CLONE_TIMEOUT_SECONDS,
+            cwd=runtime,
+            quota_root=root,
         )
+        clone_manifest = _bounded_clone_manifest(source)
+        _check_public_clone_totals(clone_manifest)
         rev_args = [
             git,
             "-c",
@@ -1067,6 +1159,7 @@ def _public_clone_request(
             env,
             PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
             cwd=source,
+            quota_root=root,
         )
         metadata_manifest = _bounded_clone_manifest(source)
         _check_public_clone_totals(metadata_manifest, tree_manifest)

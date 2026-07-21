@@ -172,9 +172,12 @@ def test_private_reserved_and_metadata_addresses_are_rejected():
         "100.64.0.1",
         "169.254.169.254",
         "192.0.2.1",
+        "224.0.0.1",
+        "255.255.255.255",
         "::1",
         "fe80::1",
         "fd00::1",
+        "ff02::1",
         "::ffff:10.0.0.1",
     ):
         check(
@@ -297,6 +300,12 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "-c",
                 "protocol.https.allow=always",
                 "-c",
+                "protocol.version=0",
+                "-c",
+                "transfer.bundleURI=false",
+                "-c",
+                "fetch.bundleURI=",
+                "-c",
                 "submodule.recurse=false",
                 "-c",
                 "fetch.recurseSubmodules=false",
@@ -319,6 +328,10 @@ def test_exact_hardened_git_argv_environment_and_manifest():
             check(
                 "git: clone argv is exact and hardened",
                 fake.calls[0]["args"] == expected,
+            )
+            check(
+                "git: initial clone runs from the isolated runtime",
+                fake.calls[0]["cwd"] == os.path.dirname(fake.calls[0]["env"]["TMPDIR"]),
             )
             check(
                 "git: clone, tree inspection, checkout, and local SHA resolution have bounded timeouts",
@@ -374,6 +387,8 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 and "credential.helper=" in expected
                 and "core.hooksPath=/dev/null" in expected
                 and "http.followRedirects=false" in expected
+                and "protocol.version=0" in expected
+                and "transfer.bundleURI=false" in expected
                 and "--no-tags" in expected
                 and "--no-recurse-submodules" in expected,
             )
@@ -451,6 +466,33 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             check(
                 "cleanup: retained-byte overflow clone is removed immediately",
                 not os.path.lexists(root),
+            )
+    finally:
+        nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
+
+    old_bytes = nls.MAX_PUBLIC_CLONE_BYTES
+    try:
+        nls.MAX_PUBLIC_CLONE_BYTES = 32
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "clone-root")
+            os.makedirs(root)
+            script = (
+                "from pathlib import Path; import time; "
+                "Path('one').write_bytes(b'a' * 20); time.sleep(0.1); "
+                "Path('two').write_bytes(b'b' * 20); time.sleep(1)"
+            )
+            check(
+                "bounds: aggregate clone quota interrupts many-small-file growth",
+                rejected(
+                    lambda: nls.run_public_git(
+                        [sys.executable, "-c", script],
+                        env={"PATH": os.environ.get("PATH", os.defpath)},
+                        cwd=root,
+                        timeout=2,
+                        quota_root=root,
+                    ),
+                    "byte limit",
+                ),
             )
     finally:
         nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
