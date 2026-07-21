@@ -53,7 +53,9 @@ finishes cloning and after its `.git` administration is removed. Stock Git
 may transiently download or write more pack data before that audit; this
 narrow residual is accepted under the ordinary-network posture. An over-limit
 retained tree fails closed and the complete clone root is deterministically
-deleted.
+deleted. These safeguards are stricter than the official
+`claude-code-action` posture because that action has no resource sandbox or
+resource bounding.
 
 ### DNS rebinding residual
 

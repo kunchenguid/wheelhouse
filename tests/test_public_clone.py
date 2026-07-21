@@ -60,10 +60,18 @@ def rejected(call, text=""):
 
 
 class StockGit:
-    def __init__(self, clone_returncode=0, retained_size=None, commit=COMMIT):
+    def __init__(
+        self,
+        clone_returncode=0,
+        retained_size=None,
+        transient_pack_size=None,
+        commit=COMMIT,
+    ):
         self.calls = []
         self.clone_returncode = clone_returncode
         self.retained_size = retained_size
+        self.transient_pack_size = transient_pack_size
+        self.transient_pack_created = False
         self.commit = commit
 
     def __call__(self, args, *, env, cwd=None, timeout=None):
@@ -80,6 +88,13 @@ class StockGit:
                 handle.write("repository administration\n")
             with open(os.path.join(source, "README.md"), "w", encoding="utf-8") as handle:
                 handle.write("public source\n")
+            if self.transient_pack_size is not None:
+                transient_pack = os.path.join(
+                    source, ".git", "objects", "pack", "transient.pack"
+                )
+                with open(transient_pack, "wb") as handle:
+                    handle.truncate(self.transient_pack_size)
+                self.transient_pack_created = True
             if self.retained_size is not None:
                 oversized = os.path.join(source, "oversized.bin")
                 with open(oversized, "wb") as handle:
@@ -369,6 +384,40 @@ def test_exact_stock_clone_argv_environment_and_data_only_result():
                 os.environ[key] = value
 
 
+def test_transient_git_pack_is_removed_before_retained_audit():
+    with tempfile.TemporaryDirectory() as parent:
+        root = clone_root(parent)
+        fake = StockGit(transient_pack_size=nls.MAX_PUBLIC_CLONE_BYTES + 1)
+        result = json.loads(clone_request(fake, root))
+        source = result["location"]
+        check(
+            "residual: over-budget transient stock-Git pack is created and discarded",
+            fake.transient_pack_created
+            and not os.path.lexists(os.path.join(source, ".git"))
+            and not os.path.lexists(
+                os.path.join(source, ".git", "objects", "pack", "transient.pack")
+            ),
+        )
+        check(
+            "residual: post-clone retained-tree audit is the enforced bound",
+            result["manifest"]["retained_bytes"] <= nls.MAX_PUBLIC_CLONE_BYTES
+            and result["manifest"]["paths"] == ["README.md"]
+            and os.path.isfile(os.path.join(source, "README.md")),
+        )
+        check(
+            "residual: returned tree is data-only and non-committable",
+            subprocess.run(
+                ["git", "-C", source, "status"],
+                capture_output=True,
+            ).returncode
+            != 0,
+        )
+        check(
+            "residual: trusted cleanup removes the retained clone",
+            nls.cleanup_public_clones(root) and not os.path.lexists(root),
+        )
+
+
 def test_post_clone_limits_and_deterministic_cleanup():
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
@@ -508,6 +557,7 @@ def main():
     test_url_validation_and_public_addresses()
     test_ref_argument_safety()
     test_exact_stock_clone_argv_environment_and_data_only_result()
+    test_transient_git_pack_is_removed_before_retained_audit()
     test_post_clone_limits_and_deterministic_cleanup()
     test_stock_git_output_is_bounded()
     test_operation_scope_documentation_and_same_turn_action()
