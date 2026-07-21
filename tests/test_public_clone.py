@@ -306,6 +306,12 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "-c",
                 "fetch.bundleURI=",
                 "-c",
+                "fetch.fsckObjects=true",
+                "-c",
+                "fetch.unpackLimit=0",
+                "-c",
+                "transfer.unpackLimit=0",
+                "-c",
                 "submodule.recurse=false",
                 "-c",
                 "fetch.recurseSubmodules=false",
@@ -313,6 +319,8 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "http.followRedirects=false",
                 "clone",
                 "--quiet",
+                "--template",
+                os.path.join(root, "runtime", "template"),
                 "--depth",
                 "1",
                 "--no-checkout",
@@ -389,6 +397,9 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 and "http.followRedirects=false" in expected
                 and "protocol.version=0" in expected
                 and "transfer.bundleURI=false" in expected
+                and "fetch.fsckObjects=true" in expected
+                and "fetch.unpackLimit=0" in expected
+                and "transfer.unpackLimit=0" in expected
                 and "--no-tags" in expected
                 and "--no-recurse-submodules" in expected,
             )
@@ -466,33 +477,6 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             check(
                 "cleanup: retained-byte overflow clone is removed immediately",
                 not os.path.lexists(root),
-            )
-    finally:
-        nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
-
-    old_bytes = nls.MAX_PUBLIC_CLONE_BYTES
-    try:
-        nls.MAX_PUBLIC_CLONE_BYTES = 32
-        with tempfile.TemporaryDirectory() as parent:
-            root = os.path.join(parent, "clone-root")
-            os.makedirs(root)
-            script = (
-                "from pathlib import Path; import time; "
-                "Path('one').write_bytes(b'a' * 20); time.sleep(0.1); "
-                "Path('two').write_bytes(b'b' * 20); time.sleep(1)"
-            )
-            check(
-                "bounds: aggregate clone quota interrupts many-small-file growth",
-                rejected(
-                    lambda: nls.run_public_git(
-                        [sys.executable, "-c", script],
-                        env={"PATH": os.environ.get("PATH", os.defpath)},
-                        cwd=root,
-                        timeout=2,
-                        quota_root=root,
-                    ),
-                    "byte limit",
-                ),
             )
     finally:
         nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
@@ -624,6 +608,72 @@ def test_preparation_failure_cleans_partial_root():
         check(
             "cleanup: preparation failure leaves no root",
             not os.path.lexists(root),
+        )
+
+
+def test_git_pack_input_quota_is_enforced():
+    with tempfile.TemporaryDirectory() as parent:
+        repository = os.path.join(parent, "repository")
+        runtime = os.path.join(parent, "runtime")
+        source = os.path.join(parent, "source")
+        home = os.path.join(runtime, "home")
+        tmp = os.path.join(runtime, "tmp")
+        config = os.path.join(home, "config")
+        for path in (repository, home, tmp, config):
+            os.makedirs(path, exist_ok=True)
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.name", "test"],
+            check=True,
+        )
+        with open(os.path.join(repository, "payload"), "wb") as handle:
+            handle.write(os.urandom(8192))
+        subprocess.run(["git", "-C", repository, "add", "payload"], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "commit", "-qm", "payload"], check=True
+        )
+        env = nls._public_git_env(home, tmp, config)
+        wrapper = nls._prepare_public_git_exec_path(
+            shutil.which("git"), env, runtime, 4096
+        )
+        template = os.path.join(runtime, "template")
+        os.makedirs(template, exist_ok=True)
+        result = nls.run_public_git(
+            [
+                shutil.which("git"),
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "fetch.fsckObjects=true",
+                "-c",
+                "fetch.unpackLimit=0",
+                "-c",
+                "transfer.unpackLimit=0",
+                "clone",
+                "--quiet",
+                "--template",
+                template,
+                "--no-local",
+                "--no-checkout",
+                "file://" + repository,
+                source,
+            ],
+            env=env,
+            cwd=runtime,
+            timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS,
+            git_exec_path=wrapper,
+            file_size_limit=4096,
+        )
+        check(
+            "bounds: index-pack rejects an oversized incoming pack",
+            result.returncode != 0
+            and "maximum allowed size" in str(result.stdout),
         )
 
 
@@ -803,6 +853,7 @@ def main():
     test_exact_hardened_git_argv_environment_and_manifest()
     test_bounds_failure_output_cap_and_deterministic_cleanup()
     test_preparation_failure_cleans_partial_root()
+    test_git_pack_input_quota_is_enforced()
     test_raw_materialization_ignores_checkout_attributes()
     test_lossy_tree_paths_fail_closed()
     test_operation_scope_allowed_tools_cleanup_and_same_turn_action()

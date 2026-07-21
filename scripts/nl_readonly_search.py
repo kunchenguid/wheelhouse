@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -58,6 +59,7 @@ MAX_PUBLIC_TREE_OUTPUT_CHARS = 4 * 1024 * 1024
 MAX_PUBLIC_CLONE_FILES = 20000
 MAX_PUBLIC_CLONE_ENTRIES = 30000
 MAX_PUBLIC_CLONE_BYTES = 100 * 1024 * 1024
+MAX_PUBLIC_CLONE_METADATA_HEADROOM = 8 * 1024 * 1024
 MAX_PUBLIC_MANIFEST_ENTRIES = 200
 MAX_PUBLIC_MANIFEST_PATH_BYTES = 20000
 MAX_PUBLIC_SYMLINK_BYTES = 4096
@@ -475,13 +477,20 @@ def _public_git_env(home, tmp, config):
     return env
 
 
-def _limit_public_git_files():
+def _public_clone_file_limit():
+    headroom = min(MAX_PUBLIC_CLONE_METADATA_HEADROOM, MAX_PUBLIC_CLONE_BYTES // 2)
+    return max(1, (MAX_PUBLIC_CLONE_BYTES - headroom) // 2)
+
+
+def _limit_public_git_files(file_size_limit=None):
     try:
         import resource
 
+        if file_size_limit is None:
+            file_size_limit = MAX_PUBLIC_CLONE_BYTES
         resource.setrlimit(
             resource.RLIMIT_FSIZE,
-            (MAX_PUBLIC_CLONE_BYTES, MAX_PUBLIC_CLONE_BYTES),
+            (file_size_limit, file_size_limit),
         )
     except (ImportError, OSError, ValueError):
         pass
@@ -499,56 +508,6 @@ def _kill_public_git_process(process):
         process.kill()
 
 
-def _public_clone_usage(root):
-    stack = [root]
-    entry_count = 0
-    file_count = 0
-    retained_bytes = 0
-    while stack:
-        directory = stack.pop()
-        try:
-            entries = list(os.scandir(directory))
-        except FileNotFoundError:
-            continue
-        for entry in entries:
-            try:
-                child = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            entry_count += 1
-            if stat.S_ISDIR(child.st_mode):
-                stack.append(entry.path)
-                continue
-            if not (stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)):
-                raise ValueError("public clone contains a special file")
-            file_count += 1
-            retained_bytes += child.st_size
-    return entry_count, file_count, retained_bytes
-
-
-def _monitor_public_clone_quota(root, process, stop, violations, errors):
-    while not stop.is_set():
-        try:
-            entry_count, file_count, retained_bytes = _public_clone_usage(root)
-        except Exception as exc:
-            errors.append(exc)
-            _kill_public_git_process(process)
-            return
-        if entry_count > MAX_PUBLIC_CLONE_ENTRIES:
-            violations.append("entry")
-            _kill_public_git_process(process)
-            return
-        if file_count > MAX_PUBLIC_CLONE_FILES:
-            violations.append("file")
-            _kill_public_git_process(process)
-            return
-        if retained_bytes > MAX_PUBLIC_CLONE_BYTES:
-            violations.append("byte")
-            _kill_public_git_process(process)
-            return
-        stop.wait(0.01)
-
-
 def run_public_git(
     args,
     *,
@@ -556,17 +515,25 @@ def run_public_git(
     cwd=None,
     timeout=PUBLIC_CLONE_TIMEOUT_SECONDS,
     output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
-    quota_root=None,
+    git_exec_path=None,
+    file_size_limit=None,
 ):
+    child_env = dict(env)
+    if git_exec_path is not None:
+        child_env["GIT_EXEC_PATH"] = git_exec_path
     process = subprocess.Popen(
         list(args),
         cwd=cwd,
-        env=env,
+        env=child_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-        preexec_fn=_limit_public_git_files if os.name == "posix" else None,
+        preexec_fn=(
+            (lambda: _limit_public_git_files(file_size_limit))
+            if os.name == "posix"
+            else None
+        ),
     )
     captured = bytearray()
     truncated = []
@@ -584,17 +551,6 @@ def run_public_git(
 
     reader = threading.Thread(target=drain_output, name="wheelhouse-public-git-output")
     reader.start()
-    quota_stop = threading.Event()
-    quota_violations = []
-    quota_errors = []
-    quota_monitor = None
-    if quota_root is not None:
-        quota_monitor = threading.Thread(
-            target=_monitor_public_clone_quota,
-            args=(quota_root, process, quota_stop, quota_violations, quota_errors),
-            name="wheelhouse-public-clone-quota",
-        )
-        quota_monitor.start()
     timed_out = None
     try:
         process.wait(timeout=timeout)
@@ -602,23 +558,11 @@ def run_public_git(
         timed_out = exc
         _kill_public_git_process(process)
         process.wait()
-    finally:
-        quota_stop.set()
-        if quota_monitor is not None:
-            quota_monitor.join()
     reader.join()
     if timed_out is not None:
         raise ValueError(
             "public Git operation timed out after %s seconds" % timeout
         ) from timed_out
-    if quota_errors:
-        raise ValueError(
-            "public clone quota could not be enforced"
-        ) from quota_errors[0]
-    if quota_violations:
-        raise ValueError(
-            "public clone exceeds the retained %s limit" % quota_violations[0]
-        )
     output = bytes(captured).decode("utf-8", errors="replace")
     if truncated:
         output += "\n[git output truncated]"
@@ -643,14 +587,17 @@ def _run_public_git_checked(
     cwd=None,
     output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
     error_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
-    quota_root=None,
+    git_exec_path=None,
+    file_size_limit=None,
 ):
     try:
         kwargs = {"env": env, "cwd": cwd, "timeout": timeout}
         if runner is run_public_git:
             kwargs["output_limit"] = output_limit
-            if quota_root is not None:
-                kwargs["quota_root"] = quota_root
+            if git_exec_path is not None:
+                kwargs["git_exec_path"] = git_exec_path
+            if file_size_limit is not None:
+                kwargs["file_size_limit"] = file_size_limit
         result = runner(args, **kwargs)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
@@ -665,6 +612,56 @@ def _run_public_git_checked(
             message += ": " + detail
         raise ValueError(message)
     return _git_output(result, limit=output_limit)
+
+
+def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
+    original = _run_public_git_checked(
+        run_public_git,
+        [git, "--exec-path"],
+        env,
+        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        cwd=runtime,
+    ).strip()
+    if not os.path.isabs(original) or not os.path.isdir(original):
+        raise ValueError("public Git executable path is invalid")
+    wrapper_dir = os.path.join(runtime, "git-core")
+    os.makedirs(
+        wrapper_dir,
+        mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+    )
+    for entry in os.scandir(original):
+        if entry.name == "git":
+            continue
+        os.symlink(entry.path, os.path.join(wrapper_dir, entry.name))
+    wrapper = os.path.join(wrapper_dir, "git")
+    script = "\n".join(
+        [
+            "#!/bin/sh",
+            'if [ "$1" = "index-pack" ]; then',
+            "    shift",
+            "    exec %s index-pack --max-input-size=%s --no-rev-index \"$@\""
+            % (shlex.quote(git), file_size_limit),
+            "fi",
+            'if [ "$1" = "unpack-objects" ]; then',
+            "    exit 125",
+            "fi",
+            "exec %s \"$@\"" % shlex.quote(git),
+            "",
+        ]
+    )
+    descriptor = os.open(
+        wrapper,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+    )
+    try:
+        data = memoryview(script.encode("utf-8"))
+        while data:
+            count = os.write(descriptor, data)
+            data = data[count:]
+    finally:
+        os.close(descriptor)
+    return wrapper_dir
 
 
 def _check_public_clone_totals(*manifests):
@@ -1037,10 +1034,27 @@ def _public_clone_request(
     try:
         root, runtime, home, tmp, config = _prepare_public_clone_root(root)
         source = os.path.join(root, "source")
+        template = os.path.join(runtime, "template")
+        os.makedirs(
+            template,
+            mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+        )
         git = shutil.which("git")
         if not git:
             raise ValueError("git is unavailable")
         env = _public_git_env(home, tmp, config)
+        file_size_limit = None
+        git_exec_path = None
+        if runner is run_public_git:
+            if os.name != "posix":
+                raise ValueError("public clone is unavailable on this runner")
+            file_size_limit = _public_clone_file_limit()
+            git_exec_path = _prepare_public_git_exec_path(
+                git,
+                env,
+                runtime,
+                file_size_limit,
+            )
         args = [
             git,
             "-c",
@@ -1062,6 +1076,12 @@ def _public_clone_request(
             "-c",
             "fetch.bundleURI=",
             "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "fetch.unpackLimit=0",
+            "-c",
+            "transfer.unpackLimit=0",
+            "-c",
             "submodule.recurse=false",
             "-c",
             "fetch.recurseSubmodules=false",
@@ -1069,6 +1089,8 @@ def _public_clone_request(
             "http.followRedirects=false",
             "clone",
             "--quiet",
+            "--template",
+            template,
             "--depth",
             "1",
             "--no-checkout",
@@ -1087,7 +1109,8 @@ def _public_clone_request(
             env,
             PUBLIC_CLONE_TIMEOUT_SECONDS,
             cwd=runtime,
-            quota_root=root,
+            git_exec_path=git_exec_path,
+            file_size_limit=file_size_limit,
         )
         clone_manifest = _bounded_clone_manifest(source)
         _check_public_clone_totals(clone_manifest)
@@ -1110,6 +1133,8 @@ def _public_clone_request(
                 env,
                 PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
                 cwd=source,
+                git_exec_path=git_exec_path,
+                file_size_limit=file_size_limit,
             )
             .strip()
             .lower()
@@ -1159,7 +1184,8 @@ def _public_clone_request(
             env,
             PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
             cwd=source,
-            quota_root=root,
+            git_exec_path=git_exec_path,
+            file_size_limit=file_size_limit,
         )
         metadata_manifest = _bounded_clone_manifest(source)
         _check_public_clone_totals(metadata_manifest, tree_manifest)
