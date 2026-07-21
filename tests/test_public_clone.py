@@ -663,6 +663,17 @@ def test_raw_materialization_ignores_checkout_attributes():
         )
 
 
+def test_lossy_tree_paths_fail_closed():
+    listing = "100644 blob %s 1\tbad\ufffd\0" % ("0" * 40)
+    check(
+        "paths: undecodable Git filenames are rejected before materialization",
+        rejected(
+            lambda: nls._bounded_public_tree_manifest(listing),
+            "undecodable paths",
+        ),
+    )
+
+
 def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
@@ -751,6 +762,7 @@ def main():
     test_bounds_failure_output_cap_and_deterministic_cleanup()
     test_preparation_failure_cleans_partial_root()
     test_raw_materialization_ignores_checkout_attributes()
+    test_lossy_tree_paths_fail_closed()
     test_operation_scope_allowed_tools_cleanup_and_same_turn_action()
     print()
     if _failures:

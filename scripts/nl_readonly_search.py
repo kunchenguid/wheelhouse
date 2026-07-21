@@ -589,6 +589,8 @@ def _check_public_clone_totals(*manifests):
 def _bounded_public_tree_manifest(output):
     if output.endswith("[git output truncated]"):
         raise ValueError("public clone tree listing exceeded the output limit")
+    if "\ufffd" in output:
+        raise ValueError("public clone tree listing contains undecodable paths")
 
     entry_count = 0
     file_count = 0
