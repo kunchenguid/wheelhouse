@@ -221,14 +221,23 @@ still appears where it's plain English, e.g. "triage the queue".)
   defect was entirely in how `check_status()` derived those inputs. See
   `tests/test_check_status.py`.
 - **Failed decision = durable open `blocked`, never pure `needs-decision`
-  (card #447).** `decision-handler.yml` maps `terminal_state == 'error'` onto
-  the same label path as `blocked` (add `blocked`, drop `needs-decision`; do
-  NOT close). Leaving a failed action as pure `needs-decision` lets reconcile's
-  soft self-heal silently consume it as `resolved` when the open target later
-  leaves the worklist. Hard-close still auto-cleans a `blocked` card once the
-  target is genuinely merged/closed. Guarded by the YAML-inspection in
-  `tests/test_nl_decisions_search.py` (`test_error_terminal_state_labels_as_blocked`)
-  and the soft/hard-close cases in `tests/test_reconcile.py`.
+  (card #447), except recoverable merge conflicts.** `decision-handler.yml`
+  maps `terminal_state == 'error'` onto the same label path as `blocked` (add
+  `blocked`, drop `needs-decision`; do NOT close). Leaving a failed action as
+  pure `needs-decision` lets reconcile's soft self-heal silently consume it as
+  `resolved` when the open target later leaves the worklist. Hard-close still
+  auto-cleans a `blocked` card once the target is genuinely merged/closed.
+  **Exception (card #1544):** `do_merge` returns terminal `none` when GitHub
+  reports a merge conflict (still posts the conflict note). Terminal `none`
+  does not add `blocked` or drop `needs-decision`, so the card stays pure
+  pending and the existing scan/reconcile refresh path reactivates it after a
+  clean new head. Generic non-conflict failures stay durable `error`/`blocked`.
+  Stale-head rechecks and NL revision binding are unchanged. Guarded by the
+  YAML-inspection in `tests/test_nl_decisions_search.py`
+  (`test_error_terminal_state_labels_as_blocked`, plus `none`/retryable
+  keep-actionable checks), the soft/hard-close cases in `tests/test_reconcile.py`,
+  and `tests/test_decision.py`
+  (`test_merge_conflict_is_recoverable_not_durable_blocked`).
 - **Workflow-touching PRs are manual UI merges by design (Option B; cards
   #442/#447).** `FLEET_TOKEN` intentionally has no Workflows write. Before any
   card-driven `do_merge` API call, `apply_decision._workflow_merge_block`

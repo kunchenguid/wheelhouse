@@ -723,11 +723,23 @@ def test_retryable_terminal_keeps_card_actionable():
             "'retryable'" not in str(block.get("if", ""))
             and '"retryable"' not in str(block.get("if", "")),
         )
+        # Recoverable merge-conflict uses terminal "none" (card #1544). Same
+        # non-blocking surface as comment/request-changes: never durable blocked.
+        check(
+            "workflow: none (recoverable conflict) does not add blocked",
+            "'none'" not in str(block.get("if", ""))
+            and '"none"' not in str(block.get("if", "")),
+        )
     if drop:
         check(
             "workflow: retryable merge result keeps needs-decision",
             "'retryable'" not in str(drop.get("if", ""))
             and '"retryable"' not in str(drop.get("if", "")),
+        )
+        check(
+            "workflow: none (recoverable conflict) keeps needs-decision",
+            "'none'" not in str(drop.get("if", ""))
+            and '"none"' not in str(drop.get("if", "")),
         )
 
 

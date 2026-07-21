@@ -1972,12 +1972,21 @@ def test_thank_on_merge_skips_non_success_outcomes():
 
     fake, calls = fake_gh_rest(open_pr(), merge_error="422: merge conflict")
     with patch_core(gh_rest=fake, **common):
-        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
-    check("thank: a failed merge PUT is an error, not resolved", terminal == "error")
-    check("thank: no comment when the merge itself failed", posts(calls) == [])
+        msg, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    # Merge conflicts are recoverable (card #1544): leave the card pending so a
+    # later clean head can refresh via the normal scan path. Still not resolved.
+    check(
+        "thank: a merge-conflict PUT is recoverable none, not resolved",
+        terminal == "none",
+    )
+    check(
+        "thank: merge-conflict message still explains the rebase ask",
+        "merge conflict" in msg.lower() and "rebase" in msg.lower(),
+    )
+    check("thank: no thank-you comment when the merge itself failed", posts(calls) == [])
 
-    # Card #447: 403 token failures and merge conflicts both terminal "error".
-    # decision-handler must label both as blocked (not pure needs-decision).
+    # Card #447: generic (non-conflict) failures stay durable "error" so
+    # decision-handler labels them blocked (not pure needs-decision).
     fake, calls = fake_gh_rest(
         open_pr(),
         merge_error=(
@@ -2054,6 +2063,244 @@ def test_thank_on_merge_custom_message_and_per_repo_precedence():
     check(
         "thank: per-repo message overrides the global message",
         p and p[0]["fields"]["body"] == "Repo says thanks @alice!",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Recoverable merge-conflict classification (card #1544 / #447 tension):
+# a real base-advance conflict must leave the card pure pending so a later
+# clean head refreshes via the normal path, while generic failures stay
+# durable blocked and stale heads stay non-actionable.
+# --------------------------------------------------------------------------- #
+def test_merge_conflict_is_recoverable_not_durable_blocked():
+    import render_card as rc
+
+    common = dict(
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    )
+    old_head = "93d2ba365d725e2263e9e4181b8db1ffe8a205ed"
+    new_head = "668a67c9a002a4480598e9fb20a6059f9eff9032"
+
+    # (1) Real merge-conflict PUT -> recoverable terminal + owner-facing note.
+    conflict_detail = (
+        "gh: Pull Request has merge conflicts (HTTP 405)"
+    )
+    fake, calls = fake_gh_rest(
+        open_pr(head_sha=old_head),
+        merge_error=conflict_detail,
+    )
+    with patch_core(gh_rest=fake, **common):
+        msg, terminal = ad.do_merge(
+            "owner-login", "target-repo", 79, old_head
+        )
+    check(
+        "recoverable-conflict: terminal is none (not error/blocked/resolved)",
+        terminal == "none",
+    )
+    check(
+        "recoverable-conflict: message still explains the conflict",
+        "merge conflict" in msg.lower()
+        and "rebase" in msg.lower()
+        and "target-repo#79" in msg,
+    )
+    check(
+        "recoverable-conflict: merge PUT was attempted",
+        len(merge_puts(calls)) == 1,
+    )
+    check(
+        "recoverable-conflict: no thank-you or target side-write on conflict",
+        posts(calls) == [],
+    )
+    # decision-handler only adds blocked / drops needs-decision for
+    # terminal_state in {blocked, error}. Terminal "none" leaves pure pending.
+    pure_pending = [
+        {"name": n}
+        for n in (
+            "needs-decision",
+            "kind:pr-review",
+            "repo:target-repo",
+            "priority:med",
+            "target:target-repo-79",
+        )
+    ]
+    check(
+        "recoverable-conflict: pure pending labels stay is_refreshable",
+        rc.is_refreshable(pure_pending) is True,
+    )
+    blocked_labels = [
+        {"name": n}
+        for n in ("blocked", "kind:pr-review", "repo:target-repo", "target:target-repo-79")
+    ]
+    check(
+        "recoverable-conflict: durable blocked labels are NOT refreshable "
+        "(#447 protection still encodes this shape)",
+        rc.is_refreshable(blocked_labels) is False,
+    )
+
+    # (2) Later contributor rebase / new clean head is a material refresh trigger.
+    card_state = {
+        "repo": "target-repo",
+        "number": 79,
+        "kind": "pr-review",
+        "head_sha": old_head,
+        "comp": "pass",
+        "tests": "green",
+        "priority": "med",
+        "options": ["merge", "close", "investigate", "hold"],
+        "render_version": rc.CARD_RENDER_VERSION,
+    }
+    refreshed_item = {
+        "repo": "target-repo",
+        "number": 79,
+        "kind": "pr-review",
+        "head_sha": new_head,
+        "comp": "pass",
+        "tests": "green",
+        "priority": "med",
+        "options": ["merge", "close", "investigate", "hold"],
+        "title": "fix labels",
+        "author": "contributor",
+        "bucket": "merge-ready",
+        "updated_at": "2026-07-21T20:18:37Z",
+        "url": "https://github.com/owner/target-repo/pull/79",
+        "summary": "compliance=pass tests=green",
+        "recommendation": "Merge it.",
+    }
+    check(
+        "recoverable-conflict: new head is material_changed for normal refresh",
+        rc.material_changed(refreshed_item, card_state) is True,
+    )
+    check(
+        "recoverable-conflict: new head needs refresh on pure pending card",
+        rc.refresh_needed(refreshed_item, card_state, labels=pure_pending) is True,
+    )
+    check(
+        "recoverable-conflict: same head is not a material refresh",
+        rc.material_changed(
+            dict(refreshed_item, head_sha=old_head), card_state
+        )
+        is False,
+    )
+    # A still-blocked card (pre-fix shape) would NOT refresh even with new head:
+    # refresh_needed may still be True on material change, but reconcile/upsert
+    # only act when is_refreshable is True.
+    check(
+        "recoverable-conflict: blocked+new-head stays non-refreshable "
+        "(why the recoverable terminal is load-bearing)",
+        rc.is_refreshable(blocked_labels) is False
+        and rc.material_changed(refreshed_item, card_state) is True,
+    )
+
+    # (3) Action bound to the OLD head is rejected (stale-head recheck).
+    fake, calls = fake_gh_rest(open_pr(head_sha=new_head))
+    with patch_core(gh_rest=fake, **common):
+        stale_msg, stale_terminal = ad.do_merge(
+            "owner-login", "target-repo", 79, old_head
+        )
+    check(
+        "recoverable-conflict: action on old head is retryable, not merged",
+        stale_terminal == "retryable",
+    )
+    check(
+        "recoverable-conflict: stale-head message names the drift",
+        "moved" in stale_msg.lower() or "changed" in stale_msg.lower(),
+    )
+    check(
+        "recoverable-conflict: stale-head never reaches the merge PUT",
+        merge_puts(calls) == [],
+    )
+    fake, calls = fake_gh_rest(open_pr(head_sha=new_head))
+    with patch_core(
+        gh_rest=fake,
+        get_owner=lambda: "owner-login",
+        load_config=lambda: thank_cfg(),
+        maintainers=lambda: {"owner-login"},
+    ):
+        out = run_execute(
+            {
+                "DECISION": "merge",
+                "TARGET_REPO": "target-repo",
+                "TARGET_NUMBER": "79",
+                "HEAD_SHA": old_head,
+                "KIND": "pr-review",
+                "TARGET_REVISION": old_head,
+                "FREE_TEXT": "",
+            }
+        )
+    check(
+        "recoverable-conflict: cmd_execute rejects old-head revision as retryable",
+        out.get("terminal_state") == "retryable" and out.get("success") == "false",
+    )
+    check(
+        "recoverable-conflict: cmd_execute never reaches merge PUT on stale rev",
+        merge_puts(calls) == [],
+    )
+
+    # (4) Generic non-conflict execution error remains durable error.
+    fake, calls = fake_gh_rest(
+        open_pr(head_sha=old_head),
+        merge_error="gh: Resource not accessible by personal access token (HTTP 403)",
+    )
+    with patch_core(gh_rest=fake, **common):
+        err_msg, err_terminal = ad.do_merge(
+            "owner-login", "target-repo", 79, old_head
+        )
+    check(
+        "recoverable-conflict: generic merge API failure stays terminal error",
+        err_terminal == "error",
+    )
+    check(
+        "recoverable-conflict: generic failure is not misclassified as conflict",
+        "conflict" not in err_msg.lower(),
+    )
+
+    # (5) #447 false-close stays impossible: durable blocked without
+    # needs-decision is non-refreshable, so soft-heal cannot consume it.
+    check(
+        "recoverable-conflict: #447 blocked shape is non-refreshable",
+        rc.is_refreshable(
+            [{"name": "blocked"}, {"name": "kind:pr-review"}, {"name": "target:x-1"}]
+        )
+        is False,
+    )
+    check(
+        "recoverable-conflict: #447 blocked never soft-heal refreshable "
+        "even with needs-decision still present",
+        rc.is_refreshable(
+            [
+                {"name": "needs-decision"},
+                {"name": "blocked"},
+                {"name": "kind:pr-review"},
+            ]
+        )
+        is False,
+    )
+
+    # (6) Claim / idempotency shape: recoverable conflict does not leave the
+    # card in a non-claimable blocked state; pure pending remains claimable.
+    # (auto-merge G1 requires needs-decision + trusted identity.)
+    check(
+        "recoverable-conflict: pure pending has needs-decision for G1 claim",
+        any(lab["name"] == "needs-decision" for lab in pure_pending),
+    )
+    check(
+        "recoverable-conflict: blocked shape lacks needs-decision claim surface",
+        not any(lab["name"] == "needs-decision" for lab in blocked_labels),
+    )
+
+    # Conflict substring must not fire on unrelated 405s without "conflict".
+    fake, calls = fake_gh_rest(
+        open_pr(head_sha=old_head),
+        merge_error="gh: Pull Request is not mergeable (HTTP 405)",
+    )
+    with patch_core(gh_rest=fake, **common):
+        other_msg, other_terminal = ad.do_merge(
+            "owner-login", "target-repo", 79, old_head
+        )
+    check(
+        "recoverable-conflict: non-conflict 405 stays durable error",
+        other_terminal == "error" and "failed" in other_msg.lower(),
     )
 
 
@@ -2978,6 +3225,7 @@ def main():
     test_thank_on_merge_best_effort_survives_comment_failure()
     test_thank_on_merge_skips_owner_maintainer_bot_and_blank_author()
     test_thank_on_merge_custom_message_and_per_repo_precedence()
+    test_merge_conflict_is_recoverable_not_durable_blocked()
     test_do_request_changes_posts_review()
     test_do_request_changes_respects_cleanup_config()
     test_do_request_changes_refuses_self_review()
