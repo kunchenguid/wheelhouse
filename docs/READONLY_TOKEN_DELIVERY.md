@@ -35,3 +35,27 @@ This residual exposure is understood and accepted because the credential is
 limited to public reads and has no write or private-repository access. Existing
 environment scrubbing and the scoped `wheelhouse-search` wrapper remain
 defense-in-depth controls, not a claim that the token is unavailable in process.
+
+## Anonymous public clone child
+
+The owner/maintainer-gated `nl-decision.search` path may ask `wheelhouse-search`
+to clone one complete public HTTPS Git URL. This is separate from the existing
+authenticated `gh` allowlist. The wrapper resolves the URL's host and rejects
+loopback, link-local, private, reserved, metadata, or otherwise non-public
+addresses before it starts Git. Git receives an explicit credential-free
+environment with a fresh home and configuration, prompting and credential
+helpers disabled, and no model, GitHub, cloud, or runner credentials inherited.
+The shallow data-only clone is retained outside the target workspace only for
+the model step, then a trusted `always()` step removes it.
+
+### DNS rebinding residual
+
+For arbitrary public custom Git hosts, Git resolves the hostname again between
+Wheelhouse's validation and Git's connection. A host can theoretically change
+from the validated public address to a non-public address in that narrow window.
+Wheelhouse does not add a custom HTTP stack, address-pinning proxy, or provider
+proxy to close that gap. This is the explicitly accepted residual of aligning
+with the official `claude-code-action` posture. Redirect following is disabled,
+metadata and other non-public answers are rejected at validation, the child has
+no credentials, the hosted runner has no Wheelhouse-internal service network,
+and clone time and retained data remain bounded.

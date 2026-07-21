@@ -57,6 +57,8 @@ python tests/test_triage_replay.py
 python tests/test_auto_merge_v1.py
 python tests/test_deep_review.py
 python tests/test_nl_decisions_search.py
+python tests/test_public_clone.py
+python tests/test_public_clone_e2e.py
 python tests/test_workflow_lint.py
 python tests/test_scan_reliability.py
 python tests/test_config_schema.py
