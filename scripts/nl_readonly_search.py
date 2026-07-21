@@ -4,10 +4,11 @@
 The workflow installs this file as `wheelhouse-search` only when the optional
 READONLY_TOKEN secret is present. Claude can write a JSON request to
 `search-request.json` and run that wrapper, but the wrapper controls the actual
-command shape: no writes and bounded output. Authenticated `gh` operations stay
-limited to the target repo plus owner-scoped repos from `wheelhouse.config.yml`.
-The separate `public_clone` operation accepts a complete public HTTPS Git URL,
-validates its current addresses, and invokes stock Git anonymously in an
+command shape: authenticated `gh` operations are read-only and all output is
+bounded. Those operations stay limited to the target repo plus owner-scoped
+repos from `wheelhouse.config.yml`. The separate `public_clone` operation is
+the bounded local-temporary exception: it accepts a complete public HTTPS Git
+URL, validates its current addresses, and invokes stock Git anonymously in an
 isolated temporary directory. It removes Git administration before a
 post-clone retained-tree audit and never executes cloned content.
 """
@@ -689,7 +690,9 @@ def _bounded_clone_manifest(source):
                     target = os.readlink(entry.path)
                     target_bytes = os.fsencode(target)
                 except (OSError, UnicodeError) as exc:
-                    raise ValueError("public clone contains an unreadable symlink") from exc
+                    raise ValueError(
+                        "public clone contains an unreadable symlink"
+                    ) from exc
                 if len(target_bytes) > MAX_PUBLIC_SYMLINK_BYTES:
                     raise ValueError("public clone contains an oversized symlink")
                 if "\x00" in os.fsdecode(target_bytes):
@@ -729,9 +732,7 @@ def _public_clone_request(
         raise ValueError(
             "public_clone has unsupported fields: %s" % ", ".join(unexpected)
         )
-    canonical_url, _ = validate_public_git_url(
-        req.get("url"), resolver=resolver
-    )
+    canonical_url, _ = validate_public_git_url(req.get("url"), resolver=resolver)
     ref = _safe_public_ref(req.get("ref"))
     root = _public_clone_root(clone_root)
     try:
@@ -749,14 +750,17 @@ def _public_clone_request(
             PUBLIC_CLONE_TIMEOUT_SECONDS,
             cwd=runtime,
         )
-        commit = _run_public_git_checked(
-            runner,
-            _public_git_args(git)
-            + ["rev-parse", "--verify", "HEAD^{commit}"],
-            env,
-            PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-            cwd=source,
-        ).strip().lower()
+        commit = (
+            _run_public_git_checked(
+                runner,
+                _public_git_args(git) + ["rev-parse", "--verify", "HEAD^{commit}"],
+                env,
+                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+                cwd=source,
+            )
+            .strip()
+            .lower()
+        )
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
             raise ValueError("public clone did not resolve a valid commit SHA")
         _remove_git_admin(source)
@@ -773,6 +777,7 @@ def _public_clone_request(
     except Exception:
         cleanup_public_clones(root)
         raise
+
 
 def run_gh(args):
     result = subprocess.run(
