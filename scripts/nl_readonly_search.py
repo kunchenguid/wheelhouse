@@ -550,6 +550,7 @@ def _run_public_git_checked(
     timeout,
     cwd=None,
     output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
+    error_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
 ):
     try:
         kwargs = {"env": env, "cwd": cwd, "timeout": timeout}
@@ -563,12 +564,25 @@ def _run_public_git_checked(
     except OSError as exc:
         raise ValueError("public Git operation could not start") from exc
     if getattr(result, "returncode", 1) != 0:
-        detail = _git_output(result, limit=output_limit)
+        detail = _git_output(result, limit=error_limit)
         message = "public Git operation failed"
         if detail:
             message += ": " + detail
         raise ValueError(message)
     return _git_output(result, limit=output_limit)
+
+
+def _check_public_clone_totals(*manifests):
+    totals = {
+        field: sum(manifest[field] for manifest in manifests)
+        for field in ("entry_count", "file_count", "retained_bytes")
+    }
+    if totals["entry_count"] > MAX_PUBLIC_CLONE_ENTRIES:
+        raise ValueError("public clone exceeds the retained entry limit")
+    if totals["file_count"] > MAX_PUBLIC_CLONE_FILES:
+        raise ValueError("public clone exceeds the retained file limit")
+    if totals["retained_bytes"] > MAX_PUBLIC_CLONE_BYTES:
+        raise ValueError("public clone exceeds the retained byte limit")
 
 
 def _bounded_public_tree_manifest(output):
@@ -647,7 +661,7 @@ def _bounded_clone_manifest(source):
         for entry in entries:
             rel = "%s/%s" % (prefix, entry.name) if prefix else entry.name
             try:
-                rel_bytes = rel.encode("utf-8")
+                rel_bytes = len(json.dumps(rel, ensure_ascii=True).encode("utf-8"))
                 child = entry.stat(follow_symlinks=False)
             except (OSError, UnicodeError) as exc:
                 raise ValueError("public clone contains an unreadable path") from exc
@@ -671,10 +685,10 @@ def _bounded_clone_manifest(source):
                 visible_count += 1
                 if (
                     len(paths) < MAX_PUBLIC_MANIFEST_ENTRIES
-                    and path_bytes + len(rel_bytes) <= MAX_PUBLIC_MANIFEST_PATH_BYTES
+                    and path_bytes + rel_bytes <= MAX_PUBLIC_MANIFEST_PATH_BYTES
                 ):
                     paths.append(rel)
-                    path_bytes += len(rel_bytes)
+                    path_bytes += rel_bytes
         stack.extend(reversed(child_dirs))
     return {
         "entry_count": entry_count,
@@ -789,7 +803,7 @@ def _public_clone_request(
             "--full-tree",
             "HEAD",
         ]
-        _bounded_public_tree_manifest(
+        tree_manifest = _bounded_public_tree_manifest(
             _run_public_git_checked(
                 runner,
                 tree_args,
@@ -799,6 +813,27 @@ def _public_clone_request(
                 output_limit=MAX_PUBLIC_TREE_OUTPUT_CHARS,
             )
         )
+        read_tree_args = [
+            git,
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.allow=never",
+            "read-tree",
+            "--reset",
+            "HEAD",
+        ]
+        _run_public_git_checked(
+            runner,
+            read_tree_args,
+            env,
+            PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+            cwd=source,
+        )
+        metadata_manifest = _bounded_clone_manifest(source)
+        _check_public_clone_totals(metadata_manifest, tree_manifest)
         checkout_args = [
             git,
             "-c",

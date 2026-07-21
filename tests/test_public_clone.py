@@ -92,6 +92,8 @@ class FakeGit:
                     % ("0" * 40, size, name)
                 )
             return subprocess.CompletedProcess(args, 0, "".join(listing), "")
+        if "read-tree" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
         if "checkout" in args:
             source = cwd
             for name, contents in self.files.items():
@@ -329,7 +331,8 @@ def test_exact_hardened_git_argv_environment_and_manifest():
             check(
                 "git: tree limits are checked before checkout",
                 "ls-tree" in fake.calls[2]["args"]
-                and "checkout" in fake.calls[3]["args"],
+                and "read-tree" in fake.calls[3]["args"]
+                and "checkout" in fake.calls[4]["args"],
             )
             env = fake.calls[0]["env"]
             expected_env = {
@@ -452,6 +455,23 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
     finally:
         nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
 
+    old_bytes = nls.MAX_PUBLIC_CLONE_BYTES
+    try:
+        nls.MAX_PUBLIC_CLONE_BYTES = 30
+        with tempfile.TemporaryDirectory() as parent:
+            root = clone_root(parent)
+            fake = FakeGit(files={"small": "123456789012345"})
+            check(
+                "bounds: clone metadata and tree bytes share one aggregate cap",
+                rejected(lambda: clone_request(fake, root), "byte limit"),
+            )
+            check(
+                "cleanup: aggregate metadata overflow clone is removed immediately",
+                not os.path.lexists(root),
+            )
+    finally:
+        nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
+
     class TimeoutGit(FakeGit):
         def __call__(self, args, *, env, cwd=None, timeout=None):
             if "clone" in args:
@@ -485,6 +505,29 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
         check("bounds: Git diagnostic output is capped", bounded)
         check("cleanup: failed clone is removed immediately", not os.path.lexists(root))
 
+    class TreeErrorGit(FakeGit):
+        def __call__(self, args, *, env, cwd=None, timeout=None):
+            if "ls-tree" in args:
+                result = super().__call__(args, env=env, cwd=cwd, timeout=timeout)
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    result.stdout,
+                    "x" * (nls.MAX_PUBLIC_TREE_OUTPUT_CHARS * 2),
+                )
+            return super().__call__(args, env=env, cwd=cwd, timeout=timeout)
+
+    with tempfile.TemporaryDirectory() as parent:
+        root = clone_root(parent)
+        try:
+            clone_request(TreeErrorGit(), root)
+        except ValueError as exc:
+            bounded = len(str(exc)) < nls.MAX_PUBLIC_GIT_OUTPUT_CHARS + 100
+        else:
+            bounded = False
+        check("bounds: tree diagnostics retain the small error cap", bounded)
+        check("cleanup: tree inspection failure is removed immediately", not os.path.lexists(root))
+
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
         first = FakeGit(files={"old.txt": "old"})
@@ -495,6 +538,19 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             "cleanup: a later public_clone deterministically replaces the prior clone",
             not os.path.exists(os.path.join(root, "source", "old.txt"))
             and os.path.isfile(os.path.join(root, "source", "new.txt")),
+        )
+        nls.cleanup_public_clones(root)
+
+    with tempfile.TemporaryDirectory() as parent:
+        root = clone_root(parent)
+        special_name = 'quote"\nname'
+        result = json.loads(
+            clone_request(FakeGit(files={special_name: "x"}), root)
+        )
+        check(
+            "result: escaped manifest paths remain valid bounded JSON",
+            special_name in result["manifest"]["paths"]
+            and len(json.dumps(result)) <= nls.MAX_OUTPUT_CHARS,
         )
         nls.cleanup_public_clones(root)
 
