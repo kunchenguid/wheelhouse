@@ -70,7 +70,26 @@ class FakeGit:
         self.calls.append(
             {"args": args, "env": dict(env), "cwd": cwd, "timeout": timeout}
         )
-        if "clone" in args:
+        if "ls-remote" in args:
+            refs = [
+                value
+                for value in args
+                if value.startswith("refs/heads/") or value.startswith("refs/tags/")
+            ]
+            if refs:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    COMMIT + "\t" + refs[0] + "\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "ref: refs/heads/main\tHEAD\n" + COMMIT + "\tHEAD\n",
+                "",
+            )
+        if "init" in args:
             source = args[-1]
             os.makedirs(os.path.join(source, ".git"), exist_ok=True)
             with open(
@@ -79,10 +98,19 @@ class FakeGit:
                 handle.write('[remote "origin"]\n')
             return subprocess.CompletedProcess(
                 args,
-                self.clone_returncode,
-                self.clone_output,
+                0,
+                "",
                 "",
             )
+        if "fetch-pack" in args:
+            return subprocess.CompletedProcess(
+                args,
+                self.clone_returncode,
+                self.clone_output or (COMMIT + " " + COMMIT + "\n"),
+                "",
+            )
+        if "update-ref" in args or "symbolic-ref" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
         if "ls-tree" in args:
             listing = []
             for name, contents in sorted(self.files.items()):
@@ -253,10 +281,8 @@ def test_ref_argument_safety():
         clone_request(fake, clone_root(parent), ref="release/v1.2")
         args = fake.calls[0]["args"]
         check(
-            "ref: safe ref occupies one argv element before the option separator",
-            args[args.index("--branch") : args.index("--branch") + 2]
-            == ["--branch", "release/v1.2"]
-            and args[-3] == "--",
+            "ref: safe ref is resolved as exact branch and tag names",
+            args[-2:] == ["refs/heads/release/v1.2", "refs/tags/release/v1.2"],
         )
         nls.cleanup_public_clones(clone_root(parent))
 
@@ -317,43 +343,30 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "fetch.recurseSubmodules=false",
                 "-c",
                 "http.followRedirects=false",
-                "clone",
-                "--quiet",
-                "--template",
-                os.path.join(root, "runtime", "template"),
-                "--depth",
-                "1",
-                "--no-checkout",
-                "--no-tags",
-                "--single-branch",
-                "--no-recurse-submodules",
-                "--config",
-                "remote.origin.tagOpt=--no-tags",
-                "--",
+                "ls-remote",
+                "--symref",
                 "https://forge.example/team/repo.git",
-                os.path.join(root, "source"),
+                "HEAD",
             ]
             check(
-                "git: clone argv is exact and hardened",
+                "git: remote advertisement argv is exact and hardened",
                 fake.calls[0]["args"] == expected,
             )
             check(
-                "git: initial clone runs from the isolated runtime",
+                "git: remote advertisement runs from the isolated runtime",
                 fake.calls[0]["cwd"] == os.path.dirname(fake.calls[0]["env"]["TMPDIR"]),
             )
             check(
-                "git: clone, tree inspection, checkout, and local SHA resolution have bounded timeouts",
-                fake.calls[0]["timeout"] == nls.PUBLIC_CLONE_TIMEOUT_SECONDS
-                and all(
-                    call["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS
-                    for call in fake.calls[1:]
-                ),
+                "git: fetch, tree inspection, checkout, and local SHA resolution have bounded timeouts",
+                fake.calls[2]["timeout"] == nls.PUBLIC_CLONE_TIMEOUT_SECONDS
+                and fake.calls[0]["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS
+                and all(call["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS for call in fake.calls[1:2] + fake.calls[3:]),
             )
             check(
                 "git: tree limits are checked before checkout",
-                "ls-tree" in fake.calls[2]["args"]
-                and "read-tree" in fake.calls[3]["args"]
-                and "checkout" in fake.calls[4]["args"],
+                "ls-tree" in fake.calls[6]["args"]
+                and "read-tree" in fake.calls[7]["args"]
+                and "checkout" in fake.calls[8]["args"],
             )
             env = fake.calls[0]["env"]
             expected_env = {
@@ -400,8 +413,10 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 and "fetch.fsckObjects=true" in expected
                 and "fetch.unpackLimit=0" in expected
                 and "transfer.unpackLimit=0" in expected
-                and "--no-tags" in expected
-                and "--no-recurse-submodules" in expected,
+                and "--keep" in fake.calls[2]["args"]
+                and "--depth=1" in fake.calls[2]["args"]
+                and "submodule.recurse=false" in expected
+                and "fetch.recurseSubmodules=false" in expected,
             )
             check(
                 "result: canonical URL, commit, isolated location, and bounded manifest are returned",
@@ -500,8 +515,7 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
 
     class TimeoutGit(FakeGit):
         def __call__(self, args, *, env, cwd=None, timeout=None):
-            if "clone" in args:
-                os.makedirs(args[-1], exist_ok=True)
+            if "fetch-pack" in args:
                 raise subprocess.TimeoutExpired(args, timeout)
             return super().__call__(args, env=env, cwd=cwd, timeout=timeout)
 
@@ -642,6 +656,19 @@ def test_git_pack_input_quota_is_enforced():
         )
         template = os.path.join(runtime, "template")
         os.makedirs(template, exist_ok=True)
+        subprocess.run(
+            [
+                shutil.which("git"),
+                "init",
+                "-q",
+                "--template",
+                template,
+                source,
+            ],
+            env=env,
+            cwd=runtime,
+            check=True,
+        )
         result = nls.run_public_git(
             [
                 shutil.which("git"),
@@ -655,17 +682,15 @@ def test_git_pack_input_quota_is_enforced():
                 "fetch.unpackLimit=0",
                 "-c",
                 "transfer.unpackLimit=0",
-                "clone",
-                "--quiet",
-                "--template",
-                template,
-                "--no-local",
-                "--no-checkout",
+                "fetch-pack",
+                "--keep",
+                "--depth=1",
+                "--no-progress",
                 "file://" + repository,
-                source,
+                "HEAD",
             ],
             env=env,
-            cwd=runtime,
+            cwd=source,
             timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS,
             git_exec_path=wrapper,
             file_size_limit=4096,
@@ -673,7 +698,117 @@ def test_git_pack_input_quota_is_enforced():
         check(
             "bounds: index-pack rejects an oversized incoming pack",
             result.returncode != 0
-            and "maximum allowed size" in str(result.stdout),
+            and (
+                "bounded byte budget" in str(result.stdout)
+                or "maximum allowed size" in str(result.stdout)
+                or "invalid index-pack output" in str(result.stdout)
+            ),
+        )
+
+
+def test_pack_and_index_share_aggregate_storage_budget():
+    with tempfile.TemporaryDirectory() as parent:
+        repository = os.path.join(parent, "repository")
+        probe = os.path.join(parent, "probe")
+        actual = os.path.join(parent, "actual")
+        runtime = os.path.join(parent, "runtime")
+        home = os.path.join(runtime, "home")
+        tmp = os.path.join(runtime, "tmp")
+        config = os.path.join(home, "config")
+        template = os.path.join(runtime, "template")
+        for path in (repository, home, tmp, config, template):
+            os.makedirs(path, exist_ok=True)
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.name", "test"],
+            check=True,
+        )
+        for index in range(40):
+            with open(
+                os.path.join(repository, "file-%02d" % index), "wb"
+            ) as handle:
+                handle.write(os.urandom(32))
+        subprocess.run(["git", "-C", repository, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "commit", "-qm", "payload"], check=True
+        )
+        git = shutil.which("git")
+        subprocess.run(
+            [git, "init", "-q", "--template", template, probe], check=True
+        )
+        subprocess.run(
+            [
+                git,
+                "fetch-pack",
+                "--keep",
+                "--depth=1",
+                "--no-progress",
+                repository,
+                "HEAD",
+            ],
+            cwd=probe,
+            check=True,
+            capture_output=True,
+        )
+        probe_pack = [
+            os.path.join(probe, ".git", "objects", "pack", name)
+            for name in os.listdir(os.path.join(probe, ".git", "objects", "pack"))
+            if name.endswith((".pack", ".idx"))
+        ]
+        artifact_limit = max(os.path.getsize(path) for path in probe_pack) + 1
+        env = nls._public_git_env(home, tmp, config)
+        wrapper = nls._prepare_public_git_exec_path(
+            git, env, runtime, artifact_limit
+        )
+        subprocess.run(
+            [git, "init", "-q", "--template", template, actual], check=True
+        )
+        result = nls.run_public_git(
+            [
+                git,
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.file.allow=always",
+                "fetch-pack",
+                "--keep",
+                "--depth=1",
+                "--no-progress",
+                repository,
+                "HEAD",
+            ],
+            env=env,
+            cwd=actual,
+            timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS,
+            git_exec_path=wrapper,
+            file_size_limit=artifact_limit,
+        )
+        actual_pack = [
+            os.path.join(actual, ".git", "objects", "pack", name)
+            for name in os.listdir(os.path.join(actual, ".git", "objects", "pack"))
+            if name.endswith((".pack", ".idx"))
+        ]
+        retained = sum(os.path.getsize(path) for path in actual_pack)
+        check(
+            "bounds: pack and index may cross one slot but stay within reserved aggregate slots",
+            result.returncode == 0
+            and retained > artifact_limit
+            and retained <= 4 * artifact_limit,
+        )
+        budgets = nls._public_clone_storage_budgets()
+        check(
+            "bounds: aggregate object-store overflow is rejected before materialization",
+            rejected(
+                lambda: nls._check_public_clone_storage_budgets(
+                    {"retained_bytes": budgets["object_bytes"] + budgets["headroom"] + 1},
+                    {"retained_bytes": 0},
+                ),
+                "object storage",
+            ),
         )
 
 
@@ -854,6 +989,7 @@ def main():
     test_bounds_failure_output_cap_and_deterministic_cleanup()
     test_preparation_failure_cleans_partial_root()
     test_git_pack_input_quota_is_enforced()
+    test_pack_and_index_share_aggregate_storage_budget()
     test_raw_materialization_ignores_checkout_attributes()
     test_lossy_tree_paths_fail_closed()
     test_operation_scope_allowed_tools_cleanup_and_same_turn_action()

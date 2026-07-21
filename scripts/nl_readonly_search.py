@@ -478,8 +478,21 @@ def _public_git_env(home, tmp, config):
 
 
 def _public_clone_file_limit():
+    return _public_clone_storage_budgets()["artifact_bytes"]
+
+
+def _public_clone_storage_budgets():
     headroom = min(MAX_PUBLIC_CLONE_METADATA_HEADROOM, MAX_PUBLIC_CLONE_BYTES // 2)
-    return max(1, (MAX_PUBLIC_CLONE_BYTES - headroom) // 2)
+    available = MAX_PUBLIC_CLONE_BYTES - headroom
+    tree_bytes = available // 2
+    object_bytes = available - tree_bytes
+    artifact_bytes = max(1, object_bytes // 4)
+    return {
+        "headroom": headroom,
+        "tree_bytes": tree_bytes,
+        "object_bytes": object_bytes,
+        "artifact_bytes": artifact_bytes,
+    }
 
 
 def _limit_public_git_files(file_size_limit=None):
@@ -633,14 +646,80 @@ def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
         if entry.name == "git":
             continue
         os.symlink(entry.path, os.path.join(wrapper_dir, entry.name))
+    pump = os.path.join(runtime, "public-index-pack-pump")
+    pump_script = "\n".join(
+        [
+            "#!%s" % sys.executable,
+            "import os",
+            "import subprocess",
+            "import sys",
+            "",
+            "limit = int(sys.argv[1])",
+            "git = sys.argv[2]",
+            "index_args = sys.argv[3:] + ['--max-input-size=%s', '--no-rev-index']"
+            % file_size_limit,
+            "",
+            "def limit_file_size():",
+            "    import resource",
+            "    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))",
+            "",
+            "child = subprocess.Popen(",
+            "    [git, 'index-pack'] + index_args,",
+            "    stdin=subprocess.PIPE,",
+            "    preexec_fn=limit_file_size,",
+            ")",
+            "remaining = limit",
+            "try:",
+            "    while remaining:",
+            "        chunk = os.read(0, min(65536, remaining))",
+            "        if not chunk:",
+            "            break",
+            "        view = memoryview(chunk)",
+            "        while view:",
+            "            count = os.write(child.stdin.fileno(), view)",
+            "            view = view[count:]",
+            "        remaining -= len(chunk)",
+            "    if os.read(0, 1):",
+            "        os.write(2, b'public Git pack exceeds the bounded byte budget\\n')",
+            "        child.kill()",
+            "        child.wait()",
+            "        sys.exit(1)",
+            "    child.stdin.close()",
+            "except (BrokenPipeError, OSError):",
+            "    try:",
+            "        child.kill()",
+            "    except ProcessLookupError:",
+            "        pass",
+            "    child.wait()",
+            "    sys.exit(1)",
+            "sys.exit(child.wait())",
+            "",
+        ]
+    )
+    descriptor = os.open(
+        pump,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+    )
+    try:
+        data = memoryview(pump_script.encode("utf-8"))
+        while data:
+            count = os.write(descriptor, data)
+            data = data[count:]
+    finally:
+        os.close(descriptor)
     wrapper = os.path.join(wrapper_dir, "git")
     script = "\n".join(
         [
             "#!/bin/sh",
             'if [ "$1" = "index-pack" ]; then',
             "    shift",
-            "    exec %s index-pack --max-input-size=%s --no-rev-index \"$@\""
-            % (shlex.quote(git), file_size_limit),
+            "    exec %s %s %s \"$@\""
+            % (
+                shlex.quote(pump),
+                file_size_limit,
+                shlex.quote(git),
+            ),
             "fi",
             'if [ "$1" = "unpack-objects" ]; then',
             "    exit 125",
@@ -662,6 +741,178 @@ def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
     finally:
         os.close(descriptor)
     return wrapper_dir
+
+
+def _public_git_args(git):
+    return [
+        git,
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.interactive=never",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.https.allow=always",
+        "-c",
+        "protocol.version=0",
+        "-c",
+        "transfer.bundleURI=false",
+        "-c",
+        "fetch.bundleURI=",
+        "-c",
+        "fetch.fsckObjects=true",
+        "-c",
+        "fetch.unpackLimit=0",
+        "-c",
+        "transfer.unpackLimit=0",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "fetch.recurseSubmodules=false",
+        "-c",
+        "http.followRedirects=false",
+    ]
+
+
+def _public_remote_object(output, names):
+    if output.endswith("[git output truncated]"):
+        raise ValueError("public Git remote advertisement exceeded the output limit")
+    found = {}
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            continue
+        object_id, name = fields
+        if name in names and re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id
+        ):
+            found[name] = object_id
+    for name in names:
+        if name in found:
+            return found[name], name
+    raise ValueError("public Git ref was not found")
+
+
+def _public_fetched_object(output):
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and all(
+            re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", field)
+            for field in fields
+        ):
+            return fields[0]
+    raise ValueError("public Git fetch returned no commit")
+
+
+def _public_fetch_pack(
+    git,
+    env,
+    runtime,
+    source,
+    template,
+    canonical_url,
+    ref,
+    runner,
+    git_exec_path=None,
+    file_size_limit=None,
+):
+    remote_query = _public_git_args(git) + ["ls-remote"]
+    if ref:
+        branch_ref = "refs/heads/" + ref
+        tag_ref = "refs/tags/" + ref
+        remote_query.extend(["--refs", canonical_url, branch_ref, tag_ref])
+        remote_names = (branch_ref, tag_ref)
+    else:
+        remote_query.extend(["--symref", canonical_url, "HEAD"])
+        remote_names = ("HEAD",)
+    remote_output = _run_public_git_checked(
+        runner,
+        remote_query,
+        env,
+        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        cwd=runtime,
+        git_exec_path=git_exec_path,
+        file_size_limit=file_size_limit,
+    )
+    remote_object, remote_ref = _public_remote_object(remote_output, remote_names)
+
+    init_args = _public_git_args(git) + [
+        "init",
+        "--quiet",
+        "--template",
+        template,
+        source,
+    ]
+    _run_public_git_checked(
+        runner,
+        init_args,
+        env,
+        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        cwd=runtime,
+        git_exec_path=git_exec_path,
+        file_size_limit=file_size_limit,
+    )
+    fetch_args = _public_git_args(git) + [
+        "fetch-pack",
+        "--keep",
+        "--depth=1",
+        "--no-progress",
+        canonical_url,
+        remote_ref,
+    ]
+    fetched_output = _run_public_git_checked(
+        runner,
+        fetch_args,
+        env,
+        PUBLIC_CLONE_TIMEOUT_SECONDS,
+        cwd=source,
+        git_exec_path=git_exec_path,
+        file_size_limit=file_size_limit,
+    )
+    if _public_fetched_object(fetched_output) != remote_object:
+        raise ValueError("public Git fetch returned an unexpected commit")
+
+    update_args = _public_git_args(git) + [
+        "update-ref",
+        "refs/wheelhouse/public",
+        remote_object,
+    ]
+    _run_public_git_checked(
+        runner,
+        update_args,
+        env,
+        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        cwd=source,
+        git_exec_path=git_exec_path,
+        file_size_limit=file_size_limit,
+    )
+    symbolic_args = _public_git_args(git) + [
+        "symbolic-ref",
+        "HEAD",
+        "refs/wheelhouse/public",
+    ]
+    _run_public_git_checked(
+        runner,
+        symbolic_args,
+        env,
+        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        cwd=source,
+        git_exec_path=git_exec_path,
+        file_size_limit=file_size_limit,
+    )
+
+
+def _check_public_clone_storage_budgets(metadata, tree):
+    budgets = _public_clone_storage_budgets()
+    if tree["retained_bytes"] > budgets["tree_bytes"]:
+        raise ValueError("public clone exceeds the retained byte limit for materialization")
+    if metadata["retained_bytes"] > budgets["object_bytes"] + budgets["headroom"]:
+        raise ValueError("public clone exceeds the retained byte limit for object storage")
 
 
 def _check_public_clone_totals(*manifests):
@@ -1055,73 +1306,20 @@ def _public_clone_request(
                 runtime,
                 file_size_limit,
             )
-        args = [
+        _public_fetch_pack(
             git,
-            "-c",
-            "credential.helper=",
-            "-c",
-            "credential.interactive=never",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "protocol.allow=never",
-            "-c",
-            "protocol.https.allow=always",
-            "-c",
-            "protocol.version=0",
-            "-c",
-            "transfer.bundleURI=false",
-            "-c",
-            "fetch.bundleURI=",
-            "-c",
-            "fetch.fsckObjects=true",
-            "-c",
-            "fetch.unpackLimit=0",
-            "-c",
-            "transfer.unpackLimit=0",
-            "-c",
-            "submodule.recurse=false",
-            "-c",
-            "fetch.recurseSubmodules=false",
-            "-c",
-            "http.followRedirects=false",
-            "clone",
-            "--quiet",
-            "--template",
-            template,
-            "--depth",
-            "1",
-            "--no-checkout",
-            "--no-tags",
-            "--single-branch",
-            "--no-recurse-submodules",
-            "--config",
-            "remote.origin.tagOpt=--no-tags",
-        ]
-        if ref:
-            args.extend(["--branch", ref])
-        args.extend(["--", canonical_url, source])
-        _run_public_git_checked(
-            runner,
-            args,
             env,
-            PUBLIC_CLONE_TIMEOUT_SECONDS,
-            cwd=runtime,
+            runtime,
+            source,
+            template,
+            canonical_url,
+            ref,
+            runner,
             git_exec_path=git_exec_path,
             file_size_limit=file_size_limit,
         )
-        clone_manifest = _bounded_clone_manifest(source)
-        _check_public_clone_totals(clone_manifest)
         rev_args = [
-            git,
-            "-c",
-            "credential.helper=",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "protocol.allow=never",
+            *_public_git_args(git),
             "rev-parse",
             "--verify",
             "HEAD^{commit}",
@@ -1142,13 +1340,7 @@ def _public_clone_request(
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
             raise ValueError("public clone did not resolve a valid commit SHA")
         tree_args = [
-            git,
-            "-c",
-            "credential.helper=",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "protocol.allow=never",
+            *_public_git_args(git),
             "ls-tree",
             "-r",
             "-l",
@@ -1164,16 +1356,12 @@ def _public_clone_request(
                 PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
                 cwd=source,
                 output_limit=MAX_PUBLIC_TREE_OUTPUT_CHARS,
+                git_exec_path=git_exec_path,
+                file_size_limit=file_size_limit,
             )
         )
         read_tree_args = [
-            git,
-            "-c",
-            "credential.helper=",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "protocol.allow=never",
+            *_public_git_args(git),
             "read-tree",
             "--reset",
             "HEAD",
@@ -1188,6 +1376,7 @@ def _public_clone_request(
             file_size_limit=file_size_limit,
         )
         metadata_manifest = _bounded_clone_manifest(source)
+        _check_public_clone_storage_budgets(metadata_manifest, tree_manifest)
         _check_public_clone_totals(metadata_manifest, tree_manifest)
         if runner is run_public_git:
             _materialize_public_clone_raw(
@@ -1200,13 +1389,7 @@ def _public_clone_request(
             )
         else:
             checkout_args = [
-                git,
-                "-c",
-                "credential.helper=",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "protocol.allow=never",
+                *_public_git_args(git),
                 "checkout",
                 "--quiet",
                 "--detach",
