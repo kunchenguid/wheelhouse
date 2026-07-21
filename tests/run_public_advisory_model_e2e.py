@@ -82,13 +82,13 @@ def execute_case(
 
     derive_task, derive_result = invoke(
         "policy-derive.public", "derive",
-        "Act only as PolicyDeriver. Read only vision.md, vision-units.json, and policy-binding.json. Classify every exact unit and condition. Map every non-context criterion to gating generic operations. Mark every unknown or ambiguity explicitly.",
+        "Act only as PolicyDeriver. Read only vision.md, vision-units.json, and policy-binding.json. Apply the trusted canonical rubric exactly. Classify every exact unit and extract every applicability condition. Map every non-context criterion to gating generic operations. Mark every unknown or ambiguity explicitly.",
     )
     plan_path = case / "policy-derivation.json"
     plan_path.write_text(json.dumps(derive_result["final"]["value"], sort_keys=True) + "\n", encoding="utf-8")
     audit_task, audit_result = invoke(
         "policy-audit.public", "audit",
-        "Act only as an independent CoverageAuditor. Read only vision.md, vision-units.json, policy-binding.json, and policy-derivation.json. Produce your own exhaustive unit classifications, conditions, requiredness, and operation mapping. Report every disagreement.",
+        "Act only as an independent CoverageAuditor. Read only vision.md, vision-units.json, policy-binding.json, and policy-derivation.json. Apply the same trusted canonical rubric exactly and independently verify exhaustive unit classifications, conditions, requiredness, and operation mapping. Report only clear rubric disagreements; copy the proposed semantic fields and obligations exactly when they agree.",
         policy_plan_file=str(plan_path),
     )
     audit_path = case / "policy-audit.json"

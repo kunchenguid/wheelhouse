@@ -1559,7 +1559,12 @@ def build_task(
                 "when a required meaning or operation cannot be represented, and ambiguous only "
                 "when the clause has unresolved alternative meanings. A list item inherits the "
                 "applicability conditions stated by its immediately preceding list introduction; "
-                "record that inherited scope in conditions. For an audit agreement, copy "
+                "record that inherited scope in conditions. Use advisory for should statements; "
+                "use conditional for explicit applicability triggers or scoped subject classes; "
+                "use prohibited for explicit bans. Every conditional or prohibited unit must name "
+                "its scope in conditions. Structural comparison and other target-local judgment "
+                "map only to policy.assess unless the text explicitly requires pinned public source "
+                "inspection. For an audit agreement, copy "
                 "the proposed semantic fields and obligations exactly; otherwise supply your "
                 "independent values, list every disagreement, and set complete false.",
             ]

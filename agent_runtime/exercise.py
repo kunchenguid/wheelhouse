@@ -29,7 +29,8 @@ MAX_EXTRACTED_BYTES = 200 * 1024 * 1024
 MAX_OUTPUT_BYTES = 65_536
 MAX_RUNTIME_BYTES = 4 * 1024 * 1024
 MAX_RUNTIME_FILES = 256
-MAX_WALL_SECONDS = 30
+MAX_WALL_SECONDS = 60
+MAX_SCENARIO_WALL_SECONDS = 20
 MAX_CALLS = 8
 PACKAGE_NAME = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+")
 
@@ -326,7 +327,7 @@ def _run_scenario(
                 work, writable, node, bool(artifact_sandbox)
             ),
         )
-        scenario_deadline = time.monotonic() + min(10, remaining)
+        scenario_deadline = time.monotonic() + min(MAX_SCENARIO_WALL_SECONDS, remaining)
         try:
             while process.poll() is None:
                 _writable_usage(runtime_root)

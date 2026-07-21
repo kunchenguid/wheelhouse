@@ -46,6 +46,7 @@ MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_GIT_WIRE_BYTES = 100 * 1024 * 1024
 MAX_GIT_TREE_BYTES = 200 * 1024 * 1024
 MAX_GIT_FILES = 10_000
+MAX_GIT_MODEL_RESPONSE_BYTES = 60 * 1024
 MAX_REDIRECTS = 5
 MAX_TASK_REDIRECTS = 20
 MAX_TASK_BYTES = 150 * 1024 * 1024
@@ -1615,21 +1616,44 @@ class PublicReadService:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        response_truncated = len(content.encode("utf-8")) > MAX_RESPONSE_BYTES // 2
+        response_truncated = len(content.encode("utf-8")) > MAX_GIT_MODEL_RESPONSE_BYTES
         if response_truncated:
-            content = json.dumps(
-                {
-                    "commit": snapshot["commit"],
-                    "tree": snapshot["tree"],
-                    "manifest_sha256": snapshot["manifest_sha256"],
-                    "exposure_truncated": True,
-                    "files": [
-                        {key: row[key] for key in ("path", "kind", "bytes", "sha256") if key in row}
-                        for row in manifest[:1000]
-                    ],
-                },
-                separators=(",", ":"),
-            )
+            exposed = []
+            for row in manifest:
+                candidate = exposed + [row]
+                bounded = json.dumps(
+                    {
+                        "commit": snapshot["commit"],
+                        "tree": snapshot["tree"],
+                        "manifest_sha256": snapshot["manifest_sha256"],
+                        "exposure_truncated": True,
+                        "files": candidate,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if len(bounded.encode("utf-8")) > MAX_GIT_MODEL_RESPONSE_BYTES:
+                    metadata = {
+                        key: row[key]
+                        for key in ("path", "kind", "bytes", "sha256")
+                        if key in row
+                    }
+                    candidate = exposed + [metadata]
+                    bounded = json.dumps(
+                        {
+                            "commit": snapshot["commit"],
+                            "tree": snapshot["tree"],
+                            "manifest_sha256": snapshot["manifest_sha256"],
+                            "exposure_truncated": True,
+                            "files": candidate,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    if len(bounded.encode("utf-8")) > MAX_GIT_MODEL_RESPONSE_BYTES:
+                        break
+                exposed = candidate
+                content = bounded
         receipt = self._receipt(
             operation="public.git_snapshot",
             requested_url=str(arguments["url"]),
@@ -1656,9 +1680,13 @@ class PublicReadService:
                         "exposure_truncated",
                     )
                 },
+                "exposure_truncated": snapshot["exposure_truncated"]
+                or response_truncated,
                 **self.store.write_excerpt(content),
             },
-            truncated=snapshot["exposure_truncated"] or response_truncated,
+            # The complete depth-1 snapshot remains receipt-bound even when the
+            # model receives a smaller representative source projection.
+            truncated=snapshot["exposure_truncated"],
         )
         return _evidence_envelope(receipt, content)
 

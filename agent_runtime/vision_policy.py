@@ -459,7 +459,11 @@ def project_advisory_review(
             and coverage_complete
             and obligation["semantic_status"]
             in {"recognized", "recognized-local"}
-            and units_by_id[obligation["unit_id"]].get("conditions")
+            and (
+                units_by_id[obligation["unit_id"]].get("conditions")
+                or units_by_id[obligation["unit_id"]].get("condition_strength")
+                in {"conditional", "prohibited"}
+            )
         )
         trusted_status = (
             "complete-pass" if assessment == "pass" and receipts_complete
