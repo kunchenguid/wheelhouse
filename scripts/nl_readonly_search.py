@@ -54,6 +54,7 @@ PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS = 10
 PUBLIC_DNS_TIMEOUT_SECONDS = 5
 MAX_PUBLIC_DNS_ANSWERS = 32
 MAX_PUBLIC_GIT_OUTPUT_CHARS = 8000
+MAX_PUBLIC_TREE_OUTPUT_CHARS = 4 * 1024 * 1024
 MAX_PUBLIC_CLONE_FILES = 20000
 MAX_PUBLIC_CLONE_ENTRIES = 30000
 MAX_PUBLIC_CLONE_BYTES = 100 * 1024 * 1024
@@ -422,17 +423,21 @@ def cleanup_public_clones(clone_root=None):
 
 def _prepare_public_clone_root(clone_root=None):
     root = _public_clone_root(clone_root)
-    cleanup_public_clones(root)
-    os.makedirs(root, mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-    runtime = os.path.join(root, "runtime")
-    home = os.path.join(runtime, "home")
-    tmp = os.path.join(runtime, "tmp")
-    config = os.path.join(home, "config")
-    for path in (runtime, home, tmp, config):
-        os.makedirs(
-            path, mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR, exist_ok=True
-        )
-    return root, runtime, home, tmp, config
+    try:
+        cleanup_public_clones(root)
+        os.makedirs(root, mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        runtime = os.path.join(root, "runtime")
+        home = os.path.join(runtime, "home")
+        tmp = os.path.join(runtime, "tmp")
+        config = os.path.join(home, "config")
+        for path in (runtime, home, tmp, config):
+            os.makedirs(
+                path, mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR, exist_ok=True
+            )
+        return root, runtime, home, tmp, config
+    except Exception:
+        cleanup_public_clones(root)
+        raise
 
 
 def _public_git_env(home, tmp, config):
@@ -472,7 +477,14 @@ def _limit_public_git_files():
         pass
 
 
-def run_public_git(args, *, env, cwd=None, timeout=PUBLIC_CLONE_TIMEOUT_SECONDS):
+def run_public_git(
+    args,
+    *,
+    env,
+    cwd=None,
+    timeout=PUBLIC_CLONE_TIMEOUT_SECONDS,
+    output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
+):
     process = subprocess.Popen(
         list(args),
         cwd=cwd,
@@ -491,7 +503,7 @@ def run_public_git(args, *, env, cwd=None, timeout=PUBLIC_CLONE_TIMEOUT_SECONDS)
             chunk = process.stdout.read(8192)
             if not chunk:
                 return
-            remaining = MAX_PUBLIC_GIT_OUTPUT_CHARS - len(captured)
+            remaining = output_limit - len(captured)
             if remaining > 0:
                 captured.extend(chunk[:remaining])
             if len(chunk) > remaining:
@@ -521,19 +533,29 @@ def run_public_git(args, *, env, cwd=None, timeout=PUBLIC_CLONE_TIMEOUT_SECONDS)
     return subprocess.CompletedProcess(args, process.returncode, output, "")
 
 
-def _git_output(result):
+def _git_output(result, limit=MAX_PUBLIC_GIT_OUTPUT_CHARS):
     output = str(getattr(result, "stdout", "") or "")
     stderr = str(getattr(result, "stderr", "") or "")
     if stderr:
         output += "\n" + stderr
-    if len(output) > MAX_PUBLIC_GIT_OUTPUT_CHARS:
-        output = output[:MAX_PUBLIC_GIT_OUTPUT_CHARS] + "\n[git output truncated]"
+    if len(output) > limit:
+        output = output[:limit] + "\n[git output truncated]"
     return output.strip()
 
 
-def _run_public_git_checked(runner, args, env, timeout, cwd=None):
+def _run_public_git_checked(
+    runner,
+    args,
+    env,
+    timeout,
+    cwd=None,
+    output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
+):
     try:
-        result = runner(args, env=env, cwd=cwd, timeout=timeout)
+        kwargs = {"env": env, "cwd": cwd, "timeout": timeout}
+        if runner is run_public_git:
+            kwargs["output_limit"] = output_limit
+        result = runner(args, **kwargs)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
             "public Git operation timed out after %s seconds" % timeout
@@ -541,12 +563,65 @@ def _run_public_git_checked(runner, args, env, timeout, cwd=None):
     except OSError as exc:
         raise ValueError("public Git operation could not start") from exc
     if getattr(result, "returncode", 1) != 0:
-        detail = _git_output(result)
+        detail = _git_output(result, limit=output_limit)
         message = "public Git operation failed"
         if detail:
             message += ": " + detail
         raise ValueError(message)
-    return _git_output(result)
+    return _git_output(result, limit=output_limit)
+
+
+def _bounded_public_tree_manifest(output):
+    if output.endswith("[git output truncated]"):
+        raise ValueError("public clone tree listing exceeded the output limit")
+
+    entry_count = 0
+    file_count = 0
+    retained_bytes = 0
+    directories = set()
+    for record in output.split("\0"):
+        if not record:
+            continue
+        try:
+            metadata, rel = record.split("\t", 1)
+            _mode, object_type, _object_id, size = metadata.split(" ")
+        except ValueError as exc:
+            raise ValueError("public clone tree listing was malformed") from exc
+        if not rel or rel.startswith("/") or "\\" in rel:
+            raise ValueError("public clone tree listing was malformed")
+        parts = rel.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            raise ValueError("public clone tree listing was malformed")
+        if object_type not in ("blob", "commit"):
+            raise ValueError("public clone contains an unsupported tree entry")
+        if size == "-":
+            size = 0
+        else:
+            try:
+                size = int(size)
+            except ValueError as exc:
+                raise ValueError("public clone tree listing was malformed") from exc
+            if size < 0:
+                raise ValueError("public clone tree listing was malformed")
+
+        file_count += 1
+        retained_bytes += size
+        if file_count > MAX_PUBLIC_CLONE_FILES:
+            raise ValueError("public clone exceeds the retained file limit")
+        if retained_bytes > MAX_PUBLIC_CLONE_BYTES:
+            raise ValueError("public clone exceeds the retained byte limit")
+
+        for index in range(1, len(parts)):
+            directories.add("/".join(parts[:index]))
+        entry_count = file_count + len(directories)
+        if entry_count > MAX_PUBLIC_CLONE_ENTRIES:
+            raise ValueError("public clone exceeds the retained entry limit")
+
+    return {
+        "entry_count": entry_count,
+        "file_count": file_count,
+        "retained_bytes": retained_bytes,
+    }
 
 
 def _bounded_clone_manifest(source):
@@ -621,15 +696,14 @@ def _public_clone_request(
         raise ValueError(
             "public_clone has unsupported fields: %s" % ", ".join(unexpected)
         )
-    canonical_url, addresses = validate_public_git_url(
+    canonical_url, _ = validate_public_git_url(
         req.get("url"), resolver=resolver
     )
     ref = _safe_public_ref(req.get("ref"))
     root = _public_clone_root(clone_root)
-    prepared = False
+    prepared = True
     try:
         root, runtime, home, tmp, config = _prepare_public_clone_root(root)
-        prepared = True
         source = os.path.join(root, "source")
         git = shutil.which("git")
         if not git:
@@ -659,6 +733,7 @@ def _public_clone_request(
             "--quiet",
             "--depth",
             "1",
+            "--no-checkout",
             "--no-tags",
             "--single-branch",
             "--no-recurse-submodules",
@@ -699,6 +774,52 @@ def _public_clone_request(
         )
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
             raise ValueError("public clone did not resolve a valid commit SHA")
+        tree_args = [
+            git,
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.allow=never",
+            "ls-tree",
+            "-r",
+            "-l",
+            "-z",
+            "--full-tree",
+            "HEAD",
+        ]
+        _bounded_public_tree_manifest(
+            _run_public_git_checked(
+                runner,
+                tree_args,
+                env,
+                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+                cwd=source,
+                output_limit=MAX_PUBLIC_TREE_OUTPUT_CHARS,
+            )
+        )
+        checkout_args = [
+            git,
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.allow=never",
+            "checkout",
+            "--quiet",
+            "--detach",
+            "--no-recurse-submodules",
+            "HEAD",
+        ]
+        _run_public_git_checked(
+            runner,
+            checkout_args,
+            env,
+            PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+            cwd=source,
+        )
         shutil.rmtree(runtime)
         manifest = _bounded_clone_manifest(source)
         result = {
@@ -707,11 +828,7 @@ def _public_clone_request(
             "commit": commit,
             "location": source,
             "manifest": manifest,
-            "validated_addresses": addresses,
-            "cleanup": "automatic after the model step; a later public_clone replaces this clone",
         }
-        if ref:
-            result["ref"] = ref
         return _cap(json.dumps(result, sort_keys=True, indent=2) + "\n")
     except Exception:
         if prepared:

@@ -73,11 +73,6 @@ class FakeGit:
         if "clone" in args:
             source = args[-1]
             os.makedirs(os.path.join(source, ".git"), exist_ok=True)
-            for name, contents in self.files.items():
-                path = os.path.join(source, name)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(contents)
             with open(
                 os.path.join(source, ".git", "config"), "w", encoding="utf-8"
             ) as handle:
@@ -88,6 +83,23 @@ class FakeGit:
                 self.clone_output,
                 "",
             )
+        if "ls-tree" in args:
+            listing = []
+            for name, contents in sorted(self.files.items()):
+                size = len(contents.encode("utf-8"))
+                listing.append(
+                    "100644 blob %s %s\t%s\0"
+                    % ("0" * 40, size, name)
+                )
+            return subprocess.CompletedProcess(args, 0, "".join(listing), "")
+        if "checkout" in args:
+            source = cwd
+            for name, contents in self.files.items():
+                path = os.path.join(source, name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(contents)
+            return subprocess.CompletedProcess(args, 0, "", "")
         return subprocess.CompletedProcess(args, 0, COMMIT + "\n", "")
 
 
@@ -292,6 +304,7 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "--quiet",
                 "--depth",
                 "1",
+                "--no-checkout",
                 "--no-tags",
                 "--single-branch",
                 "--no-recurse-submodules",
@@ -306,9 +319,17 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 fake.calls[0]["args"] == expected,
             )
             check(
-                "git: clone and local SHA resolution have bounded timeouts",
+                "git: clone, tree inspection, checkout, and local SHA resolution have bounded timeouts",
                 fake.calls[0]["timeout"] == nls.PUBLIC_CLONE_TIMEOUT_SECONDS
-                and fake.calls[1]["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+                and all(
+                    call["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS
+                    for call in fake.calls[1:]
+                ),
+            )
+            check(
+                "git: tree limits are checked before checkout",
+                "ls-tree" in fake.calls[2]["args"]
+                and "checkout" in fake.calls[3]["args"],
             )
             env = fake.calls[0]["env"]
             expected_env = {
@@ -363,6 +384,12 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 and result["manifest"]["retained_bytes"] <= nls.MAX_PUBLIC_CLONE_BYTES,
             )
             check(
+                "result: DNS resolution addresses are not returned",
+                "validated_addresses" not in result
+                and "cleanup" not in result
+                and "ref" not in result,
+            )
+            check(
                 "result: clone is outside the target workspace and readable",
                 not nls._path_within(result["location"], ROOT)
                 and open(
@@ -398,7 +425,7 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             root = clone_root(parent)
             fake = FakeGit(files={"one": "1", "two": "2"})
             check(
-                "bounds: post-clone file overflow fails closed",
+                "bounds: pre-checkout file overflow fails closed",
                 rejected(lambda: clone_request(fake, root), "file limit"),
             )
             check(
@@ -415,7 +442,7 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             root = clone_root(parent)
             fake = FakeGit(files={"large": "retained bytes exceed the cap"})
             check(
-                "bounds: post-clone retained-byte overflow fails closed",
+                "bounds: pre-checkout retained-byte overflow fails closed",
                 rejected(lambda: clone_request(fake, root), "byte limit"),
             )
             check(
@@ -470,6 +497,36 @@ def test_bounds_failure_output_cap_and_deterministic_cleanup():
             and os.path.isfile(os.path.join(root, "source", "new.txt")),
         )
         nls.cleanup_public_clones(root)
+
+
+def test_preparation_failure_cleans_partial_root():
+    original_makedirs = nls.os.makedirs
+    with tempfile.TemporaryDirectory() as parent:
+        root = clone_root(parent)
+        failure_path = os.path.join(root, "runtime", "home")
+
+        def failing_makedirs(path, *args, **kwargs):
+            if path == failure_path:
+                raise OSError("injected preparation failure")
+            return original_makedirs(path, *args, **kwargs)
+
+        nls.os.makedirs = failing_makedirs
+        try:
+            preparation_failed = False
+            try:
+                nls._prepare_public_clone_root(root)
+            except OSError:
+                preparation_failed = True
+            check(
+                "cleanup: partial preparation is removed",
+                preparation_failed,
+            )
+        finally:
+            nls.os.makedirs = original_makedirs
+        check(
+            "cleanup: preparation failure leaves no root",
+            not os.path.lexists(root),
+        )
 
 
 def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
@@ -558,6 +615,7 @@ def main():
     test_ref_argument_safety()
     test_exact_hardened_git_argv_environment_and_manifest()
     test_bounds_failure_output_cap_and_deterministic_cleanup()
+    test_preparation_failure_cleans_partial_root()
     test_operation_scope_allowed_tools_cleanup_and_same_turn_action()
     print()
     if _failures:
