@@ -1704,7 +1704,11 @@ def test_public_task_contract():
             ACTION_LIMITS["policy-derive.public"] == (540_000, 600_000, 32, 8, 131_072)
             and ACTION_LIMITS["policy-audit.public"] == (540_000, 600_000, 32, 8, 131_072)
             and derive_task["spec"]["limits"]["maxInputTokens"] == 300_000
-            and derive_task["spec"]["limits"]["maxOutputTokens"] == 32_000,
+            and derive_task["spec"]["limits"]["maxOutputTokens"] == 32_000
+            and "a structural-similarity criterion still maps only to policy.assess"
+            in (
+                derive_bundle / derive_task["spec"]["prompt"]["userArtifact"]
+            ).read_text(encoding="utf-8"),
         )
         check(
             "task: one wrapped policy result is normalized before identity validation",
@@ -2299,6 +2303,11 @@ def test_exercise_hard_wall():
         check(
             "exercise: extraction and execution share one killable hard wall bound",
             code == "exercise.deadline" and time.monotonic() - started < 1,
+        )
+        check(
+            "exercise: production walls leave bounded runner-load headroom",
+            original_wall == 90
+            and exercise_module.MAX_SCENARIO_WALL_SECONDS == 30,
         )
 
 
