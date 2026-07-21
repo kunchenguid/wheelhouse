@@ -964,7 +964,12 @@ class ClaudeCliAdapter(AgentAdapterV1):
                 "protocol": probe.descriptor.value["protocol"],
                 "argv": argv,
                 "stdinArtifact": "/run/wheelhouse/prompt.txt",
-                "environment": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"},
+                "environment": {
+                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
+                        task["spec"]["limits"]["maxOutputTokens"]
+                    ),
+                },
                 "secretBindings": [
                     {
                         "authRef": "anthropic-subscription",

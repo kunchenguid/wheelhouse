@@ -360,6 +360,11 @@ def main():
             and plan["claude"]["stdinArtifact"] == "/run/wheelhouse/prompt.txt",
         )
         check(
+            "compile: provider output budget is explicit",
+            plan["claude"]["environment"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+            == str(task["spec"]["limits"]["maxOutputTokens"]),
+        )
+        check(
             "compile: OAuth secret absent from plan",
             TOKEN not in serialized_plan
             and probe.auth_source == str(credential),
