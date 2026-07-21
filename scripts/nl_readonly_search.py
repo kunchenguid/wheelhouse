@@ -7,15 +7,15 @@ READONLY_TOKEN secret is present. Claude can write a JSON request to
 command shape: no writes and bounded output. Authenticated `gh` operations stay
 limited to the target repo plus owner-scoped repos from `wheelhouse.config.yml`.
 The separate `public_clone` operation accepts a complete public HTTPS Git URL,
-validates its current addresses, and invokes Git anonymously in an isolated,
-bounded temporary directory. It never executes cloned content.
+validates its current addresses, and invokes stock Git anonymously in an
+isolated temporary directory. It removes Git administration before a
+post-clone retained-tree audit and never executes cloned content.
 """
 
 import ipaddress
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import socket
@@ -55,11 +55,9 @@ PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS = 10
 PUBLIC_DNS_TIMEOUT_SECONDS = 5
 MAX_PUBLIC_DNS_ANSWERS = 32
 MAX_PUBLIC_GIT_OUTPUT_CHARS = 8000
-MAX_PUBLIC_TREE_OUTPUT_CHARS = 4 * 1024 * 1024
 MAX_PUBLIC_CLONE_FILES = 20000
 MAX_PUBLIC_CLONE_ENTRIES = 30000
 MAX_PUBLIC_CLONE_BYTES = 100 * 1024 * 1024
-MAX_PUBLIC_CLONE_METADATA_HEADROOM = 8 * 1024 * 1024
 MAX_PUBLIC_MANIFEST_ENTRIES = 200
 MAX_PUBLIC_MANIFEST_PATH_BYTES = 20000
 MAX_PUBLIC_SYMLINK_BYTES = 4096
@@ -477,71 +475,6 @@ def _public_git_env(home, tmp, config):
     return env
 
 
-def _public_clone_file_limit():
-    return _public_clone_storage_budgets()["artifact_bytes"]
-
-
-def _public_clone_storage_budgets():
-    headroom = min(MAX_PUBLIC_CLONE_METADATA_HEADROOM, MAX_PUBLIC_CLONE_BYTES // 2)
-    available = MAX_PUBLIC_CLONE_BYTES - headroom
-    tree_bytes = available // 2
-    object_bytes = available - tree_bytes
-    artifact_bytes = max(1, object_bytes // 4)
-    return {
-        "headroom": headroom,
-        "tree_bytes": tree_bytes,
-        "object_bytes": object_bytes,
-        "artifact_bytes": artifact_bytes,
-    }
-
-
-def _public_clone_usage(*roots):
-    total = 0
-    stack = [root for root in roots if root]
-    while stack:
-        root = stack.pop()
-        try:
-            entries = list(os.scandir(root))
-        except FileNotFoundError:
-            continue
-        for entry in entries:
-            try:
-                child = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISDIR(child.st_mode) and not stat.S_ISLNK(child.st_mode):
-                stack.append(entry.path)
-            else:
-                total += child.st_size
-    return total
-
-
-def _guard_public_clone_usage(roots, limit):
-    if _public_clone_usage(*roots) > limit:
-        raise ValueError("public clone exceeds the aggregate storage limit")
-
-
-def _adopt_public_clone_object_store(source, object_store):
-    destination = os.path.join(source, ".git", "objects")
-    if os.path.lexists(destination):
-        shutil.rmtree(destination)
-    os.replace(object_store, destination)
-
-
-def _limit_public_git_files(file_size_limit=None):
-    try:
-        import resource
-
-        if file_size_limit is None:
-            file_size_limit = MAX_PUBLIC_CLONE_BYTES
-        resource.setrlimit(
-            resource.RLIMIT_FSIZE,
-            (file_size_limit, file_size_limit),
-        )
-    except (ImportError, OSError, ValueError):
-        pass
-
-
 def _kill_public_git_process(process):
     if process.poll() is not None:
         return
@@ -554,49 +487,52 @@ def _kill_public_git_process(process):
         process.kill()
 
 
+def _read_public_git_stream(stream, captured, truncated):
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            return
+        remaining = MAX_PUBLIC_GIT_OUTPUT_CHARS - len(captured)
+        if remaining > 0:
+            captured.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            truncated.append(True)
+
+
 def run_public_git(
     args,
     *,
     env,
     cwd=None,
     timeout=PUBLIC_CLONE_TIMEOUT_SECONDS,
-    output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
-    git_exec_path=None,
-    file_size_limit=None,
 ):
-    child_env = dict(env)
-    if git_exec_path is not None:
-        child_env["GIT_EXEC_PATH"] = git_exec_path
     process = subprocess.Popen(
         list(args),
         cwd=cwd,
-        env=child_env,
+        env=dict(env),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        preexec_fn=(
-            (lambda: _limit_public_git_files(file_size_limit))
-            if os.name == "posix"
-            else None
-        ),
+        stderr=subprocess.PIPE,
+        start_new_session=os.name == "posix",
     )
-    captured = bytearray()
-    truncated = []
-
-    def drain_output():
-        while True:
-            chunk = process.stdout.read(8192)
-            if not chunk:
-                return
-            remaining = output_limit - len(captured)
-            if remaining > 0:
-                captured.extend(chunk[:remaining])
-            if len(chunk) > remaining:
-                truncated.append(True)
-
-    reader = threading.Thread(target=drain_output, name="wheelhouse-public-git-output")
-    reader.start()
+    stdout_data = bytearray()
+    stderr_data = bytearray()
+    stdout_truncated = []
+    stderr_truncated = []
+    readers = [
+        threading.Thread(
+            target=_read_public_git_stream,
+            args=(process.stdout, stdout_data, stdout_truncated),
+            name="wheelhouse-public-git-stdout",
+        ),
+        threading.Thread(
+            target=_read_public_git_stream,
+            args=(process.stderr, stderr_data, stderr_truncated),
+            name="wheelhouse-public-git-stderr",
+        ),
+    ]
+    for reader in readers:
+        reader.start()
     timed_out = None
     try:
         process.wait(timeout=timeout)
@@ -604,15 +540,20 @@ def run_public_git(
         timed_out = exc
         _kill_public_git_process(process)
         process.wait()
-    reader.join()
+    for reader in readers:
+        reader.join()
     if timed_out is not None:
         raise ValueError(
             "public Git operation timed out after %s seconds" % timeout
         ) from timed_out
-    output = bytes(captured).decode("utf-8", errors="replace")
-    if truncated:
-        output += "\n[git output truncated]"
-    return subprocess.CompletedProcess(args, process.returncode, output, "")
+
+    stdout = bytes(stdout_data).decode("utf-8", errors="replace")
+    stderr = bytes(stderr_data).decode("utf-8", errors="replace")
+    if stdout_truncated:
+        stdout += "\n[git stdout truncated]"
+    if stderr_truncated:
+        stderr += "\n[git stderr truncated]"
+    return subprocess.CompletedProcess(list(args), process.returncode, stdout, stderr)
 
 
 def _git_output(result, limit=MAX_PUBLIC_GIT_OUTPUT_CHARS):
@@ -631,20 +572,10 @@ def _run_public_git_checked(
     env,
     timeout,
     cwd=None,
-    output_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
     error_limit=MAX_PUBLIC_GIT_OUTPUT_CHARS,
-    git_exec_path=None,
-    file_size_limit=None,
 ):
     try:
-        kwargs = {"env": env, "cwd": cwd, "timeout": timeout}
-        if runner is run_public_git:
-            kwargs["output_limit"] = output_limit
-            if git_exec_path is not None:
-                kwargs["git_exec_path"] = git_exec_path
-            if file_size_limit is not None:
-                kwargs["file_size_limit"] = file_size_limit
-        result = runner(args, **kwargs)
+        result = runner(args, env=env, cwd=cwd, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
             "public Git operation timed out after %s seconds" % timeout
@@ -657,181 +588,7 @@ def _run_public_git_checked(
         if detail:
             message += ": " + detail
         raise ValueError(message)
-    return _git_output(result, limit=output_limit)
-
-
-def _prepare_public_git_exec_path(
-    git,
-    env,
-    runtime,
-    file_size_limit,
-    object_store=None,
-    object_store_limit=None,
-):
-    original = _run_public_git_checked(
-        run_public_git,
-        [git, "--exec-path"],
-        env,
-        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        cwd=runtime,
-    ).strip()
-    if not os.path.isabs(original) or not os.path.isdir(original):
-        raise ValueError("public Git executable path is invalid")
-    wrapper_dir = os.path.join(runtime, "git-core")
-    os.makedirs(
-        wrapper_dir,
-        mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-    )
-    for entry in os.scandir(original):
-        if entry.name == "git":
-            continue
-        os.symlink(entry.path, os.path.join(wrapper_dir, entry.name))
-    pump = os.path.join(runtime, "public-index-pack-pump")
-    object_store = object_store or ""
-    object_store_limit = object_store_limit or file_size_limit
-    pump_script = "\n".join(
-        [
-            "#!%s" % sys.executable,
-            "import os",
-            "import re",
-            "import subprocess",
-            "import sys",
-            "",
-            "limit = int(sys.argv[1])",
-            "git = sys.argv[2]",
-            "object_store = sys.argv[3] or os.environ.get('GIT_OBJECT_DIRECTORY', '')",
-            "store_limit = int(sys.argv[4])",
-            "index_args = sys.argv[5:]",
-            "if '--stdin' not in index_args:",
-            "    index_args.append('--stdin')",
-            "if '--fix-thin' not in index_args:",
-            "    index_args.append('--fix-thin')",
-            "index_args.extend(['--max-input-size=%s', '--no-rev-index'])"
-            % file_size_limit,
-            "index_path = ''",
-            "if object_store:",
-            "    pack_dir = os.path.join(object_store, 'pack')",
-            "    os.makedirs(pack_dir, exist_ok=True)",
-            "    index_path = os.path.join(pack_dir, 'wheelhouse-index-%s.tmp' % os.getpid())",
-            "    index_args.extend(['-o', index_path])",
-            "",
-            "def limit_file_size():",
-            "    import resource",
-            "    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))",
-            "",
-            "def usage(root):",
-            "    total = 0",
-            "    if not root:",
-            "        return total",
-            "    for directory, directories, files in os.walk(root):",
-            "        directories[:] = [name for name in directories if not os.path.islink(os.path.join(directory, name))]",
-            "        for name in files:",
-            "            try:",
-            "                total += os.lstat(os.path.join(directory, name)).st_size",
-            "            except FileNotFoundError:",
-            "                continue",
-            "    return total",
-            "",
-            "child = subprocess.Popen(",
-            "    [git, 'index-pack'] + index_args,",
-            "    stdin=subprocess.PIPE,",
-            "    stdout=subprocess.PIPE,",
-            "    preexec_fn=limit_file_size,",
-            ")",
-            "remaining = limit",
-            "try:",
-            "    while remaining:",
-            "        chunk = os.read(0, min(65536, remaining))",
-            "        if not chunk:",
-            "            break",
-            "        view = memoryview(chunk)",
-            "        while view:",
-            "            count = os.write(child.stdin.fileno(), view)",
-            "            view = view[count:]",
-            "        remaining -= len(chunk)",
-            "        if usage(object_store) > store_limit:",
-            "            child.kill()",
-            "            child.wait()",
-            "            sys.exit(1)",
-            "    if os.read(0, 1):",
-            "        os.write(2, b'public Git pack exceeds the bounded byte budget\\n')",
-            "        child.kill()",
-            "        child.wait()",
-            "        sys.exit(1)",
-            "    child.stdin.close()",
-            "    output = child.stdout.read(8192)",
-            "    returncode = child.wait()",
-            "    if returncode == 0 and index_path:",
-            "        match = re.search(rb'(?<![0-9a-f])([0-9a-f]{40}|[0-9a-f]{64})(?![0-9a-f])', output)",
-            "        if not match:",
-            "            returncode = 1",
-            "        else:",
-            "            final_index = os.path.join(os.path.dirname(index_path), 'pack-' + match.group(1).decode('ascii') + '.idx')",
-            "            os.replace(index_path, final_index)",
-            "    if index_path and os.path.exists(index_path):",
-            "        os.unlink(index_path)",
-            "    if output:",
-            "        os.write(1, output)",
-            "    sys.exit(returncode)",
-            "except (BrokenPipeError, OSError):",
-            "    try:",
-            "        child.kill()",
-            "    except ProcessLookupError:",
-            "        pass",
-            "    child.wait()",
-            "    if index_path and os.path.exists(index_path):",
-            "        os.unlink(index_path)",
-            "    sys.exit(1)",
-            "",
-        ]
-    )
-    descriptor = os.open(
-        pump,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-    )
-    try:
-        data = memoryview(pump_script.encode("utf-8"))
-        while data:
-            count = os.write(descriptor, data)
-            data = data[count:]
-    finally:
-        os.close(descriptor)
-    wrapper = os.path.join(wrapper_dir, "git")
-    script = "\n".join(
-        [
-            "#!/bin/sh",
-            'if [ "$1" = "index-pack" ]; then',
-            "    shift",
-            "    exec %s %s %s %s %s \"$@\""
-            % (
-                shlex.quote(pump),
-                file_size_limit,
-                shlex.quote(git),
-                shlex.quote(object_store),
-                object_store_limit,
-            ),
-            "fi",
-            'if [ "$1" = "unpack-objects" ]; then',
-            "    exit 125",
-            "fi",
-            "exec %s \"$@\"" % shlex.quote(git),
-            "",
-        ]
-    )
-    descriptor = os.open(
-        wrapper,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-    )
-    try:
-        data = memoryview(script.encode("utf-8"))
-        while data:
-            count = os.write(descriptor, data)
-            data = data[count:]
-    finally:
-        os.close(descriptor)
-    return wrapper_dir
+    return _git_output(result)
 
 
 def _public_git_args(git):
@@ -850,17 +607,13 @@ def _public_git_args(git):
         "-c",
         "protocol.https.allow=always",
         "-c",
-        "protocol.version=0",
+        "protocol.version=2",
         "-c",
         "transfer.bundleURI=false",
         "-c",
         "fetch.bundleURI=",
         "-c",
         "fetch.fsckObjects=true",
-        "-c",
-        "fetch.unpackLimit=0",
-        "-c",
-        "transfer.unpackLimit=0",
         "-c",
         "submodule.recurse=false",
         "-c",
@@ -870,432 +623,31 @@ def _public_git_args(git):
     ]
 
 
-def _public_remote_object(output, names):
-    if output.endswith("[git output truncated]"):
-        raise ValueError("public Git remote advertisement exceeded the output limit")
-    found = {}
-    for line in output.splitlines():
-        fields = line.split("\t")
-        if len(fields) != 2:
-            continue
-        object_id, name = fields
-        if name in names and re.fullmatch(
-            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id
-        ):
-            found[name] = object_id
-    for name in names:
-        if name in found:
-            return found[name], name
-    raise ValueError("public Git ref was not found")
-
-
-def _public_fetched_object(output):
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and re.fullmatch(
-            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", fields[0]
-        ):
-            return fields[0]
-    raise ValueError("public Git fetch returned no commit")
-
-
-def _public_fetch_pack(
-    git,
-    env,
-    runtime,
-    source,
-    template,
-    canonical_url,
-    ref,
-    runner,
-    git_exec_path=None,
-    file_size_limit=None,
-):
-    remote_query = _public_git_args(git) + ["ls-remote"]
-    if ref:
-        branch_ref = "refs/heads/" + ref
-        tag_ref = "refs/tags/" + ref
-        remote_query.extend(["--refs", canonical_url, branch_ref, tag_ref])
-        remote_names = (branch_ref, tag_ref)
-    else:
-        remote_query.extend(["--symref", canonical_url, "HEAD"])
-        remote_names = ("HEAD",)
-    remote_output = _run_public_git_checked(
-        runner,
-        remote_query,
-        env,
-        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        cwd=runtime,
-        git_exec_path=git_exec_path,
-        file_size_limit=file_size_limit,
-    )
-    remote_object, remote_ref = _public_remote_object(remote_output, remote_names)
-
-    init_args = _public_git_args(git) + [
-        "init",
+def _public_clone_args(git, canonical_url, source, ref):
+    args = _public_git_args(git) + [
+        "clone",
         "--quiet",
-        "--template",
-        template,
-        source,
-    ]
-    _run_public_git_checked(
-        runner,
-        init_args,
-        env,
-        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        cwd=runtime,
-        git_exec_path=git_exec_path,
-        file_size_limit=file_size_limit,
-    )
-    fetch_args = _public_git_args(git) + [
-        "fetch-pack",
-        "--keep",
+        "--no-tags",
+        "--no-recurse-submodules",
         "--depth=1",
-        "--filter=blob:limit=%s" % _public_clone_storage_budgets()["tree_bytes"],
-        "--no-progress",
-        canonical_url,
-        remote_ref,
+        "--single-branch",
+        "--filter=blob:limit=%s" % MAX_PUBLIC_CLONE_BYTES,
     ]
-    fetched_output = _run_public_git_checked(
-        runner,
-        fetch_args,
-        env,
-        PUBLIC_CLONE_TIMEOUT_SECONDS,
-        cwd=source,
-        git_exec_path=git_exec_path,
-        file_size_limit=file_size_limit,
-    )
-    if _public_fetched_object(fetched_output) != remote_object:
-        raise ValueError("public Git fetch returned an unexpected commit")
-
-    update_args = _public_git_args(git) + [
-        "update-ref",
-        "refs/wheelhouse/public",
-        remote_object,
-    ]
-    _run_public_git_checked(
-        runner,
-        update_args,
-        env,
-        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        cwd=source,
-        git_exec_path=git_exec_path,
-        file_size_limit=file_size_limit,
-    )
-    symbolic_args = _public_git_args(git) + [
-        "symbolic-ref",
-        "HEAD",
-        "refs/wheelhouse/public",
-    ]
-    _run_public_git_checked(
-        runner,
-        symbolic_args,
-        env,
-        PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        cwd=source,
-        git_exec_path=git_exec_path,
-        file_size_limit=file_size_limit,
-    )
+    if ref:
+        args.extend(["--branch", ref])
+    args.extend([canonical_url, source])
+    return args
 
 
-def _check_public_clone_storage_budgets(metadata, tree, object_store=None):
-    budgets = _public_clone_storage_budgets()
-    if tree["retained_bytes"] > budgets["tree_bytes"]:
-        raise ValueError("public clone exceeds the retained byte limit for materialization")
-    retained_objects = metadata["retained_bytes"]
-    if object_store is not None:
-        retained_objects += object_store["retained_bytes"]
-    if retained_objects > budgets["object_bytes"] + budgets["headroom"]:
-        raise ValueError("public clone exceeds the retained byte limit for object storage")
-
-
-def _check_public_clone_totals(*manifests):
-    totals = {
-        field: sum(manifest[field] for manifest in manifests)
-        for field in ("entry_count", "file_count", "retained_bytes")
-    }
-    if totals["entry_count"] > MAX_PUBLIC_CLONE_ENTRIES:
-        raise ValueError("public clone exceeds the retained entry limit")
-    if totals["file_count"] > MAX_PUBLIC_CLONE_FILES:
-        raise ValueError("public clone exceeds the retained file limit")
-    if totals["retained_bytes"] > MAX_PUBLIC_CLONE_BYTES:
-        raise ValueError("public clone exceeds the retained byte limit")
-
-
-def _bounded_public_tree_manifest(output):
-    if output.endswith("[git output truncated]"):
-        raise ValueError("public clone tree listing exceeded the output limit")
-    if "\ufffd" in output:
-        raise ValueError("public clone tree listing contains undecodable paths")
-
-    entry_count = 0
-    file_count = 0
-    retained_bytes = 0
-    directories = set()
-    entries = []
-    for record in output.split("\0"):
-        if not record:
-            continue
-        try:
-            metadata, rel = record.split("\t", 1)
-            _mode, object_type, _object_id, size = metadata.split()
-        except ValueError as exc:
-            raise ValueError("public clone tree listing was malformed") from exc
-        if not rel or rel.startswith("/") or "\\" in rel:
-            raise ValueError("public clone tree listing was malformed")
-        parts = rel.split("/")
-        if any(part in ("", ".", "..") for part in parts):
-            raise ValueError("public clone tree listing was malformed")
-        if object_type not in ("blob", "commit"):
-            raise ValueError("public clone contains an unsupported tree entry")
-        if rel == ".git" or rel.startswith(".git/"):
-            raise ValueError("public clone contains a reserved Git path")
-        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", _object_id):
-            raise ValueError("public clone tree listing was malformed")
-        if object_type == "blob" and _mode not in ("100644", "100755", "120000"):
-            raise ValueError("public clone contains an unsupported file mode")
-        if object_type == "commit" and _mode != "160000":
-            raise ValueError("public clone contains an unsupported tree mode")
-        if size == "-":
-            size = 0
-        else:
-            try:
-                size = int(size)
-            except ValueError as exc:
-                raise ValueError("public clone tree listing was malformed") from exc
-            if size < 0:
-                raise ValueError("public clone tree listing was malformed")
-
-        file_count += 1
-        retained_bytes += size
-        if file_count > MAX_PUBLIC_CLONE_FILES:
-            raise ValueError("public clone exceeds the retained file limit")
-        if retained_bytes > MAX_PUBLIC_CLONE_BYTES:
-            raise ValueError("public clone exceeds the retained byte limit")
-
-        for index in range(1, len(parts)):
-            directories.add("/".join(parts[:index]))
-        entry_count = file_count + len(directories)
-        if entry_count > MAX_PUBLIC_CLONE_ENTRIES:
-            raise ValueError("public clone exceeds the retained entry limit")
-        entries.append(
-            {
-                "mode": _mode,
-                "object_type": object_type,
-                "object_id": _object_id,
-                "path": rel,
-                "size": size,
-            }
-        )
-
-    return {
-        "entry_count": entry_count,
-        "file_count": file_count,
-        "retained_bytes": retained_bytes,
-        "entries": entries,
-    }
-
-
-def _materialize_public_clone_raw(git, env, source, entries, metadata, timeout):
-    blob_entries = [entry for entry in entries if entry["object_type"] == "blob"]
-    requests = b"".join(
-        (entry["object_id"] + "\n").encode("ascii") for entry in blob_entries
-    )
-    args = [
-        git,
-        "-c",
-        "credential.helper=",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "protocol.allow=never",
-        "cat-file",
-        "--batch",
-    ]
-    process = subprocess.Popen(
-        args,
-        cwd=source,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        preexec_fn=_limit_public_git_files if os.name == "posix" else None,
-    )
-    stderr_data = bytearray()
-    writer_errors = []
-    timed_out = []
-
-    def write_requests():
-        try:
-            process.stdin.write(requests)
-            process.stdin.close()
-        except (BrokenPipeError, OSError) as exc:
-            writer_errors.append(exc)
-
-    def drain_stderr():
-        while True:
-            chunk = process.stderr.read(8192)
-            if not chunk:
-                return
-            remaining = MAX_PUBLIC_GIT_OUTPUT_CHARS - len(stderr_data)
-            if remaining > 0:
-                stderr_data.extend(chunk[:remaining])
-
-    def expire_process():
-        timed_out.append(True)
-        _kill_public_git_process(process)
-
-    writer = threading.Thread(target=write_requests, name="wheelhouse-public-git-input")
-    stderr_reader = threading.Thread(
-        target=drain_stderr, name="wheelhouse-public-git-error"
-    )
-    timer = threading.Timer(timeout, expire_process)
-    writer.start()
-    stderr_reader.start()
-    timer.start()
-    written_bytes = 0
-
-    def read_content(size):
-        chunks = []
-        remaining = size
-        while remaining:
-            chunk = process.stdout.read(min(65536, remaining))
-            if not chunk:
-                raise ValueError("public Git materialization returned incomplete data")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        separator = process.stdout.read(1)
-        if separator != b"\n":
-            raise ValueError("public Git materialization returned malformed data")
-        return b"".join(chunks)
-
-    try:
-        for entry in entries:
-            destination = os.path.join(source, entry["path"])
-            parent = os.path.dirname(destination)
-            if not _path_within(parent, source):
-                raise ValueError("public clone contains an escaping path")
-            os.makedirs(
-                parent,
-                mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-                exist_ok=True,
-            )
-            if entry["object_type"] == "commit":
-                os.makedirs(
-                    destination,
-                    mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-                    exist_ok=True,
-                )
-                continue
-
-            header = process.stdout.readline(256)
-            fields = header.rstrip(b"\n").split(b" ")
-            if (
-                len(fields) != 3
-                or fields[0].decode("ascii", errors="ignore")
-                != entry["object_id"]
-            ):
-                raise ValueError("public Git materialization returned malformed data")
-            if fields[1] != b"blob":
-                raise ValueError(
-                    "public Git materialization returned an unexpected object"
-                )
-            try:
-                size = int(fields[2])
-            except ValueError as exc:
-                raise ValueError(
-                    "public Git materialization returned malformed data"
-                ) from exc
-            if size != entry["size"]:
-                raise ValueError("public Git materialization changed object size")
-
-            if entry["mode"] == "120000":
-                if size > MAX_PUBLIC_SYMLINK_BYTES:
-                    raise ValueError("public clone contains an oversized symlink")
-                content = read_content(size)
-                target = os.fsdecode(content)
-                if "\x00" in target:
-                    raise ValueError("public clone contains an invalid symlink")
-                resolved = os.path.realpath(os.path.join(parent, target))
-                if not _path_within(resolved, source):
-                    raise ValueError("public clone contains an escaping symlink")
-                if (
-                    metadata["retained_bytes"] + written_bytes + size
-                    > MAX_PUBLIC_CLONE_BYTES
-                ):
-                    raise ValueError("public clone exceeds the retained byte limit")
-                os.symlink(target, destination)
-                written_bytes += size
-                continue
-
-            file_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-            if entry["mode"] == "100755":
-                file_mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-            descriptor = os.open(
-                destination,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                file_mode,
-            )
-            try:
-                remaining = size
-                while remaining:
-                    chunk = process.stdout.read(min(65536, remaining))
-                    if not chunk:
-                        raise ValueError(
-                            "public Git materialization returned incomplete data"
-                        )
-                    if (
-                        metadata["retained_bytes"] + written_bytes + len(chunk)
-                        > MAX_PUBLIC_CLONE_BYTES
-                    ):
-                        raise ValueError(
-                            "public clone exceeds the retained byte limit"
-                        )
-                    view = memoryview(chunk)
-                    while view:
-                        count = os.write(descriptor, view)
-                        view = view[count:]
-                    written_bytes += len(chunk)
-                    remaining -= len(chunk)
-                separator = process.stdout.read(1)
-                if separator != b"\n":
-                    raise ValueError(
-                        "public Git materialization returned malformed data"
-                    )
-            finally:
-                os.close(descriptor)
-
-        process.wait(timeout=timeout)
-        if timed_out:
-            raise ValueError(
-                "public Git materialization timed out after %s seconds" % timeout
-            )
-        if writer_errors:
-            raise ValueError(
-                "public Git materialization could not be completed"
-            ) from writer_errors[0]
-        if process.returncode != 0:
-            detail = bytes(stderr_data).decode("utf-8", errors="replace").strip()
-            message = "public Git materialization failed"
-            if detail:
-                message += ": " + detail
-            raise ValueError(message)
-    except subprocess.TimeoutExpired as exc:
-        _kill_public_git_process(process)
-        raise ValueError(
-            "public Git materialization timed out after %s seconds" % timeout
-        ) from exc
-    finally:
-        timer.cancel()
-        if process.poll() is None:
-            _kill_public_git_process(process)
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
-        writer.join()
-        stderr_reader.join()
+def _remove_git_admin(source):
+    git_admin = os.path.join(source, ".git")
+    if not os.path.lexists(git_admin):
+        return
+    info = os.lstat(git_admin)
+    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+        shutil.rmtree(git_admin)
+    else:
+        os.unlink(git_admin)
 
 
 def _bounded_clone_manifest(source):
@@ -1310,7 +662,6 @@ def _bounded_clone_manifest(source):
     retained_bytes = 0
     paths = []
     path_bytes = 0
-    visible_count = 0
     while stack:
         prefix, directory = stack.pop()
         try:
@@ -1333,29 +684,37 @@ def _bounded_clone_manifest(source):
                 continue
             if not (stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)):
                 raise ValueError("public clone contains a special file")
-            if stat.S_ISLNK(child.st_mode) and not _path_within(entry.path, source):
-                raise ValueError("public clone contains an escaping symlink")
+            if stat.S_ISLNK(child.st_mode):
+                try:
+                    target = os.readlink(entry.path)
+                    target_bytes = os.fsencode(target)
+                except (OSError, UnicodeError) as exc:
+                    raise ValueError("public clone contains an unreadable symlink") from exc
+                if len(target_bytes) > MAX_PUBLIC_SYMLINK_BYTES:
+                    raise ValueError("public clone contains an oversized symlink")
+                if "\x00" in os.fsdecode(target_bytes):
+                    raise ValueError("public clone contains an invalid symlink")
+                if not _path_within(entry.path, source):
+                    raise ValueError("public clone contains an escaping symlink")
             file_count += 1
             retained_bytes += child.st_size
             if file_count > MAX_PUBLIC_CLONE_FILES:
                 raise ValueError("public clone exceeds the retained file limit")
             if retained_bytes > MAX_PUBLIC_CLONE_BYTES:
                 raise ValueError("public clone exceeds the retained byte limit")
-            if rel != ".git" and not rel.startswith(".git/"):
-                visible_count += 1
-                if (
-                    len(paths) < MAX_PUBLIC_MANIFEST_ENTRIES
-                    and path_bytes + rel_bytes <= MAX_PUBLIC_MANIFEST_PATH_BYTES
-                ):
-                    paths.append(rel)
-                    path_bytes += rel_bytes
+            if (
+                len(paths) < MAX_PUBLIC_MANIFEST_ENTRIES
+                and path_bytes + rel_bytes <= MAX_PUBLIC_MANIFEST_PATH_BYTES
+            ):
+                paths.append(rel)
+                path_bytes += rel_bytes
         stack.extend(reversed(child_dirs))
     return {
         "entry_count": entry_count,
         "file_count": file_count,
         "retained_bytes": retained_bytes,
         "paths": paths,
-        "paths_truncated": len(paths) < visible_count,
+        "paths_truncated": len(paths) < file_count,
     }
 
 
@@ -1375,169 +734,32 @@ def _public_clone_request(
     )
     ref = _safe_public_ref(req.get("ref"))
     root = _public_clone_root(clone_root)
-    prepared = True
     try:
         root, runtime, home, tmp, config = _prepare_public_clone_root(root)
         source = os.path.join(root, "source")
-        template = os.path.join(runtime, "template")
-        os.makedirs(
-            template,
-            mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-        )
         git = shutil.which("git")
         if not git:
             raise ValueError("git is unavailable")
         env = _public_git_env(home, tmp, config)
-        file_size_limit = None
-        git_exec_path = None
-        object_store = None
-        object_store_limit = None
-        if runner is run_public_git:
-            if os.name != "posix":
-                raise ValueError("public clone is unavailable on this runner")
-            budgets = _public_clone_storage_budgets()
-            file_size_limit = _public_clone_file_limit()
-            object_store_limit = budgets["object_bytes"]
-            object_store = os.path.join(runtime, "object-store")
-            os.makedirs(
-                os.path.join(object_store, "pack"),
-                mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
-            )
-            env["GIT_OBJECT_DIRECTORY"] = object_store
-            git_exec_path = _prepare_public_git_exec_path(
-                git,
-                env,
-                runtime,
-                file_size_limit,
-                object_store=object_store,
-                object_store_limit=object_store_limit,
-            )
-        _public_fetch_pack(
-            git,
-            env,
-            runtime,
-            source,
-            template,
-            canonical_url,
-            ref,
-            runner,
-            git_exec_path=git_exec_path,
-            file_size_limit=file_size_limit,
-        )
-        if object_store is not None:
-            budgets = _public_clone_storage_budgets()
-            _guard_public_clone_usage(
-                (source, object_store),
-                budgets["object_bytes"] + budgets["headroom"],
-            )
-        rev_args = [
-            *_public_git_args(git),
-            "rev-parse",
-            "--verify",
-            "HEAD^{commit}",
-        ]
-        commit = (
-            _run_public_git_checked(
-                runner,
-                rev_args,
-                env,
-                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-                cwd=source,
-                git_exec_path=git_exec_path,
-                file_size_limit=file_size_limit,
-            )
-            .strip()
-            .lower()
-        )
-        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
-            raise ValueError("public clone did not resolve a valid commit SHA")
-        tree_args = [
-            *_public_git_args(git),
-            "ls-tree",
-            "-r",
-            "-l",
-            "-z",
-            "--full-tree",
-            "HEAD",
-        ]
-        tree_manifest = _bounded_public_tree_manifest(
-            _run_public_git_checked(
-                runner,
-                tree_args,
-                env,
-                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-                cwd=source,
-                output_limit=MAX_PUBLIC_TREE_OUTPUT_CHARS,
-                git_exec_path=git_exec_path,
-                file_size_limit=file_size_limit,
-            )
-        )
-        read_tree_args = [
-            *_public_git_args(git),
-            "read-tree",
-            "--reset",
-            "HEAD",
-        ]
+        clone_args = _public_clone_args(git, canonical_url, source, ref)
         _run_public_git_checked(
             runner,
-            read_tree_args,
+            clone_args,
+            env,
+            PUBLIC_CLONE_TIMEOUT_SECONDS,
+            cwd=runtime,
+        )
+        commit = _run_public_git_checked(
+            runner,
+            _public_git_args(git)
+            + ["rev-parse", "--verify", "HEAD^{commit}"],
             env,
             PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
             cwd=source,
-            git_exec_path=git_exec_path,
-            file_size_limit=file_size_limit,
-        )
-        metadata_manifest = _bounded_clone_manifest(source)
-        object_manifest = (
-            _bounded_clone_manifest(object_store)
-            if object_store is not None
-            else None
-        )
-        _check_public_clone_storage_budgets(
-            metadata_manifest,
-            tree_manifest,
-            object_manifest,
-        )
-        if object_manifest is None:
-            _check_public_clone_totals(metadata_manifest, tree_manifest)
-        else:
-            _check_public_clone_totals(
-                metadata_manifest,
-                object_manifest,
-                tree_manifest,
-            )
-        material_metadata = dict(metadata_manifest)
-        if object_manifest is not None:
-            material_metadata["retained_bytes"] += object_manifest["retained_bytes"]
-        if runner is run_public_git:
-            _materialize_public_clone_raw(
-                git,
-                env,
-                source,
-                tree_manifest["entries"],
-                material_metadata,
-                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-            )
-        else:
-            checkout_args = [
-                *_public_git_args(git),
-                "checkout",
-                "--quiet",
-                "--detach",
-                "--no-recurse-submodules",
-                "HEAD",
-            ]
-            _run_public_git_checked(
-                runner,
-                checkout_args,
-                env,
-                PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-                cwd=source,
-            )
-        if object_store is not None:
-            _guard_public_clone_usage((source, object_store), MAX_PUBLIC_CLONE_BYTES)
-            _adopt_public_clone_object_store(source, object_store)
-            env.pop("GIT_OBJECT_DIRECTORY", None)
+        ).strip().lower()
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
+            raise ValueError("public clone did not resolve a valid commit SHA")
+        _remove_git_admin(source)
         shutil.rmtree(runtime)
         manifest = _bounded_clone_manifest(source)
         result = {
@@ -1549,10 +771,8 @@ def _public_clone_request(
         }
         return _cap(json.dumps(result, sort_keys=True, indent=2) + "\n")
     except Exception:
-        if prepared:
-            cleanup_public_clones(root)
+        cleanup_public_clones(root)
         raise
-
 
 def run_gh(args):
     result = subprocess.run(

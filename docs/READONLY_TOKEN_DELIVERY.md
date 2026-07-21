@@ -48,6 +48,13 @@ helpers disabled, and no model, GitHub, cloud, or runner credentials inherited.
 The shallow data-only clone is retained outside the target workspace only for
 the model step, then a trusted `always()` step removes it.
 
+The retained-tree file-count and byte limits are enforced after stock Git
+finishes cloning and after its `.git` administration is removed. Stock Git
+may transiently download or write more pack data before that audit; this
+narrow residual is accepted under the ordinary-network posture. An over-limit
+retained tree fails closed and the complete clone root is deterministically
+deleted.
+
 ### DNS rebinding residual
 
 For arbitrary public custom Git hosts, Git resolves the hostname again between

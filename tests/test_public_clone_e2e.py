@@ -69,6 +69,8 @@ def main():
                 or "Hello World" not in open(readme, encoding="utf-8").read()
             ):
                 raise SystemExit("cloned source is not inspectable")
+            if os.path.lexists(os.path.join(result["location"], ".git")):
+                raise SystemExit("Git administration reached retained source")
             for directory, _, names in os.walk(result["location"]):
                 for name in names:
                     path = os.path.join(directory, name)

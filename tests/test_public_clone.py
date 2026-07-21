@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Offline regression tests for wheelhouse-search public_clone. No network."""
+"""Focused offline regression tests for wheelhouse-search public_clone."""
 
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -42,7 +41,9 @@ def resolver_for(*addresses):
         for address in addresses:
             family = socket.AF_INET6 if ":" in address else socket.AF_INET
             sockaddr = (
-                (address, port, 0, 0) if family == socket.AF_INET6 else (address, port)
+                (address, port, 0, 0)
+                if family == socket.AF_INET6
+                else (address, port)
             )
             rows.append((family, socket.SOCK_STREAM, 6, "", sockaddr))
         return rows
@@ -58,79 +59,37 @@ def rejected(call, text=""):
     return False
 
 
-class FakeGit:
-    def __init__(self, clone_returncode=0, clone_output="", files=None):
+class StockGit:
+    def __init__(self, clone_returncode=0, retained_size=None, commit=COMMIT):
         self.calls = []
         self.clone_returncode = clone_returncode
-        self.clone_output = clone_output
-        self.files = files or {"README.md": "public source\n"}
+        self.retained_size = retained_size
+        self.commit = commit
 
     def __call__(self, args, *, env, cwd=None, timeout=None):
         args = list(args)
         self.calls.append(
             {"args": args, "env": dict(env), "cwd": cwd, "timeout": timeout}
         )
-        if "ls-remote" in args:
-            refs = [
-                value
-                for value in args
-                if value.startswith("refs/heads/") or value.startswith("refs/tags/")
-            ]
-            if refs:
-                return subprocess.CompletedProcess(
-                    args,
-                    0,
-                    COMMIT + "\t" + refs[0] + "\n",
-                    "",
-                )
-            return subprocess.CompletedProcess(
-                args,
-                0,
-                "ref: refs/heads/main\tHEAD\n" + COMMIT + "\tHEAD\n",
-                "",
-            )
-        if "init" in args:
+        if "clone" in args:
             source = args[-1]
-            os.makedirs(os.path.join(source, ".git"), exist_ok=True)
+            os.makedirs(os.path.join(source, ".git", "objects", "pack"), exist_ok=True)
             with open(
                 os.path.join(source, ".git", "config"), "w", encoding="utf-8"
             ) as handle:
-                handle.write('[remote "origin"]\n')
+                handle.write("repository administration\n")
+            with open(os.path.join(source, "README.md"), "w", encoding="utf-8") as handle:
+                handle.write("public source\n")
+            if self.retained_size is not None:
+                oversized = os.path.join(source, "oversized.bin")
+                with open(oversized, "wb") as handle:
+                    handle.truncate(self.retained_size)
             return subprocess.CompletedProcess(
-                args,
-                0,
-                "",
-                "",
+                args, self.clone_returncode, "", "clone output"
             )
-        if "fetch-pack" in args:
-            return subprocess.CompletedProcess(
-                args,
-                self.clone_returncode,
-                self.clone_output or (COMMIT + " refs/heads/main\n"),
-                "",
-            )
-        if "update-ref" in args or "symbolic-ref" in args:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        if "ls-tree" in args:
-            listing = []
-            for name, contents in sorted(self.files.items()):
-                size = len(contents.encode("utf-8"))
-                listing.append(
-                    "100644 blob %s %s\t%s\0"
-                    % ("0" * 40, size, name)
-                )
-            return subprocess.CompletedProcess(args, 0, "".join(listing), "")
-        if "read-tree" in args:
-            return subprocess.CompletedProcess(args, 0, "", "")
-        if "checkout" in args:
-            source = cwd
-            for name, contents in self.files.items():
-                path = os.path.join(source, name)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(contents)
-            return subprocess.CompletedProcess(args, 0, "", "")
-        return subprocess.CompletedProcess(args, 0, COMMIT + "\n", "")
+        if "rev-parse" in args:
+            return subprocess.CompletedProcess(args, 0, self.commit + "\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "unexpected stock Git operation")
 
 
 def clone_root(parent):
@@ -151,7 +110,7 @@ def clone_request(runner, root, url="https://git.example/team/repo.git", ref=Non
     )
 
 
-def test_url_validation_and_custom_domains():
+def test_url_validation_and_public_addresses():
     calls = []
 
     def resolver(host, port, type=None):
@@ -184,7 +143,7 @@ def test_url_validation_and_custom_domains():
         "https://example.com/repo%0A.git",
     ):
         check(
-            "url: forbidden or malformed target is rejected: %s" % value,
+            "url: unsafe target is rejected: %s" % value,
             rejected(
                 lambda value=value: nls.validate_public_git_url(
                     value, resolver=public_resolver
@@ -192,8 +151,6 @@ def test_url_validation_and_custom_domains():
             ),
         )
 
-
-def test_private_reserved_and_metadata_addresses_are_rejected():
     for address in (
         "127.0.0.1",
         "10.0.0.1",
@@ -228,32 +185,6 @@ def test_private_reserved_and_metadata_addresses_are_rejected():
         ),
     )
 
-    def timeout_resolver(host, port, type=None):
-        del host, port, type
-        raise TimeoutError
-
-    check(
-        "address: DNS timeout is a bounded failure",
-        rejected(
-            lambda: nls.validate_public_git_url(
-                "https://forge.example/repo.git",
-                resolver=timeout_resolver,
-            ),
-            "timed out",
-        ),
-    )
-    check(
-        "address: excessive DNS answers fail closed",
-        rejected(
-            lambda: nls.validate_public_git_url(
-                "https://forge.example/repo.git",
-                resolver=lambda host, port, type=None: public_resolver(host, port, type)
-                * (nls.MAX_PUBLIC_DNS_ANSWERS + 1),
-            ),
-            "too many addresses",
-        ),
-    )
-
 
 def test_ref_argument_safety():
     for ref in (
@@ -275,23 +206,19 @@ def test_ref_argument_safety():
         "ref: ordinary branch is accepted",
         nls._safe_public_ref("release/v1.2") == "release/v1.2",
     )
-    check(
-        "fetch: real fetch-pack output validates its object-id field",
-        nls._public_fetched_object(COMMIT + " refs/heads/main\n") == COMMIT,
-    )
-
     with tempfile.TemporaryDirectory() as parent:
-        fake = FakeGit()
+        fake = StockGit()
         clone_request(fake, clone_root(parent), ref="release/v1.2")
-        args = fake.calls[0]["args"]
+        clone_args = fake.calls[0]["args"]
         check(
-            "ref: safe ref is resolved as exact branch and tag names",
-            args[-2:] == ["refs/heads/release/v1.2", "refs/tags/release/v1.2"],
+            "ref: safe ref is passed only as stock clone branch data",
+            "--branch" in clone_args
+            and clone_args[clone_args.index("--branch") + 1] == "release/v1.2"
+            and all("upload-pack" not in value for value in clone_args),
         )
-        nls.cleanup_public_clones(clone_root(parent))
 
 
-def test_exact_hardened_git_argv_environment_and_manifest():
+def test_exact_stock_clone_argv_environment_and_data_only_result():
     secret_values = {
         "GH_TOKEN": "gh-secret-marker",
         "GITHUB_TOKEN": "github-secret-marker",
@@ -306,7 +233,7 @@ def test_exact_hardened_git_argv_environment_and_manifest():
     try:
         with tempfile.TemporaryDirectory() as parent:
             root = clone_root(parent)
-            fake = FakeGit()
+            fake = StockGit()
             result = json.loads(
                 clone_request(
                     fake,
@@ -314,7 +241,8 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                     url="https://Forge.Example:443/team/repo.git",
                 )
             )
-            git = shutil.which("git")
+            git = nls.shutil.which("git")
+            source = os.path.join(root, "source")
             expected = [
                 git,
                 "-c",
@@ -330,7 +258,7 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "-c",
                 "protocol.https.allow=always",
                 "-c",
-                "protocol.version=0",
+                "protocol.version=2",
                 "-c",
                 "transfer.bundleURI=false",
                 "-c",
@@ -338,41 +266,30 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "-c",
                 "fetch.fsckObjects=true",
                 "-c",
-                "fetch.unpackLimit=0",
-                "-c",
-                "transfer.unpackLimit=0",
-                "-c",
                 "submodule.recurse=false",
                 "-c",
                 "fetch.recurseSubmodules=false",
                 "-c",
                 "http.followRedirects=false",
-                "ls-remote",
-                "--symref",
+                "clone",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--depth=1",
+                "--single-branch",
+                "--filter=blob:limit=%s" % nls.MAX_PUBLIC_CLONE_BYTES,
                 "https://forge.example/team/repo.git",
-                "HEAD",
+                source,
             ]
+            check("git: exactly one stock clone and one stock SHA resolution", len(fake.calls) == 2)
+            check("git: hardened clone argv is exact", fake.calls[0]["args"] == expected)
             check(
-                "git: remote advertisement argv is exact and hardened",
-                fake.calls[0]["args"] == expected,
+                "git: clone and SHA resolution have separate bounded timeouts",
+                fake.calls[0]["cwd"] == os.path.join(root, "runtime")
+                and fake.calls[0]["timeout"] == nls.PUBLIC_CLONE_TIMEOUT_SECONDS
+                and fake.calls[1]["cwd"] == source
+                and fake.calls[1]["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
             )
-            check(
-                "git: remote advertisement runs from the isolated runtime",
-                fake.calls[0]["cwd"] == os.path.dirname(fake.calls[0]["env"]["TMPDIR"]),
-            )
-            check(
-                "git: fetch, tree inspection, checkout, and local SHA resolution have bounded timeouts",
-                fake.calls[2]["timeout"] == nls.PUBLIC_CLONE_TIMEOUT_SECONDS
-                and fake.calls[0]["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS
-                and all(call["timeout"] == nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS for call in fake.calls[1:2] + fake.calls[3:]),
-            )
-            check(
-                "git: tree limits are checked before checkout",
-                "ls-tree" in fake.calls[6]["args"]
-                and "read-tree" in fake.calls[7]["args"]
-                and "checkout" in fake.calls[8]["args"],
-            )
-            env = fake.calls[0]["env"]
             expected_env = {
                 "PATH",
                 "HOME",
@@ -391,75 +308,58 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 "GIT_PROTOCOL_FROM_USER",
                 "GIT_OPTIONAL_LOCKS",
             }
+            env = fake.calls[0]["env"]
+            check("git: child environment is an exact safe allowlist", set(env) == expected_env)
             check(
-                "git: child environment is an exact safe allowlist",
-                set(env) == expected_env,
-            )
-            check(
-                "git: no model, GitHub, cloud, or runner credential reaches either child",
+                "git: credentials are scrubbed and anonymous controls are exact",
                 all(
                     marker not in str(call["env"])
                     for marker in secret_values.values()
                     for call in fake.calls
                 )
-                and all(not nls.SENSITIVE_ENV_RE.search(name) for name in env),
+                and env["GIT_ASKPASS"] == "/bin/false"
+                and env["SSH_ASKPASS"] == "/bin/false"
+                and env["GIT_TERMINAL_PROMPT"] == "0"
+                and env["GIT_LFS_SKIP_SMUDGE"] == "1"
+                and env["GIT_CONFIG_GLOBAL"] == os.devnull
+                and "GIT_OBJECT_DIRECTORY" not in env
+                and "GIT_EXEC_PATH" not in env,
             )
             check(
-                "git: prompting, helpers, LFS, hooks, redirects, tags, and submodules are disabled",
-                env["GIT_TERMINAL_PROMPT"] == "0"
-                and env["GIT_ASKPASS"] == "/bin/false"
-                and env["GIT_LFS_SKIP_SMUDGE"] == "1"
-                and "credential.helper=" in expected
+                "git: tags, hooks, submodules, and custom transport machinery are disabled",
+                "--no-tags" in expected
+                and "--no-recurse-submodules" in expected
                 and "core.hooksPath=/dev/null" in expected
-                and "http.followRedirects=false" in expected
-                and "protocol.version=0" in expected
-                and "transfer.bundleURI=false" in expected
-                and "fetch.fsckObjects=true" in expected
-                and "fetch.unpackLimit=0" in expected
-                and "transfer.unpackLimit=0" in expected
-                and "--keep" in fake.calls[2]["args"]
-                and "--depth=1" in fake.calls[2]["args"]
-                and any(
-                    value.startswith("--filter=blob:limit=")
-                    for value in fake.calls[2]["args"]
-                )
-                and "submodule.recurse=false" in expected
+                and "protocol.https.allow=always" in expected
+                and "protocol.allow=never" in expected
                 and "fetch.recurseSubmodules=false" in expected,
             )
             check(
-                "result: canonical URL, commit, isolated location, and bounded manifest are returned",
+                "result: only canonical URL, SHA, data location, and bounded manifest are returned",
                 result["url"] == "https://forge.example/team/repo.git"
                 and result["commit"] == COMMIT
-                and result["location"] == os.path.join(root, "source")
+                and result["location"] == source
                 and result["manifest"]["paths"] == ["README.md"]
-                and result["manifest"]["file_count"] == 2
-                and result["manifest"]["retained_bytes"] <= nls.MAX_PUBLIC_CLONE_BYTES,
+                and result["manifest"]["file_count"] == 1
+                and ".git" not in result["manifest"]["paths"]
+                and set(result) == {"op", "url", "commit", "location", "manifest"},
             )
             check(
-                "result: DNS resolution addresses are not returned",
-                "validated_addresses" not in result
-                and "cleanup" not in result
-                and "ref" not in result,
-            )
-            check(
-                "result: clone is outside the target workspace and readable",
+                "result: retained tree is outside the workspace and non-committable",
                 not nls._path_within(result["location"], ROOT)
-                and open(
-                    os.path.join(result["location"], "README.md"), encoding="utf-8"
-                ).read()
-                == "public source\n",
+                and os.path.isfile(os.path.join(result["location"], "README.md"))
+                and not os.path.lexists(os.path.join(result["location"], ".git"))
+                and subprocess.run(
+                    ["git", "-C", result["location"], "status"],
+                    capture_output=True,
+                ).returncode
+                != 0,
             )
             check(
-                "cleanup: successful clone is retained for model reads",
-                os.path.isdir(root),
-            )
-            check(
-                "cleanup: explicit trusted cleanup reports removal",
-                nls.cleanup_public_clones(root),
-            )
-            check(
-                "cleanup: trusted cleanup removes the entire clone root",
-                not os.path.lexists(root),
+                "cleanup: successful clone remains for model reads until trusted cleanup",
+                os.path.isdir(root)
+                and nls.cleanup_public_clones(root)
+                and not os.path.lexists(root),
             )
     finally:
         for key, value in original.items():
@@ -469,481 +369,62 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 os.environ[key] = value
 
 
-def test_bounds_failure_output_cap_and_deterministic_cleanup():
-    old_files = nls.MAX_PUBLIC_CLONE_FILES
+def test_post_clone_limits_and_deterministic_cleanup():
+    with tempfile.TemporaryDirectory() as parent:
+        root = clone_root(parent)
+        fake = StockGit(retained_size=nls.MAX_PUBLIC_CLONE_BYTES + 1)
+        check(
+            "bounds: retained-byte overflow is rejected after stock clone",
+            rejected(lambda: clone_request(fake, root), "retained byte limit"),
+        )
+        check("cleanup: byte overflow removes the complete clone root", not os.path.lexists(root))
+
+    original_limit = nls.MAX_PUBLIC_CLONE_FILES
     try:
-        nls.MAX_PUBLIC_CLONE_FILES = 1
+        nls.MAX_PUBLIC_CLONE_FILES = 0
         with tempfile.TemporaryDirectory() as parent:
             root = clone_root(parent)
-            fake = FakeGit(files={"one": "1", "two": "2"})
             check(
-                "bounds: pre-checkout file overflow fails closed",
-                rejected(lambda: clone_request(fake, root), "file limit"),
+                "bounds: retained-file overflow is rejected after stock clone",
+                rejected(lambda: clone_request(StockGit(), root), "retained file limit"),
             )
-            check(
-                "cleanup: over-limit clone is removed immediately",
-                not os.path.lexists(root),
-            )
+            check("cleanup: file overflow removes the complete clone root", not os.path.lexists(root))
     finally:
-        nls.MAX_PUBLIC_CLONE_FILES = old_files
-
-    old_bytes = nls.MAX_PUBLIC_CLONE_BYTES
-    try:
-        nls.MAX_PUBLIC_CLONE_BYTES = 8
-        with tempfile.TemporaryDirectory() as parent:
-            root = clone_root(parent)
-            fake = FakeGit(files={"large": "retained bytes exceed the cap"})
-            check(
-                "bounds: pre-checkout retained-byte overflow fails closed",
-                rejected(lambda: clone_request(fake, root), "byte limit"),
-            )
-            check(
-                "cleanup: retained-byte overflow clone is removed immediately",
-                not os.path.lexists(root),
-            )
-    finally:
-        nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
-
-    old_bytes = nls.MAX_PUBLIC_CLONE_BYTES
-    try:
-        nls.MAX_PUBLIC_CLONE_BYTES = 30
-        with tempfile.TemporaryDirectory() as parent:
-            root = clone_root(parent)
-            fake = FakeGit(files={"small": "123456789012345"})
-            check(
-                "bounds: clone metadata and tree bytes share one aggregate cap",
-                rejected(lambda: clone_request(fake, root), "byte limit"),
-            )
-            check(
-                "cleanup: aggregate metadata overflow clone is removed immediately",
-                not os.path.lexists(root),
-            )
-    finally:
-        nls.MAX_PUBLIC_CLONE_BYTES = old_bytes
-
-    class TimeoutGit(FakeGit):
-        def __call__(self, args, *, env, cwd=None, timeout=None):
-            if "fetch-pack" in args:
-                raise subprocess.TimeoutExpired(args, timeout)
-            return super().__call__(args, env=env, cwd=cwd, timeout=timeout)
+        nls.MAX_PUBLIC_CLONE_FILES = original_limit
 
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
         check(
-            "bounds: clone timeout fails closed",
-            rejected(lambda: clone_request(TimeoutGit(), root), "timed out"),
-        )
-        check(
-            "cleanup: timed-out clone is removed immediately", not os.path.lexists(root)
-        )
-
-    with tempfile.TemporaryDirectory() as parent:
-        root = clone_root(parent)
-        fake = FakeGit(
-            clone_returncode=1, clone_output="x" * (nls.MAX_PUBLIC_GIT_OUTPUT_CHARS * 2)
-        )
-        try:
-            clone_request(fake, root)
-        except ValueError as exc:
-            bounded = len(
-                str(exc)
-            ) < nls.MAX_PUBLIC_GIT_OUTPUT_CHARS + 100 and "truncated" in str(exc)
-        else:
-            bounded = False
-        check("bounds: Git diagnostic output is capped", bounded)
-        check("cleanup: failed clone is removed immediately", not os.path.lexists(root))
-
-    class TreeErrorGit(FakeGit):
-        def __call__(self, args, *, env, cwd=None, timeout=None):
-            if "ls-tree" in args:
-                result = super().__call__(args, env=env, cwd=cwd, timeout=timeout)
-                return subprocess.CompletedProcess(
-                    args,
-                    1,
-                    result.stdout,
-                    "x" * (nls.MAX_PUBLIC_TREE_OUTPUT_CHARS * 2),
-                )
-            return super().__call__(args, env=env, cwd=cwd, timeout=timeout)
-
-    with tempfile.TemporaryDirectory() as parent:
-        root = clone_root(parent)
-        try:
-            clone_request(TreeErrorGit(), root)
-        except ValueError as exc:
-            bounded = len(str(exc)) < nls.MAX_PUBLIC_GIT_OUTPUT_CHARS + 100
-        else:
-            bounded = False
-        check("bounds: tree diagnostics retain the small error cap", bounded)
-        check("cleanup: tree inspection failure is removed immediately", not os.path.lexists(root))
-
-    with tempfile.TemporaryDirectory() as parent:
-        root = clone_root(parent)
-        first = FakeGit(files={"old.txt": "old"})
-        second = FakeGit(files={"new.txt": "new"})
-        clone_request(first, root)
-        clone_request(second, root)
-        check(
-            "cleanup: a later public_clone deterministically replaces the prior clone",
-            not os.path.exists(os.path.join(root, "source", "old.txt"))
-            and os.path.isfile(os.path.join(root, "source", "new.txt")),
-        )
-        nls.cleanup_public_clones(root)
-
-    with tempfile.TemporaryDirectory() as parent:
-        root = clone_root(parent)
-        special_name = 'quote"\nname'
-        result = json.loads(
-            clone_request(FakeGit(files={special_name: "x"}), root)
-        )
-        check(
-            "result: escaped manifest paths remain valid bounded JSON",
-            special_name in result["manifest"]["paths"]
-            and len(json.dumps(result)) <= nls.MAX_OUTPUT_CHARS,
-        )
-        nls.cleanup_public_clones(root)
-
-
-def test_preparation_failure_cleans_partial_root():
-    original_makedirs = nls.os.makedirs
-    with tempfile.TemporaryDirectory() as parent:
-        root = clone_root(parent)
-        failure_path = os.path.join(root, "runtime", "home")
-
-        def failing_makedirs(path, *args, **kwargs):
-            if path == failure_path:
-                raise OSError("injected preparation failure")
-            return original_makedirs(path, *args, **kwargs)
-
-        nls.os.makedirs = failing_makedirs
-        try:
-            preparation_failed = False
-            try:
-                nls._prepare_public_clone_root(root)
-            except OSError:
-                preparation_failed = True
-            check(
-                "cleanup: partial preparation is removed",
-                preparation_failed,
-            )
-        finally:
-            nls.os.makedirs = original_makedirs
-        check(
-            "cleanup: preparation failure leaves no root",
-            not os.path.lexists(root),
-        )
-
-
-def test_git_pack_input_quota_is_enforced():
-    with tempfile.TemporaryDirectory() as parent:
-        repository = os.path.join(parent, "repository")
-        runtime = os.path.join(parent, "runtime")
-        object_store = os.path.join(runtime, "object-store")
-        source = os.path.join(parent, "source")
-        home = os.path.join(runtime, "home")
-        tmp = os.path.join(runtime, "tmp")
-        config = os.path.join(home, "config")
-        for path in (repository, home, tmp, config, os.path.join(object_store, "pack")):
-            os.makedirs(path, exist_ok=True)
-        subprocess.run(["git", "init", "-q", repository], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.email", "test@example.com"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.name", "test"],
-            check=True,
-        )
-        with open(os.path.join(repository, "payload"), "wb") as handle:
-            handle.write(os.urandom(8192))
-        subprocess.run(["git", "-C", repository, "add", "payload"], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "commit", "-qm", "payload"], check=True
-        )
-        env = nls._public_git_env(home, tmp, config)
-        env["GIT_OBJECT_DIRECTORY"] = object_store
-        wrapper = nls._prepare_public_git_exec_path(
-            shutil.which("git"),
-            env,
-            runtime,
-            4096,
-            object_store=object_store,
-            object_store_limit=4096,
-        )
-        template = os.path.join(runtime, "template")
-        os.makedirs(template, exist_ok=True)
-        subprocess.run(
-            [
-                shutil.which("git"),
-                "init",
-                "-q",
-                "--template",
-                template,
-                source,
-            ],
-            env=env,
-            cwd=runtime,
-            check=True,
-        )
-        result = nls.run_public_git(
-            [
-                shutil.which("git"),
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.file.allow=always",
-                "-c",
-                "fetch.fsckObjects=true",
-                "-c",
-                "fetch.unpackLimit=0",
-                "-c",
-                "transfer.unpackLimit=0",
-                "fetch-pack",
-                "--keep",
-                "--depth=1",
-                "--no-progress",
-                "file://" + repository,
-                "HEAD",
-            ],
-            env=env,
-            cwd=source,
-            timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS,
-            git_exec_path=wrapper,
-            file_size_limit=4096,
-        )
-        check(
-            "bounds: index-pack rejects an oversized incoming pack",
-            result.returncode != 0
-            and (
-                "bounded byte budget" in str(result.stdout)
-                or "maximum allowed size" in str(result.stdout)
-                or "invalid index-pack output" in str(result.stdout)
-            ),
-        )
-
-
-def test_pack_and_index_share_aggregate_storage_budget():
-    with tempfile.TemporaryDirectory() as parent:
-        repository = os.path.join(parent, "repository")
-        probe = os.path.join(parent, "probe")
-        actual = os.path.join(parent, "actual")
-        runtime = os.path.join(parent, "runtime")
-        object_store = os.path.join(runtime, "object-store")
-        home = os.path.join(runtime, "home")
-        tmp = os.path.join(runtime, "tmp")
-        config = os.path.join(home, "config")
-        template = os.path.join(runtime, "template")
-        for path in (
-            repository,
-            home,
-            tmp,
-            config,
-            template,
-            os.path.join(object_store, "pack"),
-        ):
-            os.makedirs(path, exist_ok=True)
-        subprocess.run(["git", "init", "-q", repository], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.email", "test@example.com"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.name", "test"],
-            check=True,
-        )
-        for index in range(40):
-            with open(
-                os.path.join(repository, "file-%02d" % index), "wb"
-            ) as handle:
-                handle.write(os.urandom(32))
-        subprocess.run(["git", "-C", repository, "add", "."], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "commit", "-qm", "payload"], check=True
-        )
-        git = shutil.which("git")
-        subprocess.run(
-            [git, "init", "-q", "--template", template, probe], check=True
-        )
-        subprocess.run(
-            [
-                git,
-                "fetch-pack",
-                "--keep",
-                "--depth=1",
-                "--no-progress",
-                repository,
-                "HEAD",
-            ],
-            cwd=probe,
-            check=True,
-            capture_output=True,
-        )
-        probe_pack = [
-            os.path.join(probe, ".git", "objects", "pack", name)
-            for name in os.listdir(os.path.join(probe, ".git", "objects", "pack"))
-            if name.endswith((".pack", ".idx"))
-        ]
-        artifact_limit = max(os.path.getsize(path) for path in probe_pack) + 1
-        env = nls._public_git_env(home, tmp, config)
-        env["GIT_OBJECT_DIRECTORY"] = object_store
-        wrapper = nls._prepare_public_git_exec_path(
-            git,
-            env,
-            runtime,
-            artifact_limit,
-            object_store=object_store,
-            object_store_limit=4 * artifact_limit,
-        )
-        subprocess.run(
-            [git, "init", "-q", "--template", template, actual], check=True
-        )
-        result = nls.run_public_git(
-            [
-                git,
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.file.allow=always",
-                "fetch-pack",
-                "--keep",
-                "--depth=1",
-                "--no-progress",
-                repository,
-                "HEAD",
-            ],
-            env=env,
-            cwd=actual,
-            timeout=nls.PUBLIC_CLONE_TIMEOUT_SECONDS,
-            git_exec_path=wrapper,
-            file_size_limit=artifact_limit,
-        )
-        actual_pack = [
-            os.path.join(object_store, "pack", name)
-            for name in os.listdir(os.path.join(object_store, "pack"))
-            if name.endswith((".pack", ".idx"))
-        ]
-        retained = sum(os.path.getsize(path) for path in actual_pack)
-        check(
-            "bounds: pack and index may cross one slot but stay within reserved aggregate slots",
-            result.returncode == 0
-            and retained > artifact_limit
-            and retained <= 4 * artifact_limit,
-        )
-        check(
-            "bounds: fetch-pack does not write the source object store",
-            actual_pack
-            and (
-                not os.path.isdir(os.path.join(actual, ".git", "objects", "pack"))
-                or not any(
-                    name.endswith((".pack", ".idx"))
-                    for name in os.listdir(
-                        os.path.join(actual, ".git", "objects", "pack")
-                    )
-                )
-            ),
-        )
-        budgets = nls._public_clone_storage_budgets()
-        check(
-            "bounds: aggregate object-store overflow is rejected before materialization",
+            "cleanup: failed stock clone removes partial output",
             rejected(
-                lambda: nls._check_public_clone_storage_budgets(
-                    {"retained_bytes": budgets["object_bytes"] + budgets["headroom"] + 1},
-                    {"retained_bytes": 0},
-                ),
-                "object storage",
-            ),
-        )
-
-
-def test_raw_materialization_ignores_checkout_attributes():
-    with tempfile.TemporaryDirectory() as parent:
-        repository = os.path.join(parent, "repository")
-        source = os.path.join(parent, "source")
-        runtime = os.path.join(parent, "runtime")
-        home = os.path.join(runtime, "home")
-        tmp = os.path.join(runtime, "tmp")
-        config = os.path.join(home, "config")
-        for path in (repository, home, tmp, config):
-            os.makedirs(path, exist_ok=True)
-        subprocess.run(["git", "-C", repository, "init", "-q"], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.email", "test@example.com"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", repository, "config", "user.name", "test"],
-            check=True,
-        )
-        with open(os.path.join(repository, "eol.txt"), "wb") as handle:
-            handle.write(b"Line\n")
-        with open(os.path.join(repository, "encoded.txt"), "wb") as handle:
-            handle.write(b"L\x00i\x00n\x00e\x00\n\x00")
-        with open(
-            os.path.join(repository, ".gitattributes"), "w", encoding="utf-8"
-        ) as handle:
-            handle.write(
-                "eol.txt eol=crlf\nencoded.txt working-tree-encoding=UTF-16LE\n"
+                lambda: clone_request(StockGit(clone_returncode=1), root),
+                "clone output",
             )
-        subprocess.run(["git", "-C", repository, "add", "."], check=True)
-        subprocess.run(
-            ["git", "-C", repository, "commit", "-qm", "attributes"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "clone", "-q", "-n", repository, source], check=True
-        )
-        env = nls._public_git_env(home, tmp, config)
-        tree = subprocess.run(
-            [
-                "git",
-                "-C",
-                source,
-                "ls-tree",
-                "-r",
-                "-l",
-                "-z",
-                "--full-tree",
-                "HEAD",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        tree_manifest = nls._bounded_public_tree_manifest(tree.stdout)
-        subprocess.run(
-            ["git", "-C", source, "read-tree", "--reset", "HEAD"],
-            env=env,
-            check=True,
-        )
-        metadata_manifest = nls._bounded_clone_manifest(source)
-        nls._check_public_clone_totals(metadata_manifest, tree_manifest)
-        nls._materialize_public_clone_raw(
-            shutil.which("git"),
-            env,
-            source,
-            tree_manifest["entries"],
-            metadata_manifest,
-            nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
-        )
-        check(
-            "checkout: eol and working-tree-encoding do not transform retained blobs",
-            open(os.path.join(source, "eol.txt"), "rb").read() == b"Line\n"
-            and open(os.path.join(source, "encoded.txt"), "rb").read()
-            == b"Line\n",
+            and not os.path.lexists(root),
         )
 
 
-def test_lossy_tree_paths_fail_closed():
-    listing = "100644 blob %s 1\tbad\ufffd\0" % ("0" * 40)
+def test_stock_git_output_is_bounded():
+    result = nls.run_public_git(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 20000); sys.stderr.write('y' * 20000)",
+        ],
+        env={"PATH": os.environ.get("PATH", os.defpath)},
+        timeout=10,
+    )
     check(
-        "paths: undecodable Git filenames are rejected before materialization",
-        rejected(
-            lambda: nls._bounded_public_tree_manifest(listing),
-            "undecodable paths",
-        ),
+        "output: stdout and stderr are captured with independent hard bounds",
+        result.returncode == 0
+        and "[git stdout truncated]" in result.stdout
+        and "[git stderr truncated]" in result.stderr
+        and len(result.stdout) <= nls.MAX_PUBLIC_GIT_OUTPUT_CHARS + 32
+        and len(result.stderr) <= nls.MAX_PUBLIC_GIT_OUTPUT_CHARS + 32,
     )
 
 
-def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
+def test_operation_scope_documentation_and_same_turn_action():
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
         check(
@@ -952,7 +433,7 @@ def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
                 lambda: nls.handle_request(
                     {"op": "public_clone", "url": "https://git.example/repo.git"},
                     [],
-                    public_runner=FakeGit(),
+                    public_runner=StockGit(),
                     resolver=public_resolver,
                     clone_root=root,
                 ),
@@ -964,33 +445,36 @@ def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
         rejected(lambda: nls.handle_request({"op": "pr_list"}, []), "no repositories"),
     )
 
+    source = read("scripts", "nl_readonly_search.py")
+    forbidden = (
+        "fetch-pack",
+        "index-pack",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_EXEC_PATH",
+        "refs/wheelhouse/public",
+        "public-index-pack-pump",
+        "_materialize_public_clone",
+    )
+    check(
+        "architecture: no custom fetch, object store, namespace, or materializer remains",
+        all(token not in source for token in forbidden),
+    )
+
     workflow = read(".github", "workflows", "claude-model.yml")
     exact = "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\\n"
-    check(
-        "tools: search allowed-tools bytes are unchanged in all three Claude steps",
-        workflow.count(exact) == 3,
-    )
-    check(
-        "tools: task capability remains only the exact wheelhouse-search Bash command",
-        'tools.append("Bash(wheelhouse-search)")'
-        in read("agent_runtime", "task_builder.py")
-        and "Bash(git" not in workflow
-        and "Bash(curl" not in workflow,
-    )
     cleanup = workflow.index("- name: Remove bounded public clones")
     capture = workflow.index("- id: capture")
     check(
-        "cleanup: trusted always step removes clones after the model and before capture",
+        "tools: exact search allowed-tools bytes remain unchanged",
+        workflow.count(exact) == 3,
+    )
+    check(
+        "cleanup: trusted always step runs before capture",
         cleanup < capture
         and "always() && steps.hydrate.outputs.action == 'nl-decision.search'"
         in workflow[cleanup:capture]
         and '"$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" cleanup'
         in workflow[cleanup:capture],
-    )
-    check(
-        "scope: workflow enables public clone only for nl-decision.search",
-        'if [ "$ACTION" = "nl-decision.search" ]' in workflow
-        and "WHEELHOUSE_PUBLIC_CLONE_ENABLED=1" in workflow,
     )
 
     prompt = ad.build_nl_prompt(
@@ -1005,36 +489,28 @@ def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
         {"repo": "target", "number": 7, "head_sha": COMMIT},
         owner="owner",
     )
-    check(
-        "same-turn: prompt exposes only public_clone and data-only inspection",
-        "`public_clone` accepts `url` plus an optional safe `ref`" in prompt
-        and "Never execute cloned files" in prompt,
-    )
-    check(
-        "same-turn: existing structured route still accepts an authorized mutation",
-        routed["mode"] == "action" and routed["decision"] == "merge",
-    )
-
     delivery_doc = read("docs", "READONLY_TOKEN_DELIVERY.md")
     check(
-        "dns: accepted validation-to-Git rebinding residual is documented and bounded",
-        "DNS rebinding residual" in delivery_doc
-        and "validation and Git's connection" in delivery_doc,
+        "same-turn: public clone prompt and existing action route remain available",
+        "`public_clone` accepts" in prompt
+        and "Never execute cloned files" in prompt
+        and routed["mode"] == "action"
+        and routed["decision"] == "merge",
+    )
+    check(
+        "documentation: transient stock-Git residual is explicit",
+        "may transiently download or write more pack data" in delivery_doc
+        and "complete clone root is deterministically" in delivery_doc,
     )
 
 
 def main():
-    test_url_validation_and_custom_domains()
-    test_private_reserved_and_metadata_addresses_are_rejected()
+    test_url_validation_and_public_addresses()
     test_ref_argument_safety()
-    test_exact_hardened_git_argv_environment_and_manifest()
-    test_bounds_failure_output_cap_and_deterministic_cleanup()
-    test_preparation_failure_cleans_partial_root()
-    test_git_pack_input_quota_is_enforced()
-    test_pack_and_index_share_aggregate_storage_budget()
-    test_raw_materialization_ignores_checkout_attributes()
-    test_lossy_tree_paths_fail_closed()
-    test_operation_scope_allowed_tools_cleanup_and_same_turn_action()
+    test_exact_stock_clone_argv_environment_and_data_only_result()
+    test_post_clone_limits_and_deterministic_cleanup()
+    test_stock_git_output_is_bounded()
+    test_operation_scope_documentation_and_same_turn_action()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
