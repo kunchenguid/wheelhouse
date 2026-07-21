@@ -469,8 +469,7 @@ def _restore_agreed_audit_units(value: Any, proposed_plan: Any) -> Any:
     restored = deepcopy(value)
     if not isinstance(restored.get("units"), list):
         restored["units"] = deepcopy(proposed_plan["units"])
-    if not isinstance(restored.get("obligations"), list):
-        restored["obligations"] = deepcopy(proposed_plan["obligations"])
+    restored["obligations"] = deepcopy(proposed_plan["obligations"])
     return restored
 
 

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from unittest import mock
 from pathlib import Path
 
@@ -1721,10 +1722,16 @@ def test_public_task_contract():
         compact_audit = {
             key: value for key, value in audit.items() if key != "units"
         }
+        divergent_audit = deepcopy(audit)
+        divergent_audit["obligations"] = []
         check(
-            "task: compact no-disagreement audit restores only validated derivation units",
+            "task: no-disagreement audit restores canonical derivation structure",
             _restore_agreed_audit_units(compact_audit, plan).get("units")
             == plan["units"]
+            and _restore_agreed_audit_units(divergent_audit, plan).get(
+                "obligations"
+            )
+            == plan["obligations"]
             and "units"
             not in _restore_agreed_audit_units(
                 {**compact_audit, "complete": False}, plan
