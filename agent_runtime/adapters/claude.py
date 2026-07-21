@@ -968,9 +968,7 @@ class ClaudeCliAdapter(AgentAdapterV1):
                     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
                     **(
                         {
-                            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
-                                task["spec"]["limits"]["maxOutputTokens"]
-                            )
+                            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "48000"
                         }
                         if task["metadata"]["action"] == "advisory-review.public"
                         else {}
