@@ -1244,6 +1244,14 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   `Read,Grep,Glob,Write,Bash(wheelhouse-search)`) so it can run scoped read-only
   `gh` searches across the target repo and configured fleet repos for related,
   duplicate, or superseding PRs/issues and code context.
+  On this NL path only, the wrapper also accepts one anonymous `public_clone`
+  request with a complete public HTTPS Git URL and optional safe ref. It retains
+  one bounded, shallow, no-tags/no-submodules/no-LFS/no-hooks data-only clone
+  under `RUNNER_TEMP` for Read/Grep/Glob, and the model workflow removes the
+  fixed clone root in an `always()` step. Git receives a fresh credential-free
+  environment; the authenticated `gh` owner/fleet allowlist is unchanged. See
+  `docs/READONLY_TOKEN_DELIVERY.md` for the accepted DNS-rebinding residual and
+  `tests/test_public_clone.py` / `tests/test_public_clone_e2e.py` for guards.
   Like `triage.yml`/`deep-review.yml`, the NL prompt is pass-by-reference:
   `nl-fetch` writes target title/body/diff to bounded on-disk `target.txt` with
   an explicit truncation marker, while `apply_decision.build_nl_prompt` only

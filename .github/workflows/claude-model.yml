@@ -122,6 +122,7 @@ jobs:
         env:
           HANDOFF: ${{ runner.temp }}/wheelhouse-handoff
           ALLOWED_REPOS: ${{ steps.hydrate.outputs.allowedRepos }}
+          ACTION: ${{ steps.hydrate.outputs.action }}
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/wheelhouse-tools"
@@ -130,6 +131,9 @@ jobs:
           chmod 500 "$tool_dir" "$tool_dir/wheelhouse-search"
           echo "$tool_dir" >> "$GITHUB_PATH"
           echo "WHEELHOUSE_SEARCH_ALLOWED_REPOS=$ALLOWED_REPOS" >> "$GITHUB_ENV"
+          if [ "$ACTION" = "nl-decision.search" ]; then
+            echo "WHEELHOUSE_PUBLIC_CLONE_ENABLED=1" >> "$GITHUB_ENV"
+          fi
 
       - name: Write conservative pre-invocation checkpoint
         if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}
@@ -444,6 +448,12 @@ jobs:
           prompt: ${{ steps.hydrate.outputs.prompt }}
           settings: '{"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}'
           claude_args: "--allowedTools \"\"\n--max-turns 1\n--model claude-sonnet-4-6"
+
+      - name: Remove bounded public clones
+        if: ${{ always() && steps.hydrate.outputs.action == 'nl-decision.search' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" cleanup
 
       - id: capture
         if: ${{ always() && steps.source.outputs.match == 'true' && (steps.hydrate.outcome != 'success' || steps.hydrate.outputs.adapter == 'claude-action-compat') }}

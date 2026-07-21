@@ -499,7 +499,8 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   The no-`READONLY_TOKEN` branch can read the bounded on-disk target with `Read`/`Grep`/`Glob`, but has no shell or model `GH_TOKEN`.
   For auto triage and deep review, the no-`READONLY_TOKEN` branch is Read/Grep/Glob only, no shell, and no model `GH_TOKEN`.
   With `READONLY_TOKEN`, Claude receives only that read token as GitHub credentials and may run only `wheelhouse-search` as a shell command, using a wrapper for scoped read-only `gh` lookups across the target repo and configured fleet repos.
-  It cannot run arbitrary `gh` or `git` commands.
+  On the owner/maintainer-gated natural-language path, the same wrapper also accepts one `public_clone` request containing a complete public HTTPS Git URL and optional safe ref. The anonymous clone is shallow, credential-free, data-only, bounded, retained outside the target workspace for Read/Grep/Glob inspection, and removed after the model step.
+  It cannot run arbitrary `gh` or `git` commands or execute cloned content.
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is normalized into `AgentResult` and re-validated against the per-kind allowlist before the deterministic handler acts.
   An absent or genuinely invalid result fails closed into one separate, single-turn, no-tool repair attempt, which trusted code re-validates before replying or acting. The repair exposes no GitHub or search token to the model, but still uses the Claude subscription credential and model tokens.
