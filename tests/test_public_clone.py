@@ -585,6 +585,84 @@ def test_preparation_failure_cleans_partial_root():
         )
 
 
+def test_raw_materialization_ignores_checkout_attributes():
+    with tempfile.TemporaryDirectory() as parent:
+        repository = os.path.join(parent, "repository")
+        source = os.path.join(parent, "source")
+        runtime = os.path.join(parent, "runtime")
+        home = os.path.join(runtime, "home")
+        tmp = os.path.join(runtime, "tmp")
+        config = os.path.join(home, "config")
+        for path in (repository, home, tmp, config):
+            os.makedirs(path, exist_ok=True)
+        subprocess.run(["git", "-C", repository, "init", "-q"], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.name", "test"],
+            check=True,
+        )
+        with open(os.path.join(repository, "eol.txt"), "wb") as handle:
+            handle.write(b"Line\n")
+        with open(os.path.join(repository, "encoded.txt"), "wb") as handle:
+            handle.write(b"L\x00i\x00n\x00e\x00\n\x00")
+        with open(
+            os.path.join(repository, ".gitattributes"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                "eol.txt eol=crlf\nencoded.txt working-tree-encoding=UTF-16LE\n"
+            )
+        subprocess.run(["git", "-C", repository, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "commit", "-qm", "attributes"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "clone", "-q", "-n", repository, source], check=True
+        )
+        env = nls._public_git_env(home, tmp, config)
+        tree = subprocess.run(
+            [
+                "git",
+                "-C",
+                source,
+                "ls-tree",
+                "-r",
+                "-l",
+                "-z",
+                "--full-tree",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tree_manifest = nls._bounded_public_tree_manifest(tree.stdout)
+        subprocess.run(
+            ["git", "-C", source, "read-tree", "--reset", "HEAD"],
+            env=env,
+            check=True,
+        )
+        metadata_manifest = nls._bounded_clone_manifest(source)
+        nls._check_public_clone_totals(metadata_manifest, tree_manifest)
+        nls._materialize_public_clone_raw(
+            shutil.which("git"),
+            env,
+            source,
+            tree_manifest["entries"],
+            metadata_manifest,
+            nls.PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
+        )
+        check(
+            "checkout: eol and working-tree-encoding do not transform retained blobs",
+            open(os.path.join(source, "eol.txt"), "rb").read() == b"Line\n"
+            and open(os.path.join(source, "encoded.txt"), "rb").read()
+            == b"Line\n",
+        )
+
+
 def test_operation_scope_allowed_tools_cleanup_and_same_turn_action():
     with tempfile.TemporaryDirectory() as parent:
         root = clone_root(parent)
@@ -672,6 +750,7 @@ def main():
     test_exact_hardened_git_argv_environment_and_manifest()
     test_bounds_failure_output_cap_and_deterministic_cleanup()
     test_preparation_failure_cleans_partial_root()
+    test_raw_materialization_ignores_checkout_attributes()
     test_operation_scope_allowed_tools_cleanup_and_same_turn_action()
     print()
     if _failures:
