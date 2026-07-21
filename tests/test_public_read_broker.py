@@ -1550,7 +1550,7 @@ def test_public_task_contract():
             in derive_prompt
             and "For an audit agreement, copy the proposed semantic fields and obligations exactly"
             in derive_prompt
-            and 'Call it with exactly {"path":"vision.md"}'
+            and 'Call it with exactly {"path":"/work/vision.md"}'
             in derive_prompt
             and derive_native_schema["required"] == ["json", "unit_semantics"]
             and derive_native_schema["properties"]["unit_semantics"]["minItems"]

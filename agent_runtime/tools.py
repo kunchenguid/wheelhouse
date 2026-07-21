@@ -163,7 +163,17 @@ def _validate_relative(path: str) -> tuple[str, ...]:
 
 
 def _safe_path(root: Path, relative: str, regular: bool | None = None) -> Path:
-    parts = _validate_relative(relative)
+    raw = str(relative or "")
+    resolved_root = root.resolve()
+    if os.path.isabs(raw):
+        try:
+            raw = str(Path(raw).relative_to(root.absolute()))
+        except ValueError:
+            try:
+                raw = str(Path(raw).resolve().relative_to(resolved_root))
+            except ValueError as error:
+                raise ToolError("absolute path must remain inside the mounted input root") from error
+    parts = _validate_relative(raw)
     current = root
     for part in parts:
         current = current / part
@@ -173,7 +183,6 @@ def _safe_path(root: Path, relative: str, regular: bool | None = None) -> Path:
             raise ToolError("requested path is unavailable") from error
         if stat.S_ISLNK(info.st_mode):
             raise ToolError("symlinks are forbidden")
-    resolved_root = root.resolve()
     resolved = current.resolve()
     try:
         resolved.relative_to(resolved_root)

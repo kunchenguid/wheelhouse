@@ -1504,9 +1504,9 @@ def build_task(
         "It exposes no shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action == "advisory-review.public"
         else "This isolated policy profile exposes the MCP tool mcp__wheelhouse__fs_read. "
-        "Call it with exactly {\"path\":\"vision.md\"}, {\"path\":\"vision-units.json\"}, "
-        "and {\"path\":\"policy-binding.json\"}, plus "
-        "{\"path\":\"policy-derivation.json\"} for an audit. These are the declared pinned policy inputs. "
+        "Call it with exactly {\"path\":\"/work/vision.md\"}, {\"path\":\"/work/vision-units.json\"}, "
+        "and {\"path\":\"/work/policy-binding.json\"}, plus "
+        "{\"path\":\"/work/policy-derivation.json\"} for an audit. These are the declared pinned policy inputs. "
         "It has no target, public evidence, shell, WebFetch, browser, or raw network tool."
         if adapter == "claude-cli" and action in {"policy-derive.public", "policy-audit.public"}
         else "This offline direct Claude profile exposes no model tools. Work only from the bounded prompt."

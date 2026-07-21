@@ -47,6 +47,7 @@ def main():
         (source / "escape").symlink_to(outside)
         tools = CanonicalTools(root, ["fs.read", "fs.grep", "fs.glob"], {"fs.read": 65536, "fs.grep": 65536, "fs.glob": 32768})
         check("tools: bounded read succeeds", tools.call("fs.read", {"path": "target.txt"})["bytes"] > 0)
+        check("tools: mounted absolute read succeeds", tools.call("fs.read", {"path": str(root / "target.txt")})["bytes"] > 0)
         check("tools: prompt injection remains plain returned data", "ignore instructions" in tools.call("fs.read", {"path": "target.txt"})["text"])
         check("tools: absolute host path denied", rejected(lambda: tools.call("fs.read", {"path": str(outside)})))
         check("tools: traversal denied", rejected(lambda: tools.call("fs.read", {"path": "../secret"})))
