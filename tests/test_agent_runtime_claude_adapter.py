@@ -360,9 +360,9 @@ def main():
             and plan["claude"]["stdinArtifact"] == "/run/wheelhouse/prompt.txt",
         )
         check(
-            "compile: provider output budget is explicit",
-            plan["claude"]["environment"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
-            == str(task["spec"]["limits"]["maxOutputTokens"]),
+            "compile: provider output override is absent outside public advisory",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+            not in plan["claude"]["environment"],
         )
         check(
             "compile: OAuth secret absent from plan",

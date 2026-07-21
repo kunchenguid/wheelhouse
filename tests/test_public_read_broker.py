@@ -1795,6 +1795,9 @@ def test_public_task_contract():
             and "--strict-mcp-config" in argv
             and "exactly one StructuredOutput call"
             in argv[argv.index("--append-system-prompt") + 1]
+            and compiled["claude"]["environment"][
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+            ] == "48000"
             and argv[argv.index("--tools") + 1] == "StructuredOutput"
             and set(argv[allowed_index].split(","))
             == {

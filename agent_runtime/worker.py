@@ -597,8 +597,11 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
         "LANG": "C.UTF-8",
         "CLAUDE_CODE_OAUTH_TOKEN": token,
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
-        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(plan["limits"]["maxOutputTokens"]),
     }
+    if plan["action"] == "advisory-review.public":
+        environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(
+            plan["limits"]["maxOutputTokens"]
+        )
     if requested_tools:
         public_socket = os.environ.get("WHEELHOUSE_PUBLIC_SOCKET", "")
         exercise_socket = os.environ.get("WHEELHOUSE_EXERCISE_SOCKET", "")

@@ -966,8 +966,14 @@ class ClaudeCliAdapter(AgentAdapterV1):
                 "stdinArtifact": "/run/wheelhouse/prompt.txt",
                 "environment": {
                     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
-                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
-                        task["spec"]["limits"]["maxOutputTokens"]
+                    **(
+                        {
+                            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
+                                task["spec"]["limits"]["maxOutputTokens"]
+                            )
+                        }
+                        if task["metadata"]["action"] == "advisory-review.public"
+                        else {}
                     ),
                 },
                 "secretBindings": [
