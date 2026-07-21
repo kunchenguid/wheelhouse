@@ -106,7 +106,7 @@ class FakeGit:
             return subprocess.CompletedProcess(
                 args,
                 self.clone_returncode,
-                self.clone_output or (COMMIT + " " + COMMIT + "\n"),
+                self.clone_output or (COMMIT + " refs/heads/main\n"),
                 "",
             )
         if "update-ref" in args or "symbolic-ref" in args:
@@ -275,6 +275,10 @@ def test_ref_argument_safety():
         "ref: ordinary branch is accepted",
         nls._safe_public_ref("release/v1.2") == "release/v1.2",
     )
+    check(
+        "fetch: real fetch-pack output validates its object-id field",
+        nls._public_fetched_object(COMMIT + " refs/heads/main\n") == COMMIT,
+    )
 
     with tempfile.TemporaryDirectory() as parent:
         fake = FakeGit()
@@ -415,6 +419,10 @@ def test_exact_hardened_git_argv_environment_and_manifest():
                 and "transfer.unpackLimit=0" in expected
                 and "--keep" in fake.calls[2]["args"]
                 and "--depth=1" in fake.calls[2]["args"]
+                and any(
+                    value.startswith("--filter=blob:limit=")
+                    for value in fake.calls[2]["args"]
+                )
                 and "submodule.recurse=false" in expected
                 and "fetch.recurseSubmodules=false" in expected,
             )
@@ -629,11 +637,12 @@ def test_git_pack_input_quota_is_enforced():
     with tempfile.TemporaryDirectory() as parent:
         repository = os.path.join(parent, "repository")
         runtime = os.path.join(parent, "runtime")
+        object_store = os.path.join(runtime, "object-store")
         source = os.path.join(parent, "source")
         home = os.path.join(runtime, "home")
         tmp = os.path.join(runtime, "tmp")
         config = os.path.join(home, "config")
-        for path in (repository, home, tmp, config):
+        for path in (repository, home, tmp, config, os.path.join(object_store, "pack")):
             os.makedirs(path, exist_ok=True)
         subprocess.run(["git", "init", "-q", repository], check=True)
         subprocess.run(
@@ -651,8 +660,14 @@ def test_git_pack_input_quota_is_enforced():
             ["git", "-C", repository, "commit", "-qm", "payload"], check=True
         )
         env = nls._public_git_env(home, tmp, config)
+        env["GIT_OBJECT_DIRECTORY"] = object_store
         wrapper = nls._prepare_public_git_exec_path(
-            shutil.which("git"), env, runtime, 4096
+            shutil.which("git"),
+            env,
+            runtime,
+            4096,
+            object_store=object_store,
+            object_store_limit=4096,
         )
         template = os.path.join(runtime, "template")
         os.makedirs(template, exist_ok=True)
@@ -712,11 +727,19 @@ def test_pack_and_index_share_aggregate_storage_budget():
         probe = os.path.join(parent, "probe")
         actual = os.path.join(parent, "actual")
         runtime = os.path.join(parent, "runtime")
+        object_store = os.path.join(runtime, "object-store")
         home = os.path.join(runtime, "home")
         tmp = os.path.join(runtime, "tmp")
         config = os.path.join(home, "config")
         template = os.path.join(runtime, "template")
-        for path in (repository, home, tmp, config, template):
+        for path in (
+            repository,
+            home,
+            tmp,
+            config,
+            template,
+            os.path.join(object_store, "pack"),
+        ):
             os.makedirs(path, exist_ok=True)
         subprocess.run(["git", "init", "-q", repository], check=True)
         subprocess.run(
@@ -761,8 +784,14 @@ def test_pack_and_index_share_aggregate_storage_budget():
         ]
         artifact_limit = max(os.path.getsize(path) for path in probe_pack) + 1
         env = nls._public_git_env(home, tmp, config)
+        env["GIT_OBJECT_DIRECTORY"] = object_store
         wrapper = nls._prepare_public_git_exec_path(
-            git, env, runtime, artifact_limit
+            git,
+            env,
+            runtime,
+            artifact_limit,
+            object_store=object_store,
+            object_store_limit=4 * artifact_limit,
         )
         subprocess.run(
             [git, "init", "-q", "--template", template, actual], check=True
@@ -788,8 +817,8 @@ def test_pack_and_index_share_aggregate_storage_budget():
             file_size_limit=artifact_limit,
         )
         actual_pack = [
-            os.path.join(actual, ".git", "objects", "pack", name)
-            for name in os.listdir(os.path.join(actual, ".git", "objects", "pack"))
+            os.path.join(object_store, "pack", name)
+            for name in os.listdir(os.path.join(object_store, "pack"))
             if name.endswith((".pack", ".idx"))
         ]
         retained = sum(os.path.getsize(path) for path in actual_pack)
@@ -798,6 +827,19 @@ def test_pack_and_index_share_aggregate_storage_budget():
             result.returncode == 0
             and retained > artifact_limit
             and retained <= 4 * artifact_limit,
+        )
+        check(
+            "bounds: fetch-pack does not write the source object store",
+            actual_pack
+            and (
+                not os.path.isdir(os.path.join(actual, ".git", "objects", "pack"))
+                or not any(
+                    name.endswith((".pack", ".idx"))
+                    for name in os.listdir(
+                        os.path.join(actual, ".git", "objects", "pack")
+                    )
+                )
+            ),
         )
         budgets = nls._public_clone_storage_budgets()
         check(

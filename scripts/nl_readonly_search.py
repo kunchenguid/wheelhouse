@@ -495,6 +495,39 @@ def _public_clone_storage_budgets():
     }
 
 
+def _public_clone_usage(*roots):
+    total = 0
+    stack = [root for root in roots if root]
+    while stack:
+        root = stack.pop()
+        try:
+            entries = list(os.scandir(root))
+        except FileNotFoundError:
+            continue
+        for entry in entries:
+            try:
+                child = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(child.st_mode) and not stat.S_ISLNK(child.st_mode):
+                stack.append(entry.path)
+            else:
+                total += child.st_size
+    return total
+
+
+def _guard_public_clone_usage(roots, limit):
+    if _public_clone_usage(*roots) > limit:
+        raise ValueError("public clone exceeds the aggregate storage limit")
+
+
+def _adopt_public_clone_object_store(source, object_store):
+    destination = os.path.join(source, ".git", "objects")
+    if os.path.lexists(destination):
+        shutil.rmtree(destination)
+    os.replace(object_store, destination)
+
+
 def _limit_public_git_files(file_size_limit=None):
     try:
         import resource
@@ -627,7 +660,14 @@ def _run_public_git_checked(
     return _git_output(result, limit=output_limit)
 
 
-def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
+def _prepare_public_git_exec_path(
+    git,
+    env,
+    runtime,
+    file_size_limit,
+    object_store=None,
+    object_store_limit=None,
+):
     original = _run_public_git_checked(
         run_public_git,
         [git, "--exec-path"],
@@ -647,25 +687,55 @@ def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
             continue
         os.symlink(entry.path, os.path.join(wrapper_dir, entry.name))
     pump = os.path.join(runtime, "public-index-pack-pump")
+    object_store = object_store or ""
+    object_store_limit = object_store_limit or file_size_limit
     pump_script = "\n".join(
         [
             "#!%s" % sys.executable,
             "import os",
+            "import re",
             "import subprocess",
             "import sys",
             "",
             "limit = int(sys.argv[1])",
             "git = sys.argv[2]",
-            "index_args = sys.argv[3:] + ['--max-input-size=%s', '--no-rev-index']"
+            "object_store = sys.argv[3] or os.environ.get('GIT_OBJECT_DIRECTORY', '')",
+            "store_limit = int(sys.argv[4])",
+            "index_args = sys.argv[5:]",
+            "if '--stdin' not in index_args:",
+            "    index_args.append('--stdin')",
+            "if '--fix-thin' not in index_args:",
+            "    index_args.append('--fix-thin')",
+            "index_args.extend(['--max-input-size=%s', '--no-rev-index'])"
             % file_size_limit,
+            "index_path = ''",
+            "if object_store:",
+            "    pack_dir = os.path.join(object_store, 'pack')",
+            "    os.makedirs(pack_dir, exist_ok=True)",
+            "    index_path = os.path.join(pack_dir, 'wheelhouse-index-%s.tmp' % os.getpid())",
+            "    index_args.extend(['-o', index_path])",
             "",
             "def limit_file_size():",
             "    import resource",
             "    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))",
             "",
+            "def usage(root):",
+            "    total = 0",
+            "    if not root:",
+            "        return total",
+            "    for directory, directories, files in os.walk(root):",
+            "        directories[:] = [name for name in directories if not os.path.islink(os.path.join(directory, name))]",
+            "        for name in files:",
+            "            try:",
+            "                total += os.lstat(os.path.join(directory, name)).st_size",
+            "            except FileNotFoundError:",
+            "                continue",
+            "    return total",
+            "",
             "child = subprocess.Popen(",
             "    [git, 'index-pack'] + index_args,",
             "    stdin=subprocess.PIPE,",
+            "    stdout=subprocess.PIPE,",
             "    preexec_fn=limit_file_size,",
             ")",
             "remaining = limit",
@@ -679,20 +749,39 @@ def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
             "            count = os.write(child.stdin.fileno(), view)",
             "            view = view[count:]",
             "        remaining -= len(chunk)",
+            "        if usage(object_store) > store_limit:",
+            "            child.kill()",
+            "            child.wait()",
+            "            sys.exit(1)",
             "    if os.read(0, 1):",
             "        os.write(2, b'public Git pack exceeds the bounded byte budget\\n')",
             "        child.kill()",
             "        child.wait()",
             "        sys.exit(1)",
             "    child.stdin.close()",
+            "    output = child.stdout.read(8192)",
+            "    returncode = child.wait()",
+            "    if returncode == 0 and index_path:",
+            "        match = re.search(rb'(?<![0-9a-f])([0-9a-f]{40}|[0-9a-f]{64})(?![0-9a-f])', output)",
+            "        if not match:",
+            "            returncode = 1",
+            "        else:",
+            "            final_index = os.path.join(os.path.dirname(index_path), 'pack-' + match.group(1).decode('ascii') + '.idx')",
+            "            os.replace(index_path, final_index)",
+            "    if index_path and os.path.exists(index_path):",
+            "        os.unlink(index_path)",
+            "    if output:",
+            "        os.write(1, output)",
+            "    sys.exit(returncode)",
             "except (BrokenPipeError, OSError):",
             "    try:",
             "        child.kill()",
             "    except ProcessLookupError:",
             "        pass",
             "    child.wait()",
+            "    if index_path and os.path.exists(index_path):",
+            "        os.unlink(index_path)",
             "    sys.exit(1)",
-            "sys.exit(child.wait())",
             "",
         ]
     )
@@ -714,11 +803,13 @@ def _prepare_public_git_exec_path(git, env, runtime, file_size_limit):
             "#!/bin/sh",
             'if [ "$1" = "index-pack" ]; then',
             "    shift",
-            "    exec %s %s %s \"$@\""
+            "    exec %s %s %s %s %s \"$@\""
             % (
                 shlex.quote(pump),
                 file_size_limit,
                 shlex.quote(git),
+                shlex.quote(object_store),
+                object_store_limit,
             ),
             "fi",
             'if [ "$1" = "unpack-objects" ]; then',
@@ -801,9 +892,8 @@ def _public_remote_object(output, names):
 def _public_fetched_object(output):
     for line in output.splitlines():
         fields = line.split()
-        if len(fields) == 2 and all(
-            re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", field)
-            for field in fields
+        if len(fields) == 2 and re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", fields[0]
         ):
             return fields[0]
     raise ValueError("public Git fetch returned no commit")
@@ -861,6 +951,7 @@ def _public_fetch_pack(
         "fetch-pack",
         "--keep",
         "--depth=1",
+        "--filter=blob:limit=%s" % _public_clone_storage_budgets()["tree_bytes"],
         "--no-progress",
         canonical_url,
         remote_ref,
@@ -907,11 +998,14 @@ def _public_fetch_pack(
     )
 
 
-def _check_public_clone_storage_budgets(metadata, tree):
+def _check_public_clone_storage_budgets(metadata, tree, object_store=None):
     budgets = _public_clone_storage_budgets()
     if tree["retained_bytes"] > budgets["tree_bytes"]:
         raise ValueError("public clone exceeds the retained byte limit for materialization")
-    if metadata["retained_bytes"] > budgets["object_bytes"] + budgets["headroom"]:
+    retained_objects = metadata["retained_bytes"]
+    if object_store is not None:
+        retained_objects += object_store["retained_bytes"]
+    if retained_objects > budgets["object_bytes"] + budgets["headroom"]:
         raise ValueError("public clone exceeds the retained byte limit for object storage")
 
 
@@ -1296,15 +1390,27 @@ def _public_clone_request(
         env = _public_git_env(home, tmp, config)
         file_size_limit = None
         git_exec_path = None
+        object_store = None
+        object_store_limit = None
         if runner is run_public_git:
             if os.name != "posix":
                 raise ValueError("public clone is unavailable on this runner")
+            budgets = _public_clone_storage_budgets()
             file_size_limit = _public_clone_file_limit()
+            object_store_limit = budgets["object_bytes"]
+            object_store = os.path.join(runtime, "object-store")
+            os.makedirs(
+                os.path.join(object_store, "pack"),
+                mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+            )
+            env["GIT_OBJECT_DIRECTORY"] = object_store
             git_exec_path = _prepare_public_git_exec_path(
                 git,
                 env,
                 runtime,
                 file_size_limit,
+                object_store=object_store,
+                object_store_limit=object_store_limit,
             )
         _public_fetch_pack(
             git,
@@ -1318,6 +1424,12 @@ def _public_clone_request(
             git_exec_path=git_exec_path,
             file_size_limit=file_size_limit,
         )
+        if object_store is not None:
+            budgets = _public_clone_storage_budgets()
+            _guard_public_clone_usage(
+                (source, object_store),
+                budgets["object_bytes"] + budgets["headroom"],
+            )
         rev_args = [
             *_public_git_args(git),
             "rev-parse",
@@ -1376,15 +1488,34 @@ def _public_clone_request(
             file_size_limit=file_size_limit,
         )
         metadata_manifest = _bounded_clone_manifest(source)
-        _check_public_clone_storage_budgets(metadata_manifest, tree_manifest)
-        _check_public_clone_totals(metadata_manifest, tree_manifest)
+        object_manifest = (
+            _bounded_clone_manifest(object_store)
+            if object_store is not None
+            else None
+        )
+        _check_public_clone_storage_budgets(
+            metadata_manifest,
+            tree_manifest,
+            object_manifest,
+        )
+        if object_manifest is None:
+            _check_public_clone_totals(metadata_manifest, tree_manifest)
+        else:
+            _check_public_clone_totals(
+                metadata_manifest,
+                object_manifest,
+                tree_manifest,
+            )
+        material_metadata = dict(metadata_manifest)
+        if object_manifest is not None:
+            material_metadata["retained_bytes"] += object_manifest["retained_bytes"]
         if runner is run_public_git:
             _materialize_public_clone_raw(
                 git,
                 env,
                 source,
                 tree_manifest["entries"],
-                metadata_manifest,
+                material_metadata,
                 PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
             )
         else:
@@ -1403,6 +1534,10 @@ def _public_clone_request(
                 PUBLIC_GIT_LOCAL_TIMEOUT_SECONDS,
                 cwd=source,
             )
+        if object_store is not None:
+            _guard_public_clone_usage((source, object_store), MAX_PUBLIC_CLONE_BYTES)
+            _adopt_public_clone_object_store(source, object_store)
+            env.pop("GIT_OBJECT_DIRECTORY", None)
         shutil.rmtree(runtime)
         manifest = _bounded_clone_manifest(source)
         result = {
