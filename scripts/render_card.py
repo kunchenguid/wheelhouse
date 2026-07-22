@@ -1300,7 +1300,7 @@ def triage_source_provenance_verified(
 ):
     claim = data.get("source_provenance") if isinstance(data, dict) else None
     if not isinstance(claim, dict) or set(claim) != {
-        "url", "requested_ref", "resolved_commit", "inspected_paths"
+        "url", "requested_ref", "resolved_commit", "inspected_files"
     }:
         return False
     if not provenance_file:
@@ -1335,6 +1335,14 @@ def triage_source_provenance_verified(
         or record.get("status") != "succeeded"
         or record.get("failure") is not None
         or not isinstance(context, dict)
+        or set(context) != {
+            "version",
+            "taskSha256",
+            "action",
+            "eventKeySha256",
+            "target",
+            "sourceReview",
+        }
         or context.get("version") != 1
         or context.get("action") != action
         or action != "triage.pr.search"
@@ -1343,6 +1351,12 @@ def triage_source_provenance_verified(
         or not isinstance(context.get("taskSha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", context["taskSha256"])
         or not isinstance(source_review, dict)
+        or set(source_review) != {
+            "baseSha",
+            "visionSha",
+            "visionContentSha256",
+            "targetRepositoryCommit",
+        }
         or source_review.get("baseSha") != str(base_sha or "").lower()
         or source_review.get("visionSha") != str(vision_sha or "").lower()
         or source_review.get("targetRepositoryCommit") != str(revision or "").lower()
@@ -1351,19 +1365,43 @@ def triage_source_provenance_verified(
         return False
     source = record.get("source")
     manifest = record.get("manifest")
-    inspected = claim.get("inspected_paths")
     if (
         not isinstance(source, dict)
         or set(source) != {"url", "requestedRef", "resolvedCommit"}
         or not isinstance(manifest, dict)
-        or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated"}
-        or manifest.get("paths_truncated") is not False
-        or not isinstance(manifest.get("paths"), list)
-        or not isinstance(inspected, list)
-        or not 1 <= len(inspected) <= 128
-        or len(set(inspected)) != len(inspected)
-        or any(not isinstance(path, str) or path not in manifest["paths"] for path in inspected)
+        or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated", "observations"}
+        or not isinstance(manifest.get("observations"), list)
     ):
+        return False
+    inspected = claim.get("inspected_files")
+    if not isinstance(inspected, list) or not 1 <= len(inspected) <= 128:
+        return False
+    observed = {
+        row.get("path"): row.get("sha256")
+        for row in manifest["observations"]
+        if (
+            isinstance(row, dict)
+            and set(row) == {"path", "sha256", "bytes"}
+            and isinstance(row.get("path"), str)
+            and bool(row["path"])
+            and re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", ""))
+            and isinstance(row.get("bytes"), int)
+            and not isinstance(row.get("bytes"), bool)
+            and 0 <= row["bytes"] <= 100 * 1024 * 1024
+        )
+    }
+    if len(observed) != len(manifest["observations"]):
+        return False
+    claimed = []
+    for row in inspected:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+            return False
+        path = row.get("path")
+        digest = row.get("sha256")
+        if not isinstance(path, str) or observed.get(path) != digest:
+            return False
+        claimed.append(path)
+    if len(set(claimed)) != len(claimed):
         return False
     return (
         isinstance(claim.get("url"), str)
@@ -1387,7 +1425,14 @@ def enforce_triage_source_provenance(data, provenance_file, **expected):
         and _coerce_verdict_bool(automerge.get("recommend_merge")) is True
     ):
         return data
-    if expected and triage_source_provenance_verified(data, provenance_file, **expected):
+    external_required = automerge.get("external_source_required")
+    if external_required is False:
+        return data
+    if (
+        external_required is True
+        and expected
+        and triage_source_provenance_verified(data, provenance_file, **expected)
+    ):
         return data
     bounded = dict(data)
     bounded_automerge = dict(automerge)
@@ -1447,6 +1492,9 @@ def normalize_automerge_verdict(data):
     }
     if all(value is not None for value in vision_fields.values()):
         verdict.update(vision_fields)
+    source_required = _coerce_verdict_bool(data.get("external_source_required"))
+    if source_required is not None:
+        verdict["external_source_required"] = source_required
     return verdict
 
 

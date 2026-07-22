@@ -41,14 +41,18 @@ defense-in-depth controls, not a claim that the token is unavailable in process.
 Only the exact `nl-decision.search` and `triage.pr.search` actions may ask
 `wheelhouse-search` to clone one complete public HTTPS Git URL. Initial PR
 triage uses this source-only capability to independently inspect pinned external
-source when trusted default-branch `VISION.md` requires it. This is separate
+source when trusted default-branch `VISION.md` requires it; local-only policy
+criteria remain eligible without a clone. This is separate
 from the existing authenticated `gh` allowlist. The wrapper resolves the URL's host and rejects
 loopback, link-local, private, reserved, metadata, or otherwise non-public
 addresses before it starts Git. Git receives an explicit credential-free
 environment with a fresh home and configuration, prompting and credential
 helpers disabled, and no model, GitHub, cloud, or runner credentials inherited.
 The shallow data-only clone is retained outside the target workspace only for
-the model step, then a trusted `always()` step removes it.
+the model step, then a trusted `always()` step removes it. The broker records
+the exact URL, requested ref, resolved commit, bounded manifest, and exact-file
+SHA-256 observations in root-owned transient state. The model cannot replace
+that state, and a trusted post-model step exports it before cleanup.
 
 The retained-tree file-count and byte limits are enforced after stock Git
 finishes cloning and after its `.git` administration is removed. Stock Git

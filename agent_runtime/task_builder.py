@@ -932,7 +932,11 @@ def _bound_output_schema(
         bound["properties"].pop("automerge", None)
         return bound
     automerge = bound["properties"]["automerge"]
-    vision_fields = ("aligns_with_vision", "recommend_merge")
+    vision_fields = (
+        "aligns_with_vision",
+        "recommend_merge",
+        "external_source_required",
+    )
     if require_vision_fields:
         automerge["required"] = list(automerge["required"]) + list(vision_fields)
     else:

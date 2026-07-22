@@ -67,6 +67,7 @@ MAX_PUBLIC_CLONE_ENTRIES = 30000
 MAX_PUBLIC_CLONE_BYTES = 100 * 1024 * 1024
 MAX_PUBLIC_MANIFEST_ENTRIES = 200
 MAX_PUBLIC_MANIFEST_PATH_BYTES = 20000
+MAX_PUBLIC_OBSERVATIONS = 96
 MAX_PUBLIC_SYMLINK_BYTES = 4096
 
 PR_LIST_FIELDS = "number,title,state,author,url,updatedAt,headRefName,baseRefName"
@@ -668,6 +669,7 @@ def _bounded_clone_manifest(source):
     file_count = 0
     retained_bytes = 0
     paths = []
+    observations = []
     path_bytes = 0
     while stack:
         prefix, directory = stack.pop()
@@ -717,6 +719,19 @@ def _bounded_clone_manifest(source):
             ):
                 paths.append(rel)
                 path_bytes += rel_bytes
+                if stat.S_ISREG(child.st_mode) and len(observations) < MAX_PUBLIC_OBSERVATIONS:
+                    digest = hashlib.sha256()
+                    try:
+                        with open(entry.path, "rb") as handle:
+                            for chunk in iter(lambda: handle.read(1048576), b""):
+                                digest.update(chunk)
+                    except OSError as exc:
+                        raise ValueError(
+                            "public clone contains an unreadable file"
+                        ) from exc
+                    observations.append(
+                        {"path": rel, "sha256": digest.hexdigest(), "bytes": child.st_size}
+                    )
         stack.extend(reversed(child_dirs))
     return {
         "entry_count": entry_count,
@@ -724,6 +739,7 @@ def _bounded_clone_manifest(source):
         "retained_bytes": retained_bytes,
         "paths": paths,
         "paths_truncated": len(paths) < file_count,
+        "observations": observations,
     }
 
 
@@ -819,19 +835,11 @@ def _record_public_clone_attempt(
     commit=None,
     manifest=None,
     failure=None,
+    state_dir=None,
 ):
-    context = _load_public_clone_context(context)
-    if context is None or not path:
-        return
-    records = []
-    if os.path.isfile(path) and not os.path.islink(path):
-        with open(path, encoding="utf-8") as handle:
-            records = json.load(handle)
-        if not isinstance(records, list):
-            raise ValueError("public clone provenance log is invalid")
     record = {
         "version": PUBLIC_CLONE_PROVENANCE_VERSION,
-        "context": context,
+        "context": None,
         "status": status,
         "source": {
             "url": url,
@@ -841,6 +849,27 @@ def _record_public_clone_attempt(
         "manifest": manifest,
         "failure": failure,
     }
+    if state_dir:
+        result = subprocess.run(
+            ["sudo", "-n", os.path.abspath(__file__), "provenance-record-root", state_dir],
+            input=json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise ValueError("trusted public clone provenance recording failed")
+        return
+    context = _load_public_clone_context(context)
+    if context is None or not path:
+        return
+    record["context"] = context
+    records = []
+    if os.path.isfile(path) and not os.path.islink(path):
+        with open(path, encoding="utf-8") as handle:
+            records = json.load(handle)
+        if not isinstance(records, list):
+            raise ValueError("public clone provenance log is invalid")
     records.append(record)
     _write_public_clone_records(path, records)
 
@@ -870,7 +899,7 @@ def validate_public_clone_provenance(records, task):
             if record.get("failure") is not None or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source.get("resolvedCommit") or ""):
                 raise ValueError("public clone success provenance is invalid")
             manifest = record.get("manifest")
-            if not isinstance(manifest, dict) or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated"}:
+            if not isinstance(manifest, dict) or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated", "observations"}:
                 raise ValueError("public clone manifest provenance is invalid")
             if (
                 isinstance(manifest.get("entry_count"), bool)
@@ -886,6 +915,18 @@ def validate_public_clone_provenance(records, task):
                 or len(manifest["paths"]) > MAX_PUBLIC_MANIFEST_ENTRIES
                 or any(not isinstance(path, str) or not path or len(path.encode("utf-8")) > MAX_PUBLIC_MANIFEST_PATH_BYTES for path in manifest["paths"])
                 or not isinstance(manifest.get("paths_truncated"), bool)
+                or not isinstance(manifest.get("observations"), list)
+                or len(manifest["observations"]) > MAX_PUBLIC_OBSERVATIONS
+                or any(
+                    not isinstance(row, dict)
+                    or set(row) != {"path", "sha256", "bytes"}
+                    or row.get("path") not in manifest["paths"]
+                    or not re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", ""))
+                    or isinstance(row.get("bytes"), bool)
+                    or not isinstance(row.get("bytes"), int)
+                    or not 0 <= row["bytes"] <= MAX_PUBLIC_CLONE_BYTES
+                    for row in manifest["observations"]
+                )
             ):
                 raise ValueError("public clone manifest provenance is invalid")
         elif (
@@ -911,6 +952,79 @@ def export_public_clone_provenance(task_path, provenance_path, output_path):
     return True
 
 
+_ROOT_STATE_RE = re.compile(r"^/run/wheelhouse-public-clone-[0-9a-f]{32}$")
+
+
+def _root_state_path(value, require_exists=True):
+    if os.geteuid() != 0 or not isinstance(value, str) or not _ROOT_STATE_RE.fullmatch(value):
+        raise ValueError("trusted public clone state boundary is invalid")
+    if require_exists:
+        info = os.lstat(value)
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("trusted public clone state boundary is invalid")
+    return value
+
+
+def init_root_public_clone_provenance(task_path, state_dir):
+    state_dir = _root_state_path(state_dir, require_exists=False)
+    if os.path.lexists(state_dir):
+        raise ValueError("trusted public clone state already exists")
+    with open(task_path, "rb") as handle:
+        task_bytes = handle.read(16 * 1024 * 1024 + 1)
+    if len(task_bytes) > 16 * 1024 * 1024:
+        raise ValueError("public clone task exceeds the byte limit")
+    task = json.loads(task_bytes)
+    public_clone_context_from_task(task)
+    os.mkdir(state_dir, 0o700)
+    task_copy = os.path.join(state_dir, "task.json")
+    with open(task_copy, "xb") as handle:
+        handle.write(task_bytes)
+    os.chmod(task_copy, 0o400)
+
+
+def record_root_public_clone_provenance(state_dir, raw_record):
+    state_dir = _root_state_path(state_dir)
+    if len(raw_record.encode("utf-8")) > MAX_PUBLIC_CLONE_PROVENANCE_BYTES:
+        raise ValueError("public clone provenance exceeds the byte limit")
+    with open(os.path.join(state_dir, "task.json"), encoding="utf-8") as handle:
+        task = json.load(handle)
+    record = json.loads(raw_record)
+    if not isinstance(record, dict):
+        raise ValueError("public clone provenance record is invalid")
+    record["context"] = public_clone_context_from_task(task)
+    attempts = os.path.join(state_dir, "attempts.json")
+    records = []
+    if os.path.isfile(attempts) and not os.path.islink(attempts):
+        with open(attempts, encoding="utf-8") as handle:
+            records = json.load(handle)
+    records.append(record)
+    validate_public_clone_provenance(records, task)
+    _write_public_clone_records(attempts, records)
+
+
+def export_root_public_clone_provenance(task_path, state_dir):
+    state_dir = _root_state_path(state_dir)
+    attempts = os.path.join(state_dir, "attempts.json")
+    if not os.path.isfile(attempts) or os.path.islink(attempts):
+        return False
+    with open(task_path, encoding="utf-8") as handle:
+        expected_task = json.load(handle)
+    with open(os.path.join(state_dir, "task.json"), encoding="utf-8") as handle:
+        state_task = json.load(handle)
+    if expected_task != state_task:
+        raise ValueError("public clone task binding mismatch")
+    with open(attempts, encoding="utf-8") as handle:
+        records = json.load(handle)
+    validate_public_clone_provenance(records, expected_task)
+    sys.stdout.write(json.dumps(records, sort_keys=True, separators=(",", ":")) + "\n")
+    return True
+
+
+def cleanup_root_public_clone_provenance(state_dir):
+    state_dir = _root_state_path(state_dir)
+    shutil.rmtree(state_dir)
+
+
 def _public_clone_request(
     req,
     runner=run_public_git,
@@ -918,6 +1032,7 @@ def _public_clone_request(
     clone_root=None,
     provenance_context=None,
     provenance_file=None,
+    provenance_state=None,
 ):
     root = _public_clone_root(clone_root)
     try:
@@ -973,6 +1088,7 @@ def _public_clone_request(
             requested_ref=ref,
             commit=commit,
             manifest=manifest,
+            state_dir=provenance_state,
         )
         return _cap(json.dumps(result, sort_keys=True, indent=2) + "\n")
     except Exception as error:
@@ -987,6 +1103,7 @@ def _public_clone_request(
                 else None
             ),
             failure=type(error).__name__,
+            state_dir=provenance_state,
         )
         cleanup_public_clones(root)
         raise
@@ -1058,6 +1175,7 @@ def handle_request(
     action="",
     provenance_context=None,
     provenance_file=None,
+    provenance_state=None,
 ):
     if not isinstance(req, dict):
         raise ValueError("request must be a JSON object")
@@ -1099,6 +1217,7 @@ def handle_request(
             clone_root=clone_root,
             provenance_context=provenance_context,
             provenance_file=provenance_file,
+            provenance_state=provenance_state,
         )
     if not allowed:
         raise ValueError("no repositories are allowed for search")
@@ -1230,8 +1349,7 @@ def cmd_run():
             _read_request(),
             _env_allowed_repos(),
             action=os.environ.get("WHEELHOUSE_SEARCH_ACTION", ""),
-            provenance_context=os.environ.get("WHEELHOUSE_PUBLIC_CLONE_CONTEXT", ""),
-            provenance_file=os.environ.get("WHEELHOUSE_PUBLIC_CLONE_PROVENANCE", ""),
+            provenance_state=os.environ.get("WHEELHOUSE_PUBLIC_CLONE_STATE", ""),
         )
     except Exception as exc:
         print("wheelhouse-search error: %s" % exc, file=sys.stderr)
@@ -1242,17 +1360,18 @@ def cmd_run():
 
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == "provenance-context":
-        with open(sys.argv[2], encoding="utf-8") as handle:
-            task = json.load(handle)
-        context = public_clone_context_from_task(task)
-        encoded = json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n"
-        with open(sys.argv[3], "x", encoding="utf-8") as handle:
-            handle.write(encoded)
-        os.chmod(sys.argv[3], 0o400)
+    if len(sys.argv) == 4 and sys.argv[1] == "provenance-init-root":
+        init_root_public_clone_provenance(sys.argv[2], sys.argv[3])
         return
-    if len(sys.argv) == 5 and sys.argv[1] == "provenance-export":
-        export_public_clone_provenance(sys.argv[2], sys.argv[3], sys.argv[4])
+    if len(sys.argv) == 3 and sys.argv[1] == "provenance-record-root":
+        raw_record = sys.stdin.read(MAX_PUBLIC_CLONE_PROVENANCE_BYTES + 1)
+        record_root_public_clone_provenance(sys.argv[2], raw_record)
+        return
+    if len(sys.argv) == 4 and sys.argv[1] == "provenance-export-root":
+        export_root_public_clone_provenance(sys.argv[2], sys.argv[3])
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == "provenance-cleanup-root":
+        cleanup_root_public_clone_provenance(sys.argv[2])
         return
     if len(sys.argv) == 2 and sys.argv[1] == "install":
         cmd_install()

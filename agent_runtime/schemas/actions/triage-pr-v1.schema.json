@@ -13,17 +13,25 @@
     "source_provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["url", "requested_ref", "resolved_commit", "inspected_paths"],
+      "required": ["url", "requested_ref", "resolved_commit", "inspected_files"],
       "properties": {
         "url": {"type": "string", "minLength": 1, "maxLength": 2048},
         "requested_ref": {"type": "string", "minLength": 1, "maxLength": 255},
         "resolved_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
-        "inspected_paths": {
+        "inspected_files": {
           "type": "array",
           "minItems": 1,
           "maxItems": 128,
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
         }
       }
     },
@@ -33,6 +41,7 @@
       "required": ["behavior_class", "changes_existing_or_default_behavior", "optin_default_off"],
       "properties": {
         "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
+        "external_source_required": {"type": "boolean"},
         "aligns_with_vision": {"type": "boolean"},
         "changes_existing_or_default_behavior": {"type": "boolean"},
         "optin_default_off": {"type": "boolean"},

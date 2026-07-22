@@ -123,7 +123,9 @@ def main():
                 value.pop("automerge")
             elif include_vision:
                 value["automerge"].update(
-                    aligns_with_vision=True, recommend_merge=True
+                    aligns_with_vision=True,
+                    recommend_merge=True,
+                    external_source_required=False,
                 )
             return value
 
