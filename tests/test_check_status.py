@@ -60,8 +60,15 @@ def check_run(name, conclusion="SUCCESS", status="COMPLETED"):
     }
 
 
-def rollup(state, contexts):
-    return {"state": state, "contexts": {"nodes": contexts}}
+def rollup(state, contexts, total_count=None, has_next_page=False):
+    return {
+        "state": state,
+        "contexts": {
+            "nodes": contexts,
+            "totalCount": len(contexts) if total_count is None else total_count,
+            "pageInfo": {"hasNextPage": has_next_page},
+        },
+    }
 
 
 def pr_with(rollup_data):
@@ -262,6 +269,45 @@ def test_rollup_failure_from_ignorable_cancels_does_not_repoison():
     )
 
 
+def test_rollup_failure_with_truncated_contexts_stays_fail_closed():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="SUCCESS"),
+    ]
+    comp, tests, ci, names = core.check_status(
+        pr_with(
+            rollup(
+                "FAILURE", contexts, total_count=len(contexts) + 1, has_next_page=True
+            )
+        ),
+        CFG,
+    )
+    check("truncated contexts keep rollup FAILURE fail-closed", comp == "fail")
+
+
+def test_rollup_failure_with_inconsistent_context_count_stays_fail_closed():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+    ]
+    comp, tests, ci, names = core.check_status(
+        pr_with(rollup("FAILURE", contexts, total_count=len(contexts) + 1)), CFG
+    )
+    check("incomplete contexts keep rollup FAILURE fail-closed", comp == "fail")
+
+
+def test_rollup_failure_with_unknown_context_completeness_stays_fail_closed():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+    ]
+    rollup_data = rollup("FAILURE", contexts)
+    del rollup_data["contexts"]["pageInfo"]
+    comp, tests, ci, names = core.check_status(pr_with(rollup_data), CFG)
+    check("unknown context completeness keeps rollup FAILURE fail-closed", comp == "fail")
+
+
 def test_rollup_failure_backstop_fails_closed_without_a_compliance_gate():
     # `compliance_check: null` means there is intentionally no required gate,
     # not that an otherwise failed rollup becomes safe to merge. This is the
@@ -431,6 +477,9 @@ def main():
     test_different_check_names_do_not_mask_each_other()
     test_rollup_failure_backstop_downgrades_all_success_read()
     test_rollup_failure_from_ignorable_cancels_does_not_repoison()
+    test_rollup_failure_with_truncated_contexts_stays_fail_closed()
+    test_rollup_failure_with_inconsistent_context_count_stays_fail_closed()
+    test_rollup_failure_with_unknown_context_completeness_stays_fail_closed()
     test_rollup_failure_backstop_fails_closed_without_a_compliance_gate()
     test_genuinely_green_pr_still_passes()
     test_axi_catalog_pr_drift_green_is_merge_ready()

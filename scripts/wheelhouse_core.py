@@ -103,7 +103,7 @@ _PR_NODE_FIELDS = """
         closingIssuesReferences(first:%d){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
-          contexts(first:%d){ nodes{
+          contexts(first:%d){ totalCount pageInfo { hasNextPage } nodes{
             __typename
             ... on CheckRun { name conclusion status }
             ... on StatusContext { context state }
@@ -1008,7 +1008,23 @@ def _reduce_check_outcomes(outcomes):
     return "pending"
 
 
-def _rollup_failure_only_ignorable_cancels(context_nodes):
+def _status_contexts_complete(contexts):
+    if not isinstance(contexts, dict):
+        return False
+    nodes = contexts.get("nodes")
+    page_info = contexts.get("pageInfo")
+    total_count = contexts.get("totalCount")
+    return (
+        isinstance(nodes, list)
+        and isinstance(page_info, dict)
+        and page_info.get("hasNextPage") is False
+        and type(total_count) is int
+        and total_count >= 0
+        and total_count == len(nodes)
+    )
+
+
+def _rollup_failure_only_ignorable_cancels(contexts):
     """True when every non-pass rollup context is a CANCELLED CheckRun whose
     same-name equivalent also has a completed SUCCESS on this head.
 
@@ -1017,8 +1033,10 @@ def _rollup_failure_only_ignorable_cancels(context_nodes):
     unaccounted failure, missing success sibling, pending run, or StatusContext
     non-success keeps the fail-safe backstop active.
     """
+    if not _status_contexts_complete(contexts):
+        return False
     by_name = {}
-    for c in context_nodes or []:
+    for c in contexts["nodes"]:
         if not isinstance(c, dict):
             return False
         if c.get("__typename") == "CheckRun":
@@ -1128,7 +1146,7 @@ def check_status(pr, cfg):
     # Exception: every non-pass context is an ignorable CANCELLED sibling of a
     # proven same-name SUCCESS on this head (concurrency cancel-in-progress).
     if rollup.get("state") in ("FAILURE", "ERROR") and compliance in ("pass", "n/a"):
-        if not _rollup_failure_only_ignorable_cancels(rollup["contexts"]["nodes"]):
+        if not _rollup_failure_only_ignorable_cancels(rollup.get("contexts")):
             compliance = "fail"
     return (compliance, tstate, True, names)
 
