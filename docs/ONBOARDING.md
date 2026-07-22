@@ -168,8 +168,9 @@ jobs:
   For the exact per-run approval contract, see the [Security notes](../README.md#security-notes).
 - **Conflicting ci-noop fork PRs.** This is a scheduled-scan cleanup exception, not a dispatch behavior.
   When stale pending-contributor cleanup is enabled, a cross-repo PR in the `needs-ci-approval` ci-noop route can follow the stale rebase-nudge lifecycle only when a trusted rebase nudge is proven and GitHub currently reports it as `CONFLICTING`.
-  The scan reads mergeability again immediately before it posts a reminder or closes the PR, so non-conflicting, `UNKNOWN`, or unreadable targets stay out of cleanup.
+  The scan reads mergeability again immediately before it posts a reminder or closes the PR, so non-conflicting, `UNKNOWN`, or unreadable targets stay out of that lifecycle.
   A normal `ci-approval` item or dispatch does not create this exception.
+  See [Pending-contributor cleanup](../README.md#security-notes) for the full cleanup and clear-only contract.
 - **Issues.** To push issue triage, dispatch with `kind:"issue-triage"` from an `issues` trigger and include `updated_at` from the issue's `updated_at` event field when you want activity sorting and automatic issue-card triage caching.
   The hub also cards issues from the backstop when `card_issues: true`, skipping owner, maintainer, and bot-authored issues in the scan-built worklist.
 - **Third-party alternative.** If you prefer, `peter-evans/repository-dispatch` does the same dispatch as an action; the `gh api` form above keeps you dependency-free.
