@@ -597,9 +597,9 @@ def main():
     #     NO worklist item while it awaits terminal checks - so its existing
     #     pr-review card would keep displaying the pre-rebase head's (now
     #     superseded) state, e.g. a stale merge-ready/green that masquerades as
-    #     current. When the scan OBSERVES the head has moved, refresh that existing
-    #     card in place to the new head's honest pending state. This NEVER creates a
-    #     card (creation still defers until checks are terminal), only refreshes a
+    #     current. Exact-reread every existing candidate before deciding whether
+    #     its card already reflects the final projection. This NEVER creates a card
+    #     (creation still defers until checks are terminal), only refreshes a
     #     same-kind pure needs-decision card, and never queues triage for this
     #     transient revision. Frozen-from-consumption is handled in the close loop
     #     below via `ci_wait_pr_numbers`.
@@ -616,8 +616,6 @@ def main():
                 continue  # only refresh a same-kind (pr-review) card in place
             if not render_card.is_refreshable(ex["labels"]):
                 continue
-            if not render_card.material_changed(item, ex["state"]):
-                continue  # card already reflects the new head -> no churn
             try:
                 current = current_card(ex)
                 if (
@@ -625,7 +623,6 @@ def main():
                     and _matches_snapshot(current, ex)
                     and render_card.is_refreshable(current["labels"])
                     and current["state"].get("kind") == item.get("kind")
-                    and render_card.material_changed(item, current["state"])
                 ):
                     # The bulk item is only an invalidation/write candidate. A
                     # complete exact target observation, produced by the shared

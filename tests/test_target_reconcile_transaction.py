@@ -212,7 +212,12 @@ class ProductionTransition:
         return {"repos": {"demo": result}, "items": items}, items
 
 
-def _run_transition(final_head=None, final_phase="terminal", exact_incomplete=False):
+def _run_transition(
+    final_head=None,
+    final_phase="terminal",
+    exact_incomplete=False,
+    preproject_pending=False,
+):
     with ProductionTransition() as fixture:
         old_scan, old_items = fixture.scan()
         assert len(old_items) == 1 and old_items[0]["bucket"] == "merge-ready"
@@ -227,6 +232,12 @@ def _run_transition(final_head=None, final_phase="terminal", exact_incomplete=Fa
         assert wait_scan["repos"]["demo"]["ci_wait_pr_numbers"] == [179]
         assert len(fixture.world.approvals) == 1
 
+        pending_state = None
+        if preproject_pending:
+            lifecycle.run(wait_scan)
+            pending_state = core.parse_state_block(lifecycle.issue["body"])
+            assert pending_state.get("bucket") == "ci-running"
+
         time.sleep(0.01)
         fixture.world.phase = final_phase
         fixture.world.exact_incomplete = exact_incomplete
@@ -239,6 +250,7 @@ def _run_transition(final_head=None, final_phase="terminal", exact_incomplete=Fa
         state = core.parse_state_block(lifecycle.issue["body"])
         return {
             "state": state,
+            "pending_state": pending_state,
             "body": lifecycle.issue["body"],
             "approvals": fixture.world.approvals,
             "observations": fixture.world.observations,
@@ -309,6 +321,23 @@ def test_same_head_pending_reread_projects_pending_as_of_state():
     )
 
 
+def test_already_pending_card_rereads_terminal_completion():
+    result = _run_transition(preproject_pending=True)
+    state = result["state"]
+    check(
+        "transaction: an already-pending card is exact-reread after completion",
+        result["pending_state"].get("bucket") == "ci-running"
+        and state.get("bucket") == "merge-ready"
+        and state.get("comp") == "pass"
+        and state.get("tests") == "green",
+    )
+    check(
+        "transaction: final terminal projection replaces pending-as-of copy",
+        (state.get("projection_ref") or {}).get("freshness") == "current"
+        and "checks were pending as of" not in result["body"].lower(),
+    )
+
+
 def test_incomplete_exact_reread_projects_unknown_not_old_green():
     result = _run_transition(exact_incomplete=True)
     state = result["state"]
@@ -323,6 +352,23 @@ def test_incomplete_exact_reread_projects_unknown_not_old_green():
         "transaction: incomplete reread does not retain current green/approval copy",
         "`needs-ci-approval`" not in result["body"]
         and "- Tests: `green`" not in result["body"]
+        and "could not be completely verified" in result["body"].lower(),
+    )
+
+
+def test_already_pending_card_rereads_incomplete_as_unknown():
+    result = _run_transition(exact_incomplete=True, preproject_pending=True)
+    state = result["state"]
+    check(
+        "transaction: an already-pending card exact-rereads incomplete evidence",
+        result["pending_state"].get("bucket") == "ci-running"
+        and state.get("bucket") == "ci-state-unknown"
+        and state.get("comp") == "unknown"
+        and state.get("tests") == "unknown",
+    )
+    check(
+        "transaction: final incomplete projection replaces pending-as-of copy",
+        (state.get("projection_ref") or {}).get("freshness") == "unknown"
         and "could not be completely verified" in result["body"].lower(),
     )
 
@@ -356,7 +402,9 @@ def test_force_push_before_projection_fails_safe_without_old_head_claims():
 def main():
     test_same_scan_completion_uses_final_exact_classification()
     test_same_head_pending_reread_projects_pending_as_of_state()
+    test_already_pending_card_rereads_terminal_completion()
     test_incomplete_exact_reread_projects_unknown_not_old_green()
+    test_already_pending_card_rereads_incomplete_as_unknown()
     test_force_push_before_projection_fails_safe_without_old_head_claims()
     if _failures:
         print("\n%d failure(s): %s" % (len(_failures), ", ".join(_failures)))
