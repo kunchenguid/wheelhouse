@@ -1285,6 +1285,118 @@ def _triage_evidence_verified(data, target_file):
     return evidence_anchor_ok(evidence, target_text)
 
 
+def triage_source_provenance_verified(
+    data,
+    provenance_file,
+    *,
+    action,
+    event_key,
+    owner,
+    repo,
+    number,
+    revision,
+    base_sha,
+    vision_sha,
+):
+    claim = data.get("source_provenance") if isinstance(data, dict) else None
+    if not isinstance(claim, dict) or set(claim) != {
+        "url", "requested_ref", "resolved_commit", "inspected_paths"
+    }:
+        return False
+    if not provenance_file:
+        return False
+    try:
+        if os.path.islink(provenance_file) or not os.path.isfile(provenance_file):
+            return False
+        if os.path.getsize(provenance_file) > 262144:
+            return False
+        with open(provenance_file, encoding="utf-8") as handle:
+            records = json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if not isinstance(records, list) or len(records) != 1:
+        return False
+    record = records[0]
+    if not isinstance(record, dict) or set(record) != {
+        "version", "context", "status", "source", "manifest", "failure"
+    }:
+        return False
+    context = record.get("context")
+    source_review = context.get("sourceReview") if isinstance(context, dict) else None
+    expected_target = {
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "kind": "pr-review",
+        "revision": revision,
+    }
+    if (
+        record.get("version") != 1
+        or record.get("status") != "succeeded"
+        or record.get("failure") is not None
+        or not isinstance(context, dict)
+        or context.get("version") != 1
+        or context.get("action") != action
+        or action != "triage.pr.search"
+        or context.get("eventKeySha256") != event_key
+        or context.get("target") != expected_target
+        or not isinstance(context.get("taskSha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", context["taskSha256"])
+        or not isinstance(source_review, dict)
+        or source_review.get("baseSha") != str(base_sha or "").lower()
+        or source_review.get("visionSha") != str(vision_sha or "").lower()
+        or source_review.get("targetRepositoryCommit") != str(revision or "").lower()
+        or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("visionContentSha256", ""))
+    ):
+        return False
+    source = record.get("source")
+    manifest = record.get("manifest")
+    inspected = claim.get("inspected_paths")
+    if (
+        not isinstance(source, dict)
+        or set(source) != {"url", "requestedRef", "resolvedCommit"}
+        or not isinstance(manifest, dict)
+        or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated"}
+        or manifest.get("paths_truncated") is not False
+        or not isinstance(manifest.get("paths"), list)
+        or not isinstance(inspected, list)
+        or not 1 <= len(inspected) <= 128
+        or len(set(inspected)) != len(inspected)
+        or any(not isinstance(path, str) or path not in manifest["paths"] for path in inspected)
+    ):
+        return False
+    return (
+        isinstance(claim.get("url"), str)
+        and claim["url"] == source.get("url")
+        and isinstance(claim.get("requested_ref"), str)
+        and bool(claim["requested_ref"])
+        and claim["requested_ref"] == source.get("requestedRef")
+        and isinstance(claim.get("resolved_commit"), str)
+        and claim["resolved_commit"] == source.get("resolvedCommit")
+        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", claim["resolved_commit"])
+        is not None
+    )
+
+
+def enforce_triage_source_provenance(data, provenance_file, **expected):
+    if not isinstance(data, dict):
+        return data
+    automerge = data.get("automerge")
+    if not isinstance(automerge, dict) or not (
+        _coerce_verdict_bool(automerge.get("aligns_with_vision")) is True
+        and _coerce_verdict_bool(automerge.get("recommend_merge")) is True
+    ):
+        return data
+    if expected and triage_source_provenance_verified(data, provenance_file, **expected):
+        return data
+    bounded = dict(data)
+    bounded_automerge = dict(automerge)
+    for field in ("aligns_with_vision", "recommend_merge"):
+        bounded_automerge.pop(field, None)
+    bounded["automerge"] = bounded_automerge
+    return bounded
+
+
 def _coerce_verdict_bool(value):
     """Strict-ish boolean coercion for the auto-merge behavior verdict: accept a
     real JSON boolean or the strings 'true'/'false'; anything else is None so the
@@ -4812,6 +4924,7 @@ def triage_schema_reason(text):
 # content even if the candidate stuffs content into an unexpected key.
 _KNOWN_TRIAGE_KEYS = TRIAGE_FIELDS + (
     EVIDENCE_FIELD,
+    "source_provenance",
     "recommended_action",
     "recommended_reason",
     "recommended_next_step",
@@ -4871,6 +4984,8 @@ def _repair_schema_lines(kind):
             'If (and ONLY if) your candidate already contained an "automerge"',
             "object, include it unchanged as an additional key. Do not add one",
             "that was not already there.",
+            'If the candidate contained "source_provenance", include that object',
+            "unchanged too. Never invent or alter source provenance.",
         ]
     return lines
 
@@ -4949,7 +5064,12 @@ def plan_triage_repair(result_text, kind):
 
 
 def decide_triage_apply(
-    result_text, repaired_text, target_file, repair_claim_admitted=None
+    result_text,
+    repaired_text,
+    target_file,
+    repair_claim_admitted=None,
+    source_provenance_file="",
+    source_provenance_expected=None,
 ):
     """Deterministic decision for the (repair-aware) triage-apply step. Returns
     `{outcome, triage, reason}` where outcome is one of:
@@ -4977,6 +5097,11 @@ def decide_triage_apply(
                 "reason": "evidence quotes did not match the fetched target",
                 "candidate": "",
             }
+        triage = enforce_triage_source_provenance(
+            triage,
+            source_provenance_file,
+            **(source_provenance_expected or {}),
+        )
         return {"outcome": "success", "triage": triage, "reason": "", "candidate": ""}
     if not (result_text or "").strip():
         return {"outcome": "no-result", "triage": None, "reason": "", "candidate": ""}
@@ -4989,6 +5114,11 @@ def decide_triage_apply(
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
+                repaired = enforce_triage_source_provenance(
+                    repaired,
+                    source_provenance_file,
+                    **(source_provenance_expected or {}),
+                )
                 return {
                     "outcome": "repaired",
                     "triage": repaired,
@@ -5058,6 +5188,12 @@ def main():
     ta.add_argument("--vision-sha", default="")
     ta.add_argument("--base-sha", default="")
     ta.add_argument("--automerge-behavior-available", action="store_true")
+    ta.add_argument("--source-provenance-file", default="")
+    ta.add_argument("--source-review-action", default="")
+    ta.add_argument("--source-review-event-key", default="")
+    ta.add_argument("--source-review-owner", default="")
+    ta.add_argument("--source-review-repo", default="")
+    ta.add_argument("--source-review-number", type=int, default=0)
     ta.add_argument(
         "--target-file",
         default="",
@@ -5166,6 +5302,17 @@ def main():
             repaired_text,
             args.target_file,
             repair_claim_admitted=repair_claim_admitted,
+            source_provenance_file=args.source_provenance_file,
+            source_provenance_expected={
+                "action": args.source_review_action,
+                "event_key": args.source_review_event_key,
+                "owner": args.source_review_owner,
+                "repo": args.source_review_repo,
+                "number": args.source_review_number,
+                "revision": args.revision,
+                "base_sha": args.base_sha,
+                "vision_sha": args.vision_sha,
+            },
         )
         outcome = decision["outcome"]
         applied = False

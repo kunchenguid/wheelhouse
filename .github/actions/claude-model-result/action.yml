@@ -10,6 +10,8 @@ outputs:
     value: ${{ steps.verify.outputs.status }}
   error-code:
     value: ${{ steps.verify.outputs.error_code }}
+  public-clone-provenance:
+    value: ${{ steps.verify.outputs.public_clone_provenance }}
 runs:
   using: composite
   steps:
@@ -37,4 +39,9 @@ runs:
           echo "result=$result"
           echo "status=$status"
           echo "error_code=$error_code"
+          if [ -f "$RECEIVED/public-clone-provenance.json" ] && [ ! -L "$RECEIVED/public-clone-provenance.json" ]; then
+            echo "public_clone_provenance=$RECEIVED/public-clone-provenance.json"
+          else
+            echo "public_clone_provenance="
+          fi
         } >> "$GITHUB_OUTPUT"

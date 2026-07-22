@@ -134,6 +134,14 @@ jobs:
           case "$ACTION" in
             nl-decision.search|triage.pr.search)
               echo "WHEELHOUSE_SEARCH_ACTION=$ACTION" >> "$GITHUB_ENV"
+              provenance_dir="$(mktemp -d "$RUNNER_TEMP/wheelhouse-public-clone-provenance.XXXXXXXX")"
+              chmod 700 "$provenance_dir"
+              "$tool_dir/wheelhouse-search" provenance-context \
+                "$HANDOFF/bundle/task.json" "$provenance_dir/context.json"
+              {
+                echo "WHEELHOUSE_PUBLIC_CLONE_CONTEXT=$provenance_dir/context.json"
+                echo "WHEELHOUSE_PUBLIC_CLONE_PROVENANCE=$provenance_dir/attempts.json"
+              } >> "$GITHUB_ENV"
               ;;
           esac
 
@@ -450,6 +458,16 @@ jobs:
           prompt: ${{ steps.hydrate.outputs.prompt }}
           settings: '{"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}'
           claude_args: "--allowedTools \"\"\n--max-turns 1\n--model claude-sonnet-4-6"
+
+      - name: Capture trusted public-clone provenance
+        if: ${{ always() && steps.hydrate.outputs.action == 'triage.pr.search' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wheelhouse-model-output"
+          "$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" provenance-export \
+            "$RUNNER_TEMP/wheelhouse-handoff/bundle/task.json" \
+            "$WHEELHOUSE_PUBLIC_CLONE_PROVENANCE" \
+            "$RUNNER_TEMP/wheelhouse-model-output/public-clone-provenance.json"
 
       - name: Remove bounded public clones
         if: ${{ always() && (steps.hydrate.outputs.action == 'nl-decision.search' || steps.hydrate.outputs.action == 'triage.pr.search') }}
@@ -779,6 +797,11 @@ jobs:
             fi
           fi
           cp "$task" "$NORMALIZED/task.json"
+          if [ -f "$RAW/public-clone-provenance.json" ] && [ ! -L "$RAW/public-clone-provenance.json" ]; then
+            PYTHONPATH="$HANDOFF/runtime" python "$HANDOFF/runtime/nl_readonly_search.py" \
+              provenance-export "$task" "$RAW/public-clone-provenance.json" \
+              "$NORMALIZED/public-clone-provenance.json"
+          fi
           PYTHONPATH="$HANDOFF/runtime" python - "$task" "$result" "$events" <<'PY'
           import sys
           from agent_runtime.contract import load_json_regular, verify_result_binding

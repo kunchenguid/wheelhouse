@@ -124,6 +124,8 @@ def clone_request(
     url="https://git.example/team/repo.git",
     ref=None,
     action="nl-decision.search",
+    provenance_context=None,
+    provenance_file=None,
 ):
     request = {"op": "public_clone", "url": url}
     if ref is not None:
@@ -135,6 +137,8 @@ def clone_request(
         resolver=public_resolver,
         clone_root=root,
         action=action,
+        provenance_context=provenance_context,
+        provenance_file=provenance_file,
     )
 
 
@@ -666,6 +670,31 @@ def test_initial_triage_independent_vision_source_review_contract():
         "tests/test_cli.py": "def test_success_and_error_paths(): pass\n",
     }
     with tempfile.TemporaryDirectory() as parent:
+        head_sha = "a" * 40
+        base_sha = "b" * 40
+        vision_sha = "c" * 40
+        event_key = "d" * 64
+        task = {
+            "metadata": {
+                "action": "triage.pr.search",
+                "idempotencyKey": event_key,
+                "target": {
+                    "owner": "owner",
+                    "repo": "catalog",
+                    "number": 7,
+                    "kind": "pr-review",
+                    "revision": head_sha,
+                },
+                "sourceReview": {
+                    "baseSha": base_sha,
+                    "visionSha": vision_sha,
+                    "visionContentSha256": "e" * 64,
+                    "targetRepositoryCommit": head_sha,
+                },
+            }
+        }
+        context = nls.public_clone_context_from_task(task)
+        provenance_file = os.path.join(parent, "provenance.json")
         result = json.loads(
             clone_request(
                 StockGit(retained_files=representative_files),
@@ -673,6 +702,8 @@ def test_initial_triage_independent_vision_source_review_contract():
                 url="https://forge.example/catalog/tool.git",
                 ref="release/v1.2",
                 action="triage.pr.search",
+                provenance_context=context,
+                provenance_file=provenance_file,
             )
         )
         expected_paths = sorted(representative_files)
@@ -689,6 +720,12 @@ def test_initial_triage_independent_vision_source_review_contract():
             "recommended_action": "merge",
             "recommended_reason": "Direct pinned-source observations support merge.",
             "evidence": direct_evidence,
+            "source_provenance": {
+                "url": result["url"],
+                "requested_ref": "release/v1.2",
+                "resolved_commit": result["commit"],
+                "inspected_paths": expected_paths,
+            },
             "automerge": {
                 "behavior_class": "A",
                 "changes_existing_or_default_behavior": False,
@@ -697,7 +734,20 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "recommend_merge": True,
             },
         }
-        normalized = render_card.normalize_triage(candidate)
+        expected_binding = {
+            "action": "triage.pr.search",
+            "event_key": event_key,
+            "owner": "owner",
+            "repo": "catalog",
+            "number": 7,
+            "revision": head_sha,
+            "base_sha": base_sha,
+            "vision_sha": vision_sha,
+        }
+        trusted = render_card.enforce_triage_source_provenance(
+            candidate, provenance_file, **expected_binding
+        )
+        normalized = render_card.normalize_triage(trusted)
         eligible = am.verdict_eligible(
             (normalized or {}).get("automerge_verdict")
         )[0]
@@ -712,6 +762,68 @@ def test_initial_triage_independent_vision_source_review_contract():
             and eligible
             and "executed" not in direct_evidence
             and "package execution" not in direct_evidence,
+        )
+
+        missing = render_card.enforce_triage_source_provenance(
+            candidate, os.path.join(parent, "missing.json"), **expected_binding
+        )
+        hallucinated = json.loads(json.dumps(candidate))
+        hallucinated["source_provenance"]["resolved_commit"] = "f" * 40
+        hallucinated = render_card.enforce_triage_source_provenance(
+            hallucinated, provenance_file, **expected_binding
+        )
+        mismatched = render_card.enforce_triage_source_provenance(
+            candidate,
+            provenance_file,
+            **dict(expected_binding, vision_sha="f" * 40),
+        )
+        check(
+            "fail closed: missing, hallucinated, and identity-mismatched provenance remove VISION-positive facts",
+            all(
+                "aligns_with_vision"
+                not in (value.get("automerge") or {})
+                for value in (missing, hallucinated, mismatched)
+            ),
+        )
+        clone_request(
+            StockGit(retained_files=representative_files),
+            clone_root(parent),
+            url="https://forge.example/catalog/tool.git",
+            ref="release/v1.2",
+            action="triage.pr.search",
+            provenance_context=context,
+            provenance_file=provenance_file,
+        )
+        ambiguous = render_card.enforce_triage_source_provenance(
+            candidate, provenance_file, **expected_binding
+        )
+        check(
+            "fail closed: multiple same-turn clone observations are ambiguous",
+            "aligns_with_vision" not in ambiguous["automerge"],
+        )
+
+        failed_file = os.path.join(parent, "failed.json")
+        check(
+            "fixture: failed public clone is recorded",
+            rejected(
+                lambda: clone_request(
+                    StockGit(clone_returncode=1),
+                    clone_root(os.path.join(parent, "failed-root")),
+                    url="https://forge.example/catalog/tool.git",
+                    ref="release/v1.2",
+                    action="triage.pr.search",
+                    provenance_context=context,
+                    provenance_file=failed_file,
+                ),
+                "public Git operation failed",
+            ),
+        )
+        failed = render_card.enforce_triage_source_provenance(
+            candidate, failed_file, **expected_binding
+        )
+        check(
+            "fail closed: failed clone provenance cannot clear VISION",
+            "aligns_with_vision" not in failed["automerge"],
         )
 
     for verdict, label in (
@@ -749,6 +861,48 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "Bash(npm",
                 "Bash(pip",
                 "Bash(*)",
+            )
+        ),
+    )
+    task_schema = read(
+        "agent_runtime", "schemas", "v1alpha1", "agent-task.schema.json"
+    )
+    result_action = read(".github", "actions", "claude-model-result", "action.yml")
+    check(
+        "trusted provenance: immutable task binds target, base, VISION, and source-review content identity",
+        '"sourceReview"' in task_schema
+        and all(
+            field in task_schema
+            for field in (
+                "baseSha",
+                "visionSha",
+                "visionContentSha256",
+                "targetRepositoryCommit",
+            )
+        )
+        and '--base-sha "$BASE_SHA"' in triage
+        and '--vision-sha "$VISION_SHA"' in triage,
+    )
+    check(
+        "trusted provenance: broker record survives cleanup and crosses only the verified result artifact",
+        "provenance-context" in model
+        and "Capture trusted public-clone provenance" in model
+        and model.index("Capture trusted public-clone provenance")
+        < model.index("Remove bounded public clones")
+        and "provenance-export" in model
+        and "public-clone-provenance" in result_action,
+    )
+    check(
+        "trusted provenance: card projection receives every exact source-review binding",
+        all(
+            value in triage
+            for value in (
+                "--source-provenance-file",
+                "--source-review-action",
+                "--source-review-event-key",
+                "--source-review-owner",
+                "--source-review-repo",
+                "--source-review-number",
             )
         ),
     )

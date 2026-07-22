@@ -17,6 +17,17 @@
         "action": {"type": "string", "enum": ["triage.issue.local", "triage.issue.search", "triage.pr.local", "triage.pr.search", "triage.schema-repair", "deep-review.local", "deep-review.search", "nl-decision.local", "nl-decision.search", "nl-decision.schema-repair"]},
         "idempotencyKey": {"type": "string", "minLength": 1, "maxLength": 512},
         "wheelhouseRevision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
+        "sourceReview": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseSha", "visionSha", "visionContentSha256", "targetRepositoryCommit"],
+          "properties": {
+            "baseSha": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
+            "visionSha": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
+            "visionContentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "targetRepositoryCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          }
+        },
         "target": {
           "type": "object",
           "additionalProperties": false,

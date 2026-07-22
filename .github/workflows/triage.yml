@@ -713,7 +713,10 @@ jobs:
               echo '  "product_implications": "whether this deserves owner discussion or is routine internal work, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "one concise reason/comment/review body for the recommended action",'
-              echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt; external VISION review must append the required public_clone provenance",'
+              echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt",'
+              if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
+                echo '  "source_provenance": {"url":"exact public_clone URL","requested_ref":"exact requested ref","resolved_commit":"returned commit","inspected_paths":["manifest paths actually inspected"]},'
+              fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
               echo '    "changes_existing_or_default_behavior": true or false (true if it alters existing/default behavior other than a corrective bug fix),'
@@ -772,6 +775,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage
@@ -782,7 +786,11 @@ jobs:
           if [ "$SEARCH" = "true" ]; then action="${action}.search"; else action="${action}.local"; fi
           repository_commit="$(git -C target-src rev-parse HEAD)"
           vision_args=()
-          if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then vision_args=(--vision-file vision.md); fi
+          source_review_args=()
+          if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then
+            vision_args=(--vision-file vision.md)
+            source_review_args=(--base-sha "$BASE_SHA" --vision-sha "$VISION_SHA")
+          fi
           behavior_args=()
           if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_args=(--allow-automerge-behavior); fi
           python scripts/agent_runtime.py build-task \
@@ -791,7 +799,8 @@ jobs:
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
             --repository-dir target-src --repository-commit "$repository_commit" \
-            --event-key "$EVENT_KEY" "${vision_args[@]}" "${behavior_args[@]}"
+            --event-key "$EVENT_KEY" "${vision_args[@]}" \
+            "${source_review_args[@]}" "${behavior_args[@]}"
 
       - name: Record triage task-build failure stage
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' && steps.gate.outputs.mode == 'claude' && steps.claude-task.outcome == 'failure' }}
@@ -851,6 +860,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage
@@ -869,8 +879,10 @@ jobs:
           fi
           repository_commit="$(git -C target-src rev-parse HEAD)"
           vision_args=()
+          source_review_args=()
           if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then
             vision_args=(--vision-file vision.md)
+            source_review_args=(--base-sha "$BASE_SHA" --vision-sha "$VISION_SHA")
           fi
           behavior_args=()
           if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
@@ -892,6 +904,7 @@ jobs:
             --repository-commit "$repository_commit" \
             --event-key "$EVENT_KEY" \
             "${vision_args[@]}" \
+            "${source_review_args[@]}" \
             "${behavior_args[@]}"
 
       - id: agent-runtime
@@ -1206,6 +1219,12 @@ jobs:
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
+          SOURCE_PROVENANCE_FILE: ""
+          SOURCE_REVIEW_ACTION: ${{ steps.event-claim.outputs.action }}
+          SOURCE_REVIEW_EVENT_KEY: ${{ steps.event-claim.outputs.event_key }}
+          SOURCE_REVIEW_OWNER: ${{ github.repository_owner }}
+          SOURCE_REVIEW_REPO: ${{ steps.resolve.outputs.repo }}
+          SOURCE_REVIEW_NUMBER: ${{ steps.resolve.outputs.number }}
           # The prepare step writes target.txt in the workspace root (it has no
           # working-directory). triage-apply anchor-checks the model's evidence
           # quotes against it (pass-by-reference lazy/fabrication guard). It is
@@ -1265,6 +1284,12 @@ jobs:
                 --revision "$REVISION" \
                 --vision-sha "$VISION_SHA" \
                 --base-sha "$BASE_SHA" \
+                --source-provenance-file "${SOURCE_PROVENANCE_FILE:-}" \
+                --source-review-action "$SOURCE_REVIEW_ACTION" \
+                --source-review-event-key "$SOURCE_REVIEW_EVENT_KEY" \
+                --source-review-owner "$SOURCE_REVIEW_OWNER" \
+                --source-review-repo "$SOURCE_REVIEW_REPO" \
+                --source-review-number "$SOURCE_REVIEW_NUMBER" \
                 "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
@@ -1901,6 +1926,12 @@ jobs:
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
+          SOURCE_PROVENANCE_FILE: ${{ steps.primary-result.outputs.public-clone-provenance }}
+          SOURCE_REVIEW_ACTION: ${{ needs.triage.outputs.event_action }}
+          SOURCE_REVIEW_EVENT_KEY: ${{ needs.triage.outputs.event_key }}
+          SOURCE_REVIEW_OWNER: ${{ github.repository_owner }}
+          SOURCE_REVIEW_REPO: ${{ needs.triage.outputs.repo }}
+          SOURCE_REVIEW_NUMBER: ${{ needs.triage.outputs.number }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
@@ -1930,6 +1961,12 @@ jobs:
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
               --issue "$ISSUE" --revision "$REVISION" \
               --vision-sha "$VISION_SHA" --base-sha "$BASE_SHA" \
+              --source-provenance-file "${SOURCE_PROVENANCE_FILE:-}" \
+              --source-review-action "$SOURCE_REVIEW_ACTION" \
+              --source-review-event-key "$SOURCE_REVIEW_EVENT_KEY" \
+              --source-review-owner "$SOURCE_REVIEW_OWNER" \
+              --source-review-repo "$SOURCE_REVIEW_REPO" \
+              --source-review-number "$SOURCE_REVIEW_NUMBER" \
               "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
