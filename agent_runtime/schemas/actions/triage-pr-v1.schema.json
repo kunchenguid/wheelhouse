@@ -10,6 +10,36 @@
     "recommended_action": {"type": "string", "enum": ["merge", "request-changes", "decline", "close", "hold", "investigate", "comment"]},
     "recommended_reason": {"type": "string", "minLength": 1, "maxLength": 4000},
     "evidence": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "vision_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_owner", "target_repo", "target_number", "vision_sha", "vision_content_sha256", "base_sha", "target_head_sha", "applicable_criteria"],
+      "properties": {
+        "target_owner": {"type": "string", "minLength": 1, "maxLength": 100},
+        "target_repo": {"type": "string", "minLength": 1, "maxLength": 100},
+        "target_number": {"type": "integer", "minimum": 1},
+        "vision_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+        "vision_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+        "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+        "applicable_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "quote", "external_source_required"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+              "quote": {"type": "string", "minLength": 8, "maxLength": 500},
+              "external_source_required": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
     "source_provenance": {
       "type": "object",
       "additionalProperties": false,

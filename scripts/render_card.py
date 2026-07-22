@@ -36,6 +36,7 @@ back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1297,6 +1298,7 @@ def triage_source_provenance_verified(
     revision,
     base_sha,
     vision_sha,
+    vision_content_sha256,
 ):
     claim = data.get("source_provenance") if isinstance(data, dict) else None
     if not isinstance(claim, dict) or set(claim) != {
@@ -1359,6 +1361,8 @@ def triage_source_provenance_verified(
         }
         or source_review.get("baseSha") != str(base_sha or "").lower()
         or source_review.get("visionSha") != str(vision_sha or "").lower()
+        or source_review.get("visionContentSha256")
+        != str(vision_content_sha256 or "").lower()
         or source_review.get("targetRepositoryCommit") != str(revision or "").lower()
         or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("visionContentSha256", ""))
     ):
@@ -1416,7 +1420,135 @@ def triage_source_provenance_verified(
     )
 
 
-def enforce_triage_source_provenance(data, provenance_file, **expected):
+def triage_vision_dependency_verified(data, vision_file, **expected):
+    evidence = data.get("vision_evidence") if isinstance(data, dict) else None
+    automerge = data.get("automerge") if isinstance(data, dict) else None
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "target_owner",
+        "target_repo",
+        "target_number",
+        "vision_sha",
+        "vision_content_sha256",
+        "base_sha",
+        "target_head_sha",
+        "applicable_criteria",
+    }:
+        return None
+    if not isinstance(automerge, dict) or not vision_file:
+        return None
+    try:
+        if os.path.islink(vision_file) or not os.path.isfile(vision_file):
+            return None
+        if not 0 < os.path.getsize(vision_file) <= 40000:
+            return None
+        with open(vision_file, "rb") as handle:
+            vision_bytes = handle.read()
+        vision_text = vision_bytes.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+    content_digest = hashlib.sha256(vision_bytes).hexdigest()
+    identity = {
+        "target_owner": expected.get("owner"),
+        "target_repo": expected.get("repo"),
+        "target_number": expected.get("number"),
+        "vision_sha": str(expected.get("vision_sha") or "").lower(),
+        "vision_content_sha256": str(
+            expected.get("vision_content_sha256") or ""
+        ).lower(),
+        "base_sha": str(expected.get("base_sha") or "").lower(),
+        "target_head_sha": str(expected.get("revision") or "").lower(),
+    }
+    if (
+        {key: evidence.get(key) for key in identity} != identity
+        or identity["vision_content_sha256"] != content_digest
+    ):
+        return None
+    declarations = re.findall(
+        r"<!--\s*wheelhouse-vision-source-dependencies:\s*(\{[^\r\n]*\})\s*-->",
+        vision_text,
+    )
+    if (
+        len(declarations) != 1
+        or vision_text.count("wheelhouse-vision-source-dependencies:") != 1
+    ):
+        return None
+    try:
+        declaration = json.loads(declarations[0])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(declaration, dict) or set(declaration) != {
+        "version",
+        "complete",
+        "criteria",
+    }:
+        return None
+    trusted_criteria = declaration.get("criteria")
+    if (
+        declaration.get("version") != 1
+        or declaration.get("complete") is not True
+        or not isinstance(trusted_criteria, list)
+        or not 1 <= len(trusted_criteria) <= 32
+    ):
+        return None
+    vision_without_declaration = vision_text.replace(declarations[0], "", 1)
+    trusted = []
+    trusted_ids = []
+    for criterion in trusted_criteria:
+        if not isinstance(criterion, dict) or set(criterion) != {
+            "id",
+            "quote_sha256",
+            "external_source_required",
+        }:
+            return None
+        criterion_id = criterion.get("id")
+        if (
+            not isinstance(criterion_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", criterion_id) is None
+            or not re.fullmatch(r"[0-9a-f]{64}", criterion.get("quote_sha256", ""))
+            or not isinstance(criterion.get("external_source_required"), bool)
+        ):
+            return None
+        trusted_ids.append(criterion_id)
+        trusted.append(criterion)
+    if len(set(trusted_ids)) != len(trusted_ids):
+        return None
+    applicable = evidence.get("applicable_criteria")
+    if not isinstance(applicable, list) or len(applicable) != len(trusted):
+        return None
+    quotes = []
+    for criterion, trusted_criterion in zip(applicable, trusted):
+        if not isinstance(criterion, dict) or set(criterion) != {
+            "id",
+            "quote",
+            "external_source_required",
+        }:
+            return None
+        quote = criterion.get("quote")
+        if (
+            criterion.get("id") != trusted_criterion["id"]
+            or not isinstance(quote, str)
+            or not 8 <= len(quote) <= 500
+            or vision_without_declaration.count(quote) != 1
+            or hashlib.sha256(quote.encode("utf-8")).hexdigest()
+            != trusted_criterion["quote_sha256"]
+            or criterion.get("external_source_required")
+            is not trusted_criterion["external_source_required"]
+        ):
+            return None
+        quotes.append(quote)
+    if len(set(quotes)) != len(quotes):
+        return None
+    external_required = any(
+        criterion["external_source_required"] for criterion in trusted
+    )
+    if automerge.get("external_source_required") is not external_required:
+        return None
+    return external_required
+
+
+def enforce_triage_source_provenance(
+    data, provenance_file, vision_file="", **expected
+):
     if not isinstance(data, dict):
         return data
     automerge = data.get("automerge")
@@ -1425,7 +1557,9 @@ def enforce_triage_source_provenance(data, provenance_file, **expected):
         and _coerce_verdict_bool(automerge.get("recommend_merge")) is True
     ):
         return data
-    external_required = automerge.get("external_source_required")
+    external_required = triage_vision_dependency_verified(
+        data, vision_file, **expected
+    )
     if external_required is False:
         return data
     if (
@@ -4972,6 +5106,7 @@ def triage_schema_reason(text):
 # content even if the candidate stuffs content into an unexpected key.
 _KNOWN_TRIAGE_KEYS = TRIAGE_FIELDS + (
     EVIDENCE_FIELD,
+    "vision_evidence",
     "source_provenance",
     "recommended_action",
     "recommended_reason",
@@ -5034,6 +5169,8 @@ def _repair_schema_lines(kind):
             "that was not already there.",
             'If the candidate contained "source_provenance", include that object',
             "unchanged too. Never invent or alter source provenance.",
+            'If the candidate contained "vision_evidence", include that object',
+            "unchanged too. Never invent or alter VISION evidence.",
         ]
     return lines
 
@@ -5117,6 +5254,7 @@ def decide_triage_apply(
     target_file,
     repair_claim_admitted=None,
     source_provenance_file="",
+    vision_file="",
     source_provenance_expected=None,
 ):
     """Deterministic decision for the (repair-aware) triage-apply step. Returns
@@ -5148,6 +5286,7 @@ def decide_triage_apply(
         triage = enforce_triage_source_provenance(
             triage,
             source_provenance_file,
+            vision_file,
             **(source_provenance_expected or {}),
         )
         return {"outcome": "success", "triage": triage, "reason": "", "candidate": ""}
@@ -5165,6 +5304,7 @@ def decide_triage_apply(
                 repaired = enforce_triage_source_provenance(
                     repaired,
                     source_provenance_file,
+                    vision_file,
                     **(source_provenance_expected or {}),
                 )
                 return {
@@ -5237,6 +5377,8 @@ def main():
     ta.add_argument("--base-sha", default="")
     ta.add_argument("--automerge-behavior-available", action="store_true")
     ta.add_argument("--source-provenance-file", default="")
+    ta.add_argument("--vision-file", default="")
+    ta.add_argument("--vision-content-sha256", default="")
     ta.add_argument("--source-review-action", default="")
     ta.add_argument("--source-review-event-key", default="")
     ta.add_argument("--source-review-owner", default="")
@@ -5351,6 +5493,7 @@ def main():
             args.target_file,
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
+            vision_file=args.vision_file,
             source_provenance_expected={
                 "action": args.source_review_action,
                 "event_key": args.source_review_event_key,
@@ -5360,6 +5503,7 @@ def main():
                 "revision": args.revision,
                 "base_sha": args.base_sha,
                 "vision_sha": args.vision_sha,
+                "vision_content_sha256": args.vision_content_sha256,
             },
         )
         outcome = decision["outcome"]

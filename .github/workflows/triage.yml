@@ -112,6 +112,7 @@ jobs:
       claim_id: ${{ steps.event-claim.outputs.comment_id }}
       claim_marker: ${{ steps.event-claim.outputs.marker }}
       vision_sha: ${{ steps.prepare.outputs.vision_sha }}
+      vision_content_sha256: ${{ steps.prepare.outputs.vision_content_sha256 }}
       base_sha: ${{ steps.prepare.outputs.base_sha }}
       automerge_behavior_available: ${{ steps.prepare.outputs.automerge_behavior_available }}
       claude_ready: ${{ steps.claude-model.outcome == 'success' }}
@@ -561,6 +562,7 @@ jobs:
           # skipped, and the executor still holds on G0.
           VISION_PRESENT=false
           VISION_SHA=""
+          VISION_CONTENT_SHA256=""
           AUTOMERGE_BEHAVIOR_AVAILABLE=false
           AUTOMERGE_VERDICT_AVAILABLE=false
           if [ "$KIND" = "pr-review" ]; then
@@ -580,6 +582,7 @@ jobs:
                   && [ "$vision_bytes" = "$VISION_SIZE" ] && [ "$vision_bytes" -gt 0 ] \
                   && [ -n "$VISION_SHA" ]; then
                   VISION_PRESENT=true
+                  VISION_CONTENT_SHA256="$(sha256sum vision.md | cut -d ' ' -f1)"
                 fi
               fi
             fi
@@ -590,6 +593,7 @@ jobs:
               AUTOMERGE_VERDICT_AVAILABLE=true
             else
               VISION_SHA=""
+              VISION_CONTENT_SHA256=""
             fi
           fi
 
@@ -700,6 +704,15 @@ jobs:
                 echo "Set external_source_required true only when an applicable VISION"
                 echo "criterion needs that external inspection. Otherwise set it false"
                 echo "and omit source_provenance; local-only VISION review needs no clone."
+                echo "VISION may contain one trusted wheelhouse-vision-source-dependencies"
+                echo "declaration. In vision_evidence, emit every declared criterion in"
+                echo "declaration order, with its id, exact uniquely occurring policy quote,"
+                echo "and declared external-source dependency. The top-level dependency"
+                echo "must equal the OR of those classifications. Trusted code binds the"
+                echo "complete declaration, quotes, and identities to the exact VISION file"
+                echo "and rejects absent, incomplete, mismatched, ambiguous, or inconsistent"
+                echo "local-only evidence. Without a complete declaration, do not return a"
+                echo "positive VISION verdict."
                 echo "Judge whether this PR aligns and should merge automatically now."
                 echo "Be conservative: when unsure, confirm neither alignment nor merge."
               fi
@@ -722,6 +735,7 @@ jobs:
               echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt",'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '  "source_provenance": {"url":"exact public_clone URL","requested_ref":"exact requested ref","resolved_commit":"returned commit","inspected_files":[{"path":"exact file read","sha256":"matching trusted observation digest"}]},'
+                echo '  "vision_evidence": {"target_owner":"'${SLUG%%/*}'","target_repo":"'${SLUG#*/}'","target_number":'$NUMBER',"vision_sha":"'$VISION_SHA'","vision_content_sha256":"'$VISION_CONTENT_SHA256'","base_sha":"'$BASE_SHA'","target_head_sha":"'$HEAD_SHA'","applicable_criteria":[{"id":"declared criterion id","quote":"exact uniquely occurring VISION criterion","external_source_required":true or false}]},'
               fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
@@ -760,6 +774,7 @@ jobs:
             cat prompt.txt
             echo "$delimiter"
             echo "vision_sha=$VISION_SHA"
+            echo "vision_content_sha256=$VISION_CONTENT_SHA256"
             echo "base_sha=$BASE_SHA"
             echo "automerge_behavior_available=$AUTOMERGE_BEHAVIOR_AVAILABLE"
           } >> "$GITHUB_OUTPUT"
@@ -782,6 +797,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ steps.prepare.outputs.vision_content_sha256 }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
@@ -867,6 +883,7 @@ jobs:
           REVISION: ${{ steps.resolve.outputs.revision }}
           SEARCH: ${{ steps.readonly.outputs.enabled }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ steps.prepare.outputs.vision_content_sha256 }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
@@ -943,7 +960,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.target-artifact-name.outputs.artifact }}
-          path: target.txt
+          path: |
+            target.txt
+            vision.md
           if-no-files-found: error
           retention-days: 1
 
@@ -1087,6 +1106,7 @@ jobs:
           KIND: ${{ steps.resolve.outputs.kind }}
           REVISION: ${{ steps.resolve.outputs.revision }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ steps.prepare.outputs.vision_content_sha256 }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-agent-triage-repair
@@ -1224,6 +1244,7 @@ jobs:
           REPAIR_EXECUTION_FILE: ${{ steps.repair-result.outputs.path }}
           REPAIR_CLAIM_ADMITTED: ${{ steps.repair-claim.outputs.admitted }}
           VISION_SHA: ${{ steps.prepare.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ steps.prepare.outputs.vision_content_sha256 }}
           BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ steps.prepare.outputs.automerge_behavior_available }}
           SOURCE_PROVENANCE_FILE: ""
@@ -1238,6 +1259,7 @@ jobs:
           # NOT in the trusted-src snapshot (that predates target.txt), so pass
           # the absolute workspace path.
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          VISION_FILE: ${{ github.workspace }}/vision.md
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -1290,6 +1312,8 @@ jobs:
                 --issue "$ISSUE" \
                 --revision "$REVISION" \
                 --vision-sha "$VISION_SHA" \
+                --vision-content-sha256 "$VISION_CONTENT_SHA256" \
+                --vision-file "${VISION_FILE:-}" \
                 --base-sha "$BASE_SHA" \
                 --source-provenance-file "${SOURCE_PROVENANCE_FILE:-}" \
                 --source-review-action "$SOURCE_REVIEW_ACTION" \
@@ -1737,6 +1761,7 @@ jobs:
           KIND: ${{ needs.triage.outputs.kind }}
           REVISION: ${{ needs.triage.outputs.revision }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ needs.triage.outputs.vision_content_sha256 }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           WHEELHOUSE_REVISION: ${{ github.sha }}
           BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
@@ -1931,6 +1956,7 @@ jobs:
           PRIMARY_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
           REPAIR_ERROR_CODE: ${{ steps.repair-result-received.outputs.error-code }}
           VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
+          VISION_CONTENT_SHA256: ${{ needs.triage.outputs.vision_content_sha256 }}
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           SOURCE_PROVENANCE_FILE: ${{ steps.primary-result.outputs.public-clone-provenance }}
@@ -1940,6 +1966,7 @@ jobs:
           SOURCE_REVIEW_REPO: ${{ needs.triage.outputs.repo }}
           SOURCE_REVIEW_NUMBER: ${{ needs.triage.outputs.number }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          VISION_FILE: ${{ github.workspace }}/vision.md
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -1968,6 +1995,8 @@ jobs:
             env -i "${common[@]}" "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
               --issue "$ISSUE" --revision "$REVISION" \
               --vision-sha "$VISION_SHA" --base-sha "$BASE_SHA" \
+              --vision-content-sha256 "$VISION_CONTENT_SHA256" \
+              --vision-file "${VISION_FILE:-}" \
               --source-provenance-file "${SOURCE_PROVENANCE_FILE:-}" \
               --source-review-action "$SOURCE_REVIEW_ACTION" \
               --source-review-event-key "$SOURCE_REVIEW_EVENT_KEY" \

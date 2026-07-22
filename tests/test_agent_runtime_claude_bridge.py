@@ -127,6 +127,22 @@ def main():
                     recommend_merge=True,
                     external_source_required=False,
                 )
+                value["vision_evidence"] = {
+                    "target_owner": "owner",
+                    "target_repo": "repo",
+                    "target_number": 7,
+                    "vision_sha": "b" * 40,
+                    "vision_content_sha256": "c" * 64,
+                    "base_sha": "d" * 40,
+                    "target_head_sha": "abcdef1",
+                    "applicable_criteria": [
+                        {
+                            "id": "local",
+                            "quote": "Trusted project vision.",
+                            "external_source_required": False,
+                        }
+                    ],
+                }
             return value
 
         _, incomplete_bundle = make_bundle(

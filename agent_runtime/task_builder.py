@@ -930,6 +930,7 @@ def _bound_output_schema(
     bound = deepcopy(schema)
     if not allow_automerge_behavior:
         bound["properties"].pop("automerge", None)
+        bound["properties"].pop("vision_evidence", None)
         return bound
     automerge = bound["properties"]["automerge"]
     vision_fields = (
@@ -939,9 +940,11 @@ def _bound_output_schema(
     )
     if require_vision_fields:
         automerge["required"] = list(automerge["required"]) + list(vision_fields)
+        bound["required"] = list(bound["required"]) + ["vision_evidence"]
     else:
         for field in vision_fields:
             automerge["properties"].pop(field, None)
+        bound["properties"].pop("vision_evidence", None)
     return bound
 
 
