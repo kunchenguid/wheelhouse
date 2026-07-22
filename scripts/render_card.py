@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
+from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment, decline, and
 # request-changes are intentionally not checkboxes because issue-form checkboxes
@@ -1476,6 +1477,26 @@ def _canonical_vision_selector(selector):
     return {"changed_paths_any": sorted(set(patterns))}
 
 
+def serialize_triage_target_facts(facts, max_bytes=TARGET_FACTS_MAX_BYTES):
+    if (
+        not isinstance(facts, dict)
+        or not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1
+    ):
+        return None
+    payload = (
+        json.dumps(
+            facts,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    return payload if len(payload) <= max_bytes else None
+
+
 def build_triage_target_facts(
     before, comparison, after, *, owner, repo, number, head_sha, base_sha
 ):
@@ -1570,7 +1591,7 @@ def build_triage_target_facts(
         for path in paths
     ):
         return None
-    return {
+    facts = {
         "version": 1,
         "owner": owner,
         "repo": repo,
@@ -1580,6 +1601,7 @@ def build_triage_target_facts(
         "file_count": before_count,
         "paths": paths,
     }
+    return facts if serialize_triage_target_facts(facts) is not None else None
 
 
 def _trusted_triage_target_facts(target_facts_file, **expected):
@@ -1588,7 +1610,7 @@ def _trusted_triage_target_facts(target_facts_file, **expected):
     try:
         if os.path.islink(target_facts_file) or not os.path.isfile(target_facts_file):
             return None
-        if not 0 < os.path.getsize(target_facts_file) <= 262144:
+        if not 0 < os.path.getsize(target_facts_file) <= TARGET_FACTS_MAX_BYTES:
             return None
         with open(target_facts_file, "rb") as handle:
             facts_bytes = handle.read()
@@ -5749,9 +5771,10 @@ def main():
             head_sha=args.head_sha,
             base_sha=args.base_sha,
         )
-        if facts is None:
+        payload = serialize_triage_target_facts(facts)
+        if payload is None:
             raise SystemExit("target facts identity or completeness check failed")
-        print(json.dumps(facts, sort_keys=True, separators=(",", ":")))
+        sys.stdout.buffer.write(payload)
     elif args.cmd == "upsert":
         item = load_item(args.item_file)
         number = upsert_card(item, has_token=auto_triage_has_token())

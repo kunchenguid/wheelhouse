@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .limits import TARGET_FACTS_MAX_BYTES
+
 from . import API_VERSION
 from .admission import DIGEST
 from .contract import (
@@ -1420,7 +1422,9 @@ def build_task(
         )
     target_facts_digest = ""
     if target_facts_file:
-        digest, size, artifact = _copy_file(Path(target_facts_file), bundle, 262144)
+        digest, size, artifact = _copy_file(
+            Path(target_facts_file), bundle, TARGET_FACTS_MAX_BYTES
+        )
         target_facts_digest = digest
         inputs.append(
             {
@@ -1431,7 +1435,7 @@ def build_task(
                 "mediaType": "application/json",
                 "trust": "trusted",
                 "mount": "read-only",
-                "maxBytes": 262144,
+                "maxBytes": TARGET_FACTS_MAX_BYTES,
                 "bytes": size,
             }
         )

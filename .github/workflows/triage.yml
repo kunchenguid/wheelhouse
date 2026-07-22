@@ -586,6 +586,8 @@ jobs:
                 > target-facts.json; then
                 TARGET_FACTS_PRESENT=true
                 TARGET_FACTS_SHA256="$(sha256sum target-facts.json | cut -d ' ' -f1)"
+              else
+                rm -f target-facts.json
               fi
             fi
             vision_limit_bytes=40000

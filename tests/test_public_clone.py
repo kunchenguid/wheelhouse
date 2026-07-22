@@ -682,6 +682,22 @@ def test_initial_triage_independent_vision_source_review_contract():
         and "--after-file pr-after.json" in triage
         and 'pulls/$NUMBER/files' not in triage,
     )
+    check(
+        "target facts workflow: unavailable facts preserve ordinary triage",
+        "TARGET_FACTS_PRESENT=false" in triage
+        and "rm -f target-facts.json" in triage
+        and 'if [ "$DIFF_COMPLETE" = "true" ]; then\n              AUTOMERGE_BEHAVIOR_AVAILABLE=true' in triage
+        and 'if [ -n "$VISION_SHA" ] && [ -f vision.md ]; then' in triage,
+    )
+    runtime_limits = read("agent_runtime", "limits.py")
+    task_builder = read("agent_runtime", "task_builder.py")
+    check(
+        "target facts bounds: producer, validator, and task builder share one exact limit",
+        "TARGET_FACTS_MAX_BYTES = 262144" in runtime_limits
+        and "bundle, TARGET_FACTS_MAX_BYTES" in task_builder
+        and '"maxBytes": TARGET_FACTS_MAX_BYTES' in task_builder
+        and "<= TARGET_FACTS_MAX_BYTES" in read("scripts", "render_card.py"),
+    )
 
     representative_files = {
         "README.md": "Public package documentation\n",
@@ -709,7 +725,10 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "base_commit": {"sha": base_sha},
                 "total_commits": 1,
                 "commits": [{"sha": head_sha}],
-                "files": [{"filename": path} for path in paths],
+                "files": [
+                    {"filename": path} if isinstance(path, str) else path
+                    for path in paths
+                ],
             }
             return snapshot, comparison, json.loads(json.dumps(snapshot))
 
@@ -724,11 +743,13 @@ def test_initial_triage_independent_vision_source_review_contract():
             )
             if value is None:
                 raise AssertionError("valid pinned target facts fixture was rejected")
-            content = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            payload = render_card.serialize_triage_target_facts(value)
+            if payload is None:
+                raise AssertionError("valid target facts fixture exceeded its bound")
             path = os.path.join(parent, name)
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(content)
-            return path, hashlib.sha256(content.encode("utf-8")).hexdigest()
+            with open(path, "wb") as handle:
+                handle.write(payload)
+            return path, hashlib.sha256(payload).hexdigest()
 
         before, complete_compare, after = target_fact_inputs(["catalog/tool.yml"])
         raced_after = json.loads(json.dumps(after))
@@ -770,6 +791,52 @@ def test_initial_triage_independent_vision_source_review_contract():
                 base_sha=base_sha,
             )
             is None,
+        )
+        renamed_inputs = target_fact_inputs(
+            [{"filename": "docs/café.md", "previous_filename": "old/café.md"}]
+        )
+        renamed_facts = render_card.build_triage_target_facts(
+            *renamed_inputs,
+            owner="owner",
+            repo="catalog",
+            number=7,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+        renamed_payload = render_card.serialize_triage_target_facts(renamed_facts)
+        boundary = len(renamed_payload or b"")
+        long_suffix = "x" * 1000
+        oversized_inputs = target_fact_inputs(
+            [
+                {
+                    "filename": "new/%03d-%s" % (index, long_suffix),
+                    "previous_filename": "old/%03d-%s" % (index, long_suffix),
+                }
+                for index in range(300)
+            ]
+        )
+        oversized = render_card.build_triage_target_facts(
+            *oversized_inputs,
+            owner="owner",
+            repo="catalog",
+            number=7,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+        check(
+            "target facts bytes: exact boundary and UTF-8 renamed paths are preserved without truncation",
+            renamed_facts is not None
+            and renamed_facts["paths"] == ["docs/café.md", "old/café.md"]
+            and b"caf\xc3\xa9.md" in (renamed_payload or b"")
+            and render_card.serialize_triage_target_facts(
+                renamed_facts, max_bytes=boundary
+            )
+            == renamed_payload
+            and render_card.serialize_triage_target_facts(
+                renamed_facts, max_bytes=boundary - 1
+            )
+            is None
+            and oversized is None,
         )
 
         external_facts_file, external_facts_digest = write_target_facts(
