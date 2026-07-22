@@ -3,12 +3,16 @@
 Direct unit tests for wheelhouse_core.check_status()'s compliance
 aggregation and statusCheckRollup.state backstop, no network.
 
-Regression coverage for card #392: two GraphQL check-run contexts sharing
-the compliance check's exact name (one CANCELLED, one SUCCESS - the
-duplicate-approved-run scenario) must aggregate worst-wins, exactly like
-`tests` already does, instead of letting whichever context the loop visits
-last silently overwrite the result. Also covers the statusCheckRollup.state
-backstop and a genuinely-green PR regression check.
+Regression coverage for card #392 + card #1537 concurrency duplicates:
+two GraphQL check-run contexts sharing the compliance check's exact name
+(one CANCELLED, one SUCCESS - the duplicate-approved-run / cancel-in-progress
+scenario) must aggregate by equivalent check identity, not raw worst-wins and
+not last-write-wins. A CANCELLED sibling is ignorable only when a completed
+SUCCESS for the same required check exists on the current head; cancelled-only
+evidence never becomes pass; FAILURE/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE
+still fail; pending still waits. The statusCheckRollup.state backstop must not
+re-poison a context set proven as only SUCCESS plus ignorable cancellations,
+while genuine unaccounted failures remain fail-safe.
 
 Also covers card #543's config gap: axi's `test_check_patterns` accepts BOTH
 `build-and-test` (the JS SDK gate) and `drift` (the catalog-consistency gate),
@@ -65,6 +69,8 @@ def pr_with(rollup_data):
 
 
 def test_duplicate_compliance_contexts_cancelled_then_success():
+    # Card #1537 / lavish-axi#179 shape: concurrency cancel-in-progress left
+    # CANCELLED siblings beside a legitimate SUCCESS on the same head.
     contexts = [
         check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
         check_run("build-and-test (ubuntu-latest)"),
@@ -72,15 +78,15 @@ def test_duplicate_compliance_contexts_cancelled_then_success():
     ]
     comp, tests, ci, names = core.check_status(pr_with(rollup("SUCCESS", contexts)), CFG)
     check(
-        "duplicate compliance ctx CANCELLED-then-SUCCESS -> fail (worst-wins)",
-        comp == "fail",
+        "duplicate compliance ctx CANCELLED-then-SUCCESS -> pass (ignorable cancel)",
+        comp == "pass",
     )
     check("tests are unaffected by the compliance duplicate", tests == "green")
 
 
 def test_duplicate_compliance_contexts_success_then_cancelled():
-    # Same incident, contexts in the opposite array order - the exact bug was
-    # that the scalar overwrite made the result depend on iteration order.
+    # Same incident, contexts in the opposite array order - must not depend on
+    # GraphQL array order (card #392 last-write-wins lesson still holds).
     contexts = [
         check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
         check_run("build-and-test (ubuntu-latest)"),
@@ -88,7 +94,136 @@ def test_duplicate_compliance_contexts_success_then_cancelled():
     ]
     comp, tests, ci, names = core.check_status(pr_with(rollup("SUCCESS", contexts)), CFG)
     check(
-        "duplicate compliance ctx SUCCESS-then-CANCELLED -> fail (order-independent)",
+        "duplicate compliance ctx SUCCESS-then-CANCELLED -> pass (order-independent)",
+        comp == "pass",
+    )
+
+
+def test_duplicate_compliance_two_cancelled_plus_success():
+    # Exact lavish-axi#179 shape: one SUCCESS + two CANCELLED same-name runs.
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("build-and-test (ubuntu-latest)"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check(
+        "two CANCELLED + SUCCESS same-name compliance -> pass",
+        comp == "pass",
+    )
+    check(
+        "rollup FAILURE from ignorable cancels does not re-poison proven pass",
+        comp == "pass",
+    )
+    check("two CANCELLED + SUCCESS leaves tests green", tests == "green")
+
+
+def test_cancelled_only_compliance_is_not_pass():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("build-and-test (ubuntu-latest)"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check("cancelled-only compliance never becomes pass", comp == "fail")
+
+
+def test_success_plus_failure_still_fails():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="FAILURE"),
+        check_run("build-and-test (ubuntu-latest)"),
+    ]
+    for order in (contexts, list(reversed(contexts))):
+        comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", order)), CFG)
+        check(
+            "SUCCESS + FAILURE same-name compliance stays fail (order-independent)",
+            comp == "fail",
+        )
+
+
+def test_success_plus_timed_out_still_fails():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="TIMED_OUT"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check("SUCCESS + TIMED_OUT same-name compliance stays fail", comp == "fail")
+
+
+def test_success_plus_startup_failure_still_fails():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="STARTUP_FAILURE"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check("SUCCESS + STARTUP_FAILURE same-name compliance stays fail", comp == "fail")
+
+
+def test_success_plus_action_required_still_fails_or_waits():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run(
+            "PR must be raised via no-mistakes",
+            conclusion="ACTION_REQUIRED",
+            status="COMPLETED",
+        ),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check(
+        "SUCCESS + ACTION_REQUIRED same-name compliance stays fail",
+        comp == "fail",
+    )
+
+
+def test_success_plus_pending_sibling_stays_pending():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run(
+            "PR must be raised via no-mistakes",
+            conclusion=None,
+            status="IN_PROGRESS",
+        ),
+        check_run("build-and-test (ubuntu-latest)"),
+    ]
+    comp, tests, ci, names = core.check_status(
+        pr_with(rollup("PENDING", contexts)), CFG
+    )
+    check("SUCCESS + pending same-name compliance stays pending", comp == "pending")
+
+
+def test_test_pattern_cancelled_with_success_is_green():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="CANCELLED"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="SUCCESS"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check("test pattern CANCELLED + SUCCESS same name -> green", tests == "green")
+    check("test pattern cancel sibling leaves compliance pass", comp == "pass")
+
+
+def test_test_pattern_cancelled_only_is_fail():
+    contexts = [
+        check_run("PR must be raised via no-mistakes"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="CANCELLED"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check("test pattern cancelled-only stays fail", tests == "fail")
+
+
+def test_different_check_names_do_not_mask_each_other():
+    # A cancelled run of a DIFFERENT check must not be treated as the compliance
+    # success's sibling, and an untracked failure still trips the rollup backstop.
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("Some other required check", conclusion="FAILURE"),
+        check_run("build-and-test (ubuntu-latest)"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check(
+        "untracked failure keeps rollup FAILURE backstop (fail-safe)",
         comp == "fail",
     )
 
@@ -105,6 +240,25 @@ def test_rollup_failure_backstop_downgrades_all_success_read():
     check(
         "rollup FAILURE backstop refuses an otherwise-pass compliance read",
         comp != "pass",
+    )
+
+
+def test_rollup_failure_from_ignorable_cancels_does_not_repoison():
+    contexts = [
+        check_run("PR must be raised via no-mistakes", conclusion="SUCCESS"),
+        check_run("PR must be raised via no-mistakes", conclusion="CANCELLED"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="SUCCESS"),
+        check_run("build-and-test (ubuntu-latest)", conclusion="CANCELLED"),
+        check_run("Generated files must not be hand-edited", conclusion="SUCCESS"),
+    ]
+    comp, tests, ci, names = core.check_status(pr_with(rollup("FAILURE", contexts)), CFG)
+    check(
+        "rollup FAILURE accounted for by ignorable cancels stays pass",
+        comp == "pass",
+    )
+    check(
+        "rollup FAILURE accounted for by ignorable cancels keeps tests green",
+        tests == "green",
     )
 
 
@@ -265,7 +419,18 @@ def test_axi_mixed_build_green_drift_red_not_green():
 def main():
     test_duplicate_compliance_contexts_cancelled_then_success()
     test_duplicate_compliance_contexts_success_then_cancelled()
+    test_duplicate_compliance_two_cancelled_plus_success()
+    test_cancelled_only_compliance_is_not_pass()
+    test_success_plus_failure_still_fails()
+    test_success_plus_timed_out_still_fails()
+    test_success_plus_startup_failure_still_fails()
+    test_success_plus_action_required_still_fails_or_waits()
+    test_success_plus_pending_sibling_stays_pending()
+    test_test_pattern_cancelled_with_success_is_green()
+    test_test_pattern_cancelled_only_is_fail()
+    test_different_check_names_do_not_mask_each_other()
     test_rollup_failure_backstop_downgrades_all_success_read()
+    test_rollup_failure_from_ignorable_cancels_does_not_repoison()
     test_rollup_failure_backstop_fails_closed_without_a_compliance_gate()
     test_genuinely_green_pr_still_passes()
     test_axi_catalog_pr_drift_green_is_merge_ready()

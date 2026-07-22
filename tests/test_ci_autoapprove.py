@@ -1582,6 +1582,26 @@ def test_auto_approved_pr_is_frozen_with_antimasquerade_item():
         "ci-wait: refresh item renders a NON-green pending state (no false green)",
         refresh and refresh[0]["comp"] != "pass" and refresh[0]["tests"] != "green",
     )
+    text = " ".join(
+        [
+            str(refresh[0].get("summary") or ""),
+            str(refresh[0].get("recommendation") or ""),
+        ]
+    ).lower()
+    check(
+        "ci-wait: refresh copy says automatic triage is deferred until checks finish",
+        "automatic triage" in text
+        and ("deferred" in text or "resume" in text)
+        and ("terminal" in text or "finish" in text or "checks" in text),
+    )
+    check(
+        "ci-wait: refresh copy distinguishes prior-head triage from current head",
+        "prior-head" in text or "prior head" in text or "does not apply" in text,
+    )
+    check(
+        "ci-wait: refresh item does not claim current-head triage is already present",
+        "triage complete" not in text and "already triaged" not in text,
+    )
 
 
 def test_ci_running_pr_is_frozen():
