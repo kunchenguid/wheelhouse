@@ -333,8 +333,12 @@ def test_diff_complete_fails_closed_when_diff_exceeds_the_cap():
         and "AUTOMERGE_BEHAVIOR_AVAILABLE=true" in text,
     )
     check(
-        "triage: vision-bound verdict additionally requires VISION_PRESENT",
-        'if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
+        "triage: vision-bound verdict requires VISION and trusted target facts",
+        (
+            'if [ "$VISION_PRESENT" = "true" ] \\\n'
+            '              && [ "$TARGET_FACTS_PRESENT" = "true" ] \\\n'
+            '              && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
+        )
         in text
         and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
     )
