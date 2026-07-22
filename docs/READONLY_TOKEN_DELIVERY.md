@@ -38,9 +38,11 @@ defense-in-depth controls, not a claim that the token is unavailable in process.
 
 ## Anonymous public clone child
 
-The owner/maintainer-gated `nl-decision.search` path may ask `wheelhouse-search`
-to clone one complete public HTTPS Git URL. This is separate from the existing
-authenticated `gh` allowlist. The wrapper resolves the URL's host and rejects
+Only the exact `nl-decision.search` and `triage.pr.search` actions may ask
+`wheelhouse-search` to clone one complete public HTTPS Git URL. Initial PR
+triage uses this source-only capability to independently inspect pinned external
+source when trusted default-branch `VISION.md` requires it. This is separate
+from the existing authenticated `gh` allowlist. The wrapper resolves the URL's host and rejects
 loopback, link-local, private, reserved, metadata, or otherwise non-public
 addresses before it starts Git. Git receives an explicit credential-free
 environment with a fresh home and configuration, prompting and credential
@@ -67,4 +69,5 @@ proxy to close that gap. This is the explicitly accepted residual of aligning
 with the official `claude-code-action` posture. Redirect following is disabled,
 metadata and other non-public answers are rejected at validation, the child has
 no credentials, the hosted runner has no Wheelhouse-internal service network,
-and clone time and retained data remain bounded.
+and clone time and retained data remain bounded. Neither sanctioned action may
+execute cloned files or packages.

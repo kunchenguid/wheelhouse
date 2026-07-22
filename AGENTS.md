@@ -1219,6 +1219,7 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   Before dispatch, the queueing path writes `triaged_sha=<current revision>` and `triage_status=queued`, so errors and timeouts fail open without retriggering the same revision on every scan.
   Existing open cards of either kind with no `triaged_sha` are intentionally stale and backfill once on the next eligible scan.
   Optional `READONLY_TOKEN` search uses the unchanged `wheelhouse-search` wrapper and remains untrusted evidence only.
+  On the exact `triage.pr.search` action, the wrapper's existing bounded anonymous `public_clone` operation lets the model act as the independent reviewer for applicable trusted VISION source criteria: it must first inspect an exact pinned revision/release and representative source, record exact URL/ref/commit/files and its evidence-backed conclusion, and defer only when the sanctioned source inspection is unavailable, uncertain, or negative. Contributor assertions are leads, never independent evidence. This is source-only: target, cloned, and package execution remain forbidden, and requirements exceeding that capability fail closed.
   The Claude action allows only `github-actions[bot]`, never `*`, because scan/ingest dispatches use `github.token`.
   `render_card.py triage-apply`/`triage-fail` take a kind-agnostic `--revision` CLI argument (a PR's head SHA or an issue's `updated_at`), replacing the old pr-review-only `--head-sha` flag name.
   Result delivery is independent of transcript retention: `triage-result` extracts the compact final result event before applying the 262144-byte cap solely to the retained debug transcript.
@@ -1256,8 +1257,9 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   `Read,Grep,Glob,Write,Bash(wheelhouse-search)`) so it can run scoped read-only
   `gh` searches across the target repo and configured fleet repos for related,
   duplicate, or superseding PRs/issues and code context.
-  On this NL path only, the wrapper also accepts one anonymous `public_clone`
-  request with a complete public HTTPS Git URL and optional safe ref. It retains
+  On the exact `nl-decision.search` and `triage.pr.search` actions only, the
+  wrapper also accepts one anonymous `public_clone` request with a complete
+  public HTTPS Git URL and optional safe ref. It retains
   one bounded, shallow, no-tags/no-submodules/no-LFS/no-hooks data-only clone
   under `RUNNER_TEMP` for Read/Grep/Glob, and the model workflow removes the
   fixed clone root in an `always()` step. Git receives a fresh credential-free

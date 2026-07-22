@@ -40,7 +40,7 @@ def main():
                 {
                     "GITHUB_WORKSPACE": ROOT,
                     "RUNNER_TEMP": runner_temp,
-                    "WHEELHOUSE_PUBLIC_CLONE_ENABLED": "1",
+                    "WHEELHOUSE_SEARCH_ACTION": "nl-decision.search",
                     "WHEELHOUSE_SEARCH_ALLOWED_REPOS": "[]",
                     "WHEELHOUSE_SEARCH_REQUEST": request,
                 }

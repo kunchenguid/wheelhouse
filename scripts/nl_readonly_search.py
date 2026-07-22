@@ -9,7 +9,8 @@ bounded. Those operations stay limited to the target repo plus owner-scoped
 repos from `wheelhouse.config.yml`. The separate `public_clone` operation is
 the bounded local-temporary exception: it accepts a complete public HTTPS Git
 URL, validates its current addresses, and invokes stock Git anonymously in an
-isolated temporary directory. It removes Git administration before a
+isolated temporary directory. Only the exact `nl-decision.search` and
+`triage.pr.search` actions expose it. It removes Git administration before a
 post-clone retained-tree audit and never executes cloned content.
 """
 
@@ -49,6 +50,7 @@ SENSITIVE_ENV_RE = re.compile(
 )
 
 PUBLIC_CLONE_DIR = "wheelhouse-public-clones"
+PUBLIC_CLONE_ACTIONS = frozenset({"nl-decision.search", "triage.pr.search"})
 MAX_PUBLIC_URL_CHARS = 2048
 MAX_PUBLIC_REF_CHARS = 255
 PUBLIC_CLONE_TIMEOUT_SECONDS = 90
@@ -842,7 +844,7 @@ def handle_request(
     public_runner=run_public_git,
     resolver=socket.getaddrinfo,
     clone_root=None,
-    public_clone_enabled=False,
+    action="",
 ):
     if not isinstance(req, dict):
         raise ValueError("request must be a JSON object")
@@ -859,7 +861,7 @@ def handle_request(
             "search_issues",
             "search_code",
         ]
-        if public_clone_enabled:
+        if action in PUBLIC_CLONE_ACTIONS:
             ops.append("public_clone")
         return (
             json.dumps(
@@ -873,9 +875,9 @@ def handle_request(
             + "\n"
         )
     if op == "public_clone":
-        if not public_clone_enabled:
+        if action not in PUBLIC_CLONE_ACTIONS:
             raise ValueError(
-                "public_clone is available only to natural-language decisions"
+                "public_clone is available only to sanctioned agent actions"
             )
         return _public_clone_request(
             req,
@@ -1012,8 +1014,7 @@ def cmd_run():
         output = handle_request(
             _read_request(),
             _env_allowed_repos(),
-            public_clone_enabled=os.environ.get("WHEELHOUSE_PUBLIC_CLONE_ENABLED")
-            == "1",
+            action=os.environ.get("WHEELHOUSE_SEARCH_ACTION", ""),
         )
     except Exception as exc:
         print("wheelhouse-search error: %s" % exc, file=sys.stderr)
