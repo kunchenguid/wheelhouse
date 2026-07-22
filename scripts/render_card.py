@@ -1299,6 +1299,7 @@ def triage_source_provenance_verified(
     base_sha,
     vision_sha,
     vision_content_sha256,
+    target_facts_sha256,
 ):
     claim = data.get("source_provenance") if isinstance(data, dict) else None
     if not isinstance(claim, dict) or set(claim) != {
@@ -1357,14 +1358,18 @@ def triage_source_provenance_verified(
             "baseSha",
             "visionSha",
             "visionContentSha256",
+            "targetFactsSha256",
             "targetRepositoryCommit",
         }
         or source_review.get("baseSha") != str(base_sha or "").lower()
         or source_review.get("visionSha") != str(vision_sha or "").lower()
         or source_review.get("visionContentSha256")
         != str(vision_content_sha256 or "").lower()
+        or source_review.get("targetFactsSha256")
+        != str(target_facts_sha256 or "").lower()
         or source_review.get("targetRepositoryCommit") != str(revision or "").lower()
         or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("visionContentSha256", ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("targetFactsSha256", ""))
     ):
         return False
     source = record.get("source")
@@ -1420,13 +1425,105 @@ def triage_source_provenance_verified(
     )
 
 
-def triage_vision_dependency_verified(data, vision_file, **expected):
+def _vision_selector_pattern(pattern):
+    if (
+        not isinstance(pattern, str)
+        or not 1 <= len(pattern) <= 256
+        or pattern.startswith("/")
+        or "\\" in pattern
+        or any(part in {"", ".", ".."} for part in pattern.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in pattern)
+    ):
+        return None
+    pieces = []
+    index = 0
+    while index < len(pattern):
+        if pattern[index : index + 3] == "**/":
+            pieces.append("(?:.*/)?")
+            index += 3
+        elif pattern[index : index + 2] == "**":
+            pieces.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            pieces.append("[^/]*")
+            index += 1
+        elif pattern[index] in {"?", "[", "]", "{", "}"}:
+            return None
+        else:
+            pieces.append(re.escape(pattern[index]))
+            index += 1
+    try:
+        return re.compile("^" + "".join(pieces) + "$")
+    except re.error:
+        return None
+
+
+def _trusted_triage_target_facts(target_facts_file, **expected):
+    if not target_facts_file:
+        return None
+    try:
+        if os.path.islink(target_facts_file) or not os.path.isfile(target_facts_file):
+            return None
+        if not 0 < os.path.getsize(target_facts_file) <= 262144:
+            return None
+        with open(target_facts_file, "rb") as handle:
+            facts_bytes = handle.read()
+        facts = json.loads(facts_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(facts, dict) or set(facts) != {
+        "version",
+        "owner",
+        "repo",
+        "number",
+        "head_sha",
+        "base_sha",
+        "file_count",
+        "paths",
+    }:
+        return None
+    paths = facts.get("paths")
+    if (
+        facts.get("version") != 1
+        or facts.get("owner") != expected.get("owner")
+        or facts.get("repo") != expected.get("repo")
+        or facts.get("number") != expected.get("number")
+        or facts.get("head_sha") != str(expected.get("revision") or "").lower()
+        or facts.get("base_sha") != str(expected.get("base_sha") or "").lower()
+        or not isinstance(facts.get("file_count"), int)
+        or isinstance(facts.get("file_count"), bool)
+        or not 1 <= facts["file_count"] <= 3000
+        or not isinstance(paths, list)
+        or not all(isinstance(path, str) for path in paths)
+        or not facts["file_count"] <= len(paths) <= 2 * facts["file_count"]
+        or paths != sorted(set(paths))
+    ):
+        return None
+    if any(
+        not 1 <= len(path) <= 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        for path in paths
+    ):
+        return None
+    digest = hashlib.sha256(facts_bytes).hexdigest()
+    if digest != str(expected.get("target_facts_sha256") or "").lower():
+        return None
+    return paths, digest
+
+
+def triage_vision_dependency_verified(
+    data, vision_file, target_facts_file, **expected
+):
     evidence = data.get("vision_evidence") if isinstance(data, dict) else None
     automerge = data.get("automerge") if isinstance(data, dict) else None
     if not isinstance(evidence, dict) or set(evidence) != {
         "target_owner",
         "target_repo",
         "target_number",
+        "target_facts_sha256",
         "vision_sha",
         "vision_content_sha256",
         "base_sha",
@@ -1436,6 +1533,10 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
         return None
     if not isinstance(automerge, dict) or not vision_file:
         return None
+    target_facts = _trusted_triage_target_facts(target_facts_file, **expected)
+    if target_facts is None:
+        return None
+    target_paths, target_facts_digest = target_facts
     try:
         if os.path.islink(vision_file) or not os.path.isfile(vision_file):
             return None
@@ -1451,6 +1552,7 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
         "target_owner": expected.get("owner"),
         "target_repo": expected.get("repo"),
         "target_number": expected.get("number"),
+        "target_facts_sha256": target_facts_digest,
         "vision_sha": str(expected.get("vision_sha") or "").lower(),
         "vision_content_sha256": str(
             expected.get("vision_content_sha256") or ""
@@ -1498,6 +1600,7 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
             "id",
             "quote_sha256",
             "external_source_required",
+            "selector",
         }:
             return None
         criterion_id = criterion.get("id")
@@ -1508,15 +1611,63 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
             or not isinstance(criterion.get("external_source_required"), bool)
         ):
             return None
+        selector = criterion.get("selector")
+        if not isinstance(selector, dict) or len(selector) != 1:
+            return None
+        if set(selector) == {"always"}:
+            if selector.get("always") is not True:
+                return None
+        elif set(selector) == {"changed_paths_any"}:
+            patterns = selector.get("changed_paths_any")
+            if (
+                not isinstance(patterns, list)
+                or not 1 <= len(patterns) <= 32
+                or not all(isinstance(pattern, str) for pattern in patterns)
+                or len(set(patterns)) != len(patterns)
+                or any(_vision_selector_pattern(pattern) is None for pattern in patterns)
+            ):
+                return None
+        else:
+            return None
         trusted_ids.append(criterion_id)
         trusted.append(criterion)
     if len(set(trusted_ids)) != len(trusted_ids):
         return None
+    selector_dependencies = {}
+    applicable_trusted = []
+    for criterion in trusted:
+        selector = criterion["selector"]
+        selector_key = json.dumps(selector, sort_keys=True, separators=(",", ":"))
+        dependency = criterion["external_source_required"]
+        if (
+            selector_key in selector_dependencies
+            and selector_dependencies[selector_key] is not dependency
+        ):
+            return None
+        selector_dependencies[selector_key] = dependency
+        if "always" in selector:
+            matches = True
+        else:
+            compiled = [
+                _vision_selector_pattern(pattern)
+                for pattern in selector["changed_paths_any"]
+            ]
+            matches = any(
+                matcher.fullmatch(path) is not None
+                for matcher in compiled
+                for path in target_paths
+            )
+        if matches:
+            applicable_trusted.append(criterion)
     applicable = evidence.get("applicable_criteria")
-    if not isinstance(applicable, list) or len(applicable) != len(trusted):
+    if (
+        not applicable_trusted
+        or not isinstance(applicable, list)
+        or len(applicable) != len(applicable_trusted)
+    ):
         return None
     quotes = []
-    for criterion, trusted_criterion in zip(applicable, trusted):
+    for criterion, trusted_criterion in zip(applicable, applicable_trusted):
         if not isinstance(criterion, dict) or set(criterion) != {
             "id",
             "quote",
@@ -1539,7 +1690,7 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
     if len(set(quotes)) != len(quotes):
         return None
     external_required = any(
-        criterion["external_source_required"] for criterion in trusted
+        criterion["external_source_required"] for criterion in applicable_trusted
     )
     if automerge.get("external_source_required") is not external_required:
         return None
@@ -1547,7 +1698,7 @@ def triage_vision_dependency_verified(data, vision_file, **expected):
 
 
 def enforce_triage_source_provenance(
-    data, provenance_file, vision_file="", **expected
+    data, provenance_file, vision_file="", target_facts_file="", **expected
 ):
     if not isinstance(data, dict):
         return data
@@ -1558,7 +1709,7 @@ def enforce_triage_source_provenance(
     ):
         return data
     external_required = triage_vision_dependency_verified(
-        data, vision_file, **expected
+        data, vision_file, target_facts_file, **expected
     )
     if external_required is False:
         return data
@@ -5255,6 +5406,7 @@ def decide_triage_apply(
     repair_claim_admitted=None,
     source_provenance_file="",
     vision_file="",
+    target_facts_file="",
     source_provenance_expected=None,
 ):
     """Deterministic decision for the (repair-aware) triage-apply step. Returns
@@ -5287,6 +5439,7 @@ def decide_triage_apply(
             triage,
             source_provenance_file,
             vision_file,
+            target_facts_file,
             **(source_provenance_expected or {}),
         )
         return {"outcome": "success", "triage": triage, "reason": "", "candidate": ""}
@@ -5305,6 +5458,7 @@ def decide_triage_apply(
                     repaired,
                     source_provenance_file,
                     vision_file,
+                    target_facts_file,
                     **(source_provenance_expected or {}),
                 )
                 return {
@@ -5378,7 +5532,9 @@ def main():
     ta.add_argument("--automerge-behavior-available", action="store_true")
     ta.add_argument("--source-provenance-file", default="")
     ta.add_argument("--vision-file", default="")
+    ta.add_argument("--target-facts-file", default="")
     ta.add_argument("--vision-content-sha256", default="")
+    ta.add_argument("--target-facts-sha256", default="")
     ta.add_argument("--source-review-action", default="")
     ta.add_argument("--source-review-event-key", default="")
     ta.add_argument("--source-review-owner", default="")
@@ -5494,6 +5650,7 @@ def main():
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
             vision_file=args.vision_file,
+            target_facts_file=args.target_facts_file,
             source_provenance_expected={
                 "action": args.source_review_action,
                 "event_key": args.source_review_event_key,
@@ -5504,6 +5661,7 @@ def main():
                 "base_sha": args.base_sha,
                 "vision_sha": args.vision_sha,
                 "vision_content_sha256": args.vision_content_sha256,
+                "target_facts_sha256": args.target_facts_sha256,
             },
         )
         outcome = decision["outcome"]

@@ -769,6 +769,7 @@ def public_clone_context_from_task(task):
             "baseSha",
             "visionSha",
             "visionContentSha256",
+            "targetFactsSha256",
             "targetRepositoryCommit",
         }:
             raise ValueError("public clone source-review binding is invalid")
@@ -778,6 +779,7 @@ def public_clone_context_from_task(task):
             or not re.fullmatch(r"[0-9a-f]{7,64}", source_review.get("baseSha", ""))
             or not re.fullmatch(r"[0-9a-f]{7,64}", source_review.get("visionSha", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("visionContentSha256", ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("targetFactsSha256", ""))
             or not re.fullmatch(r"[0-9a-f]{40}", source_review.get("targetRepositoryCommit", ""))
             or source_review["targetRepositoryCommit"] != str(target.get("revision", "")).lower()
         ):

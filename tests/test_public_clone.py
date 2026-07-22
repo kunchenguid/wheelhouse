@@ -645,11 +645,13 @@ def test_initial_triage_independent_vision_source_review_contract():
         "external_source_required true only when",
         "local-only VISION review needs no clone",
         "wheelhouse-vision-source-dependencies",
-        "emit every declared criterion",
+        "changed_paths_any globs matched against target-facts.json",
+        "emit only selector-matching criteria",
         "must equal the OR",
         "rejects absent, incomplete, mismatched, ambiguous",
         '"vision_evidence"',
         '"vision_content_sha256"',
+        '"target_facts_sha256"',
     )
     check(
         "triage prompt: independent pinned-source VISION review contract is complete",
@@ -686,6 +688,27 @@ def test_initial_triage_independent_vision_source_review_contract():
         base_sha = "b" * 40
         vision_sha = "c" * 40
         event_key = "d" * 64
+        def write_target_facts(name, paths):
+            value = {
+                "version": 1,
+                "owner": "owner",
+                "repo": "catalog",
+                "number": 7,
+                "head_sha": head_sha,
+                "base_sha": base_sha,
+                "file_count": len(paths),
+                "paths": sorted(set(paths)),
+            }
+            content = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            path = os.path.join(parent, name)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            return path, hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        external_facts_file, external_facts_digest = write_target_facts(
+            "target-facts-external.json", ["catalog/tool.yml"]
+        )
+        local_criterion = "Routine documentation changes need only local review."
         external_criterion = (
             "Inspect the exact pinned external package source before approval."
         )
@@ -694,11 +717,20 @@ def test_initial_triage_independent_vision_source_review_contract():
             "complete": True,
             "criteria": [
                 {
+                    "id": "routine-local",
+                    "quote_sha256": hashlib.sha256(
+                        local_criterion.encode("utf-8")
+                    ).hexdigest(),
+                    "external_source_required": False,
+                    "selector": {"always": True},
+                },
+                {
                     "id": "pinned-source",
                     "quote_sha256": hashlib.sha256(
                         external_criterion.encode("utf-8")
                     ).hexdigest(),
                     "external_source_required": True,
+                    "selector": {"changed_paths_any": ["catalog/**"]},
                 }
             ],
         }
@@ -706,6 +738,8 @@ def test_initial_triage_independent_vision_source_review_contract():
             "<!-- wheelhouse-vision-source-dependencies: "
             + json.dumps(external_declaration, separators=(",", ":"))
             + " -->\n"
+            + local_criterion
+            + "\n"
             + external_criterion
             + "\n"
         )
@@ -730,6 +764,7 @@ def test_initial_triage_independent_vision_source_review_contract():
                     "baseSha": base_sha,
                     "visionSha": vision_sha,
                     "visionContentSha256": external_vision_digest,
+                    "targetFactsSha256": external_facts_digest,
                     "targetRepositoryCommit": head_sha,
                 },
             }
@@ -769,11 +804,17 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "target_owner": "owner",
                 "target_repo": "catalog",
                 "target_number": 7,
+                "target_facts_sha256": external_facts_digest,
                 "vision_sha": vision_sha,
                 "vision_content_sha256": external_vision_digest,
                 "base_sha": base_sha,
                 "target_head_sha": head_sha,
                 "applicable_criteria": [
+                    {
+                        "id": "routine-local",
+                        "quote": local_criterion,
+                        "external_source_required": False,
+                    },
                     {
                         "id": "pinned-source",
                         "quote": external_criterion,
@@ -806,16 +847,21 @@ def test_initial_triage_independent_vision_source_review_contract():
             "base_sha": base_sha,
             "vision_sha": vision_sha,
             "vision_content_sha256": external_vision_digest,
+            "target_facts_sha256": external_facts_digest,
         }
         trusted = render_card.enforce_triage_source_provenance(
-            candidate, provenance_file, external_vision_file, **expected_binding
+            candidate,
+            provenance_file,
+            external_vision_file,
+            external_facts_file,
+            **expected_binding,
         )
         normalized = render_card.normalize_triage(trusted)
         eligible = am.verdict_eligible(
             (normalized or {}).get("automerge_verdict")
         )[0]
         check(
-            "triage scenario: direct pinned-source evidence can support a positive source-only conclusion",
+            "trusted selectors: catalog match applies local and external criteria with clone evidence",
             result["commit"] == COMMIT
             and result["manifest"]["paths"] == expected_paths
             and len(result["manifest"]["observations"]) == len(expected_paths)
@@ -824,6 +870,7 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "The change adds the public package to the catalog.",
             )
             and eligible
+            and len(candidate["vision_evidence"]["applicable_criteria"]) == 2
             and "executed" not in direct_evidence
             and "package execution" not in direct_evidence,
         )
@@ -832,27 +879,29 @@ def test_initial_triage_independent_vision_source_review_contract():
             candidate,
             os.path.join(parent, "missing.json"),
             external_vision_file,
+            external_facts_file,
             **expected_binding,
         )
         missing_evidence = json.loads(json.dumps(candidate))
         missing_evidence.pop("source_provenance")
         missing_evidence = render_card.enforce_triage_source_provenance(
-            missing_evidence, provenance_file, external_vision_file, **expected_binding
+            missing_evidence, provenance_file, external_vision_file, external_facts_file, **expected_binding
         )
         missing_dependency = json.loads(json.dumps(candidate))
         missing_dependency["automerge"].pop("external_source_required")
         missing_dependency = render_card.enforce_triage_source_provenance(
-            missing_dependency, provenance_file, external_vision_file, **expected_binding
+            missing_dependency, provenance_file, external_vision_file, external_facts_file, **expected_binding
         )
         hallucinated = json.loads(json.dumps(candidate))
         hallucinated["source_provenance"]["resolved_commit"] = "f" * 40
         hallucinated = render_card.enforce_triage_source_provenance(
-            hallucinated, provenance_file, external_vision_file, **expected_binding
+            hallucinated, provenance_file, external_vision_file, external_facts_file, **expected_binding
         )
         mismatched = render_card.enforce_triage_source_provenance(
             candidate,
             provenance_file,
             external_vision_file,
+            external_facts_file,
             **dict(expected_binding, vision_sha="f" * 40),
         )
         target_mismatched_candidate = json.loads(json.dumps(candidate))
@@ -861,6 +910,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             target_mismatched_candidate,
             provenance_file,
             external_vision_file,
+            external_facts_file,
             **expected_binding,
         )
         check(
@@ -883,7 +933,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             {"path": "src/not-observed.py", "sha256": "f" * 64}
         ]
         unobserved = render_card.enforce_triage_source_provenance(
-            unobserved, provenance_file, external_vision_file, **expected_binding
+            unobserved, provenance_file, external_vision_file, external_facts_file, **expected_binding
         )
         missing_vision_evidence = json.loads(json.dumps(candidate))
         missing_vision_evidence.pop("vision_evidence")
@@ -891,6 +941,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             missing_vision_evidence,
             provenance_file,
             external_vision_file,
+            external_facts_file,
             **expected_binding,
         )
         false_injection = json.loads(json.dumps(candidate))
@@ -899,69 +950,55 @@ def test_initial_triage_independent_vision_source_review_contract():
             false_injection,
             "",
             external_vision_file,
+            external_facts_file,
             **expected_binding,
         )
-        local_criterion = "Documentation changes require no external source review."
-        local_declaration = {
-            "version": 1,
-            "complete": True,
-            "criteria": [
-                {
-                    "id": "local-docs",
-                    "quote_sha256": hashlib.sha256(
-                        local_criterion.encode("utf-8")
-                    ).hexdigest(),
-                    "external_source_required": False,
-                }
-            ],
-        }
-        local_vision = (
-            "<!-- wheelhouse-vision-source-dependencies: "
-            + json.dumps(local_declaration, separators=(",", ":"))
-            + " -->\n"
-            + local_criterion
-            + "\n"
+        applicability_mismatch = json.loads(json.dumps(candidate))
+        applicability_mismatch.pop("source_provenance")
+        applicability_mismatch["automerge"]["external_source_required"] = False
+        applicability_mismatch["vision_evidence"]["applicable_criteria"] = [
+            candidate["vision_evidence"]["applicable_criteria"][0]
+        ]
+        applicability_mismatch = render_card.enforce_triage_source_provenance(
+            applicability_mismatch,
+            "",
+            external_vision_file,
+            external_facts_file,
+            **expected_binding,
         )
-        local_vision_file = os.path.join(parent, "vision-local.md")
-        with open(local_vision_file, "w", encoding="utf-8") as handle:
-            handle.write(local_vision)
-        local_vision_digest = hashlib.sha256(local_vision.encode("utf-8")).hexdigest()
+        local_facts_file, local_facts_digest = write_target_facts(
+            "target-facts-local.json", ["docs/readme.md"]
+        )
         local_only = json.loads(json.dumps(candidate))
         local_only.pop("source_provenance")
         local_only["automerge"]["external_source_required"] = False
-        local_only["vision_evidence"] = {
-            "target_owner": "owner",
-            "target_repo": "catalog",
-            "target_number": 7,
-            "vision_sha": vision_sha,
-            "vision_content_sha256": local_vision_digest,
-            "base_sha": base_sha,
-            "target_head_sha": head_sha,
-            "applicable_criteria": [
-                {
-                    "id": "local-docs",
-                    "quote": local_criterion,
-                    "external_source_required": False,
-                }
-            ],
-        }
+        local_only["vision_evidence"]["target_facts_sha256"] = local_facts_digest
+        local_only["vision_evidence"]["applicable_criteria"] = [
+            {
+                "id": "routine-local",
+                "quote": local_criterion,
+                "external_source_required": False,
+            }
+        ]
         local_binding = dict(
-            expected_binding, vision_content_sha256=local_vision_digest
+            expected_binding, target_facts_sha256=local_facts_digest
         )
         local_only = render_card.enforce_triage_source_provenance(
-            local_only, "", local_vision_file, **local_binding
+            local_only, "", external_vision_file, local_facts_file, **local_binding
         )
         check(
-            "trusted dependency: valid local-only positives need no clone while false injection fails closed",
+            "trusted selectors: unrelated docs match only local criteria and need no clone",
             am.verdict_eligible(
                 render_card.normalize_triage(local_only)["automerge_verdict"]
             )[0]
+            and len(local_only["vision_evidence"]["applicable_criteria"]) == 1
             and all(
                 "aligns_with_vision" not in value["automerge"]
                 for value in (
                     unobserved,
                     missing_vision_evidence,
                     false_injection,
+                    applicability_mismatch,
                 )
             ),
         )
@@ -969,6 +1006,8 @@ def test_initial_triage_independent_vision_source_review_contract():
             "<!-- wheelhouse-vision-source-dependencies: "
             + json.dumps(external_declaration, separators=(",", ":"))
             + " -->\n"
+            + local_criterion
+            + "\n"
             + external_criterion
             + "\n"
             + external_criterion
@@ -988,13 +1027,74 @@ def test_initial_triage_independent_vision_source_review_contract():
             ambiguous_evidence,
             provenance_file,
             ambiguous_vision_file,
+            external_facts_file,
             **dict(expected_binding, vision_content_sha256=ambiguous_digest),
         )
+        malformed_declaration = json.loads(json.dumps(external_declaration))
+        malformed_declaration["criteria"][1]["selector"] = {
+            "changed_paths_any": ["../catalog/**"]
+        }
+        malformed_vision = (
+            "<!-- wheelhouse-vision-source-dependencies: "
+            + json.dumps(malformed_declaration, separators=(",", ":"))
+            + " -->\n"
+            + local_criterion
+            + "\n"
+            + external_criterion
+            + "\n"
+        )
+        malformed_vision_file = os.path.join(parent, "vision-malformed.md")
+        with open(malformed_vision_file, "w", encoding="utf-8") as handle:
+            handle.write(malformed_vision)
+        malformed_digest = hashlib.sha256(
+            malformed_vision.encode("utf-8")
+        ).hexdigest()
+        malformed_evidence = json.loads(json.dumps(candidate))
+        malformed_evidence["vision_evidence"][
+            "vision_content_sha256"
+        ] = malformed_digest
+        malformed_evidence = render_card.enforce_triage_source_provenance(
+            malformed_evidence,
+            provenance_file,
+            malformed_vision_file,
+            external_facts_file,
+            **dict(expected_binding, vision_content_sha256=malformed_digest),
+        )
+        contradictory_declaration = json.loads(json.dumps(external_declaration))
+        contradictory_declaration["criteria"][1]["selector"] = {"always": True}
+        contradictory_vision = (
+            "<!-- wheelhouse-vision-source-dependencies: "
+            + json.dumps(contradictory_declaration, separators=(",", ":"))
+            + " -->\n"
+            + local_criterion
+            + "\n"
+            + external_criterion
+            + "\n"
+        )
+        contradictory_vision_file = os.path.join(parent, "vision-contradictory.md")
+        with open(contradictory_vision_file, "w", encoding="utf-8") as handle:
+            handle.write(contradictory_vision)
+        contradictory_digest = hashlib.sha256(
+            contradictory_vision.encode("utf-8")
+        ).hexdigest()
+        contradictory_evidence = json.loads(json.dumps(candidate))
+        contradictory_evidence["vision_evidence"][
+            "vision_content_sha256"
+        ] = contradictory_digest
+        contradictory_evidence = render_card.enforce_triage_source_provenance(
+            contradictory_evidence,
+            provenance_file,
+            contradictory_vision_file,
+            external_facts_file,
+            **dict(expected_binding, vision_content_sha256=contradictory_digest),
+        )
         check(
-            "trusted dependency: mismatched, missing, and ambiguous VISION evidence fails closed",
+            "trusted dependency: mismatched, missing, ambiguous, and malformed applicability fails closed",
             "aligns_with_vision" not in mismatched["automerge"]
             and "aligns_with_vision" not in missing_vision_evidence["automerge"]
-            and "aligns_with_vision" not in ambiguous_evidence["automerge"],
+            and "aligns_with_vision" not in ambiguous_evidence["automerge"]
+            and "aligns_with_vision" not in malformed_evidence["automerge"]
+            and "aligns_with_vision" not in contradictory_evidence["automerge"],
         )
         clone_request(
             StockGit(retained_files=representative_files),
@@ -1006,7 +1106,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             provenance_file=provenance_file,
         )
         ambiguous = render_card.enforce_triage_source_provenance(
-            candidate, provenance_file, external_vision_file, **expected_binding
+            candidate, provenance_file, external_vision_file, external_facts_file, **expected_binding
         )
         check(
             "fail closed: multiple same-turn clone observations are ambiguous",
@@ -1030,7 +1130,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             ),
         )
         failed = render_card.enforce_triage_source_provenance(
-            candidate, failed_file, external_vision_file, **expected_binding
+            candidate, failed_file, external_vision_file, external_facts_file, **expected_binding
         )
         check(
             "fail closed: failed clone provenance cannot clear VISION",
@@ -1088,11 +1188,13 @@ def test_initial_triage_independent_vision_source_review_contract():
                 "baseSha",
                 "visionSha",
                 "visionContentSha256",
+                "targetFactsSha256",
                 "targetRepositoryCommit",
             )
         )
         and '--base-sha "$BASE_SHA"' in triage
-        and '--vision-sha "$VISION_SHA"' in triage,
+        and '--vision-sha "$VISION_SHA"' in triage
+        and '--target-facts-file target-facts.json' in triage,
     )
     check(
         "trusted provenance: broker record survives cleanup and crosses only the verified result artifact",

@@ -131,6 +131,7 @@ def main():
                     "target_owner": "owner",
                     "target_repo": "repo",
                     "target_number": 7,
+                    "target_facts_sha256": "e" * 64,
                     "vision_sha": "b" * 40,
                     "vision_content_sha256": "c" * 64,
                     "base_sha": "d" * 40,

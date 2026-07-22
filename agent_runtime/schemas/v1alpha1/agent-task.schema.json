@@ -20,11 +20,12 @@
         "sourceReview": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["baseSha", "visionSha", "visionContentSha256", "targetRepositoryCommit"],
+          "required": ["baseSha", "visionSha", "visionContentSha256", "targetFactsSha256", "targetRepositoryCommit"],
           "properties": {
             "baseSha": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
             "visionSha": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,64}$"},
             "visionContentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "targetFactsSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "targetRepositoryCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
           }
         },

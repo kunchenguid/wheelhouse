@@ -1269,6 +1269,7 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    target_facts_file: str = "",
     base_sha: str = "",
     vision_sha: str = "",
     allow_automerge_behavior: bool = False,
@@ -1414,6 +1415,23 @@ def build_task(
                 "trust": "trusted",
                 "mount": "read-only",
                 "maxBytes": 40000,
+                "bytes": size,
+            }
+        )
+    target_facts_digest = ""
+    if target_facts_file:
+        digest, size, artifact = _copy_file(Path(target_facts_file), bundle, 262144)
+        target_facts_digest = digest
+        inputs.append(
+            {
+                "id": "target-facts",
+                "artifact": artifact,
+                "logicalPath": "target-facts.json",
+                "sha256": digest,
+                "mediaType": "application/json",
+                "trust": "trusted",
+                "mount": "read-only",
+                "maxBytes": 262144,
                 "bytes": size,
             }
         )
@@ -1602,6 +1620,7 @@ def build_task(
             or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", base_sha or "")
             or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", vision_sha or "")
             or not vision_digest
+            or not target_facts_digest
             or not re.fullmatch(r"[0-9a-f]{40}", repository_commit or "")
             or repository_commit.lower() != revision.lower()
         ):
@@ -1610,6 +1629,7 @@ def build_task(
             "baseSha": base_sha.lower(),
             "visionSha": vision_sha.lower(),
             "visionContentSha256": vision_digest,
+            "targetFactsSha256": target_facts_digest,
             "targetRepositoryCommit": repository_commit.lower(),
         }
     validate_contract(task, "AgentTask")

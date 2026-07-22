@@ -13,11 +13,12 @@
     "vision_evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target_owner", "target_repo", "target_number", "vision_sha", "vision_content_sha256", "base_sha", "target_head_sha", "applicable_criteria"],
+      "required": ["target_owner", "target_repo", "target_number", "target_facts_sha256", "vision_sha", "vision_content_sha256", "base_sha", "target_head_sha", "applicable_criteria"],
       "properties": {
         "target_owner": {"type": "string", "minLength": 1, "maxLength": 100},
         "target_repo": {"type": "string", "minLength": 1, "maxLength": 100},
         "target_number": {"type": "integer", "minimum": 1},
+        "target_facts_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "vision_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
         "vision_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "base_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
