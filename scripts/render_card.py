@@ -36,6 +36,7 @@ back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
+from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment, decline, and
 # request-changes are intentionally not checkboxes because issue-form checkboxes
@@ -1285,6 +1287,578 @@ def _triage_evidence_verified(data, target_file):
     return evidence_anchor_ok(evidence, target_text)
 
 
+def triage_source_provenance_verified(
+    data,
+    provenance_file,
+    *,
+    action,
+    event_key,
+    owner,
+    repo,
+    number,
+    revision,
+    base_sha,
+    vision_sha,
+    vision_content_sha256,
+    target_facts_sha256,
+):
+    claim = data.get("source_provenance") if isinstance(data, dict) else None
+    if not isinstance(claim, dict) or set(claim) != {
+        "url", "requested_ref", "resolved_commit", "inspected_files"
+    }:
+        return False
+    if not provenance_file:
+        return False
+    try:
+        if os.path.islink(provenance_file) or not os.path.isfile(provenance_file):
+            return False
+        if os.path.getsize(provenance_file) > 262144:
+            return False
+        with open(provenance_file, encoding="utf-8") as handle:
+            records = json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if not isinstance(records, list) or len(records) != 1:
+        return False
+    record = records[0]
+    if not isinstance(record, dict) or set(record) != {
+        "version", "context", "status", "source", "manifest", "failure"
+    }:
+        return False
+    context = record.get("context")
+    source_review = context.get("sourceReview") if isinstance(context, dict) else None
+    expected_target = {
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "kind": "pr-review",
+        "revision": revision,
+    }
+    if (
+        record.get("version") != 1
+        or record.get("status") != "succeeded"
+        or record.get("failure") is not None
+        or not isinstance(context, dict)
+        or set(context) != {
+            "version",
+            "taskSha256",
+            "action",
+            "eventKeySha256",
+            "target",
+            "sourceReview",
+        }
+        or context.get("version") != 1
+        or context.get("action") != action
+        or action != "triage.pr.search"
+        or context.get("eventKeySha256") != event_key
+        or context.get("target") != expected_target
+        or not isinstance(context.get("taskSha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", context["taskSha256"])
+        or not isinstance(source_review, dict)
+        or set(source_review) != {
+            "baseSha",
+            "visionSha",
+            "visionContentSha256",
+            "targetFactsSha256",
+            "targetRepositoryCommit",
+        }
+        or source_review.get("baseSha") != str(base_sha or "").lower()
+        or source_review.get("visionSha") != str(vision_sha or "").lower()
+        or source_review.get("visionContentSha256")
+        != str(vision_content_sha256 or "").lower()
+        or source_review.get("targetFactsSha256")
+        != str(target_facts_sha256 or "").lower()
+        or source_review.get("targetRepositoryCommit") != str(revision or "").lower()
+        or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("visionContentSha256", ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", source_review.get("targetFactsSha256", ""))
+    ):
+        return False
+    source = record.get("source")
+    manifest = record.get("manifest")
+    if (
+        not isinstance(source, dict)
+        or set(source) != {"url", "requestedRef", "resolvedCommit"}
+        or not isinstance(manifest, dict)
+        or set(manifest) != {"entry_count", "file_count", "retained_bytes", "paths", "paths_truncated", "observations"}
+        or not isinstance(manifest.get("observations"), list)
+    ):
+        return False
+    inspected = claim.get("inspected_files")
+    if not isinstance(inspected, list) or not 1 <= len(inspected) <= 128:
+        return False
+    observed = {
+        row.get("path"): row.get("sha256")
+        for row in manifest["observations"]
+        if (
+            isinstance(row, dict)
+            and set(row) == {"path", "sha256", "bytes"}
+            and isinstance(row.get("path"), str)
+            and bool(row["path"])
+            and re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", ""))
+            and isinstance(row.get("bytes"), int)
+            and not isinstance(row.get("bytes"), bool)
+            and 0 <= row["bytes"] <= 100 * 1024 * 1024
+        )
+    }
+    if len(observed) != len(manifest["observations"]):
+        return False
+    claimed = []
+    for row in inspected:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+            return False
+        path = row.get("path")
+        digest = row.get("sha256")
+        if not isinstance(path, str) or observed.get(path) != digest:
+            return False
+        claimed.append(path)
+    if len(set(claimed)) != len(claimed):
+        return False
+    return (
+        isinstance(claim.get("url"), str)
+        and claim["url"] == source.get("url")
+        and isinstance(claim.get("requested_ref"), str)
+        and bool(claim["requested_ref"])
+        and claim["requested_ref"] == source.get("requestedRef")
+        and isinstance(claim.get("resolved_commit"), str)
+        and claim["resolved_commit"] == source.get("resolvedCommit")
+        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", claim["resolved_commit"])
+        is not None
+    )
+
+
+def _vision_selector_pattern(pattern):
+    if (
+        not isinstance(pattern, str)
+        or not 1 <= len(pattern) <= 256
+        or pattern.startswith("/")
+        or "\\" in pattern
+        or any(part in {"", ".", ".."} for part in pattern.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in pattern)
+    ):
+        return None
+    pieces = []
+    index = 0
+    while index < len(pattern):
+        if pattern[index : index + 3] == "**/":
+            pieces.append("(?:.*/)?")
+            index += 3
+        elif pattern[index : index + 2] == "**":
+            pieces.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            pieces.append("[^/]*")
+            index += 1
+        elif pattern[index] in {"?", "[", "]", "{", "}"}:
+            return None
+        else:
+            pieces.append(re.escape(pattern[index]))
+            index += 1
+    try:
+        return re.compile("^" + "".join(pieces) + "$")
+    except re.error:
+        return None
+
+
+def _canonical_vision_selector(selector):
+    if not isinstance(selector, dict) or len(selector) != 1:
+        return None
+    if set(selector) == {"always"}:
+        return {"always": True} if selector.get("always") is True else None
+    if set(selector) != {"changed_paths_any"}:
+        return None
+    patterns = selector.get("changed_paths_any")
+    if (
+        not isinstance(patterns, list)
+        or not 1 <= len(patterns) <= 32
+        or not all(isinstance(pattern, str) for pattern in patterns)
+        or any(_vision_selector_pattern(pattern) is None for pattern in patterns)
+    ):
+        return None
+    return {"changed_paths_any": sorted(set(patterns))}
+
+
+def serialize_triage_target_facts(facts, max_bytes=TARGET_FACTS_MAX_BYTES):
+    if (
+        not isinstance(facts, dict)
+        or not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1
+    ):
+        return None
+    payload = (
+        json.dumps(
+            facts,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    return payload if len(payload) <= max_bytes else None
+
+
+def build_triage_target_facts(
+    before, comparison, after, *, owner, repo, number, head_sha, base_sha
+):
+    expected_head = str(head_sha or "").lower()
+    expected_base = str(base_sha or "").lower()
+    expected_slug = "%s/%s" % (owner, repo)
+    if (
+        not isinstance(owner, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", owner) is None
+        or not isinstance(repo, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", repo) is None
+        or not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or re.fullmatch(r"[0-9a-f]{40}", expected_head) is None
+        or re.fullmatch(r"[0-9a-f]{40}", expected_base) is None
+    ):
+        return None
+
+    def pr_identity(value):
+        if not isinstance(value, dict):
+            return None
+        base = value.get("base")
+        head = value.get("head")
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        changed_files = value.get("changed_files")
+        if (
+            not isinstance(value.get("number"), int)
+            or isinstance(value.get("number"), bool)
+            or value.get("number") != number
+            or not isinstance(base, dict)
+            or not isinstance(head, dict)
+            or not isinstance(base_repo, dict)
+            or base_repo.get("full_name") != expected_slug
+            or str(base.get("sha") or "").lower() != expected_base
+            or str(head.get("sha") or "").lower() != expected_head
+            or not isinstance(changed_files, int)
+            or isinstance(changed_files, bool)
+            or not 1 <= changed_files <= 300
+        ):
+            return None
+        return changed_files
+
+    before_count = pr_identity(before)
+    after_count = pr_identity(after)
+    if before_count is None or after_count != before_count:
+        return None
+    if not isinstance(comparison, dict):
+        return None
+    base_commit = comparison.get("base_commit")
+    commits = comparison.get("commits")
+    files = comparison.get("files")
+    total_commits = comparison.get("total_commits")
+    if (
+        not isinstance(base_commit, dict)
+        or str(base_commit.get("sha") or "").lower() != expected_base
+        or not isinstance(commits, list)
+        or not isinstance(total_commits, int)
+        or isinstance(total_commits, bool)
+        or not 1 <= total_commits <= 250
+        or len(commits) != total_commits
+        or not isinstance(commits[-1], dict)
+        or str(commits[-1].get("sha") or "").lower() != expected_head
+        or not isinstance(files, list)
+        or len(files) != before_count
+    ):
+        return None
+    current_paths = []
+    paths = []
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        filename = item.get("filename")
+        previous = item.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if previous is not None and (not isinstance(previous, str) or not previous):
+            return None
+        current_paths.append(filename)
+        paths.append(filename)
+        if previous is not None:
+            paths.append(previous)
+    if len(set(current_paths)) != before_count:
+        return None
+    paths = sorted(set(paths))
+    if any(
+        not 1 <= len(path) <= 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        for path in paths
+    ):
+        return None
+    facts = {
+        "version": 1,
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "head_sha": expected_head,
+        "base_sha": expected_base,
+        "file_count": before_count,
+        "paths": paths,
+    }
+    return facts if serialize_triage_target_facts(facts) is not None else None
+
+
+def _trusted_triage_target_facts(target_facts_file, **expected):
+    if not target_facts_file:
+        return None
+    try:
+        if os.path.islink(target_facts_file) or not os.path.isfile(target_facts_file):
+            return None
+        if not 0 < os.path.getsize(target_facts_file) <= TARGET_FACTS_MAX_BYTES:
+            return None
+        with open(target_facts_file, "rb") as handle:
+            facts_bytes = handle.read()
+        facts = json.loads(facts_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(facts, dict) or set(facts) != {
+        "version",
+        "owner",
+        "repo",
+        "number",
+        "head_sha",
+        "base_sha",
+        "file_count",
+        "paths",
+    }:
+        return None
+    paths = facts.get("paths")
+    if (
+        facts.get("version") != 1
+        or facts.get("owner") != expected.get("owner")
+        or facts.get("repo") != expected.get("repo")
+        or facts.get("number") != expected.get("number")
+        or facts.get("head_sha") != str(expected.get("revision") or "").lower()
+        or facts.get("base_sha") != str(expected.get("base_sha") or "").lower()
+        or not isinstance(facts.get("file_count"), int)
+        or isinstance(facts.get("file_count"), bool)
+        or not 1 <= facts["file_count"] <= 300
+        or not isinstance(paths, list)
+        or not all(isinstance(path, str) for path in paths)
+        or not facts["file_count"] <= len(paths) <= 2 * facts["file_count"]
+        or paths != sorted(set(paths))
+    ):
+        return None
+    if any(
+        not 1 <= len(path) <= 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        for path in paths
+    ):
+        return None
+    digest = hashlib.sha256(facts_bytes).hexdigest()
+    if digest != str(expected.get("target_facts_sha256") or "").lower():
+        return None
+    return paths, digest
+
+
+def triage_vision_dependency_verified(
+    data, vision_file, target_facts_file, **expected
+):
+    evidence = data.get("vision_evidence") if isinstance(data, dict) else None
+    automerge = data.get("automerge") if isinstance(data, dict) else None
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "target_owner",
+        "target_repo",
+        "target_number",
+        "target_facts_sha256",
+        "vision_sha",
+        "vision_content_sha256",
+        "base_sha",
+        "target_head_sha",
+        "applicable_criteria",
+    }:
+        return None
+    if not isinstance(automerge, dict) or not vision_file:
+        return None
+    target_facts = _trusted_triage_target_facts(target_facts_file, **expected)
+    if target_facts is None:
+        return None
+    target_paths, target_facts_digest = target_facts
+    try:
+        if os.path.islink(vision_file) or not os.path.isfile(vision_file):
+            return None
+        if not 0 < os.path.getsize(vision_file) <= 40000:
+            return None
+        with open(vision_file, "rb") as handle:
+            vision_bytes = handle.read()
+        vision_text = vision_bytes.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+    content_digest = hashlib.sha256(vision_bytes).hexdigest()
+    identity = {
+        "target_owner": expected.get("owner"),
+        "target_repo": expected.get("repo"),
+        "target_number": expected.get("number"),
+        "target_facts_sha256": target_facts_digest,
+        "vision_sha": str(expected.get("vision_sha") or "").lower(),
+        "vision_content_sha256": str(
+            expected.get("vision_content_sha256") or ""
+        ).lower(),
+        "base_sha": str(expected.get("base_sha") or "").lower(),
+        "target_head_sha": str(expected.get("revision") or "").lower(),
+    }
+    if (
+        {key: evidence.get(key) for key in identity} != identity
+        or identity["vision_content_sha256"] != content_digest
+    ):
+        return None
+    declarations = re.findall(
+        r"<!--\s*wheelhouse-vision-source-dependencies:\s*(\{[^\r\n]*\})\s*-->",
+        vision_text,
+    )
+    if (
+        len(declarations) != 1
+        or vision_text.count("wheelhouse-vision-source-dependencies:") != 1
+    ):
+        return None
+    try:
+        declaration = json.loads(declarations[0])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(declaration, dict) or set(declaration) != {
+        "version",
+        "complete",
+        "criteria",
+    }:
+        return None
+    trusted_criteria = declaration.get("criteria")
+    if (
+        declaration.get("version") != 1
+        or declaration.get("complete") is not True
+        or not isinstance(trusted_criteria, list)
+        or not 1 <= len(trusted_criteria) <= 32
+    ):
+        return None
+    vision_without_declaration = vision_text.replace(declarations[0], "", 1)
+    trusted = []
+    trusted_selectors = []
+    trusted_ids = []
+    for criterion in trusted_criteria:
+        if not isinstance(criterion, dict) or set(criterion) != {
+            "id",
+            "quote_sha256",
+            "external_source_required",
+            "selector",
+        }:
+            return None
+        criterion_id = criterion.get("id")
+        if (
+            not isinstance(criterion_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", criterion_id) is None
+            or not re.fullmatch(r"[0-9a-f]{64}", criterion.get("quote_sha256", ""))
+            or not isinstance(criterion.get("external_source_required"), bool)
+        ):
+            return None
+        selector = _canonical_vision_selector(criterion.get("selector"))
+        if selector is None:
+            return None
+        trusted_ids.append(criterion_id)
+        trusted.append(criterion)
+        trusted_selectors.append(selector)
+    if len(set(trusted_ids)) != len(trusted_ids):
+        return None
+    selector_dependencies = {}
+    applicable_trusted = []
+    for criterion, selector in zip(trusted, trusted_selectors):
+        selector_key = json.dumps(selector, sort_keys=True, separators=(",", ":"))
+        dependency = criterion["external_source_required"]
+        if (
+            selector_key in selector_dependencies
+            and selector_dependencies[selector_key] is not dependency
+        ):
+            return None
+        selector_dependencies[selector_key] = dependency
+        if "always" in selector:
+            matches = True
+        else:
+            compiled = [
+                _vision_selector_pattern(pattern)
+                for pattern in selector["changed_paths_any"]
+            ]
+            matches = any(
+                matcher.fullmatch(path) is not None
+                for matcher in compiled
+                for path in target_paths
+            )
+        if matches:
+            applicable_trusted.append(criterion)
+    applicable = evidence.get("applicable_criteria")
+    if (
+        not applicable_trusted
+        or not isinstance(applicable, list)
+        or len(applicable) != len(applicable_trusted)
+    ):
+        return None
+    quotes = []
+    for criterion, trusted_criterion in zip(applicable, applicable_trusted):
+        if not isinstance(criterion, dict) or set(criterion) != {
+            "id",
+            "quote",
+            "external_source_required",
+        }:
+            return None
+        quote = criterion.get("quote")
+        if (
+            criterion.get("id") != trusted_criterion["id"]
+            or not isinstance(quote, str)
+            or not 8 <= len(quote) <= 500
+            or vision_without_declaration.count(quote) != 1
+            or hashlib.sha256(quote.encode("utf-8")).hexdigest()
+            != trusted_criterion["quote_sha256"]
+            or criterion.get("external_source_required")
+            is not trusted_criterion["external_source_required"]
+        ):
+            return None
+        quotes.append(quote)
+    if len(set(quotes)) != len(quotes):
+        return None
+    external_required = any(
+        criterion["external_source_required"] for criterion in applicable_trusted
+    )
+    if automerge.get("external_source_required") is not external_required:
+        return None
+    return external_required
+
+
+def enforce_triage_source_provenance(
+    data, provenance_file, vision_file="", target_facts_file="", **expected
+):
+    if not isinstance(data, dict):
+        return data
+    automerge = data.get("automerge")
+    if not isinstance(automerge, dict) or not (
+        _coerce_verdict_bool(automerge.get("aligns_with_vision")) is True
+        and _coerce_verdict_bool(automerge.get("recommend_merge")) is True
+    ):
+        return data
+    external_required = triage_vision_dependency_verified(
+        data, vision_file, target_facts_file, **expected
+    )
+    if external_required is False:
+        return data
+    if (
+        external_required is True
+        and expected
+        and triage_source_provenance_verified(data, provenance_file, **expected)
+    ):
+        return data
+    bounded = dict(data)
+    bounded_automerge = dict(automerge)
+    for field in ("aligns_with_vision", "recommend_merge"):
+        bounded_automerge.pop(field, None)
+    bounded["automerge"] = bounded_automerge
+    return bounded
+
+
 def _coerce_verdict_bool(value):
     """Strict-ish boolean coercion for the auto-merge behavior verdict: accept a
     real JSON boolean or the strings 'true'/'false'; anything else is None so the
@@ -1335,6 +1909,9 @@ def normalize_automerge_verdict(data):
     }
     if all(value is not None for value in vision_fields.values()):
         verdict.update(vision_fields)
+    source_required = _coerce_verdict_bool(data.get("external_source_required"))
+    if source_required is not None:
+        verdict["external_source_required"] = source_required
     return verdict
 
 
@@ -4812,6 +5389,8 @@ def triage_schema_reason(text):
 # content even if the candidate stuffs content into an unexpected key.
 _KNOWN_TRIAGE_KEYS = TRIAGE_FIELDS + (
     EVIDENCE_FIELD,
+    "vision_evidence",
+    "source_provenance",
     "recommended_action",
     "recommended_reason",
     "recommended_next_step",
@@ -4871,6 +5450,10 @@ def _repair_schema_lines(kind):
             'If (and ONLY if) your candidate already contained an "automerge"',
             "object, include it unchanged as an additional key. Do not add one",
             "that was not already there.",
+            'If the candidate contained "source_provenance", include that object',
+            "unchanged too. Never invent or alter source provenance.",
+            'If the candidate contained "vision_evidence", include that object',
+            "unchanged too. Never invent or alter VISION evidence.",
         ]
     return lines
 
@@ -4949,7 +5532,14 @@ def plan_triage_repair(result_text, kind):
 
 
 def decide_triage_apply(
-    result_text, repaired_text, target_file, repair_claim_admitted=None
+    result_text,
+    repaired_text,
+    target_file,
+    repair_claim_admitted=None,
+    source_provenance_file="",
+    vision_file="",
+    target_facts_file="",
+    source_provenance_expected=None,
 ):
     """Deterministic decision for the (repair-aware) triage-apply step. Returns
     `{outcome, triage, reason}` where outcome is one of:
@@ -4977,6 +5567,13 @@ def decide_triage_apply(
                 "reason": "evidence quotes did not match the fetched target",
                 "candidate": "",
             }
+        triage = enforce_triage_source_provenance(
+            triage,
+            source_provenance_file,
+            vision_file,
+            target_facts_file,
+            **(source_provenance_expected or {}),
+        )
         return {"outcome": "success", "triage": triage, "reason": "", "candidate": ""}
     if not (result_text or "").strip():
         return {"outcome": "no-result", "triage": None, "reason": "", "candidate": ""}
@@ -4989,6 +5586,13 @@ def decide_triage_apply(
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
+                repaired = enforce_triage_source_provenance(
+                    repaired,
+                    source_provenance_file,
+                    vision_file,
+                    target_facts_file,
+                    **(source_provenance_expected or {}),
+                )
                 return {
                     "outcome": "repaired",
                     "triage": repaired,
@@ -5051,6 +5655,16 @@ def main():
     rd.add_argument("--item-file", required=True)
     rd.add_argument("--out-dir", required=True)
 
+    vf = sub.add_parser("triage-target-facts")
+    vf.add_argument("--before-file", required=True)
+    vf.add_argument("--compare-file", required=True)
+    vf.add_argument("--after-file", required=True)
+    vf.add_argument("--owner", required=True)
+    vf.add_argument("--repo", required=True)
+    vf.add_argument("--number", type=int, required=True)
+    vf.add_argument("--head-sha", required=True)
+    vf.add_argument("--base-sha", required=True)
+
     ta = sub.add_parser("triage-apply")
     ta.add_argument("--issue", required=True)
     ta.add_argument("--revision", required=True)
@@ -5058,6 +5672,16 @@ def main():
     ta.add_argument("--vision-sha", default="")
     ta.add_argument("--base-sha", default="")
     ta.add_argument("--automerge-behavior-available", action="store_true")
+    ta.add_argument("--source-provenance-file", default="")
+    ta.add_argument("--vision-file", default="")
+    ta.add_argument("--target-facts-file", default="")
+    ta.add_argument("--vision-content-sha256", default="")
+    ta.add_argument("--target-facts-sha256", default="")
+    ta.add_argument("--source-review-action", default="")
+    ta.add_argument("--source-review-event-key", default="")
+    ta.add_argument("--source-review-owner", default="")
+    ta.add_argument("--source-review-repo", default="")
+    ta.add_argument("--source-review-number", type=int, default=0)
     ta.add_argument(
         "--target-file",
         default="",
@@ -5127,7 +5751,31 @@ def main():
 
     args = ap.parse_args()
 
-    if args.cmd == "upsert":
+    if args.cmd == "triage-target-facts":
+        values = []
+        for path in (args.before_file, args.compare_file, args.after_file):
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise SystemExit("target facts input is unavailable")
+            if not 0 < os.path.getsize(path) <= 8 * 1024 * 1024:
+                raise SystemExit("target facts input is invalid")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    values.append(json.load(handle))
+            except (OSError, UnicodeError, ValueError) as error:
+                raise SystemExit("target facts input is invalid") from error
+        facts = build_triage_target_facts(
+            *values,
+            owner=args.owner,
+            repo=args.repo,
+            number=args.number,
+            head_sha=args.head_sha,
+            base_sha=args.base_sha,
+        )
+        payload = serialize_triage_target_facts(facts)
+        if payload is None:
+            raise SystemExit("target facts identity or completeness check failed")
+        sys.stdout.buffer.write(payload)
+    elif args.cmd == "upsert":
         item = load_item(args.item_file)
         number = upsert_card(item, has_token=auto_triage_has_token())
         gh_output = os.environ.get("GITHUB_OUTPUT")
@@ -5166,6 +5814,21 @@ def main():
             repaired_text,
             args.target_file,
             repair_claim_admitted=repair_claim_admitted,
+            source_provenance_file=args.source_provenance_file,
+            vision_file=args.vision_file,
+            target_facts_file=args.target_facts_file,
+            source_provenance_expected={
+                "action": args.source_review_action,
+                "event_key": args.source_review_event_key,
+                "owner": args.source_review_owner,
+                "repo": args.source_review_repo,
+                "number": args.source_review_number,
+                "revision": args.revision,
+                "base_sha": args.base_sha,
+                "vision_sha": args.vision_sha,
+                "vision_content_sha256": args.vision_content_sha256,
+                "target_facts_sha256": args.target_facts_sha256,
+            },
         )
         outcome = decision["outcome"]
         applied = False

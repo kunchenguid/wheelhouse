@@ -138,6 +138,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         repository_dir=args.repository_dir,
         repository_commit=args.repository_commit,
         vision_file=args.vision_file,
+        target_facts_file=args.target_facts_file,
+        base_sha=args.base_sha,
+        vision_sha=args.vision_sha,
         allow_automerge_behavior=args.allow_automerge_behavior,
         require_vision_fields=args.require_vision_fields,
         repair_kind=args.repair_kind,
@@ -397,6 +400,9 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--repository-dir", default="")
     build.add_argument("--repository-commit", default="")
     build.add_argument("--vision-file", default="")
+    build.add_argument("--target-facts-file", default="")
+    build.add_argument("--base-sha", default="")
+    build.add_argument("--vision-sha", default="")
     build.add_argument("--allow-automerge-behavior", action="store_true")
     build.add_argument("--require-vision-fields", action="store_true")
     build.add_argument("--repair-kind", choices=("issue", "pr"), default="pr")

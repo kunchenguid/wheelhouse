@@ -126,7 +126,7 @@ The Claude Action compatibility boundary receives only:
 The Claude model subprocess never receives `FLEET_TOKEN` or another GitHub credential with write or acting authority.
 The action no-search path receives only the model job's downscoped default token because the pinned action requires a GitHub token input.
 Search-enabled action paths may receive only the optional `READONLY_TOKEN` and the narrow `wheelhouse-search` command.
-For `nl-decision.search` only, that command also exposes the bounded anonymous `public_clone` request operation. It accepts a complete public HTTPS Git URL, retains one data-only shallow clone under `RUNNER_TEMP` for Read/Grep/Glob, and removes it in an `always()` cleanup step. The declared tool remains exactly `Bash(wheelhouse-search)`.
+For the exact `nl-decision.search` and `triage.pr.search` actions only, that command also exposes the bounded anonymous `public_clone` request operation. It accepts a complete public HTTPS Git URL plus an optional safe ref, retains one data-only shallow clone under `RUNNER_TEMP` for Read/Grep/Glob, and removes it in an `always()` cleanup step. Initial PR triage explicitly distinguishes local-only VISION criteria from criteria that require external source inspection. External-source-positive verdicts require matching exact-file SHA-256 observations and clone provenance captured in root-owned transient state outside the model's writable identity. The declared tool remains exactly `Bash(wheelhouse-search)`; cloned and package execution remain forbidden.
 Trusted card writes and target operations remain outside the model subprocess.
 
 The disabled Codex adapter keeps `READONLY_TOKEN` in a trusted host broker.

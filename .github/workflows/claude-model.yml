@@ -131,9 +131,15 @@ jobs:
           chmod 500 "$tool_dir" "$tool_dir/wheelhouse-search"
           echo "$tool_dir" >> "$GITHUB_PATH"
           echo "WHEELHOUSE_SEARCH_ALLOWED_REPOS=$ALLOWED_REPOS" >> "$GITHUB_ENV"
-          if [ "$ACTION" = "nl-decision.search" ]; then
-            echo "WHEELHOUSE_PUBLIC_CLONE_ENABLED=1" >> "$GITHUB_ENV"
-          fi
+          case "$ACTION" in
+            nl-decision.search|triage.pr.search)
+              echo "WHEELHOUSE_SEARCH_ACTION=$ACTION" >> "$GITHUB_ENV"
+              provenance_state="/run/wheelhouse-public-clone-$(python -c 'import secrets; print(secrets.token_hex(16))')"
+              sudo -n "$tool_dir/wheelhouse-search" provenance-init-root \
+                "$HANDOFF/bundle/task.json" "$provenance_state"
+              echo "WHEELHOUSE_PUBLIC_CLONE_STATE=$provenance_state" >> "$GITHUB_ENV"
+              ;;
+          esac
 
       - name: Write conservative pre-invocation checkpoint
         if: ${{ steps.hydrate.outcome == 'success' && steps.hydrate.outputs.adapter == 'claude-action-compat' }}
@@ -449,11 +455,36 @@ jobs:
           settings: '{"permissions":{"deny":["Bash","Read","Edit","Write","MultiEdit","NotebookEdit","Glob","Grep","WebFetch","WebSearch","Task"]}}'
           claude_args: "--allowedTools \"\"\n--max-turns 1\n--model claude-sonnet-4-6"
 
+      - name: Capture trusted public-clone provenance
+        if: ${{ always() && steps.hydrate.outputs.action == 'triage.pr.search' }}
+        run: |
+          set -euo pipefail
+          provenance_output="$RUNNER_TEMP/wheelhouse-model-output"
+          case "$provenance_output" in
+            "$RUNNER_TEMP"/*) ;;
+            *) exit 1 ;;
+          esac
+          rm -rf -- "$provenance_output"
+          install -d -m 700 "$provenance_output"
+          provenance_tmp="$provenance_output/.public-clone-provenance.json.tmp"
+          sudo -n "$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" provenance-export-root \
+            "$RUNNER_TEMP/wheelhouse-handoff/bundle/task.json" \
+            "$WHEELHOUSE_PUBLIC_CLONE_STATE" > "$provenance_tmp"
+          if [ -s "$provenance_tmp" ]; then
+            mv "$provenance_tmp" "$provenance_output/public-clone-provenance.json"
+          else
+            rm -f "$provenance_tmp" "$provenance_output/public-clone-provenance.json"
+          fi
+
       - name: Remove bounded public clones
-        if: ${{ always() && steps.hydrate.outputs.action == 'nl-decision.search' }}
+        if: ${{ always() && (steps.hydrate.outputs.action == 'nl-decision.search' || steps.hydrate.outputs.action == 'triage.pr.search') }}
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" cleanup
+          if [[ "${WHEELHOUSE_PUBLIC_CLONE_STATE:-}" =~ ^/run/wheelhouse-public-clone-[0-9a-f]{32}$ ]]; then
+            sudo -n "$RUNNER_TEMP/wheelhouse-tools/wheelhouse-search" \
+              provenance-cleanup-root "$WHEELHOUSE_PUBLIC_CLONE_STATE"
+          fi
 
       - id: capture
         if: ${{ always() && steps.source.outputs.match == 'true' && (steps.hydrate.outcome != 'success' || steps.hydrate.outputs.adapter == 'claude-action-compat') }}
@@ -777,6 +808,15 @@ jobs:
             fi
           fi
           cp "$task" "$NORMALIZED/task.json"
+          if [ -f "$RAW/public-clone-provenance.json" ] && [ ! -L "$RAW/public-clone-provenance.json" ]; then
+            PYTHONPATH="$HANDOFF/runtime" python - "$task" \
+              "$RAW/public-clone-provenance.json" \
+              "$NORMALIZED/public-clone-provenance.json" <<'PY'
+          import sys
+          from nl_readonly_search import export_public_clone_provenance
+          export_public_clone_provenance(*sys.argv[1:])
+          PY
+          fi
           PYTHONPATH="$HANDOFF/runtime" python - "$task" "$result" "$events" <<'PY'
           import sys
           from agent_runtime.contract import load_json_regular, verify_result_binding

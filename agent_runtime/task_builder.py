@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .limits import TARGET_FACTS_MAX_BYTES
+
 from . import API_VERSION
 from .admission import DIGEST
 from .contract import (
@@ -930,14 +932,21 @@ def _bound_output_schema(
     bound = deepcopy(schema)
     if not allow_automerge_behavior:
         bound["properties"].pop("automerge", None)
+        bound["properties"].pop("vision_evidence", None)
         return bound
     automerge = bound["properties"]["automerge"]
-    vision_fields = ("aligns_with_vision", "recommend_merge")
+    vision_fields = (
+        "aligns_with_vision",
+        "recommend_merge",
+        "external_source_required",
+    )
     if require_vision_fields:
         automerge["required"] = list(automerge["required"]) + list(vision_fields)
+        bound["required"] = list(bound["required"]) + ["vision_evidence"]
     else:
         for field in vision_fields:
             automerge["properties"].pop(field, None)
+        bound["properties"].pop("vision_evidence", None)
     return bound
 
 
@@ -1262,6 +1271,9 @@ def build_task(
     repository_dir: str = "",
     repository_commit: str = "",
     vision_file: str = "",
+    target_facts_file: str = "",
+    base_sha: str = "",
+    vision_sha: str = "",
     allow_automerge_behavior: bool = False,
     require_vision_fields: bool = False,
     repair_kind: str = "pr",
@@ -1391,8 +1403,10 @@ def build_task(
                 "bytes": provenance_size,
             }
         )
+    vision_digest = ""
     if vision_file:
         digest, size, artifact = _copy_file(Path(vision_file), bundle, 40000)
+        vision_digest = digest
         inputs.append(
             {
                 "id": "vision",
@@ -1403,6 +1417,25 @@ def build_task(
                 "trust": "trusted",
                 "mount": "read-only",
                 "maxBytes": 40000,
+                "bytes": size,
+            }
+        )
+    target_facts_digest = ""
+    if target_facts_file:
+        digest, size, artifact = _copy_file(
+            Path(target_facts_file), bundle, TARGET_FACTS_MAX_BYTES
+        )
+        target_facts_digest = digest
+        inputs.append(
+            {
+                "id": "target-facts",
+                "artifact": artifact,
+                "logicalPath": "target-facts.json",
+                "sha256": digest,
+                "mediaType": "application/json",
+                "trust": "trusted",
+                "mount": "read-only",
+                "maxBytes": TARGET_FACTS_MAX_BYTES,
                 "bytes": size,
             }
         )
@@ -1584,6 +1617,25 @@ def build_task(
             },
         },
     }
+    if base_sha or vision_sha:
+        if (
+            action not in {"triage.pr.local", "triage.pr.search"}
+            or target_kind != "pr-review"
+            or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", base_sha or "")
+            or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", vision_sha or "")
+            or not vision_digest
+            or not target_facts_digest
+            or not re.fullmatch(r"[0-9a-f]{40}", repository_commit or "")
+            or repository_commit.lower() != revision.lower()
+        ):
+            raise ArtifactError("source-review identity binding is invalid")
+        task["metadata"]["sourceReview"] = {
+            "baseSha": base_sha.lower(),
+            "visionSha": vision_sha.lower(),
+            "visionContentSha256": vision_digest,
+            "targetFactsSha256": target_facts_digest,
+            "targetRepositoryCommit": repository_commit.lower(),
+        }
     validate_contract(task, "AgentTask")
     atomic_write_json(output_path, task)
     return task
