@@ -489,7 +489,6 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA=""
-          PR_CHANGED_FILES=""
           {
             echo "<target-content repo=\"$SLUG\" number=\"$NUMBER\" kind=\"$KIND\">"
             if [ "$KIND" = "issue-triage" ]; then
@@ -521,7 +520,6 @@ jobs:
               diff_raw="diff.raw"
               if GH_TOKEN="$FLEET_TOKEN" gh api "repos/$SLUG/pulls/$NUMBER" > pr.json 2>/dev/null; then
                 BASE_SHA="$(jq -r '.base.sha // empty' pr.json)"
-                PR_CHANGED_FILES="$(jq -r 'if (.changed_files | type) == "number" then .changed_files else empty end' pr.json)"
               fi
               if printf '%s' "$BASE_SHA" | grep -Eq '^[0-9A-Fa-f]{7,64}$' \
                 && printf '%s' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{7,64}$'; then
@@ -574,25 +572,18 @@ jobs:
           AUTOMERGE_VERDICT_AVAILABLE=false
           if [ "$KIND" = "pr-review" ]; then
             if [ "$DIFF_COMPLETE" = "true" ] \
-              && printf '%s' "$PR_CHANGED_FILES" | grep -Eq '^[1-9][0-9]{0,3}$' \
-              && [ "$PR_CHANGED_FILES" -le 3000 ] \
-              && GH_TOKEN="$FLEET_TOKEN" gh api --paginate --slurp \
-                "repos/$SLUG/pulls/$NUMBER/files?per_page=100" > pr-files.json 2>/dev/null; then
+              && GH_TOKEN="$FLEET_TOKEN" gh api \
+                "repos/$SLUG/compare/$BASE_SHA...$HEAD_SHA" > compare.json 2>/dev/null \
+              && GH_TOKEN="$FLEET_TOKEN" gh api \
+                "repos/$SLUG/pulls/$NUMBER" > pr-after.json 2>/dev/null; then
               target_owner="${SLUG%%/*}"
               target_repo="${SLUG#*/}"
-              if jq -e --arg owner "$target_owner" --arg repo "$target_repo" \
-                --argjson number "$NUMBER" --arg head "${HEAD_SHA,,}" \
-                --arg base "${BASE_SHA,,}" --argjson count "$PR_CHANGED_FILES" '
-                  (if type == "array" and all(.[]; type == "array") then [.[][]] else error("pages") end) as $files |
-                  if (($files | length) == $count and all($files[];
-                    (.filename | type) == "string" and (.filename | length) > 0 and
-                    ((has("previous_filename") | not) or .previous_filename == null or
-                     ((.previous_filename | type) == "string" and (.previous_filename | length) > 0))))
-                  then {version:1, owner:$owner, repo:$repo, number:$number,
-                    head_sha:$head, base_sha:$base, file_count:$count,
-                    paths:([$files[] | .filename, (.previous_filename? // empty)] | unique)}
-                  else error("incomplete files") end
-                ' pr-files.json > target-facts.json; then
+              if python scripts/render_card.py triage-target-facts \
+                --before-file pr.json --compare-file compare.json \
+                --after-file pr-after.json --owner "$target_owner" \
+                --repo "$target_repo" --number "$NUMBER" \
+                --head-sha "$HEAD_SHA" --base-sha "$BASE_SHA" \
+                > target-facts.json; then
                 TARGET_FACTS_PRESENT=true
                 TARGET_FACTS_SHA256="$(sha256sum target-facts.json | cut -d ' ' -f1)"
               fi

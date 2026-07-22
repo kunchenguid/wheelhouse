@@ -1458,6 +1458,130 @@ def _vision_selector_pattern(pattern):
         return None
 
 
+def _canonical_vision_selector(selector):
+    if not isinstance(selector, dict) or len(selector) != 1:
+        return None
+    if set(selector) == {"always"}:
+        return {"always": True} if selector.get("always") is True else None
+    if set(selector) != {"changed_paths_any"}:
+        return None
+    patterns = selector.get("changed_paths_any")
+    if (
+        not isinstance(patterns, list)
+        or not 1 <= len(patterns) <= 32
+        or not all(isinstance(pattern, str) for pattern in patterns)
+        or any(_vision_selector_pattern(pattern) is None for pattern in patterns)
+    ):
+        return None
+    return {"changed_paths_any": sorted(set(patterns))}
+
+
+def build_triage_target_facts(
+    before, comparison, after, *, owner, repo, number, head_sha, base_sha
+):
+    expected_head = str(head_sha or "").lower()
+    expected_base = str(base_sha or "").lower()
+    expected_slug = "%s/%s" % (owner, repo)
+    if (
+        not isinstance(owner, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", owner) is None
+        or not isinstance(repo, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", repo) is None
+        or not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or re.fullmatch(r"[0-9a-f]{40}", expected_head) is None
+        or re.fullmatch(r"[0-9a-f]{40}", expected_base) is None
+    ):
+        return None
+
+    def pr_identity(value):
+        if not isinstance(value, dict):
+            return None
+        base = value.get("base")
+        head = value.get("head")
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        changed_files = value.get("changed_files")
+        if (
+            not isinstance(value.get("number"), int)
+            or isinstance(value.get("number"), bool)
+            or value.get("number") != number
+            or not isinstance(base, dict)
+            or not isinstance(head, dict)
+            or not isinstance(base_repo, dict)
+            or base_repo.get("full_name") != expected_slug
+            or str(base.get("sha") or "").lower() != expected_base
+            or str(head.get("sha") or "").lower() != expected_head
+            or not isinstance(changed_files, int)
+            or isinstance(changed_files, bool)
+            or not 1 <= changed_files <= 300
+        ):
+            return None
+        return changed_files
+
+    before_count = pr_identity(before)
+    after_count = pr_identity(after)
+    if before_count is None or after_count != before_count:
+        return None
+    if not isinstance(comparison, dict):
+        return None
+    base_commit = comparison.get("base_commit")
+    commits = comparison.get("commits")
+    files = comparison.get("files")
+    total_commits = comparison.get("total_commits")
+    if (
+        not isinstance(base_commit, dict)
+        or str(base_commit.get("sha") or "").lower() != expected_base
+        or not isinstance(commits, list)
+        or not isinstance(total_commits, int)
+        or isinstance(total_commits, bool)
+        or not 1 <= total_commits <= 250
+        or len(commits) != total_commits
+        or not isinstance(commits[-1], dict)
+        or str(commits[-1].get("sha") or "").lower() != expected_head
+        or not isinstance(files, list)
+        or len(files) != before_count
+    ):
+        return None
+    current_paths = []
+    paths = []
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        filename = item.get("filename")
+        previous = item.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if previous is not None and (not isinstance(previous, str) or not previous):
+            return None
+        current_paths.append(filename)
+        paths.append(filename)
+        if previous is not None:
+            paths.append(previous)
+    if len(set(current_paths)) != before_count:
+        return None
+    paths = sorted(set(paths))
+    if any(
+        not 1 <= len(path) <= 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        for path in paths
+    ):
+        return None
+    return {
+        "version": 1,
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "head_sha": expected_head,
+        "base_sha": expected_base,
+        "file_count": before_count,
+        "paths": paths,
+    }
+
+
 def _trusted_triage_target_facts(target_facts_file, **expected):
     if not target_facts_file:
         return None
@@ -1492,7 +1616,7 @@ def _trusted_triage_target_facts(target_facts_file, **expected):
         or facts.get("base_sha") != str(expected.get("base_sha") or "").lower()
         or not isinstance(facts.get("file_count"), int)
         or isinstance(facts.get("file_count"), bool)
-        or not 1 <= facts["file_count"] <= 3000
+        or not 1 <= facts["file_count"] <= 300
         or not isinstance(paths, list)
         or not all(isinstance(path, str) for path in paths)
         or not facts["file_count"] <= len(paths) <= 2 * facts["file_count"]
@@ -1594,6 +1718,7 @@ def triage_vision_dependency_verified(
         return None
     vision_without_declaration = vision_text.replace(declarations[0], "", 1)
     trusted = []
+    trusted_selectors = []
     trusted_ids = []
     for criterion in trusted_criteria:
         if not isinstance(criterion, dict) or set(criterion) != {
@@ -1611,32 +1736,17 @@ def triage_vision_dependency_verified(
             or not isinstance(criterion.get("external_source_required"), bool)
         ):
             return None
-        selector = criterion.get("selector")
-        if not isinstance(selector, dict) or len(selector) != 1:
-            return None
-        if set(selector) == {"always"}:
-            if selector.get("always") is not True:
-                return None
-        elif set(selector) == {"changed_paths_any"}:
-            patterns = selector.get("changed_paths_any")
-            if (
-                not isinstance(patterns, list)
-                or not 1 <= len(patterns) <= 32
-                or not all(isinstance(pattern, str) for pattern in patterns)
-                or len(set(patterns)) != len(patterns)
-                or any(_vision_selector_pattern(pattern) is None for pattern in patterns)
-            ):
-                return None
-        else:
+        selector = _canonical_vision_selector(criterion.get("selector"))
+        if selector is None:
             return None
         trusted_ids.append(criterion_id)
         trusted.append(criterion)
+        trusted_selectors.append(selector)
     if len(set(trusted_ids)) != len(trusted_ids):
         return None
     selector_dependencies = {}
     applicable_trusted = []
-    for criterion in trusted:
-        selector = criterion["selector"]
+    for criterion, selector in zip(trusted, trusted_selectors):
         selector_key = json.dumps(selector, sort_keys=True, separators=(",", ":"))
         dependency = criterion["external_source_required"]
         if (
@@ -5523,6 +5633,16 @@ def main():
     rd.add_argument("--item-file", required=True)
     rd.add_argument("--out-dir", required=True)
 
+    vf = sub.add_parser("triage-target-facts")
+    vf.add_argument("--before-file", required=True)
+    vf.add_argument("--compare-file", required=True)
+    vf.add_argument("--after-file", required=True)
+    vf.add_argument("--owner", required=True)
+    vf.add_argument("--repo", required=True)
+    vf.add_argument("--number", type=int, required=True)
+    vf.add_argument("--head-sha", required=True)
+    vf.add_argument("--base-sha", required=True)
+
     ta = sub.add_parser("triage-apply")
     ta.add_argument("--issue", required=True)
     ta.add_argument("--revision", required=True)
@@ -5609,7 +5729,30 @@ def main():
 
     args = ap.parse_args()
 
-    if args.cmd == "upsert":
+    if args.cmd == "triage-target-facts":
+        values = []
+        for path in (args.before_file, args.compare_file, args.after_file):
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise SystemExit("target facts input is unavailable")
+            if not 0 < os.path.getsize(path) <= 8 * 1024 * 1024:
+                raise SystemExit("target facts input is invalid")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    values.append(json.load(handle))
+            except (OSError, UnicodeError, ValueError) as error:
+                raise SystemExit("target facts input is invalid") from error
+        facts = build_triage_target_facts(
+            *values,
+            owner=args.owner,
+            repo=args.repo,
+            number=args.number,
+            head_sha=args.head_sha,
+            base_sha=args.base_sha,
+        )
+        if facts is None:
+            raise SystemExit("target facts identity or completeness check failed")
+        print(json.dumps(facts, sort_keys=True, separators=(",", ":")))
+    elif args.cmd == "upsert":
         item = load_item(args.item_file)
         number = upsert_card(item, has_token=auto_triage_has_token())
         gh_output = os.environ.get("GITHUB_OUTPUT")
