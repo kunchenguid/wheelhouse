@@ -140,8 +140,11 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/auto_merge.py record automerge.json automerge-valid-claims.json
 
-      # Reconcile (create, trusted reuse, refresh, activity-reflect, close) in THIS repo -
-      # default token, so backstop activity never re-triggers the handler.
+      # Reconcile card writes (create, trusted reuse, refresh, activity-reflect,
+      # close) use THIS repo's default token, so they never re-trigger the handler.
+      # Existing CI-wait refresh candidates temporarily use WHEELHOUSE_FLEET_TOKEN
+      # for one exact, complete target read, then restore the default token before
+      # any card mutation.
       - name: Reconcile the queue
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.replay_wave != '' && inputs.replay_dry_run) }}
         env:

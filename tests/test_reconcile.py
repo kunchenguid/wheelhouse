@@ -53,6 +53,16 @@ def body_state(
         "comp": comp,
         "tests": tests,
         "priority": priority,
+        "bucket": (
+            "needs-ci-approval"
+            if kind == "ci-approval"
+            else "issue-triage"
+            if kind == "issue-triage"
+            else "merge-ready"
+        ),
+        "projection_freshness": "",
+        "projection_head_sha": "",
+        "projection_complete": False,
         "updated_at": updated_at,
         "activity_reflected_at": activity_reflected_at,
     }
@@ -189,6 +199,7 @@ def run_reconcile(
     old_github_actions = os.environ.get("GITHUB_ACTIONS")
     old_event_name = os.environ.get("GITHUB_EVENT_NAME")
     old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
+    old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
     old_upsert = reconcile.render_card.upsert_card
     old_close = reconcile.render_card.close_card
     old_get_card = reconcile.render_card.get_card
@@ -207,6 +218,7 @@ def run_reconcile(
         os.environ["GITHUB_ACTIONS"] = "true"
         os.environ["GITHUB_EVENT_NAME"] = "schedule"
         os.environ["GITHUB_RUN_NUMBER"] = "100"
+        os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
         with tempfile.TemporaryDirectory() as d:
             scan_path = os.path.join(d, "scan.json")
             cards_path = os.path.join(d, "cards.json")
@@ -240,6 +252,10 @@ def run_reconcile(
             os.environ.pop("GITHUB_RUN_NUMBER", None)
         else:
             os.environ["GITHUB_RUN_NUMBER"] = old_run_number
+        if old_owner is None:
+            os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+        else:
+            os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
         reconcile.render_card.upsert_card = old_upsert
         reconcile.render_card.close_card = old_close
         reconcile.render_card.get_card = old_get_card
@@ -454,6 +470,7 @@ class ReconcileLifecycle:
         old_github_actions = os.environ.get("GITHUB_ACTIONS")
         old_event_name = os.environ.get("GITHUB_EVENT_NAME")
         old_run_number = os.environ.get("GITHUB_RUN_NUMBER")
+        old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
         reconcile.render_card._gh = self._gh
 
         def guarded_close(*args, **kwargs):
@@ -466,6 +483,7 @@ class ReconcileLifecycle:
         os.environ["GITHUB_ACTIONS"] = "true"
         os.environ["GITHUB_EVENT_NAME"] = event_name
         os.environ["GITHUB_RUN_NUMBER"] = str(self.run_number)
+        os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
         try:
             with tempfile.TemporaryDirectory() as d:
                 scan_path = os.path.join(d, "scan.json")
@@ -497,6 +515,10 @@ class ReconcileLifecycle:
                 os.environ.pop("GITHUB_RUN_NUMBER", None)
             else:
                 os.environ["GITHUB_RUN_NUMBER"] = old_run_number
+            if old_owner is None:
+                os.environ.pop("GITHUB_REPOSITORY_OWNER", None)
+            else:
+                os.environ["GITHUB_REPOSITORY_OWNER"] = old_owner
 
 
 def _body_with_absence(body, count=1, run_number=99):
@@ -803,6 +825,7 @@ def test_ci_wait_refresh_is_noop_when_card_already_current():
             "head_sha": "newsha",
             "comp": "none",
             "tests": "none",
+            "bucket": "ci-running",
             # Match a card already refreshed once by the anti-masquerade path: the
             # pending refresh item is priority `low` and carries the full default
             # option set (incl. `investigate`), so nothing material differs.

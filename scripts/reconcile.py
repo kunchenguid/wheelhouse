@@ -51,6 +51,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wheelhouse_core as core  # noqa: E402
 import render_card  # noqa: E402
+import target_observation as target_contracts  # noqa: E402
+import target_reconcile  # noqa: E402
 
 PR_KINDS = {"pr-review", "ci-approval"}
 
@@ -171,6 +173,67 @@ def _reconcile_run_number():
 # render_card.py now needs the same signal (to decide whether a brand-new
 # card is created HELD), so it is the shared single source of truth.
 auto_triage_has_token = render_card.auto_triage_has_token
+
+
+def _final_ci_wait_projection(owner, item, repo_cfg):
+    """Exact-reread and reclassify one CI-wait item under the fleet token.
+
+    Card writes run after this helper restores the default token. Every failure
+    returns an explicit unknown projection, so an old green or approval-needed
+    card cannot survive merely because the exact read failed.
+    """
+    fleet_token = os.environ.get("WHEELHOUSE_FLEET_TOKEN", "")
+    expected_head = str(item.get("head_sha") or "")
+    if not fleet_token:
+        observation = target_contracts.incomplete_observation(
+            owner,
+            item.get("repo"),
+            item.get("number"),
+            expected_head_sha=expected_head,
+            error="WHEELHOUSE_FLEET_TOKEN is unavailable for exact observation",
+        )
+    elif (
+        not isinstance(repo_cfg, dict)
+        or repo_cfg.get("name") != item.get("repo")
+    ):
+        observation = target_contracts.incomplete_observation(
+            owner,
+            item.get("repo"),
+            item.get("number"),
+            expected_head_sha=expected_head,
+            error="target repository observation policy is unavailable",
+        )
+    else:
+        previous_token = os.environ.get("GH_TOKEN")
+        os.environ["GH_TOKEN"] = fleet_token
+        try:
+            observation = core.observe_exact_pr(
+                owner, repo_cfg, item.get("number"), expected_head_sha=expected_head
+            )
+        finally:
+            if previous_token is None:
+                os.environ.pop("GH_TOKEN", None)
+            else:
+                os.environ["GH_TOKEN"] = previous_token
+    projection = target_reconcile.plan_ci_wait_projection(
+        owner, item, observation, receipt=item.get("action_receipt")
+    )
+    ref = projection.get("projection_ref") or {}
+    outcome = ref.get("freshness") or "unknown"
+    event = "complete" if observation["completeness"]["complete"] else "incomplete"
+    print(
+        "::notice::wheelhouse target.reobserve.%s %s#%s head=%s "
+        "observation=%s projection=%s"
+        % (
+            event,
+            item.get("repo"),
+            item.get("number"),
+            str(observation["revision"].get("head_sha") or "")[:12],
+            observation["observation_id"][:24],
+            outcome,
+        )
+    )
+    return projection
 
 
 def maybe_queue_auto_triage(
@@ -520,6 +583,15 @@ def main():
                     % (ex["number"], item["repo"], item["number"], str(e)[:160])
                 )
 
+    try:
+        observation_repo_configs = (core.load_config().get("repos") or {})
+    except Exception as error:
+        observation_repo_configs = {}
+        print(
+            "::warning::target observation policies are unavailable: %s"
+            % str(error)[:160]
+        )
+
     # 1b) Anti-masquerade for the approve/wait window. A PR whose fork CI was just
     #     auto-approved this scan, or whose approved checks are still running, emits
     #     NO worklist item while it awaits terminal checks - so its existing
@@ -555,8 +627,21 @@ def main():
                     and current["state"].get("kind") == item.get("kind")
                     and render_card.material_changed(item, current["state"])
                 ):
-                    refresh_result = render_card.upsert_card(
+                    # The bulk item is only an invalidation/write candidate. A
+                    # complete exact target observation, produced by the shared
+                    # observer and normal classifier under FLEET_TOKEN, is the
+                    # sole source of any final current/pending projection.
+                    projection_item = _final_ci_wait_projection(
+                        owner,
                         item,
+                        observation_repo_configs.get(item.get("repo")),
+                    )
+                    if not render_card.material_changed(
+                        projection_item, current["state"]
+                    ):
+                        continue
+                    refresh_result = render_card.upsert_card(
+                        projection_item,
                         existing=current,
                         has_token=has_triage_token,
                         preserve_reconcile_absence=True,

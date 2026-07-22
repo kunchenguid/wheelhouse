@@ -891,9 +891,14 @@ def _check_run(name, conclusion="SUCCESS"):
 
 
 def _green_rollup():
+    nodes = [_check_run("Gate"), _check_run("test")]
     return {
         "state": "SUCCESS",
-        "contexts": {"nodes": [_check_run("Gate"), _check_run("test")]},
+        "contexts": {
+            "totalCount": len(nodes),
+            "pageInfo": {"hasNextPage": False},
+            "nodes": nodes,
+        },
     }
 
 
@@ -910,6 +915,7 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True)
         "headRefName": "feature-%d" % number,
         "headRefOid": "sha%d" % number,
         "baseRefName": "main",
+        "baseRefOid": "base-main",
         "headRepository": {"name": "demo", "owner": {"login": "owner"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"totalCount": 0, "nodes": []},
@@ -927,7 +933,11 @@ def _full_pr(number, *, mergeable="MERGEABLE", cross_repo=False, has_tests=True)
                             if has_tests
                             else {
                                 "state": "SUCCESS",
-                                "contexts": {"nodes": [_check_run("Gate")]},
+                                "contexts": {
+                                    "totalCount": 1,
+                                    "pageInfo": {"hasNextPage": False},
+                                    "nodes": [_check_run("Gate")],
+                                },
                             }
                         )
                     }
@@ -1068,7 +1078,7 @@ def test_build_repo_midpage_failure_truncates():
     first = {
         "totalCount": 45,
         "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
-        "nodes": [_full_pr(i) for i in range(30)],
+        "nodes": [_full_pr(i) for i in range(1, 31)],
     }
     result, items, _ = _run_build_repo(first, pr_page_raises=True)
     check(

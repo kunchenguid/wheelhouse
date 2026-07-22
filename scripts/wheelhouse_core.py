@@ -60,6 +60,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
+import target_observation as target_contracts
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - workflows `pip install pyyaml` first
@@ -210,6 +212,34 @@ query($owner:String!, $name:String!, $number:Int!) {
   }
 }
 """
+
+# Exact, bounded target observation for Stage 1 card projection. This repeats
+# the bulk query's check-context shape so ``check_status`` remains the sole
+# reducer/classifier input. The explicit total/page metadata is load-bearing:
+# a target re-read that cannot prove the complete current-head context set is
+# an unknown observation, never a current green projection.
+PR_OBSERVATION_GQL = """
+query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      state
+      number title isDraft updatedAt isCrossRepository mergeable
+      author { login __typename }
+      headRefName headRefOid baseRefName baseRefOid
+      headRepository { name owner { login } }
+      baseRepository { name owner { login } }
+      commits(last:1) { nodes { commit { statusCheckRollup {
+        state
+        contexts(first:%d) { totalCount pageInfo { hasNextPage } nodes {
+          __typename
+          ... on CheckRun { name conclusion status }
+          ... on StatusContext { context state }
+        }}
+      }}}}
+    }
+  }
+}
+""" % STATUS_CONTEXTS_PAGE_SIZE
 
 PR_USER_CONTENT_EDITS_GQL = """
 query($owner:String!, $name:String!, $number:Int!, $after:String) {
@@ -646,6 +676,32 @@ def gh_graphql_open_pr_closing_refs_page(owner, name, after=None):
     if not repository:
         raise RuntimeError("repository %s/%s not found" % (owner, name))
     return repository["pullRequests"]
+
+
+def gh_graphql_pr(owner, name, number):
+    """Read one PR with the complete bounded check shape used by the scanner."""
+    data = _gh_graphql_data(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=" + PR_OBSERVATION_GQL,
+            "-f",
+            "owner=" + owner,
+            "-f",
+            "name=" + name,
+            "-F",
+            "number=%s" % number,
+        ]
+    )
+    repository = data["data"].get("repository")
+    if not repository:
+        raise RuntimeError("repository %s/%s not found" % (owner, name))
+    pr = repository.get("pullRequest")
+    if not pr:
+        raise RuntimeError("pull request #%s not found" % number)
+    return pr
 
 
 def gh_graphql_pr_mergeable(owner, name, number):
@@ -1380,6 +1436,241 @@ def classify(draft, comp, tests, ci, cross_repo=True, mergeable=None):
     return _with_mergeability(
         "review-needed", mergeable
     )  # comp missing-but-ci-present, or anything unmodeled
+
+
+def _pr_rollup(pr):
+    commits = ((pr.get("commits") or {}).get("nodes") or []) if isinstance(pr, dict) else []
+    if not commits:
+        return None
+    return ((commits[0].get("commit") or {}).get("statusCheckRollup"))
+
+
+def _check_observation_shape(pr):
+    """Return (complete, seen, total, phase) for the current-head rollup."""
+    rollup = _pr_rollup(pr)
+    if rollup is None:
+        return (True, 0, 0, "none")
+    contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+    if not isinstance(contexts, dict):
+        return (False, 0, 0, "unknown")
+    nodes = contexts.get("nodes")
+    total = contexts.get("totalCount")
+    seen = len(nodes) if isinstance(nodes, list) else 0
+    if (
+        isinstance(total, bool)
+        or not isinstance(total, int)
+        or total < 0
+        or total < seen
+    ):
+        total = seen
+    complete = _status_contexts_complete(contexts)
+    phase = "terminal"
+    if not complete:
+        phase = "unknown"
+    else:
+        for context in nodes:
+            if not isinstance(context, dict):
+                phase = "unknown"
+                complete = False
+                break
+            if context.get("__typename") == "CheckRun":
+                if str(context.get("status") or "").upper() != "COMPLETED":
+                    phase = "pending"
+                    break
+            elif context.get("__typename") == "StatusContext" or "context" in context:
+                if str(context.get("state") or "").upper() not in {
+                    "SUCCESS",
+                    "FAILURE",
+                    "ERROR",
+                }:
+                    phase = "pending"
+                    break
+            else:
+                phase = "unknown"
+                complete = False
+                break
+    return (complete, seen, total, phase)
+
+
+def _pr_observation_contract(
+    owner,
+    name,
+    pr,
+    *,
+    comp,
+    tests,
+    ci,
+    bucket,
+    pending_ci_approval,
+    action_required_complete,
+    observed_at,
+    source,
+    expected_head_sha="",
+    target_complete=True,
+    error="",
+):
+    """Normalize scanner/exact facts into target-observation/v1."""
+    head_sha = str(pr.get("headRefOid") or "")
+    base_sha = str(pr.get("baseRefOid") or "")
+    head_ref = str(pr.get("headRefName") or "")
+    state = str(pr.get("state") or "OPEN").upper()
+    cross_repo = _pr_is_cross_repo(pr)
+    checks_complete, contexts_seen, contexts_total, check_phase = (
+        _check_observation_shape(pr)
+    )
+    expected_match = not expected_head_sha or head_sha == str(expected_head_sha)
+    target_complete = bool(
+        target_complete
+        and pr.get("number")
+        and head_sha
+        and base_sha
+        and head_ref
+        and state in {"OPEN", "CLOSED", "MERGED"}
+        and isinstance(cross_repo, bool)
+    )
+    classification_complete = bucket != MERGEABILITY_PENDING
+    if _mergeable_is_conclusive(pr.get("mergeable")):
+        mergeability = "conclusive"
+    elif bucket in ("merge-ready", "review-needed", MERGEABILITY_PENDING):
+        mergeability = "unknown"
+    else:
+        mergeability = "not-required"
+    complete = bool(
+        target_complete
+        and checks_complete
+        and action_required_complete
+        and expected_match
+        and classification_complete
+    )
+    approval_phase = (
+        "approval-required" if pending_ci_approval else "not-required"
+    )
+    if pending_ci_approval:
+        check_phase = "pending"
+    elif check_phase == "none" and ci:
+        check_phase = "unknown"
+    return target_contracts.make_observation(
+        owner,
+        name,
+        pr.get("number"),
+        head_sha=head_sha,
+        base_sha=base_sha,
+        expected_head_sha=expected_head_sha,
+        observed_at=observed_at,
+        source=source,
+        completeness={
+            "complete": complete,
+            "target": target_complete,
+            "checks": checks_complete,
+            "action_required_runs": bool(action_required_complete),
+            "head_matches_expected": expected_match,
+            "check_contexts_seen": contexts_seen,
+            "check_contexts_total": contexts_total,
+            "mergeability": mergeability,
+        },
+        facts={
+            "open": state == "OPEN",
+            "title": str(pr.get("title") or "")[:500],
+            "author": str(_author_login(pr.get("author") or {}) or "")[:200],
+            "updated_at": str(pr.get("updatedAt") or "")[:100],
+            "draft": bool(pr.get("isDraft")),
+            "cross_repo": cross_repo,
+            "head_ref": head_ref[:300],
+            "mergeable": str(pr.get("mergeable") or "")[:100],
+            "ci": bool(ci),
+            "comp": str(comp or "unknown")[:100],
+            "tests": str(tests or "unknown")[:100],
+            "bucket": str(bucket or "ci-state-unknown")[:100],
+            "approval_phase": approval_phase,
+            "check_phase": check_phase,
+        },
+        error=error,
+    )
+
+
+def observe_exact_pr(owner, repo_cfg, number, expected_head_sha=""):
+    """Read and classify one exact PR through the production semantics.
+
+    The returned contract is always identity/time/completeness bound. Transport,
+    shape, pagination, pending-run, mergeability, or head-binding uncertainty is
+    represented as an incomplete observation instead of an exception or guess.
+    """
+    name = repo_cfg.get("name") if isinstance(repo_cfg, dict) else ""
+    observed_at = target_contracts.utc_now()
+    observed_head_sha = ""
+    try:
+        pr = gh_graphql_pr(owner, name, int(number))
+        observed_head_sha = str(pr.get("headRefOid") or "")
+        if int(pr.get("number") or 0) != int(number):
+            raise RuntimeError("exact PR response identity mismatch")
+        comp, tests, ci, _ = check_status(pr, repo_cfg)
+        cross_repo = _pr_is_cross_repo(pr)
+        pending_ci_approval = False
+        action_required_complete = True
+        pending_error = ""
+        if (
+            str(pr.get("state") or "OPEN").upper() == "OPEN"
+            and not pr.get("isDraft")
+            and cross_repo is True
+        ):
+            pending_runs, pending_error = _list_action_required_runs(
+                "%s/%s" % (owner, name),
+                pr.get("headRefName"),
+                pr.get("headRefOid"),
+            )
+            action_required_complete = not pending_error
+            pending_ci_approval = bool(pending_runs) if not pending_error else False
+        bucket = classify(
+            bool(pr.get("isDraft")),
+            comp,
+            tests,
+            ci,
+            cross_repo,
+            pr.get("mergeable"),
+        )
+        if str(pr.get("state") or "OPEN").upper() != "OPEN":
+            bucket = "target-closed"
+        elif pending_ci_approval:
+            bucket = "needs-ci-approval"
+        elif bucket in ("merge-ready", "review-needed") and _mergeable_is_unknown(
+            pr.get("mergeable")
+        ):
+            bucket = _resolve_pr_bucket(
+                owner,
+                name,
+                pr,
+                bool(pr.get("isDraft")),
+                comp,
+                tests,
+                ci,
+                cross_repo,
+            )
+        return _pr_observation_contract(
+            owner,
+            name,
+            pr,
+            comp=comp,
+            tests=tests,
+            ci=ci,
+            bucket=bucket,
+            pending_ci_approval=pending_ci_approval,
+            action_required_complete=action_required_complete,
+            observed_at=observed_at,
+            source="exact-reread",
+            expected_head_sha=expected_head_sha,
+            error=pending_error,
+        )
+    except Exception as error:
+        return target_contracts.incomplete_observation(
+            owner,
+            name or str((repo_cfg or {}).get("name") or "unknown"),
+            number,
+            expected_head_sha=expected_head_sha,
+            observed_head_sha=observed_head_sha,
+            observed_at=observed_at,
+            source="exact-reread",
+            error=str(error)[:300],
+        )
 
 
 def config_warning(repo, comp, names):
@@ -2896,66 +3187,85 @@ def _ci_safety_note(verdict):
 
 
 def _auto_approve_or_card(
-    owner, name, pr_number, posture, auto_enabled, changed_files=None
+    owner,
+    name,
+    pr_number,
+    posture,
+    auto_enabled,
+    changed_files=None,
+    expected_head_sha="",
+    initial_observation_id="",
 ):
-    """For one `needs-ci-approval` PR, decide auto-approve vs card.
+    """For one ``needs-ci-approval`` PR, decide auto-approve vs card.
 
-    Returns (handled, card_note, log_note, approve_status) where:
-      * handled=True  -> the run was auto-approved OR there is no pending run to
-        approve; emit NO card. `card_note` is unused (None) and `log_note` is
-        the audit line for the scan-step `::notice::`.
-      * handled=False -> return a card fallback; `card_note` is the safety warning
-        to surface on the card body (may be "", left EXACTLY as before), and
-        `log_note` is the per-PR outcome line for the scan-step `::warning::`.
-      * approve_status is the `approve_ci` status string when an approve was
-        attempted (`approved` / `noop` / `hold` / `error`), else None. Callers
-        use a `noop` status plus settled CONFLICTING mergeability to post the
-        existing rebase nudge before dropping the PR from the worklist - the
-        bucket stays `needs-ci-approval` (never rewritten to `needs-rebase`).
-    `log_note` ALWAYS carries the `ci_safety` verdict `reason`, plus - when an
-    approve was attempted - the `approve_ci` `status` + `message`. That is what
-    makes a silent approve failure (`error`/`hold`) impossible to hide in
-    the scan log; it is a logging string only (gh stderr/status text, never a
-    token) and does NOT change the card body.
-    Fails CLOSED: any uncertainty (unsafe verdict, hold, approve error/exception)
-    returns the caller-visible fallback outcome."""
+    Returns ``(handled, card_note, log_note, approve_status, receipt)``. Every
+    attempted approval has a versioned head-bound receipt. Changed or uncertain
+    effects explicitly invalidate approval/check/classification dimensions;
+    verified noops/holds are unchanged effects. Unsafe/disabled paths perform no
+    action and therefore emit no receipt.
+    """
     verdict = ci_safety("%s/%s" % (owner, name), str(pr_number), posture, changed_files)
     reason = verdict.get("reason", "")
     if auto_enabled and verdict["safe"]:
         try:
             status, message = approve_ci(
-                owner, name, str(pr_number), posture=posture, strict=True
+                owner,
+                name,
+                str(pr_number),
+                posture=posture,
+                strict=True,
+                expected_head_sha=expected_head_sha,
             )
         except Exception as e:  # an approve that throws must fall back to a card
             status, message = ("error", "auto-approve raised: %s" % str(e)[:160])
+        receipt = target_contracts.make_approval_receipt(
+            owner,
+            name,
+            pr_number,
+            expected_head_sha=expected_head_sha,
+            initial_observation_id=initial_observation_id,
+            status=status,
+        )
+        receipt_suffix = "; action-receipt=%s effect=%s invalidates=%s" % (
+            receipt["receipt_id"][:24],
+            receipt["effect"],
+            ",".join(receipt["invalidates"]) or "none",
+        )
         if status == "approved":
             return (
                 True,
                 None,
-                "auto-approved (%s): %s" % (reason, message),
+                "auto-approved (%s): %s%s" % (reason, message, receipt_suffix),
                 status,
+                receipt,
             )
         if status == "noop":
             return (
                 True,
                 None,
-                "verdict safe (%s); approve_ci noop: %s" % (reason, message),
+                "verdict safe (%s); approve_ci noop: %s%s"
+                % (reason, message, receipt_suffix),
                 status,
+                receipt,
             )
-        # hold / error -> fall through to caller fallback (fail-closed), keeping the why.
+        # hold / error -> caller fallback (fail-closed), keeping the why.
         card_note = "auto-approve did not complete (%s: %s)" % (status, message)
         safety_note = _ci_safety_note(verdict)
         if safety_note:
             card_note += "; " + safety_note
-        log_note = "verdict safe (%s); approve_ci %s: %s" % (reason, status, message)
-        return (False, card_note, log_note, status)
-    # Auto-approve disabled, or an unsafe verdict -> caller fallback; no approve attempted.
+        log_note = "verdict safe (%s); approve_ci %s: %s%s" % (
+            reason,
+            status,
+            message,
+            receipt_suffix,
+        )
+        return (False, card_note, log_note, status, receipt)
     log_note = "verdict %s (%s); not auto-approved%s" % (
         "safe" if verdict["safe"] else "unsafe",
         reason,
         "" if auto_enabled else " (auto-approve disabled)",
     )
-    return (False, _ci_safety_note(verdict), log_note, None)
+    return (False, _ci_safety_note(verdict), log_note, None, None)
 
 
 def _mergeable_for_ci_noop_nudge(pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNSET):
@@ -2976,25 +3286,27 @@ def _mergeable_for_ci_noop_nudge(pr, settled_mergeable=_MERGEABLE_SETTLEMENT_UNS
     return None
 
 
-def _ci_wait_refresh_item(slug, name, pr, auto_triage_enabled):
-    """A refresh-ONLY pr-review item for a PR that is mid fork-CI approval/run wait.
+def _ci_wait_refresh_item(
+    slug, name, pr, auto_triage_enabled, action_receipt=None
+):
+    """A refresh-only Stage 1 input for an existing CI-wait PR card.
 
-    When a source PR's fork CI is auto-approved this scan (or its already-approved
-    checks are still running), the PR emits NO worklist item while it awaits
-    terminal checks (`needs-ci-approval` is consumed by the auto-approve, and
-    `ci-running` is not in `NEEDS_MAINTAINER`). An EXISTING pr-review card for
-    that PR would therefore keep displaying the pre-rebase head's now-superseded
-    state - e.g. a stale `merge-ready`/`tests=green` - masquerading as current.
-    reconcile uses this item to REFRESH that existing card in place to the new
-    head's honest pending state so it can no longer masquerade after the scan
-    observes the head change. It NEVER creates a card from this item (new-card
-    creation still defers until checks are terminal) and reconcile never queues
-    triage for this transient revision. The `comp`/`tests` carried here are the
-    real scanned values at the new head (`none` when CI has not produced a
-    signal yet, or `pending` while checks run - NEVER `green`), so the refreshed
-    card visibly stops claiming a passed revision."""
+    The item carries the versioned bulk observation and optional approval
+    receipt, but reconcile must replace it with one exact post-action
+    observation before any card write. A successful receipt immediately
+    invalidates the bulk approval/check facts, so even this provisional payload
+    never repeats ``needs-ci-approval`` for the approved head.
+    """
     head = pr.get("head_sha", "") or ""
-    return {
+    observation = target_contracts.normalize_observation(
+        pr.get("target_observation")
+    )
+    receipt = target_contracts.normalize_action_receipt(action_receipt)
+    invalidated = bool(receipt and receipt.get("requires_reobservation"))
+    bucket = "ci-state-unknown" if invalidated else "ci-running"
+    comp = "unknown" if invalidated else pr["comp"]
+    tests = "unknown" if invalidated else pr["tests"]
+    item = {
         "repo": name,
         "number": pr["number"],
         "kind": "pr-review",
@@ -3002,28 +3314,33 @@ def _ci_wait_refresh_item(slug, name, pr, auto_triage_enabled):
         "updated_at": pr.get("updated_at", "") or "",
         "title": pr["title"],
         "author": pr["author"],
-        "bucket": pr["bucket"],
-        "comp": pr["comp"],
-        "tests": pr["tests"],
+        "bucket": bucket,
+        "comp": comp,
+        "tests": tests,
         "url": "https://github.com/%s/pull/%d" % (slug, pr["number"]),
-        # Temporally honest UX (card #1537): decision controls may already be
-        # published from a prior head, but current-head automatic triage is
-        # intentionally deferred on this transient ci_wait revision. Never
-        # imply a current-head triage result exists; prior-head triage does
-        # not apply. Reconcile still never queues triage here.
-        "summary": "head moved to %s - fork CI was re-approved and checks are "
-        "re-running. Automatic triage for this head is deferred until "
-        "checks finish (prior-head triage does not apply)."
-        % (head[:8] or "?"),
-        "recommendation": "Automatic triage will resume after terminal checks "
-        "if this card remains eligible. Prior-head triage does not apply to "
-        "the current head. Wait for checks to finish, then re-review.",
+        "summary": (
+            "Fork-CI state changed at head %s and requires an exact final "
+            "observation before projection. Automatic triage is deferred until "
+            "checks finish; prior-head triage does not apply."
+            % (head[:8] or "?")
+            if invalidated
+            else "Current-head checks were pending in the complete fleet scan. "
+            "An exact final observation is required before projection; automatic "
+            "triage is deferred and prior-head triage does not apply."
+        ),
+        "recommendation": "Wait for exact current-head reconciliation.",
         "priority": "low",
         "base_sha": pr.get("base_sha") or "",
-        # Item-level flag stays the repo's config for when terminal checks land;
-        # the ci_wait refresh path itself never queues triage on this revision.
         "auto_triage": auto_triage_enabled,
     }
+    if observation:
+        item["target_observation"] = observation
+        item["projection_ref"] = target_contracts.make_projection_ref(
+            observation, "unknown" if invalidated else "pending", bucket
+        )
+    if receipt:
+        item["action_receipt"] = receipt
+    return item
 
 
 def build_repo(
@@ -3089,6 +3406,9 @@ def build_repo(
     because Wheelhouse cannot prove which issues are already addressed by PRs."""
     name = repo_cfg["name"]
     slug = "%s/%s" % (owner, name)
+    # Conservative lower bound: facts may be read any time after this instant.
+    # Using scan completion would make early-page PRs look fresher than they are.
+    bulk_observed_at = target_contracts.utc_now()
     try:
         data = gh_graphql(owner, name)
     except (
@@ -3298,6 +3618,20 @@ def build_repo(
                 "mergeable": pr.get("mergeable"),
             }
         )
+        enriched[-1]["target_observation"] = _pr_observation_contract(
+            owner,
+            name,
+            pr,
+            comp=comp,
+            tests=tests,
+            ci=ci,
+            bucket=bucket,
+            pending_ci_approval=pending_ci_approval,
+            action_required_complete=True,
+            observed_at=bulk_observed_at,
+            source="bulk-scan",
+            target_complete=not pr_truncated,
+        )
         if bucket == "needs-rebase" and not author_excluded:
             _maybe_nudge_rebase(
                 slug, name, enriched[-1], maintainer_logins, arm_rebase_cleanup
@@ -3343,6 +3677,8 @@ def build_repo(
     # existing author-filter self-heal is never blocked (they never carry a
     # contributor pr-review card anyway).
     ci_just_approved = []
+    action_receipts = []
+    approved_receipts = {}
     for pr in enriched:
         if pr["bucket"] not in NEEDS_MAINTAINER:
             continue
@@ -3375,6 +3711,17 @@ def build_repo(
             # complete scan; a non-empty string is the ambiguity evidence.
             "same_closing_issue_overlap": overlap,
         }
+        initial_observation = target_contracts.normalize_observation(
+            pr.get("target_observation")
+        )
+        if initial_observation:
+            item["projection_ref"] = target_contracts.make_projection_ref(
+                initial_observation,
+                "current"
+                if initial_observation["completeness"]["complete"]
+                else "unknown",
+                item["bucket"],
+            )
         if kind == "pr-review":
             item["auto_triage"] = triage_enabled
             item["triage_attempt_cap_per_revision"] = triage_attempt_cap
@@ -3409,14 +3756,22 @@ def build_repo(
                     default_posture = repo_pr_target_posture(slug)
                 posture = default_posture
             approve_enabled = auto_enabled or author_excluded
-            handled, card_note, log_note, approve_status = _auto_approve_or_card(
-                owner,
-                name,
-                pr["number"],
-                posture,
-                approve_enabled,
-                pr.get("changed_files"),
+            handled, card_note, log_note, approve_status, action_receipt = (
+                _auto_approve_or_card(
+                    owner,
+                    name,
+                    pr["number"],
+                    posture,
+                    approve_enabled,
+                    pr.get("changed_files"),
+                    expected_head_sha=pr.get("head_sha") or "",
+                    initial_observation_id=(
+                        (pr.get("target_observation") or {}).get("observation_id") or ""
+                    ),
+                )
             )
+            if action_receipt:
+                action_receipts.append(action_receipt)
             if handled:
                 print(
                     "::notice::%s#%s %s"
@@ -3426,10 +3781,10 @@ def build_repo(
                 if approve_status == "noop" and not author_excluded:
                     ci_noop_nudge_candidates.append(pr)
                 if approve_status == "approved" and not author_excluded:
-                    # This scan just approved this fork PR's CI; its checks are now
-                    # pending. Freeze/refresh any existing card for it until those
-                    # checks reach a terminal result (see `_ci_wait_refresh_item`).
+                    # The receipt invalidates every pre-action CI projection fact.
+                    # Reconcile must exact-reread before writing this target.
                     ci_just_approved.append(pr["number"])
+                    approved_receipts[pr["number"]] = action_receipt
                 continue  # provably safe (or nothing to approve) -> NO card
             # Log exactly one per-PR outcome line so a silent approve failure
             # can never hide in the scan log. The card body itself is unchanged
@@ -3446,6 +3801,25 @@ def build_repo(
             )
             if author_excluded:
                 continue
+            if action_receipt and action_receipt.get("requires_reobservation"):
+                # An error may be partial: some POSTs can succeed before another
+                # fails. The pre-action observation is no longer current, so the
+                # fallback card is explicitly unknown rather than falsely green
+                # or approval-required. Manual approval remains head/safety bound.
+                item.update(
+                    {
+                        "bucket": "ci-state-unknown",
+                        "comp": "unknown",
+                        "tests": "unknown",
+                        "summary": "Fork-CI approval had a partial or uncertain "
+                        "effect; current target state is unknown until a complete "
+                        "re-observation.",
+                    }
+                )
+                if initial_observation:
+                    item["projection_ref"] = target_contracts.make_projection_ref(
+                        initial_observation, "unknown", item["bucket"]
+                    )
             if card_note:  # surface the safety warning on the card body / response
                 item["warning"] = card_note
             # Attach the advisory, read-only security summary of the changed
@@ -3571,10 +3945,20 @@ def build_repo(
         # reconcile can update an existing stale card to the new head's pending
         # state (never create a card, never queue triage for this revision).
         "ci_wait_refresh_items": [
-            _ci_wait_refresh_item(slug, name, enriched_by_number[n], triage_enabled)
+            _ci_wait_refresh_item(
+                slug,
+                name,
+                enriched_by_number[n],
+                triage_enabled,
+                action_receipt=approved_receipts.get(n),
+            )
             for n in ci_wait_numbers
             if n in enriched_by_number
         ],
+        # Content-free head-bound target action audit contracts. Reconcile reads
+        # the matching receipt from each refresh item; this list is retained for
+        # scan observability and future stage separation.
+        "target_action_receipts": action_receipts,
         "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
     }
@@ -5360,7 +5744,9 @@ def _list_action_required_runs(slug, head_ref, head_sha):
     return (runs, "")
 
 
-def approve_ci(owner, repo, pr, posture=None, strict=False):
+def approve_ci(
+    owner, repo, pr, posture=None, strict=False, expected_head_sha=None
+):
     """Approve fork-PR workflow runs awaiting maintainer approval.
 
     `posture` (from `repo_pr_target_posture`) is passed by the scan-time auto path
@@ -5373,6 +5759,9 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
     associations are accepted only on matching head SHA plus head branch.
     Every verified current-head run is approved, including multiple runs with
     the same workflow identity when GitHub exposes each as actionable.
+    When ``expected_head_sha`` is supplied by the scanner, the live PR must still
+    have that exact head before any approval occurs. The manual command omits it
+    and continues to act on the freshly fetched current head.
 
     Returns (status, message). status in:
       approved - one or more runs approved
@@ -5396,6 +5785,12 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
     head_sha = str(head.get("sha") or "")
     if not head_ref or not head_sha:
         return ("error", "pr fetch returned missing head ref/sha")
+    if expected_head_sha and head_sha != str(expected_head_sha):
+        return (
+            "error",
+            "#%s head changed before approval (expected %s, observed %s)"
+            % (pr, str(expected_head_sha)[:12], head_sha[:12]),
+        )
     changed_files = pr_data.get("changed_files")
     base_ref = str(base.get("ref") or "")
     default_branch = str(((base.get("repo") or {}).get("default_branch")) or "")

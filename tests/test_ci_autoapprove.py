@@ -462,7 +462,9 @@ def run_build_repo(
             return verdict(slug, pr, repo_posture, changed_files)
         return SAFE_VERDICT if verdict is None else verdict
 
-    def fake_approve(owner, name, pr, posture=None, strict=False):
+    def fake_approve(
+        owner, name, pr, posture=None, strict=False, expected_head_sha=None
+    ):
         calls["approve"].append((owner, name, pr, posture, strict))
         if approve_raises:
             raise RuntimeError("approve boom")
@@ -814,7 +816,14 @@ def test_truncated_pr_file_list_routes_to_card():
             return SimpleNamespace(returncode=0, stdout="\n".join(files), stderr="")
         raise AssertionError(cmd)
 
-    def fake_approve(owner, name, pr_number, posture=None):
+    def fake_approve(
+        owner,
+        name,
+        pr_number,
+        posture=None,
+        strict=False,
+        expected_head_sha=None,
+    ):
         calls["approve"].append((owner, name, pr_number))
         return ("approved", "approved 1 run")
 
@@ -1078,6 +1087,7 @@ def run_approve_ci(
     posture=CLEAN_POSTURE,
     strict=False,
     repo_posture=None,
+    expected_head_sha=None,
 ):
     approval_results = list(approval_results or [])
     run_details = run_details or {}
@@ -1129,10 +1139,33 @@ def run_approve_ci(
     if stub_safety:
         core.ci_safety = lambda slug, pr, posture, changed_files=None: safety_verdict
     try:
-        status, message = core.approve_ci("o", "r", "1", posture=posture, strict=strict)
+        status, message = core.approve_ci(
+            "o",
+            "r",
+            "1",
+            posture=posture,
+            strict=strict,
+            expected_head_sha=expected_head_sha,
+        )
         return status, message, calls
     finally:
         core.subprocess.run, core.ci_safety, core.repo_pr_target_posture = save
+
+
+def test_approve_ci_expected_head_mismatch_stops_before_run_discovery():
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+        expected_head_sha="different-head",
+    )
+    check("approve_ci: expected-head mismatch -> error", status == "error")
+    check(
+        "approve_ci: expected-head mismatch is explicit",
+        "head changed before approval" in message,
+    )
+    check(
+        "approve_ci: expected-head mismatch performs no run read or write",
+        calls["run_list"] == [] and calls["approved"] == [],
+    )
 
 
 def test_approve_ci_run_list_failure_returns_error():
@@ -1578,6 +1611,20 @@ def test_auto_approved_pr_is_frozen_with_antimasquerade_item():
         and refresh[0]["number"] == 7
         and refresh[0]["head_sha"] == "sha7",
     )
+    receipt = (result.get("target_action_receipts") or [{}])[0]
+    check(
+        "ci-wait: successful approval has a head-bound invalidating receipt",
+        receipt.get("schema") == "wheelhouse.target-action-receipt/v1"
+        and receipt.get("expected_head_sha") == "sha7"
+        and receipt.get("effect") == "changed"
+        and receipt.get("requires_reobservation") is True
+        and refresh[0].get("action_receipt", {}).get("receipt_id")
+        == receipt.get("receipt_id"),
+    )
+    check(
+        "ci-wait: successful approval provisional payload never repeats approval-needed",
+        refresh[0].get("bucket") != "needs-ci-approval",
+    )
     check(
         "ci-wait: refresh item renders a NON-green pending state (no false green)",
         refresh and refresh[0]["comp"] != "pass" and refresh[0]["tests"] != "green",
@@ -1636,6 +1683,27 @@ def test_unsafe_carded_pr_is_not_frozen():
     check(
         "ci-wait: unsafe carded PR gets no refresh item",
         result["ci_wait_refresh_items"] == [],
+    )
+
+
+def test_uncertain_approval_receipt_invalidates_fallback_projection():
+    result, items, calls = run_build_repo(
+        [needs_ci_pr(8)], approve_result=("error", "approved 1/2; second failed")
+    )
+    receipt = (result.get("target_action_receipts") or [{}])[0]
+    check(
+        "ci-wait: uncertain approval has an unknown-effect receipt",
+        receipt.get("expected_head_sha") == "sha8"
+        and receipt.get("effect") == "unknown"
+        and receipt.get("requires_reobservation") is True,
+    )
+    check(
+        "ci-wait: uncertain approval fallback is explicit unknown, not current approval",
+        len(items) == 1
+        and items[0].get("bucket") == "ci-state-unknown"
+        and items[0].get("comp") == "unknown"
+        and items[0].get("tests") == "unknown"
+        and (items[0].get("projection_ref") or {}).get("freshness") == "unknown",
     )
 
 
@@ -1798,6 +1866,7 @@ def main():
     test_carded_approve_exception_is_logged()
     test_carded_unsafe_verdict_is_logged_without_approve_status()
     test_carded_disabled_auto_approve_is_logged()
+    test_approve_ci_expected_head_mismatch_stops_before_run_discovery()
     test_approve_ci_run_list_failure_returns_error()
     test_approve_ci_invalid_run_list_returns_error()
     test_approve_ci_any_failed_post_returns_error()
@@ -1823,6 +1892,7 @@ def main():
     test_auto_approved_pr_is_frozen_with_antimasquerade_item()
     test_ci_running_pr_is_frozen()
     test_unsafe_carded_pr_is_not_frozen()
+    test_uncertain_approval_receipt_invalidates_fallback_projection()
     test_noop_ci_approval_is_not_frozen()
     test_author_excluded_approved_pr_is_not_frozen()
     test_merge_ready_pr_is_not_frozen()

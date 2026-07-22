@@ -148,7 +148,9 @@ def run_build_repo(
             "auto_approve_ci": auto_approve_ci,
         }
 
-    def fake_approve(owner, name, pr, posture=None, strict=False):
+    def fake_approve(
+        owner, name, pr, posture=None, strict=False, expected_head_sha=None
+    ):
         calls["approve"].append(pr)
         return approve_result
 

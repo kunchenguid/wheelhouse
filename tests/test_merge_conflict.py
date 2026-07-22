@@ -209,7 +209,9 @@ def run_build_repo(
             "reason": "clean",
         }
 
-    def fake_approve(owner, name, pr, posture=None, strict=False):
+    def fake_approve(
+        owner, name, pr, posture=None, strict=False, expected_head_sha=None
+    ):
         calls["approve"].append((owner, name, pr, posture, strict))
         return approve_result
 
