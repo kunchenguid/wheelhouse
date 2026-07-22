@@ -37,15 +37,20 @@ still appears where it's plain English, e.g. "triage the queue".)
   `priority:*`). A hidden
   `<!-- wheelhouse-state: {...} -->` block in each card body carries
   `{repo, number, kind, head_sha, options}` plus the material fields
-  `{comp, tests, priority}` (the latter three added so a refresh can cheaply and
-  deterministically decide "did this target materially change?" - see "Card
-  refresh" in Sharp edges). `options` is also material for refresh comparison,
+  `{comp, tests, priority, bucket, projection_freshness, projection_head_sha,
+  projection_complete}` so a refresh can cheaply and deterministically decide
+  "did this target or its current-tense projection contract materially change?"
+  - see "Card refresh" in Sharp edges. `options` is also material for refresh comparison,
   but is normalized as a sorted set so checkbox reordering alone does not
   refresh the card. The state block also carries `updated_at` unconditionally
   (populated for issue-triage items, empty for pr-review) - it is NON-material,
   existing as the issue-triage auto-triage cache key and strict newer-only
   deterministic refresh stamp, mirroring how `head_sha` doubles as the
-  pr-review cache key. The state block also carries
+  pr-review cache key. PR cards may also carry a versioned, non-churn-triggering
+  `projection_ref` with observation ID/time/source, target/head identity,
+  completeness, freshness, and bucket. Its semantic head/completeness/freshness/
+  bucket dimensions are the material fields above; a newer observation ID/time
+  alone does not rewrite an otherwise unchanged card. The state block also carries
   `activity_reflected_at`, a NON-material target-activity sort stamp. When a
   target's GitHub `updatedAt` advances past that stamp, Wheelhouse may make one
   hidden state-only card body edit so GitHub's `sort:updated-desc` issue view
@@ -152,6 +157,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   `auto-triage-enabled`, `auto-triage-issues-enabled`, `qualify_issue_refs`
   (rewrites a bare GitHub-autolink `#N` in model text to `owner/repo#N` - see
   "Cross-repo reference qualification" in Sharp edges)),
+  `target_observation.py` (pure versioned exact/bulk observation, head-bound
+  approval receipt, and compact projection-reference contracts),
+  `target_reconcile.py` (pure CI-wait observation + receipt -> current/pending/
+  unknown projection planner; no GitHub calls or Markdown),
   `render_card.py` (render + card CRUD, including the shared strict closed-card
   lookup/trust/reuse operation used by both ingest and reconcile;
   `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
@@ -272,9 +281,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   block, so the handler treats it as a no-op.)
 - **Card refresh (an open card must reflect CURRENT target state).** Both the
   event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) keep a
-  card current: when a target's MATERIAL state changes - `head_sha`, compliance
-  (`comp`), tests (`tests`), `kind`, `priority`, or checkbox `options` - the
-  card is re-rendered in place. Exact deterministic card-title drift is also a
+  card current: when a target's MATERIAL state changes - `head_sha`, bucket,
+  compliance (`comp`), tests (`tests`), projection freshness/head/completeness,
+  `kind`, `priority`, or checkbox `options` - the card is re-rendered in place.
+  Observation ID/time are persisted in `projection_ref` but intentionally do not
+  trigger churn when every semantic dimension is unchanged. Exact deterministic card-title drift is also a
   trigger for every kind, using the renderer's same 70-character truncation,
   while summary/recommendation remain non-triggers. A valid strictly newer
   issue-triage `updated_at` is a full-refresh trigger when the advisory queued
@@ -876,11 +887,14 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Approve safe fork CI, wait for terminal checks, then classify.**
   `build_repo` reports freshly approved and `ci-running` contributor PRs in `ci_wait_pr_numbers`, and reconcile freezes their existing `PR_KINDS` cards against self-heal consumption just like `indeterminate_pr_numbers`.
   Author-excluded, unsafe or unverifiable, and verified-noop PRs are not frozen; approval eligibility remains the shared `ci_safety` verdict plus head verification.
-  `ci_wait_refresh_items` are refresh-only `pr-review` items: reconcile may use one to update an existing same-kind pure `needs-decision` card to the observed head's non-green state, but must never create a card or queue triage for that transient revision. The refresh summary/recommendation explicitly say automatic triage for the current head is deferred until terminal checks and that prior-head triage does not apply (card #1537 UX).
-  Terminal checks release the freeze and resume normal classification.
+  `ci_wait_refresh_items` are refresh-only `pr-review` invalidation candidates: reconcile may use one to update an existing same-kind pure `needs-decision` card, but must never create a card or queue triage for that transient revision.
+  The bulk scan attaches `wheelhouse.target-observation/v1`; every attempted approval also emits a head-bound `wheelhouse.target-action-receipt/v1`. Approved or uncertain effects invalidate approval phase, check phase, comp, tests, and bucket. The provisional item therefore never repeats `needs-ci-approval` after a successful receipt.
+  Before any existing CI-wait card write, reconcile re-reads the exact PR under `WHEELHOUSE_FLEET_TOKEN` through `wheelhouse_core.observe_exact_pr`, which uses the same complete-context `check_status` reduction, independent action-required enumeration, and normal classifier as scan. It restores the default card token before `render_card.upsert_card`; card snapshot CAS remains unchanged.
+  A complete terminal reread uses normal classification; a complete non-terminal reread projects `ci-running` with an as-of time. Incomplete, failed, ambiguous, or expected-head-mismatched reads project explicit `ci-state-unknown`/unknown values against the actually observed head and never claim current green or current approval-needed state. A successful same-head approval receipt can never project `needs-ci-approval`.
+  The rendered card persists `wheelhouse.card-projection-ref/v1` and visible current/pending/unknown as-of wording. Terminal checks observed on the next bulk scan still release the freeze and resume normal triage/lifecycle handling.
   Wheelhouse can first observe a target head change through the best-effort hourly `scan-backstop` or an optional source-repo `repository_dispatch`; neither is guaranteed before the next scan.
   At or after the first successful observation-driven refresh, a card cannot display the old head as current; before then, and after a failed corrective refresh, acting paths remain safe because the decision-handler rechecks the pinned head SHA.
-  See `tests/test_ci_autoapprove.py` for emission and `tests/test_reconcile.py` for refresh, freeze, and release coverage.
+  See `tests/test_ci_autoapprove.py` for receipts/emission, `tests/test_target_observation.py` for contracts/planning, `tests/test_target_reconcile_transaction.py` for production-composed timed transitions, and `tests/test_reconcile.py` for refresh, freeze, and release coverage.
 - **Merge conflicts leave the maintainer queue.**
   `wheelhouse_core.py` fetches GraphQL `pullRequests.nodes.mergeable` and treats only `CONFLICTING` as authoritative.
   An explicit `UNKNOWN` is a pending value - see the UNKNOWN-pending bullet above for the merge-ready/review-needed settlement poll and membership freeze that prevent oscillation.
@@ -1324,7 +1338,9 @@ Run the unit tests:
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_nl_schema_repair.py` - native-first NL structured output, schema-valid terminal-result admission, and bounded direct repair, no network: exact canonical `nl-decision-v1` schema binding through the pinned action; trusted acceptance of one terminal `structured_output`; missing, multiple, invalid, and dishonest-native-success denial paths; the malformed `\`-before-backtick regression; bounded, tokenless, one-turn, no-tool repair; success-on-repair routing to a real answer; still-invalid repair denial with precise retryable projection; and static workflow proof that neither runtime branch can recurse into another repair attempt.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, activity-reflection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation and current version stamp: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped with the current `render_version` on the next refresh, a render-version-behind card with an older cached automated harness status line gets it labeled exactly once, a card already at the current version with already-qualified triage is a full no-op unless target activity advances, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
-- `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, fixed-K adjacent-run soft-close lifecycle/provenance, hard-close and stale-snapshot race safety, and stale-card self-healing, no network. Also covers the #551 approve/wait freeze: a `ci_wait_pr_numbers` PR-kind card is FROZEN (never consumed), its stale-head display is refreshed to the new head's pending state via `ci_wait_refresh_items` (anti-masquerade) without ever creating a card, the refresh is a no-op once the card is already current (no churn), and the intervening workflow run invalidates any prior absence streak before terminal checks release the freeze.
+- `python tests/test_target_observation.py` - pure versioned target-observation/action-receipt/projection-reference contracts, tamper-evident identities, approval invalidation effects, and current/pending/unknown projection planning.
+- `python tests/test_target_reconcile_transaction.py` - production-composed timed fork-CI regression through `build_repo`, shared exact observer/check reduction/classifier, real reconcile/upsert/render, and the in-memory card boundary: same-scan terminal completion, still-pending current head, incomplete context list, force-push mismatch, persisted as-of identity, and fleet/card token restoration.
+- `python tests/test_reconcile.py` - reconcile routing, target-activity state-only reflection, fixed-K adjacent-run soft-close lifecycle/provenance, hard-close and stale-snapshot race safety, and stale-card self-healing, no network. Also covers the #551 approve/wait freeze: a `ci_wait_pr_numbers` PR-kind card is FROZEN (never consumed), its stale-head display is exact-reread and refreshed to pending or explicit unknown via `ci_wait_refresh_items` (anti-masquerade) without ever creating a card, the refresh is a no-op once the semantic projection is already current (no churn), and the intervening workflow run invalidates any prior absence streak before terminal checks release the freeze.
 - `python tests/test_card_reuse.py` - deterministic end-to-end coverage through the actual reconcile, renderer/upsert, triage, decision, criteria, and trusted auto-merge indexing modules with an in-memory GitHub boundary: same/new-head and CI-to-PR reuse, strict provenance/actor/identity exclusions, legacy behavior, complete pagination, mutation races, partial failures, global lifecycle serialization, post-open uniqueness rollback, unchanged auto-merge duplicate denial, and the full two-absence waiting/re-entry lifecycle.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, the contributor-fork CI-noop conflict-nudge exception (including UNKNOWN/error no-nudge and no cleanup arming), author-filter nudge skips, optional pending-contributor cleanup arming for normal `needs-rebase` nudges, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.

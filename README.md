@@ -363,10 +363,13 @@ Wheelhouse bumps a pure pending card's own updated time when the target PR or is
 That signal is target-level GitHub activity and may include owner, maintainer, or bot activity.
 For refresh, auto-triage, and self-healing, a "pure pending" card means it has `needs-decision` and lacks `processing`, `resolved`, or `blocked`.
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
-While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
+While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, classification bucket, compliance, tests, projection freshness/completeness, kind, priority, or checkbox options.
 It also refreshes when the exact rendered issue title drifts, or when an issue-triage `updatedAt` is strictly newer and no automatic-triage queued write is eligible to own that revision.
-The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an existing same-kind PR-review card to the observed head's pending state without creating a card, posting the usual target-updated comment, or queuing triage.
-The refreshed card says automatic triage for the current head is deferred until checks finish and prior-head triage does not apply; terminal checks return the PR to normal classification, triage, and refresh handling.
+The fork-CI approval wait is a scan-only exception: the bulk scan emits a versioned target observation and any approval emits a head-bound action receipt that invalidates the pre-action CI facts.
+Before an existing same-kind PR-review card is written, reconcile switches temporarily to the fleet token, performs one complete exact-target read through the shared production check reducer/classifier, restores the default card token, and projects only that final observation.
+Complete pending checks render `ci-running` with an as-of time; complete terminal checks use normal classification immediately.
+An incomplete, failed, ambiguous, or head-mismatched final read renders explicit `unknown` values and last-known wording, never current green or approval-needed state, while the card remains frozen from consumption and automatic triage remains deferred.
+Every such card persists a compact observation ID/time/head/freshness projection reference; a successful approval receipt can never project `needs-ci-approval` for the same head.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
 The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
@@ -617,8 +620,10 @@ wheelhouse.config.yml          the one file you edit
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow labels and posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
-  wheelhouse_core.py           resilient GraphQL scan/classify, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
-  render_card.py               build decision cards, including held pending-triage placeholders, auto-merge criteria, history-only workflow holds, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
+  wheelhouse_core.py           resilient GraphQL scan/classify and exact-target adapters, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
+  target_observation.py        pure versioned target-observation, approval-receipt, and card-projection-reference contracts
+  target_reconcile.py          pure exact observation + action receipt -> CI-wait card projection planner
+  render_card.py               build decision cards, including held pending-triage placeholders, observation freshness, auto-merge criteria, history-only workflow holds, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   auto_merge.py                evaluate criteria, claim, validate, merge, persist final-gate manual-merge holds, and audit strictly eligible scan-time PR auto-merges
   automerge_criteria.py        stable schema for authoritative auto-merge criterion rows
@@ -634,7 +639,9 @@ tests/test_reconcile.py        offline unit test for reconcile routing, activity
 tests/test_card_reuse.py       offline end-to-end card soft-close, trusted reuse, ambiguity, and lifecycle serialization tests
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, cleanup arming, and stale-card self-healing
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
-tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, duplicate-run approval, and logging
+tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, head-bound receipts, duplicate-run approval, and logging
+tests/test_target_observation.py offline unit test for versioned observation/receipt contracts and pure pending/current/unknown projection planning
+tests/test_target_reconcile_transaction.py production-composed timed regression for approval, same-scan completion, pending checks, incomplete reads, force pushes, and card projection
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, evidence normalization/anchoring, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation

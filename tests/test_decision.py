@@ -2148,6 +2148,10 @@ def test_merge_conflict_is_recoverable_not_durable_blocked():
         "tests": "green",
         "priority": "med",
         "options": ["merge", "close", "investigate", "hold"],
+        "bucket": "merge-ready",
+        "projection_freshness": "",
+        "projection_head_sha": "",
+        "projection_complete": False,
         "render_version": rc.CARD_RENDER_VERSION,
     }
     refreshed_item = {

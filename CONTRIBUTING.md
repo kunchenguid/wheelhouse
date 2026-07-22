@@ -49,6 +49,8 @@ python tests/test_reconcile.py
 python tests/test_merge_conflict.py
 python tests/test_pending_contributor_cleanup.py
 python tests/test_ci_autoapprove.py
+python tests/test_target_observation.py
+python tests/test_target_reconcile_transaction.py
 python tests/test_ci_security_summary.py
 python tests/test_check_status.py
 python tests/test_author_filter.py

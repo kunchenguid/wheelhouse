@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
+import target_observation as target_contracts  # noqa: E402
 from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
 
 # Quick-decision (checkbox) option keys per kind. Comment, decline, and
@@ -183,9 +184,23 @@ AUTOMERGE_WORKFLOW_HOLD_END = "<!-- wheelhouse-automerge-workflow-hold:end -->"
 SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL, AUTOMERGE_WORKFLOW_HOLD_LABEL})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
-# Exact rendered title drift is also a refresh trigger; summary/recommendation
-# updates ride along with another refresh but are not triggers.
-MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
+# ``bucket`` and the semantic projection-reference dimensions are material so a
+# current-tense classification cannot silently disagree with its persisted
+# observation contract. Observation ID/time themselves are audit references,
+# not churn triggers: a semantically unchanged scan stays a no-op.
+MATERIAL_FIELDS = (
+    "head_sha",
+    "comp",
+    "tests",
+    "kind",
+    "priority",
+    "options",
+    "bucket",
+    "projection_freshness",
+    "projection_head_sha",
+    "projection_complete",
+)
+PROJECTION_REF_FIELD = "projection_ref"
 
 # Non-material hidden timestamp used only to mirror target GitHub activity onto
 # the card issue's own updatedAt for `sort:updated-desc`.
@@ -546,11 +561,30 @@ def normalized_material_options(options):
     )
 
 
+def projection_ref_for_item(item):
+    """Return a valid projection ref that is bound to this exact item."""
+    ref = target_contracts.normalize_projection_ref(
+        (item or {}).get(PROJECTION_REF_FIELD)
+    )
+    if ref is None:
+        return None
+    target = ref["target"]
+    expected_owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    if (
+        (expected_owner and target.get("owner") != expected_owner)
+        or target.get("repo") != item.get("repo")
+        or target.get("number") != int(item.get("number") or 0)
+        or ref["revision"].get("head_sha") != str(item.get("head_sha") or "")
+        or ref.get("bucket") != str(item.get("bucket") or "")
+    ):
+        return None
+    return ref
+
+
 def material_signature(item):
-    """The material comparison signature, with the same defaults as the card
-    body/labels. Options compare as a normalized set so order-only changes do
-    not make a card stale."""
+    """The semantic material signature used for refresh decisions."""
     kind = item.get("kind", "pr-review")
+    projection = projection_ref_for_item(item)
     return {
         "head_sha": item.get("head_sha", "") or "",
         "comp": item.get("comp", "n/a"),
@@ -558,6 +592,16 @@ def material_signature(item):
         "kind": kind,
         "priority": item.get("priority", "low"),
         "options": normalized_material_options(card_options(item)),
+        "bucket": item.get("bucket", "") or "",
+        "projection_freshness": (
+            projection.get("freshness") if projection else ""
+        ),
+        "projection_head_sha": (
+            projection["revision"].get("head_sha", "") if projection else ""
+        ),
+        "projection_complete": (
+            projection.get("complete") if projection else False
+        ),
     }
 
 
@@ -2896,6 +2940,7 @@ def render(item, held=False, workflow_hold=None):
     title = (item.get("title") or "").strip() or "(no title)"
     base_options = card_options(item)
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    projection_ref = projection_ref_for_item(item)
     triage = (
         normalize_triage(item.get("triage"))
         if kind in AUTO_TRIAGE_FLAG_BY_KIND
@@ -2923,6 +2968,8 @@ def render(item, held=False, workflow_hold=None):
         "options": base_options,
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
+    if projection_ref:
+        state[PROJECTION_REF_FIELD] = projection_ref
     state["render_version"] = CARD_RENDER_VERSION
     if kind == "ci-approval" and CI_SECURITY_SUMMARY_VERSION_FIELD in item:
         state[CI_SECURITY_SUMMARY_HEAD_FIELD] = (
@@ -2974,6 +3021,25 @@ def render(item, held=False, workflow_hold=None):
     lines.append("### Situation")
     lines.append("- Compliance: `%s`" % item.get("comp", "n/a"))
     lines.append("- Tests: `%s`" % item.get("tests", "n/a"))
+    if projection_ref:
+        freshness = projection_ref["freshness"]
+        observed_at = projection_ref["observed_at"]
+        if freshness == "current":
+            lines.append(
+                "- Freshness: complete target observation as of `%s`" % observed_at
+            )
+        elif freshness == "pending":
+            lines.append(
+                "- Freshness: current-head checks were pending as of `%s`"
+                % observed_at
+            )
+        else:
+            lines.append(
+                "- Freshness: **%s** - current target state could not be "
+                "completely verified as of `%s`; approval-needed, green, and "
+                "last-known values are not current assertions."
+                % (freshness, observed_at)
+            )
     if item.get("summary"):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
