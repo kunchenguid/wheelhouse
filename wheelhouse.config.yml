@@ -19,9 +19,7 @@ repos:
     # merge". For lavish-axi this is the "raised via no-mistakes" contribution
     # gate. Set to null if you have no such gate. When set, a PR is never shown
     # as merge-ready until this check passes.
-    # Duplicate contexts with this exact name aggregate worst-wins. A GitHub
-    # rollup FAILURE/ERROR also fails closed rather than marking a PR merge-ready,
-    # even when this is null.
+    # See README setup step 2 for duplicate-context and rollup aggregation rules.
     compliance_check: "PR must be raised via no-mistakes"
     # Substrings that identify your *test* / CI checks. A PR is "tests green"
     # only when every check whose name contains one of these passes. lavish-axi
@@ -135,9 +133,9 @@ repos:
     test_check_patterns: ["build-and-test"]
 
   # -- These have CI but NO no-mistakes contribution gate, so compliance_check is
-  #    null: a PR is never withheld waiting on a gate that does not exist (a
-  #    GitHub rollup FAILURE/ERROR still fails closed). test_check_patterns match
-  #    each repo's real CI test-job check names.
+  #    null: a PR is never withheld waiting on a gate that does not exist.
+  #    GitHub rollup failures still follow README setup step 2.
+  #    test_check_patterns match each repo's real CI test-job check names.
   - name: treehouse
     # No no-mistakes gate. ci.yml ("CI") runs a Go `test` matrix
     # (ubuntu/macos/windows-latest); its separate `check` job is a gofmt/vet gate

@@ -103,7 +103,7 @@ _PR_NODE_FIELDS = """
         closingIssuesReferences(first:%d){ totalCount pageInfo { hasNextPage endCursor } nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
           state
-          contexts(first:%d){ nodes{
+          contexts(first:%d){ totalCount pageInfo { hasNextPage } nodes{
             __typename
             ... on CheckRun { name conclusion status }
             ... on StatusContext { context state }
@@ -955,12 +955,133 @@ def gh_rest(path, method=None, fields=None, jq=None, paginate=False, slurp=False
 # --------------------------------------------------------------------------- #
 # classification (ported)
 # --------------------------------------------------------------------------- #
+def _check_run_outcome(conclusion, status):
+    """Map one CheckRun to pass/fail/pending/cancelled.
+
+    CANCELLED is a distinct outcome so same-name aggregation can ignore a
+    concurrency-cancelled duplicate only when a completed SUCCESS exists for
+    that equivalent check on the current head (card #1537). Cancelled-only
+    evidence never becomes pass.
+    """
+    concl = (conclusion or "").upper()
+    st = (status or "").upper()
+    done = st == "COMPLETED" or st == ""
+    if not done:
+        return "pending"
+    if concl == "SUCCESS":
+        return "pass"
+    if concl == "CANCELLED":
+        return "cancelled"
+    if concl in ("FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"):
+        return "fail"
+    # Unknown/neutral completed conclusions wait rather than invent pass.
+    return "pending"
+
+
+def _status_context_outcome(state):
+    st = (state or "").upper()
+    if st == "SUCCESS":
+        return "pass"
+    if st == "PENDING":
+        return "pending"
+    if st in ("FAILURE", "ERROR"):
+        return "fail"
+    return "pending"
+
+
+def _reduce_check_outcomes(outcomes):
+    """Reduce outcomes for one equivalent check identity on the current head.
+
+    Order-independent. Substantive fail wins; pending waits; a completed SUCCESS
+    makes CANCELLED siblings ignorable; cancelled-only is fail (never pass).
+    """
+    if not outcomes:
+        return "pending"
+    if "fail" in outcomes:
+        return "fail"
+    if "pending" in outcomes:
+        return "pending"
+    if "pass" in outcomes:
+        return "pass"
+    if "cancelled" in outcomes:
+        return "fail"
+    return "pending"
+
+
+def _status_contexts_complete(contexts):
+    if not isinstance(contexts, dict):
+        return False
+    nodes = contexts.get("nodes")
+    page_info = contexts.get("pageInfo")
+    total_count = contexts.get("totalCount")
+    return (
+        isinstance(nodes, list)
+        and isinstance(page_info, dict)
+        and page_info.get("hasNextPage") is False
+        and type(total_count) is int
+        and total_count >= 0
+        and total_count == len(nodes)
+    )
+
+
+def _rollup_failure_only_ignorable_cancels(contexts):
+    """True when every non-pass rollup context is a CANCELLED CheckRun whose
+    same-name equivalent also has a completed SUCCESS on this head.
+
+    Used to avoid re-poisoning compliance when GitHub's aggregate rollup is
+    FAILURE solely from concurrency-cancelled duplicates (card #1537). Any
+    unaccounted failure, missing success sibling, pending run, or StatusContext
+    non-success keeps the fail-safe backstop active.
+    """
+    if not _status_contexts_complete(contexts):
+        return False
+    by_name = {}
+    for c in contexts["nodes"]:
+        if not isinstance(c, dict):
+            return False
+        if c.get("__typename") == "CheckRun":
+            name = c.get("name") or ""
+            by_name.setdefault(name, []).append(
+                _check_run_outcome(c.get("conclusion"), c.get("status"))
+            )
+        elif c.get("__typename") == "StatusContext" or "context" in c:
+            # Status contexts have no CANCELLED twin; any non-pass is unaccounted.
+            if _status_context_outcome(c.get("state")) != "pass":
+                return False
+        else:
+            return False
+    if not by_name:
+        return False
+    saw_ignorable_cancel = False
+    for outcomes in by_name.values():
+        reduced = _reduce_check_outcomes(outcomes)
+        # Every name-group must reduce to pass (success, or success + cancelled).
+        if reduced != "pass":
+            return False
+        if "pass" not in outcomes:
+            return False
+        if any(o not in ("pass", "cancelled") for o in outcomes):
+            return False
+        if "cancelled" in outcomes:
+            saw_ignorable_cancel = True
+    # Pure all-SUCCESS with rollup FAILURE still fails closed (unaccounted check).
+    # Only excuse when at least one CANCELLED sibling was actually observed.
+    return saw_ignorable_cancel
+
+
 def check_status(pr, cfg):
     """Return (compliance, tests, ci_present, names).
 
     compliance in pass/fail/pending/missing/n/a/none; tests in green/fail/pending/none.
-    Matching compliance contexts aggregate worst-wins, and a GitHub rollup
-    FAILURE/ERROR clamps an otherwise pass/n/a compliance read to fail.
+
+    Matching compliance (and same-name test) contexts aggregate by equivalent
+    check identity on the current head: substantive FAILURE/TIMED_OUT/
+    ACTION_REQUIRED/STARTUP_FAILURE still fail, pending still waits, and a
+    CANCELLED concurrency duplicate is ignored only when a completed SUCCESS
+    for that same check name exists. Cancelled-only evidence never becomes
+    pass. A GitHub rollup FAILURE/ERROR still clamps an otherwise pass/n/a
+    compliance read to fail, except when every non-pass rollup context is an
+    ignorable CANCELLED sibling of a proven SUCCESS (card #1537).
     """
     commits = pr["commits"]["nodes"]
     rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
@@ -968,90 +1089,65 @@ def check_status(pr, cfg):
         return ("none", "none", False, [])
     comp_name = cfg.get("compliance_check")
     patterns = cfg.get("test_check_patterns", []) or []
-    comp_results = []
-    tests = []
+    # Group by exact check name / status context so only truly equivalent
+    # duplicates (same head, same name) can cancel each other out. Different
+    # matrix legs (e.g. ubuntu vs macos) keep distinct names and stay independent.
+    comp_by_name = {}
+    test_by_name = {}
     names = []
-    comp_terminal_fail = (
-        "FAILURE",
-        "TIMED_OUT",
-        "CANCELLED",
-        "ACTION_REQUIRED",
-        "STARTUP_FAILURE",
-    )
     for c in rollup["contexts"]["nodes"]:
         if c["__typename"] == "CheckRun":
             name = c.get("name") or ""
             names.append(name)
-            concl = (c.get("conclusion") or "").upper()
-            status = (c.get("status") or "").upper()
-            done = status == "COMPLETED" or status == ""
+            outcome = _check_run_outcome(c.get("conclusion"), c.get("status"))
             if comp_name and name == comp_name:
-                comp_results.append(
-                    "pass"
-                    if concl == "SUCCESS"
-                    else "fail"
-                    if concl in comp_terminal_fail
-                    else "pending"
-                )
+                comp_by_name.setdefault(name, []).append(outcome)
             elif any(p in name for p in patterns):
-                tests.append(
-                    "pass"
-                    if (done and concl == "SUCCESS")
-                    else "fail"
-                    if (done and concl in ("FAILURE", "TIMED_OUT", "CANCELLED"))
-                    else "pending"
-                )
+                test_by_name.setdefault(name, []).append(outcome)
         else:  # StatusContext
             ctx = c.get("context") or ""
             names.append(ctx)
-            st = (c.get("state") or "").upper()
+            outcome = _status_context_outcome(c.get("state"))
             if comp_name and ctx == comp_name:
-                comp_results.append(
-                    "pass"
-                    if st == "SUCCESS"
-                    else "fail"
-                    if st in ("FAILURE", "ERROR")
-                    else "pending"
-                )
+                comp_by_name.setdefault(ctx, []).append(outcome)
             elif any(p in ctx for p in patterns):
-                tests.append(
-                    "pass"
-                    if st == "SUCCESS"
-                    else "pending"
-                    if st == "PENDING"
-                    else "fail"
-                )
-    # compliance is aggregated worst-wins across every context sharing
-    # comp_name, exactly like `tests` below - GitHub can return more than one
-    # check-run with the same name (e.g. a cancelled duplicate alongside the
-    # real successful run), and a scalar last-write-wins overwrite here would
-    # silently pick whichever context the API happened to return last.
+                test_by_name.setdefault(ctx, []).append(outcome)
+    # Reduce each equivalent-name group, then worst-wins across groups.
+    # Scalar last-write-wins would silently pick API order (card #392).
     if not comp_name:
         compliance = "n/a"
-    elif not comp_results:
+    elif not comp_by_name:
         compliance = "missing"
-    elif "fail" in comp_results:
-        compliance = "fail"
-    elif "pending" in comp_results:
-        compliance = "pending"
     else:
-        compliance = "pass"
-    if not tests:
+        comp_results = [
+            _reduce_check_outcomes(outcomes) for outcomes in comp_by_name.values()
+        ]
+        if "fail" in comp_results:
+            compliance = "fail"
+        elif "pending" in comp_results:
+            compliance = "pending"
+        else:
+            compliance = "pass"
+    if not test_by_name:
         tstate = "none"
-    elif "fail" in tests:
-        tstate = "fail"
-    elif "pending" in tests:
-        tstate = "pending"
     else:
-        tstate = "green"
-    # Fail-toward-safe backstop: GitHub's own authoritative rollup state is
-    # already fetched below and, until now, was never consulted. If it says
-    # the commit is not green, never let compliance come out pass/n/a-with-
-    # green-tests - deliberately conservative even though this can hold a
-    # card whose only failing check is one this config doesn't track; a false
-    # hold the owner can inspect is acceptable, a false green is not.
+        test_results = [
+            _reduce_check_outcomes(outcomes) for outcomes in test_by_name.values()
+        ]
+        if "fail" in test_results:
+            tstate = "fail"
+        elif "pending" in test_results:
+            tstate = "pending"
+        else:
+            tstate = "green"
+    # Fail-toward-safe backstop: GitHub's authoritative rollup state is
+    # FAILURE/ERROR. Never let compliance come out pass/n/a when an unaccounted
+    # failure may exist - deliberately conservative even for untracked checks.
+    # Exception: every non-pass context is an ignorable CANCELLED sibling of a
+    # proven same-name SUCCESS on this head (concurrency cancel-in-progress).
     if rollup.get("state") in ("FAILURE", "ERROR") and compliance in ("pass", "n/a"):
-        compliance = "fail"
+        if not _rollup_failure_only_ignorable_cancels(rollup.get("contexts")):
+            compliance = "fail"
     return (compliance, tstate, True, names)
 
 
@@ -2537,11 +2633,21 @@ def _ci_noop_conflict_is_current(owner, repo, pr):
 
 def _active_pending_ask_kinds(pr):
     if _is_ci_approval_cleanup_lane(pr):
-        return {"needs-rebase"} if _pr_conflicting_for_cleanup(pr) else set()
+        # Conflicting fork ci-noop: only a proven rebase nudge may remind/close.
+        if _pr_conflicting_for_cleanup(pr):
+            return {"needs-rebase"}
+        # Non-conflicting CI-approval is clear-only for answered request-changes
+        # (head move / contributor activity). It never reminds or closes.
+        return {"request-changes"}
     kinds = {"request-changes"}
     if _pr_conflicting_for_cleanup(pr):
         kinds.add("needs-rebase")
     return kinds
+
+
+def _ci_approval_clear_only(pr):
+    """Non-conflicting CI-approval: label clear only, never remind/close."""
+    return _is_ci_approval_cleanup_lane(pr) and not _pr_conflicting_for_cleanup(pr)
 
 
 def _sweep_pending_pr(
@@ -2626,6 +2732,12 @@ def _sweep_pending_pr(
             _remove_target_label(slug, number, PENDING_CONTRIBUTOR_LABEL)
         return "activity"
 
+    # Non-conflicting CI-approval is a fast security gate, not a stale-contributor
+    # close lane. After head-move / activity clears above, never remind or close
+    # here - even with a still-bound request-changes marker (card #1537).
+    if _ci_approval_clear_only(pr):
+        return "skip"
+
     reminder_at = asked_dt + timedelta(days=reminder_days)
     close_at = asked_dt + timedelta(days=cleanup_days)
     reminded = _has_reminder(
@@ -2682,17 +2794,21 @@ def sweep_pending_contributor_actions(
             continue
         conflicting = _pr_conflicting_for_cleanup(pr)
         is_ci_approval = _is_ci_approval_cleanup_lane(pr)
-        # ci-approval is a fast security gate, not a stale-contributor lane.
+        has_pending = PENDING_CONTRIBUTOR_LABEL in set(pr.get("labels") or [])
+        # ci-approval is a fast security gate, not a stale-contributor close lane.
         # The narrow ci-noop exception requires both a proven rebase nudge and a
         # conclusively conflicting cross-repo PR.
-        # A non-conflicting ci-approval PR is ignored even with a pending label,
-        # so the close path never fires without a fresh, authoritative conflict.
+        # Non-conflicting ci-approval is clear-only: enter only when a pending
+        # label (or truncated labels) is present so answered request-changes can
+        # drop the stale label after a head move / contributor activity, without
+        # ever reminding or closing (card #1537).
         if is_ci_approval and not conflicting:
-            continue
+            if not has_pending and not pr.get("labels_truncated"):
+                continue
         maybe_pending = (
             pr.get("bucket") == "needs-rebase"
             or conflicting
-            or PENDING_CONTRIBUTOR_LABEL in set(pr.get("labels") or [])
+            or has_pending
             or pr.get("labels_truncated")
         )
         if not maybe_pending:
@@ -2890,12 +3006,22 @@ def _ci_wait_refresh_item(slug, name, pr, auto_triage_enabled):
         "comp": pr["comp"],
         "tests": pr["tests"],
         "url": "https://github.com/%s/pull/%d" % (slug, pr["number"]),
-        "summary": "head moved to %s - fork CI was re-approved and its checks "
-        "are re-running; a fresh review is pending." % (head[:8] or "?"),
-        "recommendation": "Checks are re-running at the new head. Wait for them "
-        "to reach a terminal result, then re-review.",
+        # Temporally honest UX (card #1537): decision controls may already be
+        # published from a prior head, but current-head automatic triage is
+        # intentionally deferred on this transient ci_wait revision. Never
+        # imply a current-head triage result exists; prior-head triage does
+        # not apply. Reconcile still never queues triage here.
+        "summary": "head moved to %s - fork CI was re-approved and checks are "
+        "re-running. Automatic triage for this head is deferred until "
+        "checks finish (prior-head triage does not apply)."
+        % (head[:8] or "?"),
+        "recommendation": "Automatic triage will resume after terminal checks "
+        "if this card remains eligible. Prior-head triage does not apply to "
+        "the current head. Wait for checks to finish, then re-review.",
         "priority": "low",
         "base_sha": pr.get("base_sha") or "",
+        # Item-level flag stays the repo's config for when terminal checks land;
+        # the ci_wait refresh path itself never queues triage on this revision.
         "auto_triage": auto_triage_enabled,
     }
 

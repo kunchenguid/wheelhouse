@@ -952,6 +952,9 @@ def test_ci_approval_and_disabled_cleanup_are_out_of_scope():
     check("scope: disabled cleanup does nothing", closed == set())
     check("scope: disabled cleanup performs no target reads", fake.calls == [])
 
+    # Non-conflicting ci-approval with a same-head unanswered request-changes
+    # marker must never close or remind - the security-gate lane stays quiet.
+    # (Stale-label clear on head move is covered separately.)
     fake = FakeGitHub(comments=[pending_comment(record)], reviews=[review(101, ts())])
     with patch_rest(fake):
         closed = core.sweep_pending_contributor_actions(
@@ -963,8 +966,23 @@ def test_ci_approval_and_disabled_cleanup_are_out_of_scope():
             targets={"pr"},
             now=BASE + timedelta(days=14),
         )
-    check("scope: ci-approval targets are ignored even with a pending label",
-          closed == set() and fake.calls == [])
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("scope: non-conflicting ci-approval never closes", closed == set())
+    check(
+        "scope: non-conflicting ci-approval never posts reminder/close writes",
+        not any(
+            call.get("method") in ("POST", "PATCH")
+            and (
+                (call.get("path") or "").endswith("/comments")
+                or (call.get("path") or "").endswith("/issues/7")
+            )
+            for call in fake.calls
+        ),
+    )
+    check(
+        "scope: same-head unanswered request-changes keeps pending label in ci-approval",
+        core.PENDING_CONTRIBUTOR_LABEL in labels,
+    )
 
     fake = FakeGitHub(comments=[pending_comment(record)], reviews=[review(101, ts())])
     with patch_rest(fake):
@@ -1233,6 +1251,17 @@ def test_ci_noop_ignores_request_changes_markers():
           core._active_pending_ask_kinds(ci_noop_pr) == {"needs-rebase"})
     check("pr-review: request-changes remains an active ask",
           core._active_pending_ask_kinds(enriched_pr()) == {"request-changes"})
+    non_conflict_ci = enriched_pr(
+        labels=[core.PENDING_CONTRIBUTOR_LABEL],
+        bucket="needs-ci-approval",
+        kind="ci-approval",
+        mergeable="MERGEABLE",
+        cross_repo=True,
+    )
+    check(
+        "ci-approval clear-only: non-conflicting lane admits request-changes asks",
+        core._active_pending_ask_kinds(non_conflict_ci) == {"request-changes"},
+    )
 
     record = request_record()
     fake = FakeGitHub(
@@ -1244,6 +1273,121 @@ def test_ci_noop_ignores_request_changes_markers():
           closed == set())
     check("ci-noop: request-changes marker without rebase nudge performs no writes",
           not any(call["method"] for call in fake.calls))
+
+
+def test_ci_approval_lane_clears_stale_request_changes_after_head_move():
+    # Card #1537 class: request-changes armed on old head, contributor pushed,
+    # PR re-entered needs-ci-approval (non-conflicting). Cleanup must drop the
+    # stale pending-contributor label without closing or nagging.
+    record = request_record(head="oldsha")
+    fake = FakeGitHub(
+        pr_obj=pr(head="newsha"),
+        comments=[pending_comment(record)],
+        reviews=[review(101, ts())],
+    )
+    closed = run(
+        fake,
+        enriched_pr(
+            labels=[core.PENDING_CONTRIBUTOR_LABEL],
+            bucket="needs-ci-approval",
+            kind="ci-approval",
+            head="newsha",
+            mergeable="MERGEABLE",
+            cross_repo=True,
+        ),
+        now_days=14,
+    )
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("ci-approval clear: never closes after head move", closed == set())
+    check(
+        "ci-approval clear: removes stale pending label after head move",
+        core.PENDING_CONTRIBUTOR_LABEL not in labels,
+    )
+    check(
+        "ci-approval clear: never posts reminder or close comments",
+        not any(
+            call.get("method") == "POST"
+            and (call.get("path") or "").endswith("/comments")
+            for call in fake.calls
+        ),
+    )
+    check(
+        "ci-approval clear: never patches the target issue closed",
+        not any(
+            call.get("method") == "PATCH"
+            and (call.get("path") or "").endswith("/issues/7")
+            for call in fake.calls
+        ),
+    )
+
+
+def test_ci_approval_lane_clears_stale_request_changes_after_contributor_activity():
+    record = request_record(head="sha1")
+    fake = FakeGitHub(
+        pr_obj=pr(head="sha1"),
+        comments=[
+            pending_comment(record),
+            comment("fixed in latest push", ts(1), CONTRIBUTOR, 9),
+        ],
+        reviews=[review(101, ts())],
+        timeline=[timeline_event("commented", ts(1), CONTRIBUTOR)],
+    )
+    closed = run(
+        fake,
+        enriched_pr(
+            labels=[core.PENDING_CONTRIBUTOR_LABEL],
+            bucket="needs-ci-approval",
+            kind="ci-approval",
+            head="sha1",
+            mergeable="MERGEABLE",
+            cross_repo=True,
+        ),
+        now_days=14,
+    )
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check("ci-approval activity clear: never closes", closed == set())
+    check(
+        "ci-approval activity clear: removes pending label after contributor reply",
+        core.PENDING_CONTRIBUTOR_LABEL not in labels,
+    )
+
+
+def test_ci_approval_lane_does_not_close_same_head_unanswered_request_changes():
+    record = request_record(head="sha1")
+    fake = FakeGitHub(
+        pr_obj=pr(head="sha1"),
+        comments=[pending_comment(record), reminder_comment(record)],
+        reviews=[review(101, ts())],
+    )
+    closed = run(
+        fake,
+        enriched_pr(
+            labels=[core.PENDING_CONTRIBUTOR_LABEL],
+            bucket="needs-ci-approval",
+            kind="ci-approval",
+            head="sha1",
+            mergeable="MERGEABLE",
+            cross_repo=True,
+        ),
+        now_days=14,
+    )
+    labels = [item["name"] for item in fake.issue["labels"]]
+    check(
+        "ci-approval clear-only: same-head unanswered request-changes never closes",
+        closed == set(),
+    )
+    check(
+        "ci-approval clear-only: same-head unanswered request-changes keeps label",
+        core.PENDING_CONTRIBUTOR_LABEL in labels,
+    )
+    check(
+        "ci-approval clear-only: same-head unanswered request-changes never reminds",
+        not any(
+            call.get("method") == "POST"
+            and (call.get("path") or "").endswith("/comments")
+            for call in fake.calls
+        ),
+    )
 
 
 def test_widened_ci_noop_skips_when_conflict_has_resolved():
@@ -1387,6 +1531,9 @@ def main():
     test_widened_backlog_contributor_activity_fails_open()
     test_widened_ci_noop_conflicting_pr_reminds_then_closes()
     test_ci_noop_ignores_request_changes_markers()
+    test_ci_approval_lane_clears_stale_request_changes_after_head_move()
+    test_ci_approval_lane_clears_stale_request_changes_after_contributor_activity()
+    test_ci_approval_lane_does_not_close_same_head_unanswered_request_changes()
     test_widened_ci_noop_skips_when_conflict_has_resolved()
     test_ci_approval_pr_without_proven_conflicting_fork_stays_out_of_scope()
     test_conflicting_non_ci_noop_lanes_stay_out_of_scope()

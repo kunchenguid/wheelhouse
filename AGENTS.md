@@ -198,28 +198,26 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 ## Sharp edges
 
-- **`check_status()`'s `comp`/`tests` are worst-wins aggregates, never scalar
-  overwrites - card #392 was a false green from getting this wrong.**
+- **`check_status()` aggregates by equivalent check identity, never scalar
+  last-write-wins - cards #392 and #1537.**
   GitHub's GraphQL `statusCheckRollup.contexts` can return more than one
-  check-run with the SAME name (e.g. Wheelhouse's own `approve_ci` approving
-  two duplicate pending runs of one workflow, one of which then gets
-  cancelled by the workflow's own `concurrency: cancel-in-progress` group).
-  `check_status()` (`scripts/wheelhouse_core.py`) collects every context
-  matching `cfg["compliance_check"]` into a list and reduces it after the
-  loop, exactly like it already did for `tests`: any terminal non-`SUCCESS`
-  conclusion anywhere in the group -> `"fail"`; else any non-`COMPLETED`
-  context -> `"pending"`; only if every matching context is a completed
-  `SUCCESS` -> `"pass"`. A scalar last-write-wins assignment inside the loop
-  (the original bug) makes the result depend on GraphQL array order instead
-  of policy. As a fail-toward-safe backstop, `check_status()` also clamps
+  check-run with the SAME name (e.g. `concurrency: cancel-in-progress`
+  leaving CANCELLED siblings beside a completed SUCCESS on the same head).
+  `check_status()` (`scripts/wheelhouse_core.py`) groups by exact check name
+  on the current head and reduces each group: substantive
+  FAILURE/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE -> `"fail"`; any
+  non-completed -> `"pending"`; a completed SUCCESS makes same-name
+  CANCELLED siblings ignorable -> `"pass"`; cancelled-only evidence is
+  never pass. Across different names (e.g. matrix legs) results still
+  worst-wins. A scalar last-write-wins assignment inside the loop (card
+  #392) would make the result depend on GraphQL array order instead of
+  policy. As a fail-toward-safe backstop, `check_status()` also clamps
   `compliance` to `"fail"` whenever GitHub's own authoritative
   `statusCheckRollup.state` is `"FAILURE"`/`"ERROR"` and the per-context read
-  would otherwise say `"pass"`/`"n/a"` - deliberately conservative (it can
-  hold a card over an untracked/optional check the rollup counts but this
-  config doesn't), because a false hold is recoverable and a false green is
-  not. `classify()` is correct given correct inputs and was not touched; the
-  defect was entirely in how `check_status()` derived those inputs. See
-  `tests/test_check_status.py`.
+  would otherwise say `"pass"`/`"n/a"`, except when every non-pass rollup
+  context is an ignorable CANCELLED sibling of a proven same-name SUCCESS
+  (card #1537 concurrency poison). Untracked/optional failures still fail
+  closed. See `tests/test_check_status.py`.
 - **Failed decision = durable open `blocked`, never pure `needs-decision`
   (card #447), except recoverable merge conflicts.** `decision-handler.yml`
   maps `terminal_state == 'error'` onto the same label path as `blocked` (add
@@ -735,9 +733,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   Routing alone never creates or proves an ask.
   Its nudge is deliberately treated through the legacy retrofit rather than requiring cleanup state, so an unarmed nudge is not orphaned.
   `_pr_conflicting_for_cleanup` gates this widened proof path with the scan's authoritative `mergeable == CONFLICTING` result, carried in the enriched scan dict.
-  A `needs-ci-approval` PR is entered ONLY when it is authoritatively CONFLICTING this scan.
-  A non-conflicting one is ignored even with a pending label, so the fast security-gate lane is untouched and the close path is fail-closed on current conflict.
-  UNKNOWN, MERGEABLE, and None never qualify.
+  A `needs-ci-approval` PR may remind/close ONLY when it is authoritatively
+  CONFLICTING this scan (ci-noop rebase path). A non-conflicting ci-approval
+  PR is clear-only: if a pending-contributor label is present, the sweep may
+  drop it after a head move or qualifying contributor activity proves a
+  request-changes ask was answered (card #1537), but it never reminds, closes,
+  or reclassifies the PR. UNKNOWN, MERGEABLE, and None never qualify for the
+  close path.
+
   It never handles issue-triage, never runs from
   ingest, never runs in Claude/LLM paths, and never uses `READONLY_TOKEN`.
   The sweep runs inside `wheelhouse_core.py scan` under `FLEET_TOKEN`, before
@@ -873,7 +876,7 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Approve safe fork CI, wait for terminal checks, then classify.**
   `build_repo` reports freshly approved and `ci-running` contributor PRs in `ci_wait_pr_numbers`, and reconcile freezes their existing `PR_KINDS` cards against self-heal consumption just like `indeterminate_pr_numbers`.
   Author-excluded, unsafe or unverifiable, and verified-noop PRs are not frozen; approval eligibility remains the shared `ci_safety` verdict plus head verification.
-  `ci_wait_refresh_items` are refresh-only `pr-review` items: reconcile may use one to update an existing same-kind pure `needs-decision` card to the observed head's non-green state, but must never create a card or queue triage for that transient revision.
+  `ci_wait_refresh_items` are refresh-only `pr-review` items: reconcile may use one to update an existing same-kind pure `needs-decision` card to the observed head's non-green state, but must never create a card or queue triage for that transient revision. The refresh summary/recommendation explicitly say automatic triage for the current head is deferred until terminal checks and that prior-head triage does not apply (card #1537 UX).
   Terminal checks release the freeze and resume normal classification.
   Wheelhouse can first observe a target head change through the best-effort hourly `scan-backstop` or an optional source-repo `repository_dispatch`; neither is guaranteed before the next scan.
   At or after the first successful observation-driven refresh, a card cannot display the old head as current; before then, and after a failed corrective refresh, acting paths remain safe because the decision-handler rechecks the pinned head SHA.
@@ -1325,9 +1328,9 @@ Run the unit tests:
   It covers the completed-context plus separate `action_required` masking regression, fail-closed pending-run discovery, the unchanged draft/fork/author boundaries, and approval of every verified same-workflow duplicate run.
   It also asserts that the risky-file HOLD still short-circuits before run listing or approval, the advisory security summary is attached only to a carded risky contributor PR, and the #551 approve/wait freeze remains limited to freshly approved or running CI.
 - `python tests/test_ci_security_summary.py` - the advisory read-only CI-approval security summary (`ci_security_summary`), no network: the HOLD stays effective and the summary CANNOT act (every gh call is a read, `approve_ci` is never invoked); risky patterns are surfaced (`pull_request_target` + PR-head checkout, write permissions, `secrets: inherit`, referenced secret NAMES, unpinned third-party actions) while SHA-pinned actions and benign first-party workflows raise no flags; secret VALUES / verbatim file lines are never echoed and contributor values are sanitized against markdown breakout; it fails closed (unreadable/incomplete file lists and unreadable/unparseable files -> a manual-review note, never raises); composite `action.yml` files are analyzed; and the render side scopes `### Security review (advisory)` to ci-approval, frames it advisory/untrusted, keeps `security_summary` out of the state block, and never triggers a material refresh.
-- `python tests/test_check_status.py` - direct unit tests for `check_status()`'s `compliance` aggregation: two check-run contexts sharing the `compliance_check` name (one `CANCELLED`, one `SUCCESS`) yield `comp == "fail"` in both array orders (the card #392 incident - worst-wins, not last-write-wins), the `statusCheckRollup.state == "FAILURE"` backstop refuses to report `pass` even when every per-context read is `SUCCESS`, and a genuinely-green PR still classifies `comp == "pass"` / `tests == "green"`, no network. Also covers card #543's axi two-signal `test_check_patterns: ["build-and-test", "drift"]` (the JS-SDK gate plus the catalog-consistency gate, which run on disjoint paths): a docs/catalog PR with only `drift` green computes `tests == green` and classifies `merge-ready`, `drift` red/pending is not merge-ready (test worst-wins), the SDK `build-and-test` posture is byte-for-byte unchanged (red/pending blocks, green passes), and the mixed both-present case stays worst-wins.
+- `python tests/test_check_status.py` - direct, offline unit coverage for the `check_status()` aggregation invariant above, the rollup fail-closed backstop, genuinely green PRs, and card #543's disjoint axi test signals.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_pending_contributor_cleanup.py` - deterministic stale pending-contributor cleanup: config defaults/overrides, PR-only scope, reminder and close thresholds, visible-reminder requirement, close-comment wording, idempotent reminder/close behavior, keep-open, contributor activity detection, maintainer/bot non-reset behavior, head-move cleanup, fail-open timeline/edit-history/proof cases, legacy rebase marker retrofit, and CI/disabled-target exclusions, no network. Also covers the reviewed-event timestamp shape (`_timeline_event_time` reading `submitted_at`, so a maintainer/bot review no longer fails open as "reviewed event missing timestamp" and a review-caused `updated_at` bump is attributable while a truly unexplained bump still fails open), the re-read-by-id recovery (`_backfill_missing_review_times` recovering a missing review/`reviewed`-event timestamp, and a failed re-read failing open), and the widened provable-ask set (an un-armed, maintainer-reviewed, conflicting fork nudge backlog PR reminds first then closes on a later scan, still honoring keep-open and contributor-activity fail-open; and a nudged ci-noop `needs-ci-approval` PR that is authoritatively `mergeable == CONFLICTING` enters the same reminder-then-close lifecycle via `_pr_conflicting_for_cleanup`, while a non-conflicting `needs-ci-approval` PR - None/MERGEABLE/UNKNOWN - is skipped with no reads and honors keep-open).
+- `python tests/test_pending_contributor_cleanup.py` - offline coverage for the deterministic, fail-open cleanup invariant above, including thresholds, proof and activity handling, timestamp recovery, legacy rebase records, the conflicting ci-noop exception, and the non-conflicting CI-approval clear-only path.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, `activity_reflected_at` remaining non-material and being folded into queued writes, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision). Also covers the pass-by-reference `evidence` schema field (`normalize_triage` requires a non-empty string or non-empty string list, rejects missing/blank/malformed lists, and never leaks it into the rendered triage dict) and the `evidence_anchor_ok`/`_triage_evidence_verified` lazy/fabrication guard (genuine single-quoted, double-quoted, markdown-normalized, or conservative fallback target spans verify; fabricated or too-short spans are rejected; and an unreadable `target.txt` fails OPEN).
 - `python tests/test_triage_budget.py` - fully offline automatic-triage spend-guard coverage for typed cap and ceiling configuration, strict non-material attempt records, cap exhaustion, trusted by-number daily-ledger creation and verification, UTC rollover, all fail-closed ledger failures, safe reservation leakage, the sealed dispatch boundary, workflow admission, shared concurrency, and the bounded two-call schema-repair amplification.
 - `python tests/test_triage_replay.py` - fully offline operator-only replay coverage for exact-number card/source reads, strict exact-revision and identity gates, claim tombstone verification, duplicate-only re-entry, terminal-error and absent-cache recovery, admission-duplicate card projection, fail-closed malformed/mismatch matrices, dry-run zero-write behavior, reviewable wave bounds, bounded dual-written triage result records, and the two exact-cohort one-use evidence-array attempts resets with the global cap pinned at 2.

@@ -111,8 +111,8 @@ pending_contributor_cleanup_targets: ["pr"]  # PR-only MVP
 ```
 
 Wheelhouse reads every matching check context.
-If GitHub returns duplicate contexts with the same compliance check name, any failing context wins, then any pending context, and only an all-success group passes.
-GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental false green cannot make a card look merge-ready.
+If GitHub returns duplicate contexts with the same check name, any substantive failure wins, then any pending context; a completed success makes only cancelled same-name siblings ignorable, while cancelled-only evidence never passes.
+GitHub's own rollup `FAILURE` or `ERROR` also fails closed unless its complete context list proves that every non-pass context is such a cancelled sibling, so an untracked or unreadable failure cannot make a card look merge-ready.
 
 > **Heads-up - `auto_triage` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork with `CLAUDE_CODE_OAUTH_TOKEN` gets lightweight automatic PR-review summaries without another config edit.
@@ -150,7 +150,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > A run is approved only after Wheelhouse verifies it is the target PR's awaiting `action_required` run: GitHub-populated `workflow_run.pull_requests` must contain exactly that PR, and fork-originated empty associations must match the PR `head_sha` plus `head_branch`.
 > See [Security notes](#security-notes) for the exact per-run approval contract.
 > After a safe run is approved, Wheelhouse waits for its checks to finish before classifying the PR or creating a card.
-> During that wait, an existing pure PR-review card is kept open and the hourly scan refreshes it to the observed head's non-green pending state; no transient-head triage is queued.
+> During that wait, an existing pure PR-review card follows the [fork-CI approval wait](#daily-use) behavior.
 > If the approval call verifies that no matching run is awaiting approval, the scan normally emits no card and any stale CI-approval card follows the [scheduled backstop lifecycle](#daily-use).
 > For a contributor fork whose safe no-op PR is conclusively `CONFLICTING`, it also posts the existing one-per-head rebase nudge before consuming the card; it never does so for an approved run or unresolved mergeability.
 > If the mergeability settlement required for that exception errors, the repo scan is unhealthy and reconcile preserves an existing card instead.
@@ -189,8 +189,7 @@ GitHub's own rollup `FAILURE` or `ERROR` also fails closed so an accidental fals
 > When this key is absent Wheelhouse never auto-closes a target for contributor inactivity.
 > When enabled, the scheduled scan watches only PRs with a provable pending-contributor ask created by Wheelhouse: a successful `/request-changes` review or a merge-conflict rebase nudge.
 > A provable legacy rebase nudge that predates cleanup arming is eligible too, so an already-nudged conflicting PR can join the same reminder-then-close lifecycle without a new contributor-facing ask.
-> The CI-approval security lane remains out of scope except for a cross-repo `needs-ci-approval` ci-noop PR with both a provable rebase nudge and an authoritative current `CONFLICTING` mergeability result.
-> The scan re-checks that exception's mergeability immediately before a reminder or close, so a non-conflicting, `UNKNOWN`, or unreadable PR is skipped rather than acted on.
+> The [security notes](#security-notes) define the CI-approval reminder/close exception and clear-only behavior.
 > It posts one reminder at `pending_contributor_reminder_days` and closes at `pending_contributor_cleanup_days` only if the reminder already exists.
 > A rebase-specific repeat reminder uses the same visible `Automated reminder:` label as the initial conflict nudge; request-changes reminders retain their distinct wording.
 > It skips instead of closing if any required target timeline or PR edit-history read fails, if the ask marker cannot be proven, if the PR head moved, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if the target has the `wheelhouse:keep-open` label.
@@ -366,7 +365,8 @@ For refresh, auto-triage, and self-healing, a "pure pending" card means it has `
 A `pending-triage` card still counts as pure pending for those maintenance paths, but its `held` state makes checkbox, slash-command, and plain-English decisions inert until Wheelhouse publishes it.
 While a card is still a pure `needs-decision` card, a new dispatch or the hourly scan refreshes it in place when the target's material state changes: head SHA, compliance, tests, kind, priority, or checkbox options.
 It also refreshes when the exact rendered issue title drifts, or when an issue-triage `updatedAt` is strictly newer and no automatic-triage queued write is eligible to own that revision.
-The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an existing same-kind PR-review card to the observed head's pending state without creating a card, posting the usual target-updated comment, or queuing triage; terminal checks return the PR to normal classification and refresh handling.
+The fork-CI approval wait is a scan-only exception: the hourly scan refreshes an existing same-kind PR-review card to the observed head's pending state without creating a card, posting the usual target-updated comment, or queuing triage.
+The refreshed card says automatic triage for the current head is deferred until checks finish and prior-head triage does not apply; terminal checks return the PR to normal classification, triage, and refresh handling.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
 The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
@@ -443,9 +443,11 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **Pending-contributor cleanup is deterministic and fail-open.** The scheduled scan runs the stale cleanup sweep under `FLEET_TOKEN`, the same deterministic target-side context that posts normal `needs-rebase` merge-conflict nudges and approves safe fork CI.
   It never runs in a Claude path and never uses `READONLY_TOKEN`.
   It closes only PRs with a structured target-side marker plus active `wheelhouse:pending-contributor-action` label, or legacy rebase nudges whose original hidden per-head marker and timestamp can still be proven.
-  A ci-noop fork PR with `needs-ci-approval` is eligible through that legacy-nudge proof only when scan-time and pre-write mergeability reads are both conclusively `CONFLICTING`.
+  A ci-noop fork PR with `needs-ci-approval` is eligible for reminders or closing through that legacy-nudge proof only when scan-time and pre-write mergeability reads are both conclusively `CONFLICTING`.
+  A non-conflicting CI-approval PR is clear-only: a head move or qualifying contributor activity after a proven `/request-changes` ask clears its stale pending label without a reminder, close, or classification change.
   CI routing alone is never treated as a cleanup ask.
-  It also requires a prior visible reminder, an open target, no `wheelhouse:keep-open` label, the same PR head SHA, a verified original ask, and complete target timeline and PR edit-history reads.
+  Closing also requires a prior visible reminder.
+  Every reminder or close requires an open target, no `wheelhouse:keep-open` label, the same PR head SHA, a verified original ask, and complete target timeline and PR edit-history reads.
   Any uncertainty skips the close.
   Contributor comments, reviews, review comments, edits, or head pushes after the ask stop cleanup and clear the active pending label.
   Owner, configured-maintainer, and bot activity does not reset the clock.
@@ -540,7 +542,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Ledger read or write failures only warn and do not fail the run.
 - **Items look wrong (a non-compliant PR shows as merge-ready).**
   Your `compliance_check` / `test_check_patterns` don't match your actual check names.
-  Wheelhouse aggregates duplicate compliance contexts worst-wins and treats GitHub rollup `FAILURE` or `ERROR` as compliance failure, so also check for a cancelled duplicate run or an untracked required check in the PR's Checks tab.
+  Review the exact duplicate-check and rollup rules in [setup step 2](#2-edit-wheelhouseconfigyml), then check for an untracked required check in the PR's Checks tab.
   Run the `checks` helper (step 2) to see the real names, and the scan logs surface a config warning when a gate-like check is present but unconfigured.
 - **A decision didn't execute.**
   Almost always `FLEET_TOKEN` scope: it needs Actions + Contents + Issues + Pull requests (read & write) on the **target** repo.
@@ -563,10 +565,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Wheelhouse paginates open PRs, open issues, PR closing references, and hub cards; if any repo page or closing-reference page cannot be read completely, it reports the warning, suppresses new issue-triage cards that might be duplicates of PR-addressed issues, and refuses to self-heal close existing cards for that repo until a complete scan succeeds.
 - **A pending-contributor PR did not get reminded or closed.**
   Check that `pending_contributor_cleanup` is enabled globally or for that repo, and that the effective `pending_contributor_cleanup_targets` contains `pr`.
-  The cleanup sweep is intentionally narrow: it only handles PRs where Wheelhouse can prove a `/request-changes` review or merge-conflict rebase nudge happened, including an unarmed legacy nudge.
-  A `needs-ci-approval` fork PR is considered only when it is currently `CONFLICTING` and the nudge is proven; this does not widen the normal CI-approval lane.
-  It skips if the target has `wheelhouse:keep-open`, if the PR head changed, if a non-maintainer human commented, reviewed, left a review comment, edited the PR body, pushed, or performed another target timeline action after the ask, if the target has an unaccounted post-ask update, or if any required target timeline or PR edit-history read is missing or ambiguous.
-  When a review list item or `reviewed` timeline event lacks a timestamp, the scan re-reads that review by ID; if it still cannot prove the time, it skips cleanup by design.
+  Review the exact proof, CI-lane, clear-only, and fail-open rules in [Security notes](#security-notes).
   Search the latest `scan-backstop` log for `pending-contributor cleanup skipped`, `pending-contributor cleanup reminded`, or `pending-contributor cleanup closed`.
 - **An Approve-CI card disappeared before I acted.**
   Search the latest `scan-backstop` logs for `approve_ci noop`.
