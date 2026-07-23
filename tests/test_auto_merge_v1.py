@@ -973,6 +973,14 @@ def test_class_b_semantic_admission_boundary():
         ]
         == schema.STATUS_UNAVAILABLE,
     )
+    check(
+        "class B admission: affected patient cannot alias repair agent",
+        render_card._restoration_pair_linked(
+            "Open monitored runs lose authentication sessions.",
+            "Authentication sessions preserve diagnostic timestamps.",
+        )
+        is False,
+    )
 
     unsupported_input = candidate()
     unsupported_input["automerge"] = dict(unsupported_input["automerge"])
@@ -1329,6 +1337,17 @@ def test_class_b_semantic_admission_boundary():
             render_card._restoration_claim_supported(temporal, temporal)
             is True,
         )
+    unknown_temporal_clause = (
+        "Authentication sessions lose processing after audit logs write state."
+    )
+    check(
+        "class B admission: unknown temporal predicate is unavailable",
+        render_card._restoration_claim_supported(
+            unknown_temporal_clause,
+            unknown_temporal_clause,
+        )
+        is False,
+    )
     check(
         "class B admission: unlisted relation cannot alias ordered roles",
         render_card._restoration_claim_supported(
@@ -2012,6 +2031,27 @@ def test_class_b_semantic_admission_boundary():
             "semantic admission: valid class %s remains eligible" % behavior_class,
             am.verdict_eligible(unaffected)[0] is True,
         )
+
+    optin_text = "Adds an opt-in feature that is disabled by default"
+    optin_input = candidate(summary=optin_text + ".")
+    optin_input["automerge"] = dict(optin_input["automerge"])
+    optin_input["automerge"].update(
+        {"behavior_class": "C", "optin_default_off": True}
+    )
+    optin_input["automerge"].pop("class_b_restoration")
+    optin = normalize(optin_input)["automerge_verdict"]
+    check(
+        "semantic admission: class C default-off wording remains eligible",
+        render_card._derive_behavior_assertion_semantics(optin_text) is None
+        and am.verdict_eligible(optin)[0] is True,
+    )
+    check(
+        "semantic admission: actual default change remains protected",
+        render_card._derive_behavior_assertion_semantics(
+            "Changes the default timeout"
+        )
+        == {("default_behavior", "changed")},
+    )
 
 
 def test_verdict_class_C_requires_optin_default_off():

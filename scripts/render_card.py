@@ -2209,6 +2209,13 @@ _BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
     "|".join("(?:%s)" % pattern for _, pattern in _PROTECTED_SUBJECT_PATTERNS),
     re.I,
 )
+_CLASS_C_DEFAULT_OFF_RE = re.compile(
+    r"\b(?:adds?|introduces?|new)\b"
+    r"(?=[^.!?;]{0,100}\b(?:strictly\s+)?opt-in\b)"
+    r"[^.!?;]{0,120}\b(?:strictly\s+)?opt-in\b"
+    r"[^.!?;]{0,80}\bdisabled\s+by\s+default\b",
+    re.I,
+)
 _RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
 _RESTORATION_GENERIC_WORDS = frozenset(
     {
@@ -2396,7 +2403,8 @@ def _protected_contract_claims(texts):
     for text in texts:
         for clause in re.split(r"[.!?;]+", str(text or "")):
             cleaned = _clean_triage_text(clause, limit=700, default="")
-            if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
+            masked = _CLASS_C_DEFAULT_OFF_RE.sub("", cleaned)
+            if masked and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(masked):
                 claims.add(cleaned.casefold())
     return claims
 
@@ -2532,6 +2540,52 @@ _RESTORATION_PREDICATES = {
 _RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
     {"a", "an", "never", "not", "now", "the"}
 )
+_RESTORATION_RELATION_WORDS = frozenset(
+    {
+        "after",
+        "at",
+        "before",
+        "by",
+        "during",
+        "following",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "over",
+        "through",
+        "to",
+        "under",
+        "until",
+        "upon",
+        "with",
+        "without",
+    }
+)
+_RESTORATION_TEMPORAL_RELATIONS = frozenset(
+    {"after", "before", "during", "following", "on", "until", "upon"}
+)
+_RESTORATION_TEMPORAL_HEADS = frozenset(
+    {
+        "completion",
+        "failure",
+        "migration",
+        "reconnection",
+        "recovery",
+        "reopening",
+        "restart",
+        "restoration",
+        "resumption",
+        "retry",
+        "rollback",
+        "shutdown",
+        "startup",
+        "success",
+        "timeout",
+        "upgrade",
+    }
+)
 
 
 def _restoration_role(words):
@@ -2539,6 +2593,31 @@ def _restoration_role(words):
         word
         for word in words
         if word not in _RESTORATION_ROLE_STRUCTURE_WORDS
+    )
+
+
+def _restoration_roles_are_bounded(agent, patient):
+    if _RESTORATION_RELATION_WORDS.intersection(agent):
+        return False
+    relation_indexes = [
+        index
+        for index, word in enumerate(patient)
+        if word in _RESTORATION_RELATION_WORDS
+    ]
+    if not relation_indexes:
+        return True
+    if len(relation_indexes) != 1:
+        return False
+    relation_index = relation_indexes[0]
+    relation = patient[relation_index]
+    temporal_object = patient[relation_index + 1 :]
+    return (
+        relation in _RESTORATION_TEMPORAL_RELATIONS
+        and relation_index > 0
+        and 1 <= len(temporal_object) <= 2
+        and temporal_object[-1] in _RESTORATION_TEMPORAL_HEADS
+        and not _RESTORATION_AUXILIARIES.intersection(temporal_object)
+        and not set(_RESTORATION_PREDICATES).intersection(temporal_object)
     )
 
 
@@ -2623,7 +2702,11 @@ def _restoration_propositions(text):
         else:
             agent = left_role
             patient = _restoration_role(trailing)
-        if not patient or (not agent and not passive):
+        if (
+            not patient
+            or (not agent and not passive)
+            or not _restoration_roles_are_bounded(agent, patient)
+        ):
             return None
         polarity_start = (
             passive_start
@@ -2722,6 +2805,9 @@ _RESTORATION_REPAIR_RELATIONS = {
         {"persist", "preserve", "remain", "restore", "retain", "survive"}
     ),
 }
+_RESTORATION_SUBJECT_OBJECT_REPAIRS = frozenset(
+    {"persist", "recover", "remain", "reopen", "resume", "return", "survive"}
+)
 
 
 def _restoration_pair_linked(defect, restored):
@@ -2738,6 +2824,11 @@ def _restoration_pair_linked(defect, restored):
     restored_predicate, restored_agent, restored_patient, restored_polarity = (
         restored_propositions[0]
     )
+    restored_object = (
+        restored_agent
+        if restored_predicate in _RESTORATION_SUBJECT_OBJECT_REPAIRS
+        else restored_patient
+    )
     repair_predicates = _RESTORATION_REPAIR_RELATIONS.get(
         (defect_predicate, defect_polarity),
         frozenset(),
@@ -2745,7 +2836,7 @@ def _restoration_pair_linked(defect, restored):
     return (
         restored_polarity == "affirmative"
         and restored_predicate in repair_predicates
-        and defect_patient in {restored_agent, restored_patient}
+        and defect_patient == restored_object
     )
 
 
@@ -3050,6 +3141,7 @@ def _bind_propagated_semantics(subjects, effects):
 
 def _derive_behavior_assertion_semantics(claim):
     text = _normalize_bounded_contractions(claim).casefold()
+    text = _CLASS_C_DEFAULT_OFF_RE.sub("", text)
     coordinated_topic = _coordinated_documentation_topic_semantics(text)
     if coordinated_topic is not None:
         return coordinated_topic
