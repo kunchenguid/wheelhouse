@@ -2231,6 +2231,8 @@ _RESTORATION_STOP_WORDS = _RESTORATION_GENERIC_WORDS | frozenset(
         "again",
         "also",
         "before",
+        "be",
+        "been",
         "from",
         "into",
         "remains",
@@ -2438,6 +2440,8 @@ _RESTORATION_CLAUSE_RE = re.compile(
 _RESTORATION_AUXILIARIES = frozenset(
     {
         "are",
+        "be",
+        "been",
         "can",
         "could",
         "did",
@@ -2522,16 +2526,33 @@ def _restoration_propositions(text):
             ),
             None,
         )
-        passive = (
-            auxiliary_index is not None
-            and words[auxiliary_index] in {"are", "is", "was", "were"}
-            and all(
-                word in {"never", "not", "now"}
-                for word in words[auxiliary_index + 1 : predicate_index]
-            )
+        passive_start = None
+        passive_prefix = " ".join(words[:predicate_index])
+        passive_match = re.search(
+            r"(?:^|\s)("
+            r"(?:is|are|was|were)(?:\s+(?:never|not|now))*"
+            r"|(?:has|have|had)(?:\s+(?:never|not|now))*\s+been"
+            r"(?:\s+(?:never|not|now))*"
+            r"|(?:can|could|will|would|shall|should|must)"
+            r"(?:\s+(?:never|not|now))*\s+be"
+            r"(?:\s+(?:never|not|now))*"
+            r")$",
+            passive_prefix,
         )
+        if passive_match is not None:
+            passive_start = len(
+                re.findall(
+                    r"[a-z][a-z0-9_-]*",
+                    passive_prefix[: passive_match.start(1)],
+                )
+            )
+        passive = passive_start is not None
         subject_end = (
-            auxiliary_index if auxiliary_index is not None else predicate_index
+            passive_start
+            if passive
+            else auxiliary_index
+            if auxiliary_index is not None
+            else predicate_index
         )
         left_role = _restoration_role(words[:subject_end])
         trailing = words[predicate_index + 1 :]
@@ -2654,6 +2675,68 @@ def _is_documentation_topic(text, protected_span, documentation_spans):
     return False
 
 
+def _coordinated_documentation_topic_semantics(text):
+    documentation = list(_DOCUMENTATION_WORD_RE.finditer(text))
+    protected = sorted(
+        (
+            match.start(),
+            match.end(),
+        )
+        for _, pattern in _PROTECTED_SUBJECT_PATTERNS
+        for match in re.finditer(pattern, text, re.I)
+    )
+    if len(documentation) != 1 or len(protected) < 2:
+        return None
+    documentation_match = documentation[0]
+    first_start, first_end = protected[0]
+    last_start, last_end = protected[-1]
+    coordinated = all(
+        re.search(
+            r"\b(?:and|as\s+well\s+as|along\s+with)\b",
+            text[left_end:right_start],
+            re.I,
+        )
+        is not None
+        for (_, left_end), (right_start, _) in zip(
+            protected, protected[1:]
+        )
+    )
+    forward = (
+        documentation_match.end() <= first_start
+        and re.search(
+            r"\b(?:for|of)\b",
+            text[documentation_match.end() : first_start],
+            re.I,
+        )
+        is not None
+    )
+    reverse = (
+        documentation_match.start() >= last_end
+        and re.fullmatch(
+            r"[\s/-]*",
+            text[last_end : documentation_match.start()],
+        )
+        is not None
+    )
+    if not coordinated or not (forward or reverse):
+        return None
+    effects = []
+    occupied = []
+    for effect, pattern in _EFFECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            span = (match.start(), match.end())
+            if any(
+                span[0] < end and span[1] > start
+                for start, end in occupied
+            ):
+                continue
+            occupied.append(span)
+            effects.append(effect)
+    if len(effects) != 1:
+        return None
+    return {("documentation_or_tests", effects[0])}
+
+
 def _atomic_semantic_spans(text):
     documentation_spans = _documentation_spans(text)
     subjects = [
@@ -2691,54 +2774,67 @@ def _atomic_semantic_spans(text):
                     span[0],
                     span[1],
                     match.group(0).casefold().startswith("without "),
-                    False,
                 )
             )
-    semantic_starts = sorted(
-        [start for _, start, _ in subjects]
-        + [start for _, start, _, _, _ in effects]
-    )
-    effects = [
-        (
-            effect,
-            start,
-            end,
-            subordinate_after,
+    scoped_effects = []
+    for index, item in enumerate(sorted(effects, key=lambda value: value[1])):
+        effect, start, end, subordinate_after = item
+        next_start = (
+            sorted(effects, key=lambda value: value[1])[index + 1][1]
+            if index + 1 < len(effects)
+            else len(text)
+        )
+        governed_text = text[end:next_start]
+        governed_words = {
+            word.casefold()
+            for word in re.findall(
+                r"[a-z][a-z0-9_-]*", governed_text, re.I
+            )
+        }
+        locally_unprotected = (
+            (
+                subordinate_after
+                or (
+                    subjects
+                    and end <= min(start for _, start, _ in subjects)
+                )
+            )
+            and
             len(
-                {
-                    word
-                    for word in re.findall(
-                        r"[a-z][a-z0-9_-]*",
-                        text[
-                            end : next(
-                                (
-                                    item
-                                    for item in semantic_starts
-                                    if item > end
-                                ),
-                                len(text),
-                            )
-                        ],
-                        re.I,
-                    )
-                    if word.casefold()
-                    not in {
+                governed_words.difference(
+                    {
                         "a",
                         "an",
-                        "it",
-                        "that",
+                        "or",
                         "the",
-                        "them",
-                        "this",
                         "while",
                         "without",
                     }
+                )
+            )
+            >= 2
+            and not governed_words.intersection(
+                {
+                    "her",
+                    "hers",
+                    "his",
+                    "it",
+                    "its",
+                    "their",
+                    "theirs",
+                    "them",
+                    "they",
+                    "this",
+                    "that",
                 }
             )
-            >= 2,
+            and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(governed_text) is None
         )
-        for effect, start, end, subordinate_after, _ in effects
-    ]
+        if not locally_unprotected:
+            scoped_effects.append(
+                (effect, start, end, subordinate_after)
+            )
+    effects = scoped_effects
     return subjects, effects, documentation_topic
 
 
@@ -2752,7 +2848,6 @@ def _bind_atomic_semantics(subjects, effects):
             effect_start,
             effect_end,
             subordinate_after,
-            _,
         ) in enumerate(effects):
             if subordinate_after and effect_start >= end:
                 continue
@@ -2777,26 +2872,14 @@ def _bind_atomic_semantics(subjects, effects):
         effect, index = next(iter(nearest))
         consumed_effects.add(index)
         semantics.add((subject, effect))
-    for index, (
-        _,
-        effect_start,
-        _,
-        subordinate_after,
-        explicit_unprotected_object,
-    ) in enumerate(effects):
-        if index not in consumed_effects and not (
-            explicit_unprotected_object
-            or (
-                subordinate_after
-                and effect_start >= max(end for _, _, end in subjects)
-            )
-        ):
+    for index, _ in enumerate(effects):
+        if index not in consumed_effects:
             return None
     return semantics
 
 
 def _bind_propagated_semantics(subjects, effects):
-    propagated = {effect for effect, _, _, _, _ in effects}
+    propagated = {effect for effect, _, _, _ in effects}
     if len(propagated) != 1:
         return None
     effect = next(iter(propagated))
@@ -2805,6 +2888,9 @@ def _bind_propagated_semantics(subjects, effects):
 
 def _derive_behavior_assertion_semantics(claim):
     text = _normalize_bounded_contractions(claim).casefold()
+    coordinated_topic = _coordinated_documentation_topic_semantics(text)
+    if coordinated_topic is not None:
+        return coordinated_topic
     atomic = [
         part.strip()
         for part in _ATOMIC_COORDINATOR_RE.split(text)

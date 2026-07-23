@@ -1142,6 +1142,56 @@ def test_class_b_semantic_admission_boundary():
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    check(
+        "class B admission: compound passive canonicalizes active roles",
+        render_card._restoration_claim_supported(
+            "Authentication sessions have been blocked by monitored runs.",
+            "Monitored runs block authentication sessions.",
+        )
+        is True,
+    )
+    compound_passive_input = candidate()
+    compound_passive_input["automerge"] = dict(
+        compound_passive_input["automerge"]
+    )
+    compound_passive_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Authentication sessions have been blocked by monitored runs."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Authentication sessions block monitored runs.",
+        },
+        "intended_behavior_restored": restored_quote,
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": restored_quote,
+        },
+    }
+    compound_passive = normalize(
+        compound_passive_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Authentication sessions block monitored runs."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: compound passive role inversion is unavailable",
+        am.verdict_eligible(compound_passive)[0] is False
+        and am.behavior_verdict_facts(compound_passive)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1357,6 +1407,41 @@ def test_class_b_semantic_admission_boundary():
         "semantic admission: coordinated docs topics remain eligible",
         am.verdict_eligible(coordinated_docs)[0] is True,
     )
+    reverse_docs_text = "Existing mode and workflow documentation changes"
+    reverse_docs_input = candidate(summary=reverse_docs_text + ".")
+    reverse_docs_input["automerge"] = dict(reverse_docs_input["automerge"])
+    reverse_docs_input["automerge"]["behavior_assertions"] = list(
+        reverse_docs_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": reverse_docs_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {
+                "source": "target.txt",
+                "quote": reverse_docs_text,
+            },
+        }
+    ]
+    reverse_docs = normalize(
+        reverse_docs_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(reverse_docs_text),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: reverse coordinated docs remain eligible",
+        am.verdict_eligible(reverse_docs)[0] is True,
+    )
 
     unbound_effect_text = (
         "Updates documentation for the delivery contract while tightening it"
@@ -1397,6 +1482,50 @@ def test_class_b_semantic_admission_boundary():
         "semantic admission: unbound protected effect is unavailable",
         am.verdict_eligible(unbound_effect)[0] is False
         and am.behavior_verdict_facts(unbound_effect)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+    anaphoric_effect_text = (
+        "Updates documentation for the delivery contract while "
+        "tightening its default requirements"
+    )
+    anaphoric_effect_input = candidate(summary=anaphoric_effect_text + ".")
+    anaphoric_effect_input["automerge"] = dict(
+        anaphoric_effect_input["automerge"]
+    )
+    anaphoric_effect_input["automerge"]["behavior_assertions"] = list(
+        anaphoric_effect_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": anaphoric_effect_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {
+                "source": "target.txt",
+                "quote": anaphoric_effect_text,
+            },
+        }
+    ]
+    anaphoric_effect = normalize(
+        anaphoric_effect_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(anaphoric_effect_text),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: anaphoric protected effect is unavailable",
+        am.verdict_eligible(anaphoric_effect)[0] is False
+        and am.behavior_verdict_facts(anaphoric_effect)[0][
             "g6_behavior_class"
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
