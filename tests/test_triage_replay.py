@@ -1463,6 +1463,7 @@ def test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit():
             ({"GITHUB_EVENT_NAME": "schedule"}, "valid-wave", 25),
             ({"GITHUB_ACTOR": "someone-else"}, "valid-wave", 25),
             ({}, "Bad_Wave", 25),
+            ({}, "", 25),
             ({}, "valid-wave", 0),
             ({}, "valid-wave", 26),
             ({"GITHUB_RUN_NUMBER": "not-a-number"}, "valid-wave", 25),
@@ -1889,6 +1890,117 @@ def test_result_records_cover_success_failure_bound_and_duplicate_editing():
     )
 
 
+def _scan_workflow_step_plan(event_name, wave="", dry_run=False, exact_cards=""):
+    """Evaluate the scan workflow's production step conditions for one event."""
+    document = yaml.safe_load(
+        (ROOT / ".github/workflows/scan-backstop.yml").read_text(encoding="utf-8")
+    )
+    values = {
+        "github.event_name": event_name,
+        "inputs.replay_wave": wave,
+        "inputs.replay_dry_run": dry_run,
+        "inputs.replay_exact_cards": exact_cards,
+    }
+    planned = []
+    for step in document["jobs"]["reconcile"]["steps"]:
+        condition = str(step.get("if", "true")).strip()
+        if condition.startswith("${{") and condition.endswith("}}"):
+            condition = condition[3:-2].strip()
+        for name, value in values.items():
+            condition = condition.replace(name, repr(value))
+        expression = (
+            condition.replace("always()", "True")
+            .replace("&&", " and ")
+            .replace("||", " or ")
+            .replace("!(", "not (")
+            .replace("true", "True")
+            .replace("false", "False")
+        )
+        if eval(expression, {"__builtins__": {}}, {}):
+            planned.append(step.get("name") or step.get("uses"))
+    return planned
+
+
+def test_workflow_exact_selector_replay_only_posture_matrix():
+    prerequisites = {
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "Install deps",
+    }
+    replay_step = "Replay one bounded auto-triage wave"
+    ordinary_steps = {
+        "List open cards",
+        "Scan the fleet",
+        "Claim auto-merge decision cards",
+        "Validate auto-merge decision cards",
+        "Auto-merge eligible PRs",
+        "Record auto-merges",
+        "Reconcile the queue",
+        "Check fleet-scan health",
+    }
+
+    # A raw non-empty selector isolates the run before selector validation.
+    # The exact replay owner is the only project command that can act in either
+    # write or dry-run mode; its script tests below retain exact-cohort and
+    # writes=0 enforcement respectively.
+    for dry_run in (False, True):
+        planned = set(
+            _scan_workflow_step_plan(
+                "workflow_dispatch",
+                wave="reviewed-wave",
+                dry_run=dry_run,
+                exact_cards="v1:41,42",
+            )
+        )
+        assert planned == prerequisites | {replay_step}
+        assert planned.isdisjoint(ordinary_steps)
+
+    # Even malformed or incomplete raw input cannot fall through to ordinary
+    # scan/backstop acting. It reaches the replay owner, which rejects it before
+    # any exact-card read or write.
+    malformed = set(
+        _scan_workflow_step_plan(
+            "workflow_dispatch",
+            wave="",
+            dry_run=False,
+            exact_cards="not-a-selector",
+        )
+    )
+    incomplete = set(
+        _scan_workflow_step_plan(
+            "workflow_dispatch",
+            wave="",
+            dry_run=False,
+            exact_cards="v1:41,42",
+        )
+    )
+    assert malformed == incomplete == prerequisites | {replay_step}
+    try:
+        replay._exact_card_scope("not-a-selector")
+        assert False, "malformed exact selector accepted"
+    except ValueError:
+        pass
+
+    # Empty exact-selector input preserves all prior owners: scheduled and
+    # ordinary manual maintenance, generic write replay, and generic dry-run.
+    scheduled = set(_scan_workflow_step_plan("schedule"))
+    manual = set(_scan_workflow_step_plan("workflow_dispatch"))
+    generic_write = set(
+        _scan_workflow_step_plan(
+            "workflow_dispatch", wave="reviewed-wave", dry_run=False
+        )
+    )
+    generic_dry_run = set(
+        _scan_workflow_step_plan(
+            "workflow_dispatch", wave="reviewed-wave", dry_run=True
+        )
+    )
+    assert scheduled == prerequisites | ordinary_steps
+    assert manual == prerequisites | ordinary_steps
+    assert generic_write == prerequisites | ordinary_steps | {replay_step}
+    assert generic_dry_run == prerequisites | {"List open cards", replay_step}
+
+
 def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     scan_text = (ROOT / ".github/workflows/scan-backstop.yml").read_text(
         encoding="utf-8"
@@ -1908,6 +2020,24 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         "github.event_name == 'workflow_dispatch' && "
         "inputs.replay_wave != '' && inputs.replay_dry_run"
     )
+    exact_isolation_guard = (
+        "github.event_name == 'workflow_dispatch' && inputs.replay_exact_cards != ''"
+    )
+    assert scan["permissions"] == {
+        "contents": "read",
+        "issues": "write",
+        "actions": "write",
+    }
+    assert scan["jobs"]["reconcile"]["if"] == (
+        "github.event_name == 'schedule' || github.actor == github.repository_owner"
+    )
+    list_step = next(
+        value
+        for value in scan["jobs"]["reconcile"]["steps"]
+        if value.get("name") == "List open cards"
+    )
+    assert exact_isolation_guard in list_step["if"]
+    assert "!" in list_step["if"]
     write_capable_steps = {
         "Scan the fleet",
         "Claim auto-merge decision cards",
@@ -1925,6 +2055,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         )
         condition = guarded_step.get("if", "")
         assert dry_run_guard in condition, guarded
+        assert exact_isolation_guard in condition, guarded
         assert "!" in condition, guarded
     step = next(
         value
@@ -1933,6 +2064,8 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     )
     assert "github.event_name == 'workflow_dispatch'" in step["if"]
     assert "inputs.replay_wave != ''" in step["if"]
+    assert "inputs.replay_exact_cards != ''" in step["if"]
+    assert "||" in step["if"]
     assert "scripts/triage_replay.py" in step["run"]
     assert "REPLAY_DRY_RUN" in step["run"]
     assert "args+=(--dry-run)" in step["run"]
@@ -2047,6 +2180,7 @@ TESTS = [
     test_duplicate_only_parked_replay_does_not_consume_cap_or_once_marker,
     test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral,
     test_admission_denial_terminalizes_only_the_exact_queued_revision,
+    test_workflow_exact_selector_replay_only_posture_matrix,
     test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries,
 ]
 
