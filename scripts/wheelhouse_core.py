@@ -58,7 +58,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import target_observation as target_contracts
 
@@ -94,6 +94,37 @@ PR_LABELS_PAGE_SIZE = 20
 CLOSING_REFS_PAGE_SIZE = 20
 STATUS_CONTEXTS_PAGE_SIZE = 100
 ACTION_REQUIRED_RUN_LIMIT = 30
+# Event-aware compliance enrichment is opt-in per repository. Actions run pages
+# are bounded so a pathological same-head history degrades to unknown rather
+# than turning a fleet scan into an unbounded API crawl.
+COMPLIANCE_EVIDENCE_SCHEMA = "wheelhouse.actions-current-body/v1"
+COMPLIANCE_EVIDENCE_RUN_PAGE_SIZE = 100
+COMPLIANCE_EVIDENCE_RUN_LIMIT = 300
+_COMPLIANCE_EVIDENCE_KEY = "_wheelhouse_compliance_evidence"
+_COMPLIANCE_EVENT_ACTIONS = frozenset(
+    {"opened", "edited", "synchronize", "reopened"}
+)
+_COMPLIANCE_RUN_STATUSES = frozenset(
+    {"queued", "in_progress", "completed", "waiting", "requested", "pending"}
+)
+_COMPLIANCE_RUN_CONCLUSIONS = frozenset(
+    {
+        "success",
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "startup_failure",
+        "neutral",
+        "skipped",
+        "stale",
+    }
+)
+_COMPLIANCE_RUN_TITLE_RE = re.compile(
+    r"^PR #([1-9][0-9]*) body compliance - "
+    r"(opened|edited|synchronize|reopened) - "
+    r"event ([1-9][0-9]*) \(run ([1-9][0-9]*)\)$"
+)
 
 _PR_NODE_FIELDS = """
         number title isDraft updatedAt changedFiles isCrossRepository mergeable
@@ -107,7 +138,7 @@ _PR_NODE_FIELDS = """
           state
           contexts(first:%d){ totalCount pageInfo { hasNextPage } nodes{
             __typename
-            ... on CheckRun { name conclusion status }
+            ... on CheckRun { databaseId detailsUrl name conclusion status }
             ... on StatusContext { context state }
           }}
         }}}}
@@ -232,7 +263,7 @@ query($owner:String!, $name:String!, $number:Int!) {
         state
         contexts(first:%d) { totalCount pageInfo { hasNextPage } nodes {
           __typename
-          ... on CheckRun { name conclusion status }
+          ... on CheckRun { databaseId detailsUrl name conclusion status }
           ... on StatusContext { context state }
         }}
       }}}}
@@ -389,6 +420,13 @@ def load_config():
     for r in repos:
         if isinstance(r, dict) and r.get("name"):
             triage_attempt_caps[r["name"]] = _triage_attempt_cap(r, global_attempt_cap)
+            _, compliance_evidence_error = compliance_evidence_config(r)
+            if compliance_evidence_error:
+                print(
+                    "::error::wheelhouse config: repo %s compliance_evidence is invalid: %s"
+                    % (r["name"], compliance_evidence_error),
+                    file=sys.stderr,
+                )
             if "triage_daily_ceiling" in r:
                 # The daily budget is one fleet-wide ledger. A repository-level
                 # value would falsely imply an independent budget and is
@@ -1080,6 +1118,557 @@ def _status_contexts_complete(contexts):
     )
 
 
+def _positive_api_int(value):
+    """Strictly normalize one GitHub-owned positive integer identity."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isdigit() and not value.startswith("0"):
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def compliance_evidence_config(cfg):
+    """Return (normalized, error) for the opt-in Actions evidence contract.
+
+    An absent key means legacy same-name reduction. A present but malformed key
+    is not silently ignored: callers attach unavailable evidence so compliance
+    cannot fall back to an older success.
+    """
+    if not isinstance(cfg, dict) or "compliance_evidence" not in cfg:
+        return (None, "")
+    raw = cfg.get("compliance_evidence")
+    expected = {"schema", "workflow_path", "workflow_name"}
+    if not isinstance(raw, dict) or set(raw) != expected:
+        return (None, "compliance_evidence must contain schema, workflow_path, workflow_name")
+    if raw.get("schema") != COMPLIANCE_EVIDENCE_SCHEMA:
+        return (None, "unsupported compliance_evidence schema")
+    workflow_path = raw.get("workflow_path")
+    workflow_name = raw.get("workflow_name")
+    compliance_check = cfg.get("compliance_check")
+    if (
+        not isinstance(workflow_path, str)
+        or workflow_path != workflow_path.strip()
+        or len(workflow_path) > 200
+        or not re.fullmatch(
+            r"\.github/workflows/[A-Za-z0-9_.-]+\.(?:yml|yaml)", workflow_path
+        )
+    ):
+        return (None, "compliance_evidence workflow_path is invalid")
+    if (
+        not isinstance(workflow_name, str)
+        or not workflow_name
+        or workflow_name != workflow_name.strip()
+        or len(workflow_name) > 100
+    ):
+        return (None, "compliance_evidence workflow_name is invalid")
+    if (
+        not isinstance(compliance_check, str)
+        or not compliance_check
+        or compliance_check != compliance_check.strip()
+        or len(compliance_check) > 200
+    ):
+        return (None, "compliance_evidence requires a valid compliance_check")
+    return (
+        {
+            "schema": COMPLIANCE_EVIDENCE_SCHEMA,
+            "workflow_path": workflow_path,
+            "workflow_name": workflow_name,
+            "compliance_check": compliance_check,
+        },
+        "",
+    )
+
+
+def _unavailable_compliance_evidence(reason, runs_seen=0, runs_total=0):
+    return {
+        "schema": COMPLIANCE_EVIDENCE_SCHEMA,
+        "complete": False,
+        "error": str(reason or "event evidence unavailable")[:300],
+        "runs_seen": max(0, int(runs_seen or 0)),
+        "runs_total": max(0, int(runs_total or 0)),
+        "latest": None,
+        "bindings": [],
+    }
+
+
+def _read_compliance_workflow(slug, evidence_cfg, cache=None):
+    cache_key = (
+        "workflow",
+        slug,
+        evidence_cfg["workflow_path"],
+        evidence_cfg["workflow_name"],
+    )
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    encoded = quote(evidence_cfg["workflow_path"], safe="")
+    workflow = gh_rest("/repos/%s/actions/workflows/%s" % (slug, encoded))
+    workflow_id = _positive_api_int(
+        workflow.get("id") if isinstance(workflow, dict) else None
+    )
+    if (
+        not isinstance(workflow, dict)
+        or workflow_id is None
+        or workflow.get("path") != evidence_cfg["workflow_path"]
+        or workflow.get("name") != evidence_cfg["workflow_name"]
+        or workflow.get("state") != "active"
+    ):
+        raise RuntimeError("configured compliance workflow identity did not match")
+    normalized = {
+        "id": workflow_id,
+        "path": evidence_cfg["workflow_path"],
+        "name": evidence_cfg["workflow_name"],
+    }
+    if cache is not None:
+        cache[cache_key] = normalized
+    return normalized
+
+
+def _read_complete_compliance_runs(slug, workflow, head_sha, cache=None):
+    """Read every pull_request run for one configured workflow and exact head."""
+    cache_key = ("runs", slug, workflow["id"], str(head_sha))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    collected = []
+    total = None
+    page = 1
+    while True:
+        path = (
+            "/repos/%s/actions/workflows/%s/runs?event=pull_request&head_sha=%s"
+            "&per_page=%d&page=%d"
+            % (
+                slug,
+                workflow["id"],
+                quote(str(head_sha), safe=""),
+                COMPLIANCE_EVIDENCE_RUN_PAGE_SIZE,
+                page,
+            )
+        )
+        response = gh_rest(path)
+        if not isinstance(response, dict):
+            raise RuntimeError("compliance workflow run list returned unexpected data")
+        page_total = response.get("total_count")
+        runs = response.get("workflow_runs")
+        if (
+            isinstance(page_total, bool)
+            or not isinstance(page_total, int)
+            or page_total < 0
+            or not isinstance(runs, list)
+            or any(not isinstance(run, dict) for run in runs)
+        ):
+            raise RuntimeError("compliance workflow run list was malformed")
+        if total is None:
+            total = page_total
+            if total > COMPLIANCE_EVIDENCE_RUN_LIMIT:
+                raise RuntimeError(
+                    "compliance workflow run list exceeds bounded limit %d"
+                    % COMPLIANCE_EVIDENCE_RUN_LIMIT
+                )
+        elif page_total != total:
+            raise RuntimeError("compliance workflow run count changed during pagination")
+        if len(runs) > COMPLIANCE_EVIDENCE_RUN_PAGE_SIZE:
+            raise RuntimeError("compliance workflow run page exceeded requested size")
+        collected.extend(runs)
+        if len(collected) > total:
+            raise RuntimeError("compliance workflow run pages exceeded total_count")
+        if len(collected) == total:
+            break
+        if not runs or len(runs) < COMPLIANCE_EVIDENCE_RUN_PAGE_SIZE:
+            raise RuntimeError("compliance workflow run pagination was incomplete")
+        page += 1
+        if page > (COMPLIANCE_EVIDENCE_RUN_LIMIT // COMPLIANCE_EVIDENCE_RUN_PAGE_SIZE) + 1:
+            raise RuntimeError("compliance workflow run pagination exceeded bound")
+    result = (collected, total)
+    if cache is not None:
+        cache[cache_key] = result
+    return result
+
+
+def _normalize_compliance_run(run, workflow, pr_number, head_sha):
+    run_id = _positive_api_int(run.get("id"))
+    run_number = _positive_api_int(run.get("run_number"))
+    run_attempt = _positive_api_int(run.get("run_attempt"))
+    workflow_id = _positive_api_int(run.get("workflow_id"))
+    status = str(run.get("status") or "").strip().lower()
+    raw_conclusion = run.get("conclusion")
+    conclusion = str(raw_conclusion or "").strip().lower()
+    title = run.get("display_title")
+    match = _COMPLIANCE_RUN_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+    if (
+        run_id is None
+        or run_number is None
+        or run_attempt is None
+        or workflow_id != workflow["id"]
+        or run.get("path") != workflow["path"]
+        or run.get("event") != "pull_request"
+        or str(run.get("head_sha") or "") != str(head_sha)
+        or status not in _COMPLIANCE_RUN_STATUSES
+        or match is None
+    ):
+        raise ValueError("run identity, head, event, workflow, or title mismatch")
+    title_pr, action, title_number, title_id = match.groups()
+    # With an explicit run-name, GitHub's run API exposes that controlled title
+    # in both ``name`` and ``display_title``. The workflow's stable human name
+    # remains separately bound through workflow_id -> workflow metadata above.
+    if (
+        run.get("name") != title
+        or int(title_pr) != int(pr_number)
+        or int(title_number) != run_number
+        or int(title_id) != run_id
+        or action not in _COMPLIANCE_EVENT_ACTIONS
+    ):
+        raise ValueError("run title event identity or order mismatch")
+    if status == "completed":
+        if conclusion not in _COMPLIANCE_RUN_CONCLUSIONS:
+            raise ValueError("completed run conclusion is missing or unsupported")
+    elif raw_conclusion not in (None, ""):
+        raise ValueError("non-terminal run unexpectedly has a conclusion")
+    pull_requests = run.get("pull_requests")
+    if not isinstance(pull_requests, list):
+        raise ValueError("run pull request associations are unavailable")
+    if pull_requests:
+        if len(pull_requests) != 1 or not isinstance(pull_requests[0], dict):
+            raise ValueError("run pull request associations are ambiguous")
+        associated = _positive_api_int(pull_requests[0].get("number"))
+        if associated != int(pr_number):
+            raise ValueError("run pull request association mismatch")
+    return {
+        "run_id": run_id,
+        "run_number": run_number,
+        "run_attempt": run_attempt,
+        "action": action,
+        "status": status,
+        "conclusion": conclusion,
+    }
+
+
+def _compliance_run_outcome(run):
+    if run["status"] != "completed":
+        return "pending"
+    conclusion = run["conclusion"]
+    if conclusion == "success":
+        return "pass"
+    if conclusion == "cancelled":
+        return "fail"
+    if conclusion in {
+        "failure",
+        "timed_out",
+        "action_required",
+        "startup_failure",
+    }:
+        return "fail"
+    return "pending"
+
+
+def _compliance_context_identity(context, owner, repo):
+    check_run_id = _positive_api_int(context.get("databaseId"))
+    details_url = context.get("detailsUrl")
+    if check_run_id is None or not isinstance(details_url, str):
+        return None
+    parsed = urlparse(details_url)
+    parts = parsed.path.split("/")
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or len(parts) != 8
+        or parts[0]
+        or parts[1].casefold() != str(owner).casefold()
+        or parts[2].casefold() != str(repo).casefold()
+        or parts[3:5] != ["actions", "runs"]
+        or parts[6] != "job"
+    ):
+        return None
+    run_id = _positive_api_int(parts[5])
+    url_job_id = _positive_api_int(parts[7])
+    if run_id is None or url_job_id != check_run_id:
+        return None
+    return (check_run_id, run_id)
+
+
+def _context_outcome_matches_run(context, run):
+    context_outcome = _check_run_outcome(
+        context.get("conclusion"), context.get("status")
+    )
+    if run["status"] != "completed":
+        return context_outcome == "pending"
+    expected = {
+        "success": "pass",
+        "failure": "fail",
+        "timed_out": "fail",
+        "action_required": "fail",
+        "startup_failure": "fail",
+        "cancelled": "cancelled",
+    }.get(run["conclusion"], "pending")
+    return context_outcome == expected
+
+
+def _build_compliance_evidence(
+    owner, repo, pr_number, head_sha, evidence_cfg, workflow, api_runs, total, contexts
+):
+    if not _status_contexts_complete(contexts):
+        return _unavailable_compliance_evidence(
+            "check contexts are incomplete", len(api_runs), total
+        )
+    normalized_runs = []
+    try:
+        for run in api_runs:
+            normalized_runs.append(
+                _normalize_compliance_run(
+                    run, workflow, int(pr_number), str(head_sha)
+                )
+            )
+    except (TypeError, ValueError) as error:
+        return _unavailable_compliance_evidence(
+            str(error), len(api_runs), total
+        )
+    if not normalized_runs:
+        return _unavailable_compliance_evidence(
+            "no current-head compliance event run was found", 0, total
+        )
+    by_id = {}
+    by_number = {}
+    for run in normalized_runs:
+        if run["run_id"] in by_id or run["run_number"] in by_number:
+            return _unavailable_compliance_evidence(
+                "compliance event run identity or order is duplicated ambiguously",
+                len(api_runs),
+                total,
+            )
+        by_id[run["run_id"]] = run
+        by_number[run["run_number"]] = run
+    bindings = []
+    bound_run_ids = set()
+    bound_check_ids = set()
+    compliance_check = evidence_cfg["compliance_check"]
+    for context in contexts["nodes"]:
+        if not isinstance(context, dict):
+            return _unavailable_compliance_evidence(
+                "check context entry is malformed", len(api_runs), total
+            )
+        context_name = (
+            context.get("name")
+            if context.get("__typename") == "CheckRun"
+            else context.get("context")
+        )
+        if context_name != compliance_check:
+            continue
+        if context.get("__typename") != "CheckRun":
+            return _unavailable_compliance_evidence(
+                "event-aware compliance context is not an Actions check run",
+                len(api_runs),
+                total,
+            )
+        identity = _compliance_context_identity(context, owner, repo)
+        if identity is None:
+            return _unavailable_compliance_evidence(
+                "compliance check run identity is missing or mismatched",
+                len(api_runs),
+                total,
+            )
+        check_run_id, run_id = identity
+        run = by_id.get(run_id)
+        if run is None:
+            return _unavailable_compliance_evidence(
+                "compliance context references an unlisted workflow run",
+                len(api_runs),
+                total,
+            )
+        if (
+            run_id in bound_run_ids
+            or check_run_id in bound_check_ids
+            or not _context_outcome_matches_run(context, run)
+        ):
+            return _unavailable_compliance_evidence(
+                "compliance context binding is duplicated or contradicts its run",
+                len(api_runs),
+                total,
+            )
+        bound_run_ids.add(run_id)
+        bound_check_ids.add(check_run_id)
+        bindings.append(
+            {
+                "check_run_id": check_run_id,
+                "run_id": run_id,
+                "run_number": run["run_number"],
+            }
+        )
+    latest = max(normalized_runs, key=lambda run: run["run_number"])
+    latest_outcome = _compliance_run_outcome(latest)
+    latest_binding = next(
+        (binding for binding in bindings if binding["run_id"] == latest["run_id"]),
+        None,
+    )
+    if latest["status"] == "completed" and latest["conclusion"] in {
+        "success",
+        "failure",
+        "timed_out",
+        "startup_failure",
+    } and latest_binding is None:
+        return _unavailable_compliance_evidence(
+            "latest terminal compliance run has no matching check context",
+            len(api_runs),
+            total,
+        )
+    latest_result = dict(latest)
+    latest_result["outcome"] = latest_outcome
+    latest_result["check_run_id"] = (
+        latest_binding["check_run_id"] if latest_binding else None
+    )
+    return {
+        "schema": COMPLIANCE_EVIDENCE_SCHEMA,
+        "complete": True,
+        "error": "",
+        "runs_seen": len(api_runs),
+        "runs_total": total,
+        "latest": latest_result,
+        "bindings": sorted(bindings, key=lambda binding: binding["run_number"]),
+    }
+
+
+def enrich_compliance_evidence(owner, repo, pr, cfg, number=None, cache=None):
+    """Attach trusted Actions run ordering to one GraphQL PR observation.
+
+    Reads happen only for an explicitly configured repository. Every failure is
+    converted to incomplete evidence; callers continue scanning but must project
+    compliance as pending/unknown instead of falling back to an older context.
+    """
+    evidence_cfg, config_error = compliance_evidence_config(cfg)
+    if evidence_cfg is None and not config_error:
+        if isinstance(pr, dict):
+            pr.pop(_COMPLIANCE_EVIDENCE_KEY, None)
+        return None
+    if not isinstance(pr, dict):
+        return _unavailable_compliance_evidence("pull request observation is malformed")
+    if config_error:
+        evidence = _unavailable_compliance_evidence(config_error)
+        pr[_COMPLIANCE_EVIDENCE_KEY] = evidence
+        return evidence
+    pr_number = number if number is not None else pr.get("number")
+    head_sha = str(pr.get("headRefOid") or "")
+    if _positive_api_int(pr_number) is None or not head_sha:
+        evidence = _unavailable_compliance_evidence(
+            "pull request number or head identity is missing"
+        )
+        pr[_COMPLIANCE_EVIDENCE_KEY] = evidence
+        return evidence
+    rollup = None
+    commits = ((pr.get("commits") or {}).get("nodes") or [])
+    if commits and isinstance(commits[0], dict):
+        rollup = (commits[0].get("commit") or {}).get("statusCheckRollup")
+    contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+    try:
+        slug = "%s/%s" % (owner, repo)
+        workflow = _read_compliance_workflow(slug, evidence_cfg, cache=cache)
+        runs, total = _read_complete_compliance_runs(
+            slug, workflow, head_sha, cache=cache
+        )
+        evidence = _build_compliance_evidence(
+            owner,
+            repo,
+            int(pr_number),
+            head_sha,
+            evidence_cfg,
+            workflow,
+            runs,
+            total,
+            contexts,
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as error:
+        evidence = _unavailable_compliance_evidence(str(error))
+    pr[_COMPLIANCE_EVIDENCE_KEY] = evidence
+    return evidence
+
+
+def _event_compliance_outcome(pr, cfg):
+    evidence_cfg, config_error = compliance_evidence_config(cfg)
+    if evidence_cfg is None and not config_error:
+        return None
+    evidence = pr.get(_COMPLIANCE_EVIDENCE_KEY) if isinstance(pr, dict) else None
+    if (
+        config_error
+        or not isinstance(evidence, dict)
+        or evidence.get("schema") != COMPLIANCE_EVIDENCE_SCHEMA
+        or evidence.get("complete") is not True
+        or not isinstance(evidence.get("latest"), dict)
+        or evidence["latest"].get("outcome") not in {"pass", "fail", "pending"}
+    ):
+        return "pending"
+    return evidence["latest"]["outcome"]
+
+
+def _event_rollup_failure_is_accounted(contexts, cfg, evidence):
+    """Allow only superseded event failures and normal cancelled siblings.
+
+    This is the event-aware equivalent of the raw rollup exception. Every
+    same-name compliance context must bind to a validated Actions run. Other
+    check names retain the legacy substantive-failure and cancelled-only rules.
+    """
+    if (
+        not _status_contexts_complete(contexts)
+        or not isinstance(evidence, dict)
+        or evidence.get("complete") is not True
+        or not isinstance(evidence.get("latest"), dict)
+        or evidence["latest"].get("outcome") != "pass"
+    ):
+        return False
+    latest_number = evidence["latest"].get("run_number")
+    latest_check_id = evidence["latest"].get("check_run_id")
+    binding_by_check = {
+        binding.get("check_run_id"): binding
+        for binding in evidence.get("bindings", [])
+        if isinstance(binding, dict)
+    }
+    if _positive_api_int(latest_number) is None or _positive_api_int(latest_check_id) is None:
+        return False
+    comp_name = cfg.get("compliance_check")
+    other_by_name = {}
+    saw_accounted_nonpass = False
+    for context in contexts["nodes"]:
+        if not isinstance(context, dict):
+            return False
+        if context.get("__typename") == "CheckRun":
+            name = context.get("name") or ""
+            outcome = _check_run_outcome(
+                context.get("conclusion"), context.get("status")
+            )
+            if name == comp_name:
+                check_id = _positive_api_int(context.get("databaseId"))
+                binding = binding_by_check.get(check_id)
+                if not binding or binding.get("run_number", 0) > latest_number:
+                    return False
+                if binding.get("run_number") == latest_number:
+                    if check_id != latest_check_id or outcome != "pass":
+                        return False
+                elif outcome in ("fail", "cancelled"):
+                    saw_accounted_nonpass = True
+                elif outcome != "pass":
+                    return False
+                continue
+            other_by_name.setdefault(name, []).append(outcome)
+        elif context.get("__typename") == "StatusContext" or "context" in context:
+            name = context.get("context") or ""
+            if name == comp_name:
+                return False
+            other_by_name.setdefault(name, []).append(
+                _status_context_outcome(context.get("state"))
+            )
+        else:
+            return False
+    for outcomes in other_by_name.values():
+        if _reduce_check_outcomes(outcomes) != "pass" or "pass" not in outcomes:
+            return False
+        if any(outcome not in ("pass", "cancelled") for outcome in outcomes):
+            return False
+        if "cancelled" in outcomes:
+            saw_accounted_nonpass = True
+    return saw_accounted_nonpass
+
+
 def _rollup_failure_only_ignorable_cancels(contexts):
     """True when every non-pass rollup context is a CANCELLED CheckRun whose
     same-name equivalent also has a completed SUCCESS on this head.
@@ -1130,19 +1719,25 @@ def check_status(pr, cfg):
 
     compliance in pass/fail/pending/missing/n/a/none; tests in green/fail/pending/none.
 
-    Matching compliance (and same-name test) contexts aggregate by equivalent
-    check identity on the current head: substantive FAILURE/TIMED_OUT/
-    ACTION_REQUIRED/STARTUP_FAILURE still fail, pending still waits, and a
-    CANCELLED concurrency duplicate is ignored only when a completed SUCCESS
-    for that same check name exists. Cancelled-only evidence never becomes
-    pass. A GitHub rollup FAILURE/ERROR still clamps an otherwise pass/n/a
-    compliance read to fail, except when every non-pass rollup context is an
-    ignorable CANCELLED sibling of a proven SUCCESS (card #1537).
+    The default policy aggregates matching compliance (and same-name test)
+    contexts by equivalent check identity on the current head: substantive
+    FAILURE/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE still fail, pending still
+    waits, and a CANCELLED concurrency duplicate is ignored only when a
+    completed SUCCESS for that same check name exists. Cancelled-only evidence
+    never becomes pass.
+
+    A repository may explicitly opt into ``wheelhouse.actions-current-body/v1``.
+    Its compliance value comes from the latest validated Actions event by
+    monotonic run_number, with run_id, workflow, PR, head, title, and check-run
+    bindings verified by ``enrich_compliance_evidence``. Missing enrichment is
+    pending, never an excuse to reuse an older success. GitHub rollup
+    FAILURE/ERROR still clamps unexplained failures in both modes.
     """
+    event_compliance = _event_compliance_outcome(pr, cfg)
     commits = pr["commits"]["nodes"]
     rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
     if not rollup or not rollup["contexts"]["nodes"]:
-        return ("none", "none", False, [])
+        return (event_compliance or "none", "none", False, [])
     comp_name = cfg.get("compliance_check")
     patterns = cfg.get("test_check_patterns", []) or []
     # Group by exact check name / status context so only truly equivalent
@@ -1170,7 +1765,9 @@ def check_status(pr, cfg):
                 test_by_name.setdefault(ctx, []).append(outcome)
     # Reduce each equivalent-name group, then worst-wins across groups.
     # Scalar last-write-wins would silently pick API order (card #392).
-    if not comp_name:
+    if event_compliance is not None:
+        compliance = event_compliance
+    elif not comp_name:
         compliance = "n/a"
     elif not comp_by_name:
         compliance = "missing"
@@ -1202,7 +1799,17 @@ def check_status(pr, cfg):
     # Exception: every non-pass context is an ignorable CANCELLED sibling of a
     # proven same-name SUCCESS on this head (concurrency cancel-in-progress).
     if rollup.get("state") in ("FAILURE", "ERROR") and compliance in ("pass", "n/a"):
-        if not _rollup_failure_only_ignorable_cancels(rollup.get("contexts")):
+        if event_compliance is not None:
+            accounted = _event_rollup_failure_is_accounted(
+                rollup.get("contexts"),
+                cfg,
+                pr.get(_COMPLIANCE_EVIDENCE_KEY),
+            )
+        else:
+            accounted = _rollup_failure_only_ignorable_cancels(
+                rollup.get("contexts")
+            )
+        if not accounted:
             compliance = "fail"
     return (compliance, tstate, True, names)
 
@@ -1489,6 +2096,16 @@ def _check_observation_shape(pr):
                 phase = "unknown"
                 complete = False
                 break
+    event_evidence = pr.get(_COMPLIANCE_EVIDENCE_KEY) if isinstance(pr, dict) else None
+    if isinstance(event_evidence, dict):
+        if event_evidence.get("complete") is not True:
+            complete = False
+            phase = "unknown"
+        elif (
+            isinstance(event_evidence.get("latest"), dict)
+            and event_evidence["latest"].get("outcome") == "pending"
+        ):
+            phase = "pending"
     return (complete, seen, total, phase)
 
 
@@ -1603,6 +2220,7 @@ def observe_exact_pr(owner, repo_cfg, number, expected_head_sha=""):
         observed_head_sha = str(pr.get("headRefOid") or "")
         if int(pr.get("number") or 0) != int(number):
             raise RuntimeError("exact PR response identity mismatch")
+        enrich_compliance_evidence(owner, name, pr, repo_cfg, number=number)
         comp, tests, ci, _ = check_status(pr, repo_cfg)
         cross_repo = _pr_is_cross_repo(pr)
         pending_ci_approval = False
@@ -3483,8 +4101,32 @@ def build_repo(
     pr_contexts = []
     pending_ci_errors = {}
     settle_numbers = []
+    # Cache the immutable workflow identity once and each exact-head run list
+    # once during this repository scan. Exact rereads and G7 use fresh caches in
+    # their separate processes so approval or event races cannot reuse a scan
+    # snapshot as final evidence.
+    compliance_evidence_cache = {}
     for pr in prs:
         author = pr.get("author") or {}
+        event_evidence = enrich_compliance_evidence(
+            owner,
+            name,
+            pr,
+            repo_cfg,
+            cache=compliance_evidence_cache,
+        )
+        if isinstance(event_evidence, dict) and event_evidence.get("complete") is not True:
+            print(
+                "::warning::wheelhouse compliance evidence unavailable %s#%s: %s"
+                % (
+                    name,
+                    pr.get("number"),
+                    _workflow_command_text(
+                        str(event_evidence.get("error") or "incomplete")[:200]
+                    ),
+                ),
+                file=sys.stderr,
+            )
         comp, tests, ci, names = check_status(pr, repo_cfg)
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
@@ -6276,7 +6918,11 @@ def cmd_checks(repo):
     prs, complete = _page_open_prs(owner, rc["name"], data["pullRequests"])
     if not complete:
         sys.exit("could not read every open PR; refusing incomplete check-name list")
+    evidence_cache = {}
     for pr in prs:
+        enrich_compliance_evidence(
+            owner, rc["name"], pr, rc, cache=evidence_cache
+        )
         _, _, _, n = check_status(pr, rc)
         names.update(n)
     print("check names on %s (compliance_check=%r):" % (repo, comp))

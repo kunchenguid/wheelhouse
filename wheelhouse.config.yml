@@ -60,6 +60,13 @@ repos:
   - name: no-mistakes
     # ci.yml runs `test` (matrix os) + `e2e` (and a format/vet `check` job we skip).
     compliance_check: "PR must be raised via no-mistakes"
+    # This repository's no-mistakes-required workflow publishes the controlled
+    # current-body run identity introduced in no-mistakes merge 912bc756. The
+    # explicit schema opts only this proven producer into latest-event reduction.
+    compliance_evidence:
+      schema: "wheelhouse.actions-current-body/v1"
+      workflow_path: ".github/workflows/no-mistakes-required.yml"
+      workflow_name: "Require no-mistakes"
     test_check_patterns: ["test (", "e2e"]
 
   - name: axi

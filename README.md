@@ -76,6 +76,11 @@ List the repos you maintain and how to read their checks:
 repos:
   - name: my-service                      # repo name only (resolved under your owner)
     compliance_check: "required-policy-check"  # exact required gate check, or null
+    # Optional only after this repository deploys the controlled latest-event producer contract:
+    # compliance_evidence:
+    #   schema: "wheelhouse.actions-current-body/v1"
+    #   workflow_path: ".github/workflows/no-mistakes-required.yml"
+    #   workflow_name: "Require no-mistakes"
     test_check_patterns: ["test", "build", "e2e"]  # substrings that identify your test/CI checks
     # auto_approve_ci: false              # optional per-repo override
     # auto_merge: true                    # optional scan-time merge opt-in (also needs VISION.md)
@@ -113,6 +118,17 @@ pending_contributor_cleanup_targets: ["pr"]  # PR-only MVP
 Wheelhouse reads every matching check context.
 If GitHub returns duplicate contexts with the same check name, any substantive failure wins, then any pending context; a completed success makes only cancelled same-name siblings ignorable, while cancelled-only evidence never passes.
 GitHub's own rollup `FAILURE` or `ERROR` also fails closed unless its complete context list proves that every non-pass context is such a cancelled sibling, so an untracked or unreadable failure cannot make a card look merge-ready.
+
+A repository whose compliance check depends on mutable PR-body events may opt
+into `wheelhouse.actions-current-body/v1` through the exact
+`compliance_evidence` mapping shown above. Wheelhouse then verifies the
+configured Actions workflow, complete exact-head run history, controlled PR /
+event / `run_number` / `run_id` identity, and each matching CheckRun binding.
+The greatest validated run number is current, so an old success cannot satisfy a
+later body edit and an old failure cannot poison a later corrected success.
+Missing or ambiguous enrichment is pending/incomplete, never a fallback. API
+bounds, scan caching, exact-reread freshness, fork behavior, and the producer
+contract are documented in [Current-body compliance evidence](docs/CURRENT_BODY_COMPLIANCE.md).
 
 > **Heads-up - `auto_triage` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork with `CLAUDE_CODE_OAUTH_TOKEN` gets lightweight automatic PR-review summaries without another config edit.

@@ -136,12 +136,12 @@ _LIVE_STATUS_GQL = (
 query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
-      headRefOid
+      number headRefOid
       commits(last:1) { nodes { commit { statusCheckRollup {
         state
         contexts(first:%d) { totalCount pageInfo { hasNextPage } nodes {
           __typename
-          ... on CheckRun { name conclusion status }
+          ... on CheckRun { databaseId detailsUrl name conclusion status }
           ... on StatusContext { context state }
         }}
       }}}}
@@ -490,6 +490,9 @@ def live_check_status(owner, repo, number, head_sha, repo_cfg):
             or total_count != len(context_nodes)
         ):
             return (False, "configured check contexts are incomplete")
+        core.enrich_compliance_evidence(
+            owner, repo, pr, repo_cfg, number=number
+        )
         comp, tests, _, _ = core.check_status(pr, repo_cfg)
     except (KeyError, TypeError, RuntimeError, ValueError) as error:
         return (False, "could not re-read configured checks: %s" % str(error)[:160])

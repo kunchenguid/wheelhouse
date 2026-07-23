@@ -3790,13 +3790,13 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     )
     check(
         "triage: alignment and final merge remain gated on trusted VISION.md",
-        'if [ "$VISION_PRESENT" = "true" ] && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
+        'if [ "$VISION_PRESENT" = "true" ] \\\n              && [ "$TARGET_FACTS_PRESENT" = "true" ] \\\n              && [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then'
         in text
         and "AUTOMERGE_VERDICT_AVAILABLE=true" in text,
     )
     check(
         "triage: the VISION policy is labeled TRUSTED owner-authored (not head)",
-        "TRUSTED owner-authored policy" in text,
+        "TRUSTED owner policy from the default branch" in text,
     )
     check(
         "triage: binds verdict storage to the fetched VISION.md SHA",
