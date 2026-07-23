@@ -1400,6 +1400,66 @@ def test_class_b_semantic_admission_boundary():
             )
             is False,
         )
+    numeric_claim = "Daemon restart lost an open monitored run 1."
+    numeric_evidence = "Daemon restart lost an open monitored run 2."
+    check(
+        "class B admission: numeric identifiers remain semantically distinct",
+        render_card._restoration_claim_supported(
+            numeric_claim, numeric_evidence
+        )
+        is False
+        and render_card._restoration_claim_supported(
+            numeric_claim, numeric_claim
+        )
+        is True,
+    )
+    for left, right in (
+        ("#1622", "#1624"),
+        ("@primary", "@secondary"),
+        ("run-1622", "run-1624"),
+        ("run_1622", "run_1624"),
+    ):
+        claim = (
+            "Daemon restart lost an open monitored run %s." % left
+            if left.startswith(("#", "@"))
+            else "Daemon restart lost an open monitored %s." % left
+        )
+        evidence = (
+            "Daemon restart lost an open monitored run %s." % right
+            if right.startswith(("#", "@"))
+            else "Daemon restart lost an open monitored %s." % right
+        )
+        check(
+            "class B admission: identifier %s differs from %s"
+            % (left, right),
+            render_card._restoration_claim_supported(claim, evidence)
+            is False
+            and render_card._restoration_claim_supported(claim, claim)
+            is True,
+        )
+    scanned = render_card._scan_restoration_lexemes(
+        "Daemon restart lost an open monitored run #1622."
+    )
+    check(
+        "class B admission: lexical spans cover normalized input exactly",
+        scanned is not None
+        and "".join(
+            scanned[0][start:end]
+            for _, _, start, end in scanned[1]
+        )
+        == scanned[0],
+    )
+    for unsupported in (
+        "Daemon restart lost an open monitored run +1.",
+        "Daemon restart lost an open monitored run (1).",
+        "Daemon restart lost an open monitored run 1!",
+        "Daemon restart lost an open monitored run alpha/beta.",
+        "Daemon restart lost an open monitored run 🧭.",
+    ):
+        check(
+            "class B admission: unsupported lexical span is unavailable",
+            render_card._restoration_propositions(unsupported) is None,
+        )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])

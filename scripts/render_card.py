@@ -2468,9 +2468,6 @@ def _semantic_polarity(text):
     return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
 
 
-_RESTORATION_CLAUSE_RE = re.compile(
-    r"\s*(?:[,;]|\b(?:and|but)\b)\s*", re.I
-)
 _RESTORATION_SUBORDINATORS = frozenset(
     {
         "although",
@@ -2561,6 +2558,35 @@ _RESTORATION_ROLE_PATTERNS = frozenset(
         ("recoverable",),
     }
 )
+_RESTORATION_LEXEME_RE = re.compile(
+    r"(?P<space>\s+)"
+    r"|(?P<symbol>[#@][A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)*)"
+    r"|(?P<number>[0-9]+(?:[._-][A-Za-z0-9]+)*)"
+    r"|(?P<word>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)"
+    r"|(?P<punct>[.])"
+)
+_RESTORATION_IDENTIFIER_RE = re.compile(
+    r"(?:[#@][a-z0-9]+(?:[._/-][a-z0-9]+)*"
+    r"|[0-9]+(?:[._-][a-z0-9]+)*)"
+)
+
+
+def _scan_restoration_lexemes(text):
+    normalized = _normalize_bounded_contractions(text)
+    lexemes = []
+    position = 0
+    while position < len(normalized):
+        match = _RESTORATION_LEXEME_RE.match(normalized, position)
+        if match is None:
+            return None
+        value = match.group(0)
+        if match.lastgroup in {"symbol", "number"} and len(value) > 64:
+            return None
+        lexemes.append(
+            (match.lastgroup, value.casefold(), match.start(), match.end())
+        )
+        position = match.end()
+    return normalized, tuple(lexemes)
 
 
 def _restoration_role(words):
@@ -2571,128 +2597,156 @@ def _restoration_role(words):
     )
 
 
+def _restoration_role_matches_pattern(role):
+    for pattern in _RESTORATION_ROLE_PATTERNS:
+        if role == pattern:
+            return True
+        if (
+            len(role) > len(pattern)
+            and role[: len(pattern)] == pattern
+            and all(
+                _RESTORATION_IDENTIFIER_RE.fullmatch(token)
+                for token in role[len(pattern) :]
+            )
+        ):
+            return True
+        if len(role) == len(pattern) and role[:-1] == pattern[:-1]:
+            final = role[-1]
+            for separator in ("-", "_"):
+                prefix = pattern[-1] + separator
+                if final.startswith(prefix) and re.fullmatch(
+                    r"[a-z0-9]+(?:[._-][a-z0-9]+)*",
+                    final[len(prefix) :],
+                ):
+                    return True
+    return False
+
+
 def _restoration_roles_are_bounded(agent, patient):
     return (
-        (not agent or agent in _RESTORATION_ROLE_PATTERNS)
-        and patient in _RESTORATION_ROLE_PATTERNS
+        (not agent or _restoration_role_matches_pattern(agent))
+        and _restoration_role_matches_pattern(patient)
     )
 
 
 def _restoration_propositions(text):
-    normalized = _normalize_bounded_contractions(text)
-    propositions = []
-    for clause in _RESTORATION_CLAUSE_RE.split(normalized):
-        if not clause.strip():
+    scanned = _scan_restoration_lexemes(text)
+    if scanned is None:
+        return None
+    _, lexemes = scanned
+    punctuation = [
+        (index, value)
+        for index, (kind, value, _, _) in enumerate(lexemes)
+        if kind == "punct"
+    ]
+    if punctuation and (
+        len(punctuation) != 1
+        or punctuation[0][0] != len(lexemes) - 1
+        or punctuation[0][1] != "."
+    ):
+        return None
+    words = [
+        value
+        for kind, value, _, _ in lexemes
+        if kind not in {"space", "punct"}
+    ]
+    if not words or _RESTORATION_SUBORDINATORS.intersection(words):
+        return None
+    predicates = [
+        (index, _RESTORATION_PREDICATES[word])
+        for index, word in enumerate(words)
+        if word in _RESTORATION_PREDICATES
+    ]
+    if len(predicates) != 1:
+        return None
+    predicate_index, predicate = predicates[0]
+    predicate_word = words[predicate_index]
+    auxiliary_index = next(
+        (
+            index
+            for index in range(predicate_index - 1, -1, -1)
+            if words[index] in _RESTORATION_AUXILIARIES
+        ),
+        None,
+    )
+    passive_start = None
+    passive_prefix = " ".join(words[:predicate_index])
+    passive_match = re.search(
+        r"(?:^|\s)("
+        r"(?:is|are|was|were)(?:\s+(?:never|not|now))*"
+        r"|(?:has|have|had)(?:\s+(?:never|not|now))*\s+been"
+        r"(?:\s+(?:never|not|now))*"
+        r"|(?:can|could|will|would|shall|should|must)"
+        r"(?:\s+(?:never|not|now))*\s+be"
+        r"(?:\s+(?:never|not|now))*"
+        r")$",
+        passive_prefix,
+    )
+    if passive_match is not None:
+        passive_start = len(passive_prefix[: passive_match.start(1)].split())
+    passive_morphology = predicate_word.endswith(("ed", "en")) or (
+        predicate_word == "lost"
+    )
+    if passive_start is not None and not passive_morphology:
+        if not predicate_word.endswith("ing"):
             return None
-        words = re.findall(r"[a-z][a-z0-9_-]*", clause.casefold())
-        if _RESTORATION_SUBORDINATORS.intersection(words):
-            return None
-        predicates = [
-            (index, _RESTORATION_PREDICATES[word])
-            for index, word in enumerate(words)
-            if word in _RESTORATION_PREDICATES
-        ]
-        if len(predicates) != 1:
-            return None
-        predicate_index, predicate = predicates[0]
-        predicate_word = words[predicate_index]
-        auxiliary_index = next(
-            (
-                index
-                for index in range(predicate_index - 1, -1, -1)
-                if words[index] in _RESTORATION_AUXILIARIES
-            ),
-            None,
-        )
         passive_start = None
-        passive_prefix = " ".join(words[:predicate_index])
-        passive_match = re.search(
-            r"(?:^|\s)("
-            r"(?:is|are|was|were)(?:\s+(?:never|not|now))*"
-            r"|(?:has|have|had)(?:\s+(?:never|not|now))*\s+been"
-            r"(?:\s+(?:never|not|now))*"
-            r"|(?:can|could|will|would|shall|should|must)"
-            r"(?:\s+(?:never|not|now))*\s+be"
-            r"(?:\s+(?:never|not|now))*"
-            r")$",
-            passive_prefix,
-        )
-        if passive_match is not None:
-            passive_start = len(
-                re.findall(
-                    r"[a-z][a-z0-9_-]*",
-                    passive_prefix[: passive_match.start(1)],
-                )
-            )
-        passive_morphology = predicate_word.endswith(("ed", "en")) or (
-            predicate_word == "lost"
-        )
-        if passive_start is not None and not passive_morphology:
-            if not predicate_word.endswith("ing"):
-                return None
-            passive_start = None
-        if auxiliary_index is not None and passive_start is None:
-            intervening = words[auxiliary_index + 1 : predicate_index]
-            if any(
-                word not in {"never", "not", "now"}
-                for word in intervening
-            ):
-                return None
-        passive = passive_start is not None
-        subject_end = (
-            passive_start
-            if passive
-            else auxiliary_index
-            if auxiliary_index is not None
-            else predicate_index
-        )
-        left_role = _restoration_role(words[:subject_end])
-        trailing = words[predicate_index + 1 :]
-        if passive:
-            if "by" in trailing:
-                by_index = trailing.index("by")
-                agent = _restoration_role(trailing[by_index + 1 :])
-                patient = left_role + _restoration_role(trailing[:by_index])
-            else:
-                agent = ()
-                patient = left_role + _restoration_role(trailing)
+    if auxiliary_index is not None and passive_start is None:
+        intervening = words[auxiliary_index + 1 : predicate_index]
+        if any(word not in {"never", "not", "now"} for word in intervening):
+            return None
+    passive = passive_start is not None
+    subject_end = (
+        passive_start
+        if passive
+        else auxiliary_index
+        if auxiliary_index is not None
+        else predicate_index
+    )
+    left_role = _restoration_role(words[:subject_end])
+    trailing = words[predicate_index + 1 :]
+    if passive:
+        if "by" in trailing:
+            by_index = trailing.index("by")
+            agent = _restoration_role(trailing[by_index + 1 :])
+            patient = left_role + _restoration_role(trailing[:by_index])
         else:
-            agent = left_role
-            patient = _restoration_role(trailing)
-        if (
-            not patient
-            or (not agent and not passive)
-            or not _restoration_roles_are_bounded(agent, patient)
-        ):
-            return None
-        polarity_start = (
-            passive_start
-            if passive
-            else auxiliary_index
-            if auxiliary_index is not None
-            else max(0, predicate_index - 1)
-        )
-        predicate_negations = {
-            index
-            for index, word in enumerate(words)
-            if word in {"never", "not"}
-        }
-        governed_negations = {
-            index
-            for index in range(polarity_start, predicate_index)
-            if words[index] in {"never", "not"}
-        }
-        if predicate_negations != governed_negations:
-            return None
-        propositions.append(
-            (
-                predicate,
-                agent,
-                patient,
-                "negative" if governed_negations else "affirmative",
-            )
-        )
-    return tuple(propositions)
+            agent = ()
+            patient = left_role + _restoration_role(trailing)
+    else:
+        agent = left_role
+        patient = _restoration_role(trailing)
+    if (
+        not patient
+        or (not agent and not passive)
+        or not _restoration_roles_are_bounded(agent, patient)
+    ):
+        return None
+    polarity_start = (
+        passive_start
+        if passive
+        else auxiliary_index
+        if auxiliary_index is not None
+        else max(0, predicate_index - 1)
+    )
+    predicate_negations = {
+        index for index, word in enumerate(words) if word in {"never", "not"}
+    }
+    governed_negations = {
+        index
+        for index in range(polarity_start, predicate_index)
+        if words[index] in {"never", "not"}
+    }
+    if predicate_negations != governed_negations:
+        return None
+    return (
+        (
+            predicate,
+            agent,
+            patient,
+            "negative" if governed_negations else "affirmative",
+        ),
+    )
 
 
 def _restoration_claim_supported(claim, evidence):
