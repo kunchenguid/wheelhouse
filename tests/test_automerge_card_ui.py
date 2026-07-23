@@ -34,7 +34,7 @@ def behavior_admission(behavior_class="A", contradiction=False):
             {
                 "corrected_defect": "Daemon restart lost an open monitored run.",
                 "intended_behavior_restored": (
-                    "An open monitored run remains recoverable after restart."
+                    "An open monitored run remains recoverable."
                 ),
             }
         )

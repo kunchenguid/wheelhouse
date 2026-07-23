@@ -2189,8 +2189,10 @@ _PROTECTED_SUBJECT_PATTERNS = (
     ),
     (
         "default_behavior",
-        r"\b(?:existing|default|existing/default)(?:\s+or\s+default)?"
-        r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r\b",
+        r"\b(?:(?:existing|default|existing/default)"
+        r"(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
+        r"|user-facing\s+flag\s+or\s+default)\b",
     ),
     ("existing_workflow", r"\bworkflow\b"),
 )
@@ -2440,7 +2442,9 @@ _RESTORATION_CLAUSE_RE = re.compile(
 _RESTORATION_SUBORDINATORS = frozenset(
     {
         "although",
+        "after",
         "as",
+        "before",
         "because",
         "during",
         "if",
@@ -2464,7 +2468,6 @@ _RESTORATION_SUBORDINATORS = frozenset(
         "whose",
     }
 )
-_RESTORATION_TEMPORAL_PREPOSITIONS = frozenset({"after", "before"})
 _RESTORATION_AUXILIARIES = frozenset(
     {
         "are",
@@ -2549,22 +2552,6 @@ def _restoration_propositions(text):
             return None
         predicate_index, predicate = predicates[0]
         predicate_word = words[predicate_index]
-        temporal_indexes = [
-            index
-            for index, word in enumerate(words)
-            if word in _RESTORATION_TEMPORAL_PREPOSITIONS
-        ]
-        if len(temporal_indexes) > 1:
-            return None
-        if temporal_indexes:
-            temporal_index = temporal_indexes[0]
-            temporal_role = [
-                word
-                for word in words[temporal_index + 1 :]
-                if word != "the"
-            ]
-            if temporal_index <= predicate_index or len(temporal_role) != 1:
-                return None
         auxiliary_index = next(
             (
                 index
@@ -2679,7 +2666,6 @@ _INDEPENDENT_NON_GOVERNANCE_OBJECT_RE = re.compile(
     r"^\s*(?:(?:a|an|the)\s+)?(?:"
     r"changelog|comments?|copy|formatting|labels?|metadata|readme|"
     r"(?:documented\s+)?recovery\s+behavior|release\s+notes?|spelling"
-    r"|user-facing\s+flag\s+or\s+default"
     r")\s*(?:only\s*)?(?:while|without)?\s*$",
     re.I,
 )
@@ -2833,7 +2819,12 @@ def _coordinated_documentation_topic_semantics(text):
         residual = text[effect_end:]
         if (
             effect_start < documentation_match.end()
-            or re.fullmatch(r"[\s,;:.-]*", between) is None
+            or re.fullmatch(
+                r"[\s,;:.-]*(?:(?:is|are|was|were)\s+)?",
+                between,
+                re.I,
+            )
+            is None
             or re.fullmatch(
                 r"[\s,;:.!?-]*(?:only[\s,;:.!?-]*)?",
                 residual,

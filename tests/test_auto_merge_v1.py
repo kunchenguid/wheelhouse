@@ -71,7 +71,7 @@ CLASS_B_ADMISSION = {
     **BEHAVIOR_ADMISSION,
     "corrected_defect": "Daemon restart lost an open monitored run.",
     "intended_behavior_restored": (
-        "An open monitored run remains recoverable after restart."
+        "An open monitored run remains recoverable."
     ),
 }
 ELIGIBLE_A = {
@@ -566,7 +566,7 @@ def test_verdict_classes_ABC():
 
 def test_class_b_semantic_admission_boundary():
     defect_quote = "Daemon restart lost an open monitored run."
-    restored_quote = "An open monitored run remains recoverable after restart."
+    restored_quote = "An open monitored run remains recoverable."
     product_claim = (
         "Narrow corrective fix restoring documented recovery behavior "
         "without changing default behavior"
@@ -736,6 +736,22 @@ def test_class_b_semantic_admission_boundary():
             },
         },
         {
+            "claim": (
+                "Routine maintainer decision - tightens an existing delivery "
+                "contract without changing a user-facing flag or default"
+            ),
+            "subject": "default_behavior",
+            "effect": "unchanged",
+            "evidence": {
+                "source": "target.txt",
+                "quote": (
+                    "Routine maintainer decision - tightens an existing "
+                    "delivery contract without changing a user-facing flag "
+                    "or default"
+                ),
+            },
+        },
+        {
             "claim": "Existing delivery contract is tightened for review",
             "subject": "delivery_contract",
             "effect": "tightened",
@@ -757,6 +773,14 @@ def test_class_b_semantic_admission_boundary():
                 "target.txt",
                 render_card._normalize_evidence_text(
                     "Existing delivery contract is tightened for review."
+                ),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Routine maintainer decision - tightens an existing "
+                    "delivery contract without changing a user-facing flag "
+                    "or default"
                 ),
             ),
         ),
@@ -1224,6 +1248,14 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: single-word temporal roles remain unavailable",
+        render_card._restoration_claim_supported(
+            "Authentication sessions resume processing after recovery.",
+            "Authentication sessions resume recovery after processing.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1655,6 +1687,30 @@ def test_class_b_semantic_admission_boundary():
         "semantic admission: former reference cannot prove independence",
         render_card._derive_behavior_assertion_semantics(former_effect_text)
         is None,
+    )
+    changed_default_text = (
+        "Changes a user-facing flag or default while preserving "
+        "the existing workflow"
+    )
+    check(
+        "semantic admission: changed default remains protected",
+        render_card._derive_behavior_assertion_semantics(
+            changed_default_text
+        )
+        == {
+            ("default_behavior", "changed"),
+            ("existing_workflow", "unchanged"),
+        },
+    )
+    passive_reverse_docs_text = (
+        "Existing mode and workflow documentation is changed"
+    )
+    check(
+        "semantic admission: passive reverse docs remain neutral",
+        render_card._derive_behavior_assertion_semantics(
+            passive_reverse_docs_text
+        )
+        == {("documentation_or_tests", "changed")},
     )
     reverse_transitive_text = (
         "Existing workflow and delivery contract documentation "

@@ -178,11 +178,11 @@ def main():
                 "quote": "Daemon restart lost an open monitored run.",
             },
             "intended_behavior_restored": (
-                "An open monitored run remains recoverable after restart."
+                "An open monitored run remains recoverable."
             ),
             "intended_behavior_restored_evidence": {
                 "source": "target-src/lib/recovery.py",
-                "quote": "An open monitored run remains recoverable after restart.",
+                "quote": "An open monitored run remains recoverable.",
             },
         }
         pr_valid = dict(valid, recommended_action="merge")
