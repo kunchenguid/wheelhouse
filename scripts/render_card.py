@@ -1087,14 +1087,24 @@ def plan_label_update(desired, current):
     return to_add, to_remove
 
 
-def _clean_triage_text(value, limit=700, default="n/a"):
+def _clean_triage_text_value(value, limit, default, preserve_handles):
     text = str(value or "").strip()
     text = text.replace("\r", "\n")
     text = re.sub(r"\s+", " ", text)
     text = text.replace("<!--", "").replace("-->", "")
+    if not preserve_handles:
+        text = text.replace("@", "")
     if len(text) > limit:
         text = text[: limit - 3].rstrip() + "..."
     return text or default
+
+
+def _clean_triage_text(value, limit=700, default="n/a"):
+    return _clean_triage_text_value(value, limit, default, False)
+
+
+def _clean_semantic_triage_text(value, limit=700, default="n/a"):
+    return _clean_triage_text_value(value, limit, default, True)
 
 
 def _display_safe_triage_text(value):
@@ -1545,7 +1555,7 @@ def _declared_evidence_refs(data):
     restoration = automerge.get(CLASS_B_RESTORATION_FIELD)
     if isinstance(restoration, dict):
         refs.extend(
-            restoration.get(field)
+            (restoration.get(field), True)
             for field in (
                 "corrected_defect_evidence",
                 "intended_behavior_restored_evidence",
@@ -1554,7 +1564,7 @@ def _declared_evidence_refs(data):
     assertions = automerge.get(BEHAVIOR_ASSERTIONS_FIELD)
     if isinstance(assertions, list):
         refs.extend(
-            assertion.get("evidence")
+            (assertion.get("evidence"), False)
             for assertion in assertions
             if isinstance(assertion, dict)
         )
@@ -1570,8 +1580,8 @@ def _bind_verified_evidence_spans(
 ):
     bounded = dict(data)
     verified = []
-    for raw_ref in _declared_evidence_refs(bounded):
-        evidence_ref = _normalize_evidence_ref(raw_ref)
+    for raw_ref, preserve_handles in _declared_evidence_refs(bounded):
+        evidence_ref = _normalize_evidence_ref(raw_ref, preserve_handles)
         if evidence_ref is None:
             continue
         source_text = _read_declared_evidence_source(
@@ -2291,7 +2301,7 @@ def _restoration_subject_tokens(text):
     return tokens
 
 
-def _normalize_evidence_ref(value):
+def _normalize_evidence_ref(value, preserve_handles=False):
     if not isinstance(value, dict) or set(value) != {"source", "quote"}:
         return None
     source = value.get("source")
@@ -2306,7 +2316,10 @@ def _normalize_evidence_ref(value):
         or ".." in source.split("/")
     ):
         return None
-    cleaned = _clean_triage_text(quote, limit=241, default="")
+    cleaner = (
+        _clean_semantic_triage_text if preserve_handles else _clean_triage_text
+    )
+    cleaned = cleaner(quote, limit=241, default="")
     if not 12 <= len(cleaned) <= 240:
         return None
     return {"source": source, "quote": cleaned}
@@ -2327,7 +2340,7 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
         raw = value.get(field)
         if not isinstance(raw, str) or len(raw) > CLASS_B_RESTORATION_MAX_CHARS:
             return None
-        text = _clean_triage_text(
+        text = _clean_semantic_triage_text(
             raw,
             limit=CLASS_B_RESTORATION_MAX_CHARS + 1,
             default="",
@@ -2345,7 +2358,9 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
             "corrected_defect_evidence",
             "intended_behavior_restored_evidence",
         ):
-            evidence_ref = _normalize_evidence_ref(value.get(field))
+            evidence_ref = _normalize_evidence_ref(
+                value.get(field), preserve_handles=True
+            )
             if evidence_ref is None:
                 return None
             evidence_refs[field] = evidence_ref

@@ -1440,7 +1440,8 @@ def test_class_b_semantic_admission_boundary():
     at_defect = "Daemon restart lost an open monitored run @primary."
     at_restored = "An open monitored run @primary remains recoverable."
     at_input = candidate(
-        summary="Fixes recovery for @primary after a daemon restart."
+        summary="Fixes recovery for @primary after a daemon restart.",
+        recommended_reason="Merge after verifying @primary recovery.",
     )
     at_input["automerge"] = dict(at_input["automerge"])
     at_input["automerge"]["class_b_restoration"] = {
@@ -1488,7 +1489,9 @@ def test_class_b_semantic_admission_boundary():
         and at_state["automerge_verdict"]["behavior_admission"][
             "corrected_defect"
         ]
-        == at_defect,
+        == at_defect
+        and at_normalized["triage_recommendation"]["reason"]
+        == "Merge after verifying primary recovery.",
     )
     check(
         "class B admission: rendered @identifier cannot notify",

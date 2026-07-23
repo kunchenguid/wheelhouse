@@ -2351,6 +2351,53 @@ def test_do_request_changes_posts_review():
     )
 
 
+def test_target_action_text_neutralizes_mentions_at_write_sinks():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(
+        gh_rest=fake,
+        load_config=lambda: cleanup_cfg(enabled=False),
+    ):
+        ad.do_comment(
+            "owner-login",
+            "target-repo",
+            5,
+            "Please ask @contributor to verify this.",
+        )
+        ad.do_close(
+            "owner-login",
+            "target-repo",
+            5,
+            reason="Closing after @contributor confirmed.",
+        )
+        ad.do_request_changes(
+            "owner-login",
+            "target-repo",
+            5,
+            "abc123",
+            "Please have @contributor add coverage.",
+        )
+    target_bodies = [
+        call["fields"]["body"]
+        for call in posts(calls)
+        if isinstance(call.get("fields"), dict) and "body" in call["fields"]
+    ]
+    check(
+        "target text: comment, close note, and review neutralize mentions",
+        target_bodies
+        == [
+            "Please ask contributor to verify this.",
+            "Closing after contributor confirmed.",
+            "Please have contributor add coverage.",
+        ],
+    )
+    safe_once = ad._target_safe_action_text("@contributor already handled")
+    check(
+        "target text: mention neutralization is idempotent",
+        ad._target_safe_action_text(safe_once) == safe_once
+        and "@" not in safe_once,
+    )
+
+
 def test_do_request_changes_respects_cleanup_config():
     for cfg, label in (
         (cleanup_cfg(enabled=False), "global disabled"),
@@ -2595,7 +2642,12 @@ def test_cmd_execute_revalidates_revision_before_any_target_mutation():
 
 def test_accept_decline_execute_comments_then_closes_issue():
     parsed = run_parse(
-        _tick_accept(accept_card(action="decline", reason="fixed by #9"))
+        _tick_accept(
+            accept_card(
+                action="decline",
+                reason="fixed by #9 after @contributor confirmed",
+            )
+        )
     )
     fake, calls = fake_gh_rest({"updated_at": parsed["target_revision"]})
     with patch_core(gh_rest=fake, get_owner=lambda: "acme"):
@@ -2619,7 +2671,8 @@ def test_accept_decline_execute_comments_then_closes_issue():
         "accept execute(issue decline): posts the recommended reason",
         mutations[0]["method"] == "POST"
         and mutations[0]["path"] == "/repos/acme/lavish-axi/issues/42/comments"
-        and mutations[0]["fields"]["body"] == "fixed by acme/lavish-axi#9",
+        and mutations[0]["fields"]["body"]
+        == "fixed by acme/lavish-axi#9 after contributor confirmed",
     )
     check(
         "accept execute(issue decline): then closes the target",
@@ -2682,7 +2735,7 @@ def test_accept_request_changes_execute_posts_review():
             accept_card(
                 kind="pr-review",
                 action="request-changes",
-                reason="please add coverage",
+                reason="please ask @contributor to add coverage",
                 options=[
                     "accept-recommendation",
                     "merge",
@@ -2715,7 +2768,43 @@ def test_accept_request_changes_execute_posts_review():
         "accept execute(pr request-changes): posts a review",
         len(review_posts) == 1
         and review_posts[0]["fields"]["event"] == "REQUEST_CHANGES"
-        and review_posts[0]["fields"]["body"] == "please add coverage",
+        and review_posts[0]["fields"]["body"]
+        == "please ask contributor to add coverage",
+    )
+
+
+def test_accept_comment_execute_neutralizes_recommendation_mentions():
+    parsed = run_parse(
+        _tick_accept(
+            accept_card(
+                action="comment",
+                reason="Please ask @contributor to verify the fix.",
+            )
+        )
+    )
+    fake, calls = fake_gh_rest({"updated_at": parsed["target_revision"]})
+    with patch_core(gh_rest=fake, get_owner=lambda: "acme"):
+        out = run_execute(
+            {
+                "DECISION": parsed["decision"],
+                "FREE_TEXT": parsed["free_text"],
+                "TARGET_REPO": parsed["target_repo"],
+                "TARGET_NUMBER": parsed["target_number"],
+                "KIND": parsed["kind"],
+                "TARGET_REVISION": parsed["target_revision"],
+            }
+        )
+    comment_posts = [
+        call
+        for call in posts(calls)
+        if call["path"].endswith("/issues/42/comments")
+    ]
+    check(
+        "accept execute(issue comment): recommendation cannot notify",
+        out["terminal_state"] == "none"
+        and len(comment_posts) == 1
+        and comment_posts[0]["fields"]["body"]
+        == "Please ask contributor to verify the fix.",
     )
 
 
@@ -3231,6 +3320,7 @@ def main():
     test_thank_on_merge_custom_message_and_per_repo_precedence()
     test_merge_conflict_is_recoverable_not_durable_blocked()
     test_do_request_changes_posts_review()
+    test_target_action_text_neutralizes_mentions_at_write_sinks()
     test_do_request_changes_respects_cleanup_config()
     test_do_request_changes_refuses_self_review()
     test_do_request_changes_does_not_arm_cleanup_for_excluded_authors()
@@ -3244,6 +3334,7 @@ def main():
     test_accept_decline_execute_comments_then_closes_issue()
     test_accept_merge_execute_keeps_stale_head_retryable()
     test_accept_request_changes_execute_posts_review()
+    test_accept_comment_execute_neutralizes_recommendation_mentions()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()
     test_history_empty_and_blank_cases()
