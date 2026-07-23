@@ -2567,12 +2567,16 @@ _RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
 )
 _RESTORATION_ROLE_PATTERNS = frozenset(
     {
+        ("archive", "retention"),
         ("authentication", "sessions"),
         ("daemon", "restart"),
+        ("lifecycle", "retries"),
         ("monitored", "runs"),
+        ("normal", "decision", "retention"),
         ("open", "monitored", "run"),
         ("open", "monitored", "runs"),
         ("recoverable",),
+        ("resolved", "decisions"),
     }
 )
 _RESTORATION_LEXEME_RE = re.compile(
@@ -3508,6 +3512,29 @@ def normalize_automerge_verdict(data, triage_data=None):
         data.get(BEHAVIOR_ASSERTIONS_FIELD),
         triage_data,
     )
+    if (
+        admission is None
+        and cls != "B"
+        and BEHAVIOR_ASSERTIONS_FIELD not in data
+        and isinstance(triage_data, dict)
+        and not _protected_contract_claims(
+            (
+                triage_data.get("summary", ""),
+                triage_data.get("product_implications", ""),
+                _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or "",
+            ),
+            cls,
+        )
+    ):
+        persisted = data.get(BEHAVIOR_ADMISSION_FIELD)
+        persisted_status = behavior_admission_status(
+            {
+                "behavior_class": cls,
+                BEHAVIOR_ADMISSION_FIELD: persisted,
+            }
+        )[0]
+        if persisted_status in {"admitted", "contradictory"}:
+            admission = dict(persisted)
     if admission is not None:
         verdict[BEHAVIOR_ADMISSION_FIELD] = admission
     vision_fields = {

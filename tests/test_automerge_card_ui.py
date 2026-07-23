@@ -386,12 +386,12 @@ def test_wh_aud_05_semantic_denial_is_visible_without_masking_other_gates():
 
     control_evidence = {
         1622: (
-            "Resolved decisions moved to the archive were undetectable.",
-            "Durable verification finds retained decisions after archive retention.",
+            "Archive retention lost resolved decisions.",
+            "Archive retention retains resolved decisions.",
         ),
         1624: (
-            "Lifecycle retries failed after normal decision retention.",
-            "Complete, verify, and resolve retries work after retention.",
+            "Normal decision retention broke lifecycle retries.",
+            "Normal decision retention supports lifecycle retries.",
         ),
     }
     for card_number, evidence_pair in control_evidence.items():
