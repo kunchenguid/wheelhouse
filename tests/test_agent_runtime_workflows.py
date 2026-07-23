@@ -329,10 +329,19 @@ def main():
         in triage_card["run"],
     )
     check(
-        "triage projection: final claim preserves the normalized model error code",
+        "triage projection: provider result and consumer commit stay distinct",
         (triage_stage.get("env") or {}).get("MODEL_ERROR_CODE")
         == "${{ steps.primary-result.outputs.error-code }}"
-        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"],
+        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"]
+        and 'stage="consumer-committed"' in triage_stage["run"]
+        and 'code="consumer.committed"' in triage_stage["run"],
+    )
+    check(
+        "triage projection: terminal stage binds the admitted task execution",
+        docs["triage"]["jobs"]["triage"]["outputs"]["execution_id"]
+        == "${{ steps.claude-task.outputs.execution_id }}"
+        and '--execution-id "${{ needs.triage.outputs.execution_id }}"'
+        in triage_stage["run"],
     )
     execute = next(step for step in steps(docs["decision"]) if step.get("id") == "execute")
     check("NL safety: deterministic FLEET_TOKEN executor remains separate", (execute.get("env") or {}).get("GH_TOKEN") == "${{ secrets.FLEET_TOKEN }}")

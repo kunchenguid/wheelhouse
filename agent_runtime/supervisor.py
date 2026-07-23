@@ -32,6 +32,7 @@ from .contract import (
     result_projection_sha256,
 )
 from .events import EventWriter
+from .output_validation import evidence_anchor_ok
 from .redaction import contains_secret, sanitize_message
 from .sandbox import SandboxError, build_command, host_proof
 
@@ -329,7 +330,7 @@ def _restore_direct_output_access(output_dir: Path) -> None:
 def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
     if task["spec"]["output"]["evidencePolicy"] != "target-anchor/v1":
         return True
-    if not isinstance(value, dict) or not isinstance(value.get("evidence"), str):
+    if not isinstance(value, dict):
         return False
     target = next((row for row in task["spec"]["inputs"] if row["id"] == "target"), None)
     if not target:
@@ -338,13 +339,7 @@ def _anchor_ok(value: Any, task: dict[str, Any], bundle: Path) -> bool:
         text = (bundle / target["artifact"]).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    import re
-    normalized = re.sub(r"\s+", " ", text).strip().lower()
-    for quote in re.findall(r'"([^"\n]{1,240})"', value["evidence"]):
-        needle = re.sub(r"\s+", " ", quote).strip().lower()
-        if len(needle) >= 12 and needle in normalized:
-            return True
-    return False
+    return evidence_anchor_ok(value.get("evidence"), text)
 
 
 def _validate_worker(

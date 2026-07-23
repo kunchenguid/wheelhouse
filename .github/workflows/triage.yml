@@ -109,6 +109,7 @@ jobs:
       event_admitted: ${{ steps.event-claim.outputs.admitted }}
       event_action: ${{ steps.event-claim.outputs.action }}
       event_key: ${{ steps.event-claim.outputs.event_key }}
+      execution_id: ${{ steps.claude-task.outputs.execution_id }}
       claim_id: ${{ steps.event-claim.outputs.comment_id }}
       claim_marker: ${{ steps.event-claim.outputs.marker }}
       vision_sha: ${{ steps.prepare.outputs.vision_sha }}
@@ -2087,6 +2088,7 @@ jobs:
             --action "${{ needs.triage.outputs.event_action }}" \
             --source-sha "${{ github.sha }}" \
             --event-key "${{ needs.triage.outputs.event_key }}" \
+            --execution-id "${{ needs.triage.outputs.execution_id }}" \
             --stage "$stage" --status "$status" --code "$code"
 
       - name: Finalize schema-repair claim and stage evidence

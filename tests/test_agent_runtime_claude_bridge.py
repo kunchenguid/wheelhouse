@@ -7,13 +7,19 @@ import json
 import tempfile
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_from_task
 from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge, write_controller_failure_result, write_revision_mismatch_result
 from agent_runtime.config import resolve_selection
+from agent_runtime.consumer import result_text
 from agent_runtime.contract import ContractError, canonical_sha256, file_sha256, result_projection_sha256, validate_contract
 from agent_runtime.task_builder import build_task, claude_declared_outputs, claude_declared_tools
+
+sys.path.insert(0, str(Path("scripts").resolve()))
+import render_card  # noqa: E402
 
 FAILURES = []
 
@@ -39,12 +45,15 @@ def make_bundle(
     action: str = "deep-review.local",
     include_vision: bool = False,
     allow_automerge_behavior: bool = False,
+    target_text: str = "fixture target\n",
+    event_key: str = "a" * 64,
+    execution_id: str = "",
 ):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
     target = root / "target.txt"
     prompt.write_text("Return the bounded result.\n", encoding="utf-8")
-    target.write_text("fixture target\n", encoding="utf-8")
+    target.write_text(target_text, encoding="utf-8")
     vision = root / "vision.md"
     if include_vision:
         vision.write_text("Trusted project vision.\n", encoding="utf-8")
@@ -61,11 +70,14 @@ def make_bundle(
         target_kind="pr-review",
         revision="abcdef1",
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
-        event_key="a" * 64,
+        event_key=event_key,
         target_file=str(target),
         vision_file=str(vision) if include_vision else "",
         allow_automerge_behavior=allow_automerge_behavior,
     )
+    if execution_id:
+        task["metadata"]["executionId"] = execution_id
+        (bundle / "task.json").write_text(json.dumps(task), encoding="utf-8")
     return task, bundle
 
 
@@ -234,6 +246,302 @@ def main():
         check(
             "bridge: trusted VISION triage accepts a complete verdict",
             vision_result["status"] == "succeeded",
+        )
+
+        production = json.loads(
+            Path("tests/fixtures/provider-telemetry-six.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        check(
+            "production cohort: exact replay runs, cards, and executions are fixed",
+            {
+                (case["run_id"], case["card"], case["execution_id"])
+                for case in production
+            }
+            == {
+                ("29985469441", 1483, "6dedd49f-1009-46b2-bda7-5dc5d6467114"),
+                ("29985480267", 1584, "889d5768-59c0-431f-9963-1645eb3be218"),
+                ("29985490774", 1585, "c81c01f3-f707-4e7a-a1a4-b56f9cd7ef77"),
+                ("29985502800", 1586, "442ff57c-635a-4aee-9cb6-0c5db7b722aa"),
+                ("29985514969", 1594, "08ed5f8a-e1fd-4230-9566-441056581487"),
+                ("29985527456", 1598, "663ba663-c5f0-4f78-87fb-e10d6bdcaf67"),
+            },
+        )
+        normalized_successes = 0
+        consumer_successes = 0
+        for case in production:
+            case_root = root / ("production-%s" % case["run_id"])
+            event_key = event_key_sha256(
+                normalized_event_identity(
+                    action="triage.pr.search",
+                    owner="owner",
+                    repo="repo",
+                    number=7,
+                    card_issue=case["card"],
+                    revision="abcdef1",
+                )
+            )
+            case_task, case_bundle = make_bundle(
+                case_root,
+                action="triage.pr.search",
+                include_vision=True,
+                allow_automerge_behavior=True,
+                target_text=case["target_excerpt"] + "\n",
+                event_key=event_key,
+                execution_id=case["execution_id"],
+            )
+            case_execution = root / ("production-%s.json" % case["run_id"])
+            transcript(
+                case_execution,
+                IMMUTABLE_MODEL,
+                case["raw_output"],
+            )
+            case_result, case_events = run_bridge(
+                case_bundle,
+                case_execution,
+                "production-%s" % case["run_id"],
+            )
+            compact = result_text(
+                str(case_bundle / ("result-production-%s.json" % case["run_id"])),
+                require_success=False,
+            )
+            repair = render_card.plan_triage_repair(compact, "pr-review")
+            consumer = render_card.decide_triage_apply(
+                compact,
+                "",
+                str(case_root / "target.txt"),
+            )
+            item = {
+                "repo": "repo",
+                "number": 7,
+                "kind": "pr-review",
+                "head_sha": "abcdef1",
+                "title": "Production replay %s" % case["run_id"],
+                "author": "fixture",
+                "bucket": "review-needed",
+                "comp": "pass",
+                "tests": "green",
+                "url": "https://example.invalid/repo/pull/7",
+                "summary": "production replay",
+                "recommendation": "Review the normalized result.",
+                "priority": "med",
+                "options": ["merge", "investigate"],
+            }
+            rendered = render_card.render(item)
+            queued_body = render_card.body_with_triage_queued(
+                rendered["body"], item
+            )
+            card = {
+                "number": case["card"],
+                "state": "OPEN",
+                "body": queued_body,
+                "labels": rendered["labels"],
+            }
+            card_writes = []
+            card_error = (
+                "evidence quotes did not match the fetched target"
+                if consumer["outcome"] == "anchor-fail"
+                else None
+            )
+            with (
+                patch.object(render_card, "get_card", return_value=card),
+                patch.object(
+                    render_card,
+                    "_edit_issue_body",
+                    side_effect=lambda number, body, **kwargs: card_writes.append(
+                        (number, body, kwargs)
+                    ),
+                ),
+                patch.object(
+                    render_card,
+                    "_evaluate_automerge_card_projection",
+                    return_value=render_card.criteria_schema.unavailable_criteria(
+                        "offline production replay"
+                    ),
+                ),
+            ):
+                applied = render_card.update_card_triage(
+                    case["card"],
+                    "abcdef1",
+                    triage=consumer["triage"],
+                    error=card_error,
+                    owner="owner",
+                    vision_sha="b" * 40,
+                    base_sha="d" * 40,
+                    automerge_behavior_available=True,
+                    require_queued=True,
+                )
+            committed_body = card_writes[0][1] if applied and len(card_writes) == 1 else ""
+            committed_state = render_card.parse_state_block(committed_body)
+            stage = stage_from_task(
+                case_task,
+                stage="consumer-committed",
+                status="ok",
+                code=case["expected_stage_code"],
+            )
+            events_rows = [
+                json.loads(line)
+                for line in case_events.read_text(encoding="utf-8").splitlines()
+            ]
+            validation_events = [
+                row for row in events_rows if row["type"] == "validation.completed"
+            ]
+            terminal_events = [
+                row for row in events_rows if row["type"] == "execution.completed"
+            ]
+            check(
+                "production %s: raw provider terminal remains successful"
+                % case["run_id"],
+                json.loads(case_execution.read_text(encoding="utf-8"))[-1][
+                    "subtype"
+                ]
+                == "success",
+            )
+            check(
+                "production %s: normalized status and code are truthful"
+                % case["run_id"],
+                case_result["status"] == case["expected_normalized_status"]
+                and (case_result.get("error") or {}).get("code")
+                == case["expected_normalized_code"],
+            )
+            check(
+                "production %s: valid compact output is never repair eligible"
+                % case["run_id"],
+                bool(compact) and repair["repair_needed"] is False,
+            )
+            check(
+                "production %s: deterministic consumer outcome stays distinct"
+                % case["run_id"],
+                consumer["outcome"] == case["expected_consumer_outcome"],
+            )
+            check(
+                "production %s: one correlated validation and terminal event"
+                % case["run_id"],
+                len(validation_events) == 1
+                and len(terminal_events) == 1
+                and all(
+                    row["executionId"] == case_result["executionId"]
+                    for row in validation_events + terminal_events
+                )
+                and validation_events[0]["data"]["errorCode"]
+                == case["expected_normalized_code"]
+                and terminal_events[0]["data"]["status"]
+                == case["expected_normalized_status"],
+            )
+            check(
+                "production %s: task binds exact replay execution and event"
+                % case["run_id"],
+                case_task["metadata"]["executionId"] == case["execution_id"]
+                and case_result["executionId"] == case["execution_id"]
+                and case_task["metadata"]["idempotencyKey"] == event_key,
+            )
+            check(
+                "production %s: offline card update commits expected status"
+                % case["run_id"],
+                applied
+                and committed_state.get("triage_status")
+                == case["expected_card_status"],
+            )
+            check(
+                "production %s: projection stage binds task and stays distinct"
+                % case["run_id"],
+                stage["code"] == case["expected_stage_code"]
+                and stage["stage"] == "consumer-committed"
+                and stage["executionId"] == case["execution_id"]
+                and stage["eventKeySha256"] == event_key
+                and stage["sourceSha"]
+                == case_task["metadata"]["wheelhouseRevision"],
+            )
+            if case_result["status"] == "succeeded":
+                normalized_successes += 1
+            if consumer["outcome"] == "success":
+                consumer_successes += 1
+                check(
+                    "production %s: successful consumer retains behavior verdict"
+                    % case["run_id"],
+                    bool(
+                        render_card.normalize_triage(consumer["triage"]).get(
+                            "automerge_verdict"
+                        )
+                    ),
+                )
+                check(
+                    "production %s: card persists behavior verdict"
+                    % case["run_id"],
+                    bool(committed_state.get("automerge_verdict")),
+                )
+            else:
+                check(
+                    "production %s: rejected evidence persists no verdict or schema success"
+                    % case["run_id"],
+                    committed_state.get("automerge_verdict") is None
+                    and committed_state.get("triage_status") == "error"
+                    and case_result["error"]["code"] == "output.evidence_invalid",
+                )
+        check(
+            "production cohort: five normalized and consumer successes",
+            normalized_successes == 5 and consumer_successes == 5,
+        )
+
+        _, invalid_bundle = make_bundle(
+            root / "genuine-schema-invalid",
+            action="triage.pr.local",
+        )
+        invalid_execution = root / "genuine-schema-invalid.json"
+        transcript(
+            invalid_execution,
+            IMMUTABLE_MODEL,
+            json.dumps({"summary": "Missing every other required field."}),
+        )
+        invalid_result, invalid_events = run_bridge(
+            invalid_bundle,
+            invalid_execution,
+            "genuine-schema-invalid",
+        )
+        invalid_text = result_text(
+            str(invalid_bundle / "result-genuine-schema-invalid.json"),
+            require_success=False,
+        )
+        invalid_plan = render_card.plan_triage_repair(invalid_text, "pr-review")
+        valid_repair = {
+            "summary": "A corrected bounded result.",
+            "product_implications": "Routine maintenance.",
+            "recommended_action": "hold",
+            "recommended_reason": "Owner review remains appropriate.",
+            "evidence": 'target.txt: "fixture target"',
+        }
+        repaired = render_card.decide_triage_apply(
+            invalid_text,
+            json.dumps(valid_repair),
+            str(root / "genuine-schema-invalid" / "target.txt"),
+        )
+        repair_failed = render_card.decide_triage_apply(
+            invalid_text,
+            json.dumps({"summary": "Still incomplete."}),
+            str(root / "genuine-schema-invalid" / "target.txt"),
+        )
+        invalid_event_rows = [
+            json.loads(line)
+            for line in invalid_events.read_text(encoding="utf-8").splitlines()
+        ]
+        check(
+            "bridge: genuine schema-invalid output remains explicitly invalid",
+            invalid_result["status"] == "failed"
+            and invalid_result["error"]["code"] == "output.schema_invalid"
+            and invalid_plan["repair_needed"] is True,
+        )
+        check(
+            "bridge: genuine schema-invalid output has one terminal failure",
+            sum(row["type"] == "validation.completed" for row in invalid_event_rows)
+            == 1
+            and sum(row["type"] == "execution.completed" for row in invalid_event_rows)
+            == 1,
+        )
+        check(
+            "consumer: the one bounded repair can succeed or fail closed",
+            repaired["outcome"] == "repaired"
+            and repair_failed["outcome"] == "repair-failed",
         )
 
         task, bundle = make_bundle(root / "success")
