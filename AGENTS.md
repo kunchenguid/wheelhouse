@@ -1065,15 +1065,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   G6 a fresh structured `automerge_verdict` for the CURRENT head SHA
   (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
   alignment, ruling out an ineligible existing/default behavior change, and
-  recommending merge. Class B additionally requires bounded evidence naming the
-  corrected defect and intended behavior restored, each with its own verified
-  `target.txt` or `target-src/` reference; semantic admission marks the
-  class unavailable when that evidence is missing or ambiguous, and rejects any
-  class whose own summary, product implications, or evidence affirmatively says
-  an existing mode, default, workflow, or delivery contract is tightened or
-  changed. Historical verdicts without the current `behavior_admission` record
-  are unavailable, never compatibility-eligible. Class C also requires an
-  explicit strictly-opt-in + default-off flag.
+  recommending merge. Class B additionally requires exact-source corrected-defect
+  and restored-behavior evidence admitted by the shared fail-closed semantic
+  boundary; contradictory A/B/C and historical verdicts cannot bypass it. Class C
+  also requires an explicit strictly-opt-in + default-off flag. The detailed
+  schema and normalization contract live in `docs/AGENT_RUNTIME.md`.
   The complete scan must also prove that no other open PR closes an issue closed by the candidate: `same_closing_issue_overlap` carries the existing `_overlap_note` result into eligibility, and a missing, malformed, or non-empty fact holds before claim or act.
   G7 is an immediate live re-check of head SHA, base SHA, default-branch VISION.md SHA, mergeable, clean state, configured compliance/test contexts, and same-closing-issue overlap right before `do_merge`.
   The overlap re-read uses `wheelhouse_core.same_closing_issue_overlap`, which strictly re-lists every open PR and reuses `_closing_issue_numbers`, `_closing_map`, and `_overlap_note`; any unreadable, incomplete, malformed, duplicate, or raced result holds in the final `do_merge` guard.
@@ -1094,7 +1090,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   Enabling "require branches to be up to date" branch protection, or using a merge queue, closes it server-side because GitHub's `mergeStateStatus` becomes `BEHIND` while auto-merge requires a CLEAN merge state.
   The behavior verdict is PRODUCED by extending the pr-review triage.
   For every complete immutable diff, `triage.yml` asks for the VISION-independent behavior class, existing/default-behavior-change, and class-C opt-in/default-off facts, plus typed `behavior_assertions` and the bounded, claim-specific `class_b_restoration` evidence when the class is B.
-  `render_card.normalize_automerge_verdict` is the semantic admission owner: it verifies exact evidence references from `target.txt` or the exact workspace/manifest-bound `target-src/`, uniquely matches canonical active, progressive, or explicitly supported compound-passive predicate, complete ordered argument-role, and predicate-local-polarity tuples with no temporal or relational complement, extra proposition, residual subordinate, or complement tokens for every restoration proposition after contraction normalization, requires the defect and restoration to share the same complete canonical affected-object role under a bounded predicate repair relation, derives rather than trusts each typed assertion's subject/effect from one authoritative protected-pattern table, uniquely maps protected occurrences, unions pending coordinated subjects, retains and consumes protected semantic effects exactly once inside atomic clauses, fails closed on every unmatched default phrase outside a proven documentation/test topic except a fully consumed isolated new opt-in disabled-by-default class-C construction with no protected subject or behavior-change effect, explicitly binds behavior objects, accepts synthetic unrelated effects only for fully parsed independent non-governance objects, preserves coordinated documentation/test protected topic edges in either word order only under one fully consumed active, compound-passive, or modal-passive documentation-edit predicate, including bounded negated modal and compound-passive no-change forms, and projects the versioned `behavior_admission` record, while `auto_merge.behavior_verdict_facts` revalidates that record for both criteria display and acting.
+  `render_card.normalize_automerge_verdict` owns semantic admission, and `auto_merge.behavior_verdict_facts` revalidates its versioned result for both criteria display and acting; see `docs/AGENT_RUNTIME.md` for the detailed contract.
   It fetches base-branch VISION.md through the contents API with NO `?ref`, never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md is also a G2 exclusion.
   Only when that trusted policy exists does triage additionally ask for alignment and the final merge recommendation; `render_card.normalize_automerge_verdict` parses the independent core plus that optional all-or-nothing extension.
   The result is PERSISTED as the

@@ -484,6 +484,7 @@ def _comment_target(slug, number, text):
 
 
 def _target_safe_action_text(text):
+    """Remove GitHub mention markers from owner/model-authored target text."""
     return str(text or "").replace("@", "")
 
 
