@@ -52,6 +52,7 @@ PACKAGED_RUNTIME_FILES = (
     "contract.py",
     "events.py",
     "install_direct_runtime.sh",
+    "limits.py",
     "redaction.py",
     "runtime.lock.json",
     "sandbox.py",
