@@ -329,6 +329,7 @@ BEHAVIOR_ADMISSION_FIELD = "behavior_admission"
 BEHAVIOR_ADMISSION_VERSION = 1
 CLASS_B_RESTORATION_MIN_CHARS = 12
 CLASS_B_RESTORATION_MAX_CHARS = 500
+_VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -1272,6 +1273,27 @@ def evidence_anchor_ok(evidence, target_text, min_quote_len=12, min_fallback_len
     )
 
 
+def _verified_evidence_spans(
+    evidence, target_text, min_quote_len=12, min_fallback_len=20
+):
+    quotes, fallback = _evidence_candidates(evidence)
+    haystack = _normalize_evidence_text(target_text)
+    verified = []
+    for candidates, minimum in (
+        (quotes, min_quote_len),
+        (fallback, min_fallback_len),
+    ):
+        for candidate in candidates:
+            needle = _normalize_evidence_text(candidate)
+            if (
+                len(needle) >= minimum
+                and needle in haystack
+                and candidate not in verified
+            ):
+                verified.append(candidate)
+    return tuple(verified)
+
+
 def _read_target_text(path, limit=4_000_000):
     """Read the on-disk target.txt for the evidence anchor check, size-bounded.
     Returns "" on any read failure so the caller can fail open (skip the anchor
@@ -1302,6 +1324,16 @@ def _triage_evidence_verified(data, target_file):
     if evidence is None:
         return False
     return evidence_anchor_ok(evidence, target_text)
+
+
+def _bind_verified_evidence_spans(data, target_file):
+    bounded = dict(data)
+    target_text = _read_target_text(target_file)
+    evidence = _flatten_evidence(bounded.get(EVIDENCE_FIELD)) or ""
+    bounded[_VERIFIED_EVIDENCE_SPANS_FIELD] = _verified_evidence_spans(
+        evidence, target_text
+    )
+    return bounded
 
 
 def triage_source_provenance_verified(
@@ -1896,7 +1928,7 @@ _BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
     r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
     r"(?:\s+[\w./-]+){0,4}\s+"
     r"(?:mode|behavio[u]?r|workflow|delivery\s+contract|contract)"
-    r"|(?:[\w./-]+\s+){0,3}workflow"
+    r"|workflow"
     r"|delivery\s+contract"
     r")\b",
     re.I,
@@ -1939,14 +1971,8 @@ _BEHAVIOR_NEUTRAL_ARTIFACT_RE = re.compile(
     r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b",
     re.I,
 )
-_BEHAVIOR_NEUTRAL_CLAUSE_RE = re.compile(
-    r"^\s*(?:"
-    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b"
-    r"|(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
-    r"modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing))"
-    r"(?:\s+\w+){0,3}\s+"
-    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b"
-    r")",
+_BEHAVIOR_NEUTRAL_OBJECT_RE = re.compile(
+    r"\b(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b",
     re.I,
 )
 _RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
@@ -2013,7 +2039,7 @@ def _restoration_subject_tokens(text):
     return tokens
 
 
-def _normalize_class_b_restoration(value, source_evidence=None):
+def _normalize_class_b_restoration(value, verified_evidence_spans=None):
     """Return canonical bounded class-B restoration evidence or None."""
     required = {"corrected_defect", "intended_behavior_restored"}
     if not isinstance(value, dict) or set(value) != required:
@@ -2047,17 +2073,54 @@ def _normalize_class_b_restoration(value, source_evidence=None):
     if (
         len(defect_tokens) < 2
         or len(restored_tokens) < 2
-        or not defect_tokens.intersection(restored_tokens)
+        or len(defect_tokens.intersection(restored_tokens)) < 2
     ):
         return None
-    if source_evidence is not None:
-        source_tokens = _restoration_subject_tokens(source_evidence)
-        if not (
-            defect_tokens.intersection(source_tokens)
-            and restored_tokens.intersection(source_tokens)
-        ):
+    if verified_evidence_spans is not None:
+        spans = tuple(verified_evidence_spans)
+        shared_subject = defect_tokens.intersection(restored_tokens)
+        bound = False
+        for defect_index, defect_span in enumerate(spans):
+            defect_source_tokens = _restoration_subject_tokens(defect_span)
+            for restored_index, restored_span in enumerate(spans):
+                if restored_index == defect_index:
+                    continue
+                restored_source_tokens = _restoration_subject_tokens(restored_span)
+                if (
+                    len(
+                        shared_subject
+                        .intersection(defect_source_tokens)
+                        .intersection(restored_source_tokens)
+                    )
+                    >= 2
+                ):
+                    bound = True
+                    break
+            if bound:
+                break
+        if not bound:
             return None
     return normalized
+
+
+def _predicate_governs_protected_contract(clause, predicate_re):
+    protected = tuple(_BEHAVIOR_PROTECTED_CONTRACT_RE.finditer(clause))
+    predicates = tuple(predicate_re.finditer(clause))
+    for contract in protected:
+        for predicate in predicates:
+            if predicate.end() <= contract.start():
+                governed_text = clause[predicate.end() : contract.start()]
+                neutral_objects = tuple(
+                    _BEHAVIOR_NEUTRAL_OBJECT_RE.finditer(governed_text)
+                )
+                if neutral_objects:
+                    after_neutral = governed_text[neutral_objects[-1].end() :]
+                    if not re.search(r"\band\b", after_neutral, re.I):
+                        continue
+                return True
+            if contract.end() <= predicate.start():
+                return True
+    return False
 
 
 def _claims_existing_contract_change(text):
@@ -2069,16 +2132,13 @@ def _claims_existing_contract_change(text):
     )
     for clause in clauses:
         bounded = _BEHAVIOR_NEUTRAL_ARTIFACT_RE.sub("", clause)
-        if (
-            not bounded.strip()
-            or _BEHAVIOR_NEUTRAL_CLAUSE_RE.search(bounded)
-        ):
+        if not bounded.strip():
             continue
         bounded = _BEHAVIOR_NEGATION_RE.sub("", bounded)
-        if not _BEHAVIOR_PROTECTED_CONTRACT_RE.search(bounded):
-            continue
-        if _BEHAVIOR_CHANGE_RE.search(bounded) or _BEHAVIOR_REQUIREMENT_RE.search(
-            bounded
+        if _predicate_governs_protected_contract(
+            bounded, _BEHAVIOR_CHANGE_RE
+        ) or _predicate_governs_protected_contract(
+            bounded, _BEHAVIOR_REQUIREMENT_RE
         ):
             return True
     return False
@@ -2088,8 +2148,11 @@ def _behavior_admission_record(behavior_class, restoration, triage_data):
     if not isinstance(triage_data, dict):
         return None
     evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
+    verified_spans = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
+    if not isinstance(verified_spans, tuple):
+        verified_spans = ()
     normalized = _normalize_class_b_restoration(
-        restoration, source_evidence=evidence
+        restoration, verified_evidence_spans=verified_spans
     )
     semantic_text = [
         triage_data.get("summary", ""),
@@ -5894,6 +5957,7 @@ def decide_triage_apply(
                 "reason": "evidence quotes did not match the fetched target",
                 "candidate": "",
             }
+        triage = _bind_verified_evidence_spans(triage, target_file)
         triage = enforce_triage_source_provenance(
             triage,
             source_provenance_file,
@@ -5913,6 +5977,7 @@ def decide_triage_apply(
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
+                repaired = _bind_verified_evidence_spans(repaired, target_file)
                 repaired = enforce_triage_source_provenance(
                     repaired,
                     source_provenance_file,

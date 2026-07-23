@@ -565,6 +565,10 @@ def test_verdict_classes_ABC():
 
 
 def test_class_b_semantic_admission_boundary():
+    target_text = (
+        "Daemon restart lost an open monitored run. "
+        "An open monitored run remains recoverable after restart."
+    )
     restoration = {
         "corrected_defect": "Daemon restart lost an open monitored run.",
         "intended_behavior_restored": (
@@ -581,7 +585,10 @@ def test_class_b_semantic_admission_boundary():
             ),
             "recommended_action": "merge",
             "recommended_reason": "The narrow recovery regression is covered.",
-            "evidence": "target.txt: 'restart lost the open monitored run'",
+            "evidence": (
+                "target.txt: 'Daemon restart lost an open monitored run.'; "
+                "target.txt: 'An open monitored run remains recoverable after restart.'"
+            ),
             "automerge": {
                 "behavior_class": "B",
                 "class_b_restoration": restoration,
@@ -594,13 +601,20 @@ def test_class_b_semantic_admission_boundary():
         value.update(overrides)
         return value
 
-    valid = render_card.normalize_triage(candidate())["automerge_verdict"]
+    def normalize(value, source=target_text):
+        bounded = dict(value)
+        bounded[render_card._VERIFIED_EVIDENCE_SPANS_FIELD] = (
+            render_card._verified_evidence_spans(bounded["evidence"], source)
+        )
+        return render_card.normalize_triage(bounded)
+
+    valid = normalize(candidate())["automerge_verdict"]
     check(
         "class B admission: narrow corrective restoration remains eligible",
         am.verdict_eligible(valid)[0] is True,
     )
 
-    observed = render_card.normalize_triage(
+    observed = normalize(
         candidate(
             summary="Adds a pre-push Codex review gate to direct-PR delivery.",
             product_implications=(
@@ -634,7 +648,7 @@ def test_class_b_semantic_admission_boundary():
             "target.txt: 'the delivery workflow is changed before push'",
         ),
     ):
-        contradictory = render_card.normalize_triage(candidate(**{field: text}))[
+        contradictory = normalize(candidate(**{field: text}))[
             "automerge_verdict"
         ]
         check(
@@ -667,8 +681,16 @@ def test_class_b_semantic_admission_boundary():
             "passive tightening",
             "The existing direct-PR workflow is being tightened for review.",
         ),
+        (
+            "neutral prefix before protected change",
+            "Updates tests and changes the existing direct-PR workflow.",
+        ),
+        (
+            "coordinated protected object",
+            "Disables flaky tests and the existing direct-PR workflow.",
+        ),
     ):
-        contradictory = render_card.normalize_triage(candidate(summary=text))[
+        contradictory = normalize(candidate(summary=text))[
             "automerge_verdict"
         ]
         check(
@@ -679,7 +701,7 @@ def test_class_b_semantic_admission_boundary():
     missing_input = candidate()
     missing_input["automerge"] = dict(missing_input["automerge"])
     missing_input["automerge"].pop("class_b_restoration")
-    missing = render_card.normalize_triage(missing_input)["automerge_verdict"]
+    missing = normalize(missing_input)["automerge_verdict"]
     missing_facts, _ = am.behavior_verdict_facts(missing)
     check(
         "class B admission: missing restoration evidence is unavailable",
@@ -694,7 +716,7 @@ def test_class_b_semantic_admission_boundary():
         "corrected_defect": "The same vague behavior statement.",
         "intended_behavior_restored": "The same vague behavior statement.",
     }
-    ambiguous = render_card.normalize_triage(ambiguous_input)["automerge_verdict"]
+    ambiguous = normalize(ambiguous_input)["automerge_verdict"]
     check(
         "class B admission: ambiguous restoration evidence is unavailable",
         am.verdict_eligible(ambiguous)[0] is False
@@ -728,13 +750,60 @@ def test_class_b_semantic_admission_boundary():
             "corrected_defect": defect,
             "intended_behavior_restored": restored,
         }
-        vague = render_card.normalize_triage(vague_input)["automerge_verdict"]
+        vague = normalize(vague_input)["automerge_verdict"]
         check(
             "class B admission: %s is unavailable" % label,
             am.verdict_eligible(vague)[0] is False
             and am.behavior_verdict_facts(vague)[0]["g6_behavior_class"]["status"]
             == schema.STATUS_UNAVAILABLE,
         )
+
+    fabricated_spans_input = candidate(
+        evidence=(
+            "target.txt: 'Daemon restart lost an open monitored run.'; "
+            "target.txt: 'An open monitored run remains recoverable after restart.'; "
+            "target.txt: 'the button color used an incorrect token'"
+        )
+    )
+    fabricated_spans = normalize(
+        fabricated_spans_input,
+        source="the button color used an incorrect token",
+    )["automerge_verdict"]
+    check(
+        "class B admission: separately fabricated matching spans are unavailable",
+        am.verdict_eligible(fabricated_spans)[0] is False
+        and am.behavior_verdict_facts(fabricated_spans)[0]["g6_behavior_class"][
+            "status"
+        ]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    incidental_input = candidate(
+        evidence=(
+            "target.txt: 'Restart logging lost buffered records.'; "
+            "target.txt: 'Restart authentication recovers expired sessions.'"
+        )
+    )
+    incidental_input["automerge"] = dict(incidental_input["automerge"])
+    incidental_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": "Restart logging lost buffered records.",
+        "intended_behavior_restored": (
+            "Restart authentication recovers expired sessions."
+        ),
+    }
+    incidental = normalize(
+        incidental_input,
+        source=(
+            "Restart logging lost buffered records. "
+            "Restart authentication recovers expired sessions."
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: incidental one-token overlap is unavailable",
+        am.verdict_eligible(incidental)[0] is False
+        and am.behavior_verdict_facts(incidental)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     changed_default = dict(valid, changes_existing_or_default_behavior=True)
     changed_facts, _ = am.behavior_verdict_facts(changed_default)
@@ -755,7 +824,7 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
-    negated = render_card.normalize_triage(
+    negated = normalize(
         candidate(summary="Fixes retries without changing the existing workflow.")
     )["automerge_verdict"]
     check(
@@ -773,6 +842,14 @@ def test_class_b_semantic_admission_boundary():
             "Updates tests for the existing direct-PR workflow.",
         ),
         (
+            "test object before workflow context",
+            "Disables flaky tests for the existing direct-PR workflow.",
+        ),
+        (
+            "multiple neutral objects before workflow context",
+            "Changes documentation and tests for the existing workflow.",
+        ),
+        (
             "explicit does-not-change",
             "The fix does not change the existing default workflow.",
         ),
@@ -785,7 +862,7 @@ def test_class_b_semantic_admission_boundary():
             "The default delivery contract remains unchanged after the fix.",
         ),
     ):
-        neutral = render_card.normalize_triage(candidate(summary=text))[
+        neutral = normalize(candidate(summary=text))[
             "automerge_verdict"
         ]
         check(
