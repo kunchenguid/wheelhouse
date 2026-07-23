@@ -970,6 +970,43 @@ def test_card_1585_escaped_quote_anchor_regression():
             'The source says "stay safe" here.',
         ),
     )
+    exact_span = "a sufficiently long exact target span"
+    check(
+        "anchor: matching single-quote delimiters remain accepted",
+        rc.evidence_anchor_ok("target.txt: '%s'" % exact_span, exact_span),
+    )
+    check(
+        "anchor: matching double-quote delimiters remain accepted",
+        rc.evidence_anchor_ok('target.txt: "%s"' % exact_span, exact_span),
+    )
+    check(
+        "anchor: genuinely unquoted evidence remains accepted",
+        rc.evidence_anchor_ok("target.txt: %s" % exact_span, exact_span),
+    )
+    check(
+        "anchor: unquoted contractions remain accepted",
+        rc.evidence_anchor_ok(
+            "target.txt: the repository's sufficiently long exact target span",
+            "the repository's sufficiently long exact target span",
+        ),
+    )
+    malformed_quotes = [
+        "target.txt: '%s\"" % exact_span,
+        'target.txt: "%s\'' % exact_span,
+        "target.txt: '%s" % exact_span,
+        'target.txt: "%s' % exact_span,
+        "target.txt: \\'%s" % exact_span,
+        "target.txt: %s\\'" % exact_span,
+        '- target.txt: \\"%s' % exact_span,
+        '1. target.txt: %s\\"' % exact_span,
+    ]
+    check(
+        "anchor: malformed delimiters never fall back to unquoted anchoring",
+        all(
+            not rc.evidence_anchor_ok(evidence, exact_span)
+            for evidence in malformed_quotes
+        ),
+    )
     check(
         "anchor(card 1585): even slash runs are not over-normalized",
         not rc.evidence_anchor_ok(
