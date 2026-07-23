@@ -581,7 +581,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   go through `triage_schema_reason`, which returns a purely STRUCTURAL reason
   (field name + defect type, NEVER a field value) safe to persist and display.
   Primary validation accepts `evidence` as either one non-empty string or a non-empty list of non-empty strings, flattening the latter with ` | ` before the shared anchor check.
-  Anchoring recognizes single- and double-quoted spans, normalizes markdown backticks and asterisks on both sides, and conservatively considers source-prefixed list/newline fragments split at ellipses.
+  Anchoring recognizes single- and double-quoted spans (including prose-style backslash escaping of the matching quote delimiter after JSON decoding), normalizes markdown backticks and asterisks on both sides, and conservatively considers source-prefixed list/newline fragments split at ellipses.
   The anti-fabrication boundary remains a verbatim target substring of at least 12 normalized characters for quoted spans and 20 for fallback fragments.
   A repair failure persists the actual structural failing stage, including a repaired anchor miss or duplicate repair claim, instead of reusing the original candidate reason.
   `triage.yml` performs EXACTLY ONE repair turn: after `triage-result`,
