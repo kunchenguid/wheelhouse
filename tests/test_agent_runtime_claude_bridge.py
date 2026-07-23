@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -48,6 +49,10 @@ def make_bundle(
     target_text: str = "fixture target\n",
     event_key: str = "a" * 64,
     execution_id: str = "",
+    owner: str = "owner",
+    repo: str = "repo",
+    number: int = 7,
+    revision: str = "abcdef1",
 ):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
@@ -64,11 +69,11 @@ def make_bundle(
         prompt_path=str(prompt),
         bundle_dir=str(bundle),
         output_path=str(bundle / "task.json"),
-        owner="owner",
-        repo="repo",
-        number=7,
+        owner=owner,
+        repo=repo,
+        number=number,
         target_kind="pr-review",
-        revision="abcdef1",
+        revision=revision,
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
         event_key=event_key,
         target_file=str(target),
@@ -272,14 +277,32 @@ def main():
         consumer_successes = 0
         for case in production:
             case_root = root / ("production-%s" % case["run_id"])
+            binding = case.get("source_binding") or {
+                "owner": "owner",
+                "repo": "repo",
+                "number": 7,
+                "target_head_sha": "abcdef1",
+                "base_sha": "d" * 40,
+                "vision_sha": "b" * 40,
+            }
+            if case.get("target_fixture"):
+                target_fixture = Path(case["target_fixture"])
+                target_fixture_bytes = target_fixture.read_bytes()
+                if case.get("target_fixture_encoding") == "base64":
+                    target_fixture_bytes = base64.b64decode(
+                        b"".join(target_fixture_bytes.split()), validate=True
+                    )
+                target_text = target_fixture_bytes.decode("utf-8")
+            else:
+                target_text = case["target_excerpt"] + "\n"
             event_key = event_key_sha256(
                 normalized_event_identity(
                     action="triage.pr.search",
-                    owner="owner",
-                    repo="repo",
-                    number=7,
+                    owner=binding["owner"],
+                    repo=binding["repo"],
+                    number=binding["number"],
                     card_issue=case["card"],
-                    revision="abcdef1",
+                    revision=binding["target_head_sha"],
                 )
             )
             case_task, case_bundle = make_bundle(
@@ -287,9 +310,13 @@ def main():
                 action="triage.pr.search",
                 include_vision=True,
                 allow_automerge_behavior=True,
-                target_text=case["target_excerpt"] + "\n",
+                target_text=target_text,
                 event_key=event_key,
                 execution_id=case["execution_id"],
+                owner=binding["owner"],
+                repo=binding["repo"],
+                number=binding["number"],
+                revision=binding["target_head_sha"],
             )
             case_execution = root / ("production-%s.json" % case["run_id"])
             transcript(
@@ -313,16 +340,17 @@ def main():
                 str(case_root / "target.txt"),
             )
             item = {
-                "repo": "repo",
-                "number": 7,
+                "repo": binding["repo"],
+                "number": binding["number"],
                 "kind": "pr-review",
-                "head_sha": "abcdef1",
+                "head_sha": binding["target_head_sha"],
                 "title": "Production replay %s" % case["run_id"],
                 "author": "fixture",
                 "bucket": "review-needed",
                 "comp": "pass",
                 "tests": "green",
-                "url": "https://example.invalid/repo/pull/7",
+                "url": "https://example.invalid/%s/pull/%s"
+                % (binding["repo"], binding["number"]),
                 "summary": "production replay",
                 "recommendation": "Review the normalized result.",
                 "priority": "med",
@@ -363,12 +391,12 @@ def main():
             ):
                 applied = render_card.update_card_triage(
                     case["card"],
-                    "abcdef1",
+                    binding["target_head_sha"],
                     triage=consumer["triage"],
                     error=card_error,
-                    owner="owner",
-                    vision_sha="b" * 40,
-                    base_sha="d" * 40,
+                    owner=binding["owner"],
+                    vision_sha=binding["vision_sha"],
+                    base_sha=binding["base_sha"],
                     automerge_behavior_available=True,
                     require_queued=True,
                 )
@@ -436,6 +464,73 @@ def main():
                 and case_result["executionId"] == case["execution_id"]
                 and case_task["metadata"]["idempotencyKey"] == event_key,
             )
+            if case["card"] == 1585:
+                candidate, candidate_reason = render_card._extract_json_object(
+                    case["raw_output"]
+                )
+                facts_path = Path(case["target_facts_fixture"])
+                vision_path = Path(case["vision_fixture"])
+                target_input = next(
+                    row for row in case_task["spec"]["inputs"] if row["id"] == "target"
+                )
+                check(
+                    "production 29985490774: frozen target content and source facts are exact",
+                    target_input["sha256"] == case["target_sha256"]
+                    and target_input["bytes"] == case["target_bytes"]
+                    and file_sha256(facts_path)
+                    == binding["target_facts_sha256"]
+                    and file_sha256(vision_path)
+                    == binding["vision_content_sha256"],
+                )
+                check(
+                    "production 29985490774: compact candidate carries the frozen head/base/VISION binding",
+                    candidate_reason == ""
+                    and candidate["vision_evidence"]
+                    == {
+                        "target_owner": binding["owner"],
+                        "target_repo": binding["repo"],
+                        "target_number": binding["number"],
+                        "target_facts_sha256": binding["target_facts_sha256"],
+                        "vision_sha": binding["vision_sha"],
+                        "vision_content_sha256": binding["vision_content_sha256"],
+                        "base_sha": binding["base_sha"],
+                        "target_head_sha": binding["target_head_sha"],
+                        "applicable_criteria": [],
+                    },
+                )
+                exact_facts = render_card._trusted_triage_target_facts(
+                    str(facts_path),
+                    owner=binding["owner"],
+                    repo=binding["repo"],
+                    number=binding["number"],
+                    revision=binding["target_head_sha"],
+                    base_sha=binding["base_sha"],
+                    target_facts_sha256=binding["target_facts_sha256"],
+                )
+                wrong_head_facts = render_card._trusted_triage_target_facts(
+                    str(facts_path),
+                    owner=binding["owner"],
+                    repo=binding["repo"],
+                    number=binding["number"],
+                    revision="f" * 40,
+                    base_sha=binding["base_sha"],
+                    target_facts_sha256=binding["target_facts_sha256"],
+                )
+                check(
+                    "production 29985490774: target facts admit only the frozen head and allowed paths",
+                    exact_facts
+                    == (
+                        [
+                            "internal/cli/helpers_test.go",
+                            "internal/daemon/manager.go",
+                            "internal/daemon/manager_test.go",
+                            "internal/git/git.go",
+                            "internal/git/git_test.go",
+                        ],
+                        binding["target_facts_sha256"],
+                    )
+                    and wrong_head_facts is None,
+                )
             check(
                 "production %s: offline card update commits expected status"
                 % case["run_id"],
@@ -480,8 +575,47 @@ def main():
                     and case_result["error"]["code"] == "output.evidence_invalid",
                 )
         check(
-            "production cohort: five normalized and consumer successes",
-            normalized_successes == 5 and consumer_successes == 5,
+            "production cohort: all six normalized and consumer successes",
+            normalized_successes == 6 and consumer_successes == 6,
+        )
+
+        _, unsupported_bundle = make_bundle(
+            root / "unsupported-evidence",
+            action="triage.pr.local",
+        )
+        unsupported_execution = root / "unsupported-evidence.json"
+        unsupported_value = triage_value(include_automerge=False)
+        unsupported_value["evidence"] = (
+            'target-src/internal/git/git.go: "source-only quote outside target scope"'
+        )
+        transcript(
+            unsupported_execution,
+            IMMUTABLE_MODEL,
+            json.dumps(unsupported_value),
+        )
+        unsupported_result, _ = run_bridge(
+            unsupported_bundle,
+            unsupported_execution,
+            "unsupported-evidence",
+        )
+        unsupported_text = result_text(
+            str(unsupported_bundle / "result-unsupported-evidence.json"),
+            require_success=False,
+        )
+        unsupported_repair = render_card.plan_triage_repair(
+            unsupported_text, "pr-review"
+        )
+        unsupported_consumer = render_card.decide_triage_apply(
+            unsupported_text,
+            "",
+            str(root / "unsupported-evidence" / "target.txt"),
+        )
+        check(
+            "evidence boundary: structurally valid unsupported quote is not a schema failure",
+            unsupported_result["status"] == "failed"
+            and unsupported_result["error"]["code"] == "output.evidence_invalid"
+            and unsupported_repair["repair_needed"] is False
+            and unsupported_consumer["outcome"] == "anchor-fail",
         )
 
         _, invalid_bundle = make_bundle(

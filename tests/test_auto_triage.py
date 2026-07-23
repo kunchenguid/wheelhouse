@@ -7,6 +7,8 @@ held-card publish, and recovery behavior.
 Run: python tests/test_auto_triage.py
 """
 
+import base64
+import hashlib
 import io
 import json
 import os
@@ -874,6 +876,262 @@ def test_evidence_anchor_ok_catches_fabrication():
     check(
         "anchor: unreadable target.txt -> verification skipped (fail open)",
         rc._triage_evidence_verified({"evidence": good}, "/no/such/target.txt") is True,
+    )
+
+
+def test_card_1585_escaped_quote_anchor_regression():
+    """Run 29985490774 supplied four genuine target quotes, but the first
+    source quote used prose-style \\' inside a single-quoted span. The old
+    regex ended that span at the escaped apostrophe and rejected the result.
+    This fixture preserves the exact fetched target and frozen source facts."""
+    cohort = json.loads(read("tests", "fixtures", "provider-telemetry-six.json"))
+    case = next(row for row in cohort if row["card"] == 1585)
+    target_fixture_bytes = open(
+        os.path.join(ROOT, case["target_fixture"]), "rb"
+    ).read()
+    target_bytes = (
+        base64.b64decode(b"".join(target_fixture_bytes.split()), validate=True)
+        if case.get("target_fixture_encoding") == "base64"
+        else target_fixture_bytes
+    )
+    facts_bytes = open(os.path.join(ROOT, case["target_facts_fixture"]), "rb").read()
+    vision_bytes = open(os.path.join(ROOT, case["vision_fixture"]), "rb").read()
+    target = target_bytes.decode("utf-8")
+    data, reason = rc._extract_json_object(case["raw_output"])
+    quotes, _ = rc._evidence_candidates(data["evidence"])
+    normalized_target = rc._normalize_evidence_text(target)
+    binding = case["source_binding"]
+
+    check(
+        "anchor(card 1585): retained target/facts/VISION hashes are exact",
+        len(target_bytes) == case["target_bytes"]
+        and hashlib.sha256(target_bytes).hexdigest() == case["target_sha256"]
+        and hashlib.sha256(facts_bytes).hexdigest()
+        == binding["target_facts_sha256"]
+        and hashlib.sha256(vision_bytes).hexdigest()
+        == binding["vision_content_sha256"],
+    )
+    check(
+        "anchor(card 1585): compact candidate extraction preserves frozen source binding",
+        reason == ""
+        and data["vision_evidence"]
+        == {
+            "target_owner": binding["owner"],
+            "target_repo": binding["repo"],
+            "target_number": binding["number"],
+            "target_facts_sha256": binding["target_facts_sha256"],
+            "vision_sha": binding["vision_sha"],
+            "vision_content_sha256": binding["vision_content_sha256"],
+            "base_sha": binding["base_sha"],
+            "target_head_sha": binding["target_head_sha"],
+            "applicable_criteria": [],
+        },
+    )
+    check(
+        "anchor(card 1585): complete fetched target was not truncated",
+        "[diff truncated after " not in target
+        and target.endswith("</target-content>\n"),
+    )
+    expected_quotes = [
+        "drops --local so worktrees inherit the source repo's effective (includeIf-aware) git identity, preserving prior behavior when local config is set",
+        'Run(ctx, srcDir, "config", "--get", "--default", "", key)',
+        "git.CopyEffectiveUserIdentity(ctx, repo.WorkingPath, wtDir)",
+        "CopyEffectiveUserIdentity(ctx, src, dst)",
+    ]
+    check(
+        "anchor(card 1585): all four cited quotes are extracted exactly",
+        quotes == expected_quotes,
+    )
+    check(
+        "anchor(card 1585): every cited quote occurs in the authoritative target",
+        all(
+            rc._normalize_evidence_text(quote) in normalized_target
+            for quote in quotes
+        ),
+    )
+    check(
+        "anchor(card 1585): exact production evidence now verifies",
+        rc.evidence_anchor_ok(data["evidence"], target),
+    )
+
+    escaped_anchor = (
+        "target.txt PR body: 'drops --local so worktrees inherit the source "
+        "repo\\'s effective (includeIf-aware) git identity, preserving prior "
+        "behavior when local config is set'"
+    )
+    check(
+        "anchor(card 1585): escaped matching delimiter is representation-only",
+        rc.evidence_anchor_ok(escaped_anchor, target),
+    )
+    check(
+        "anchor: escaped matching double-quote delimiter is representation-only",
+        rc.evidence_anchor_ok(
+            'target.txt: "the source says \\"stay safe\\" here"',
+            'The source says "stay safe" here.',
+        ),
+    )
+    exact_span = "a sufficiently long exact target span"
+    check(
+        "anchor: matching single-quote delimiters remain accepted",
+        rc.evidence_anchor_ok("target.txt: '%s'" % exact_span, exact_span),
+    )
+    check(
+        "anchor: matching double-quote delimiters remain accepted",
+        rc.evidence_anchor_ok('target.txt: "%s"' % exact_span, exact_span),
+    )
+    check(
+        "anchor: genuinely unquoted evidence remains accepted",
+        rc.evidence_anchor_ok("target.txt: %s" % exact_span, exact_span),
+    )
+    check(
+        "anchor: unquoted contractions remain accepted",
+        rc.evidence_anchor_ok(
+            "target.txt: the repository's sufficiently long exact target span",
+            "the repository's sufficiently long exact target span",
+        ),
+    )
+    unquoted_punctuation = [
+        "the users' permissions remain sufficiently precise and stable",
+        "the maintainer's choice remains sufficiently precise and stable",
+        'the 12" display remains sufficiently bright and readable',
+        'the size is 12"x14" with sufficiently stable proportions',
+        'the embedded token foo"bar remains sufficiently exact here',
+        "the path C:\\users\\wheelhouse remains sufficiently exact here",
+        "the regex /users\\/wheelhouse/ remains sufficiently exact here",
+    ]
+    check(
+        "anchor: unquoted possessives and measurements remain accepted",
+        all(
+            rc.evidence_anchor_ok("target.txt: %s" % value, value)
+            for value in unquoted_punctuation
+        ),
+    )
+    malformed_quotes = [
+        "target.txt: '%s\"" % exact_span,
+        'target.txt: "%s\'' % exact_span,
+        "target.txt: '%s" % exact_span,
+        'target.txt: "%s' % exact_span,
+        "target.txt: \\'%s" % exact_span,
+        "target.txt: %s\\'" % exact_span,
+        '- target.txt: \\"%s' % exact_span,
+        '1. target.txt: %s\\"' % exact_span,
+        "target.txt: \\'%s'" % exact_span,
+        'target.txt: \\"%s"' % exact_span,
+    ]
+    check(
+        "anchor: malformed delimiters never fall back to unquoted anchoring",
+        all(
+            not rc.evidence_anchor_ok(evidence, exact_span)
+            for evidence in malformed_quotes
+        ),
+    )
+    odd_slash_evidence = (
+        "target.txt: 'the source preserves "
+        + "\\" * 3
+        + "'quoted"
+        + "\\" * 3
+        + "' text exactly'"
+    )
+    odd_slash_target = (
+        "the source preserves "
+        + "\\" * 2
+        + "'quoted"
+        + "\\" * 2
+        + "' text exactly"
+    )
+    check(
+        "anchor: odd internal slash runs decode only their escape slash",
+        rc.evidence_anchor_ok(odd_slash_evidence, odd_slash_target),
+    )
+    even_slash_evidence = (
+        "target.txt: 'a sufficiently long exact target span" + "\\" * 2 + "'"
+    )
+    even_slash_target = "a sufficiently long exact target span" + "\\" * 2
+    check(
+        "anchor: even internal slash runs remain literal",
+        rc.evidence_anchor_ok(even_slash_evidence, even_slash_target),
+    )
+    check(
+        "anchor(card 1585): even slash runs are not over-normalized",
+        not rc.evidence_anchor_ok(
+            escaped_anchor.replace("repo\\'s", "repo\\\\'s"), target
+        ),
+    )
+    check(
+        "anchor(card 1585): unsupported escaped quote still fails closed",
+        not rc.evidence_anchor_ok(
+            "target.txt: 'a fabricated repo\\'s identity was accepted automatically'",
+            target,
+        ),
+    )
+    check(
+        "anchor(card 1585): adversarial near-match remains unsupported",
+        not rc.evidence_anchor_ok(
+            escaped_anchor.replace("local config is set'", "local config is unsafe'"),
+            target,
+        ),
+    )
+    altered = target.replace("source repo's effective", "source repo’s effective", 1)
+    check(
+        "anchor(card 1585): altered authoritative content is rejected",
+        not rc.evidence_anchor_ok(escaped_anchor, altered),
+    )
+    truncated = target[: target.index("drops --local")]
+    check(
+        "anchor(card 1585): quote beyond a truncation boundary is rejected",
+        not rc.evidence_anchor_ok(escaped_anchor, truncated),
+    )
+    whitespace_equivalent = (
+        "target.txt: 'DROPS\u00a0--LOCAL\tSO WORKTREES INHERIT THE SOURCE "
+        "REPO\\'S EFFECTIVE (INCLUDEIF-AWARE) GIT IDENTITY, PRESERVING PRIOR "
+        "BEHAVIOR WHEN LOCAL CONFIG IS SET'"
+    )
+    check(
+        "anchor(card 1585): Unicode whitespace remains semantically equivalent",
+        rc.evidence_anchor_ok(whitespace_equivalent, target),
+    )
+    check(
+        "anchor(card 1585): Unicode punctuation is not folded into a near-match",
+        not rc.evidence_anchor_ok(
+            escaped_anchor.replace("repo\\'s", "repo’s"), target
+        ),
+    )
+    check(
+        "anchor(card 1585): zero-width Unicode changes remain significant",
+        not rc.evidence_anchor_ok(
+            escaped_anchor.replace("worktrees", "work\u200btrees"), target
+        ),
+    )
+    check(
+        "anchor(card 1585): target-src-only quote cannot satisfy target scope",
+        not rc.evidence_anchor_ok(
+            "target-src/internal/git/git.go: "
+            "'github.com/kunchenguid/no-mistakes/internal/safeurl'",
+            target,
+        ),
+    )
+    check(
+        "anchor(card 1585): VISION-only quote cannot satisfy target scope",
+        not rc.evidence_anchor_ok(
+            'vision.md: "The first law is that the tool must not lose people\'s code"',
+            target,
+        ),
+    )
+
+    sibling_results = []
+    for sibling in cohort:
+        if sibling["card"] == 1585:
+            continue
+        sibling_data, sibling_reason = rc._extract_json_object(sibling["raw_output"])
+        sibling_results.append(
+            sibling_reason == ""
+            and rc.evidence_anchor_ok(
+                sibling_data["evidence"], sibling["target_excerpt"]
+            )
+        )
+    check(
+        "anchor(card 1585): all five successful sibling candidates stay accepted",
+        sibling_results == [True] * 5,
     )
 
 
@@ -3699,6 +3957,7 @@ def main():
     test_triage_requires_complete_structured_json()
     test_triage_requires_evidence_field()
     test_evidence_anchor_ok_catches_fabrication()
+    test_card_1585_escaped_quote_anchor_regression()
     test_body_helpers_queue_and_apply_result()
     test_automated_status_lines_are_labeled_only_on_allowlist()
     test_body_helpers_queue_and_apply_result_for_issue()

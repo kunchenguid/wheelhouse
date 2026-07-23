@@ -6,7 +6,6 @@ import json
 import re
 from typing import Any
 
-_EVIDENCE_QUOTE_RE = re.compile(r'"([^"\n]{1,240})"|\'([^\'\n]{1,240})\'')
 _EVIDENCE_SEGMENT_RE = re.compile(r"(?:\r?\n|\s+\|\s+)")
 _EVIDENCE_ELLIPSIS_RE = re.compile(r"(?:\u2026|\.{3})")
 _EVIDENCE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-+*]\s+|[0-9]+[.)]\s+)")
@@ -63,19 +62,113 @@ def normalize_evidence_text(text: Any) -> str:
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
+def _is_quote_opener(text: str, index: int) -> bool:
+    before = text[index - 1] if index else ""
+    return not before or before.isspace() or before in ":([{=,`"
+
+
+def _is_escaped_quote_opener(text: str, index: int) -> bool:
+    run_start = index
+    while run_start and text[run_start - 1] == "\\":
+        run_start -= 1
+    if run_start == index:
+        return False
+    before = text[run_start - 1] if run_start else ""
+    return not before or before.isspace() or before in ":([{=,`"
+
+
+def _scan_quoted_evidence(
+    text: str, max_span_len: int = 240
+) -> tuple[list[str], bool]:
+    """Extract quote-delimited spans without mistaking an escaped delimiter.
+
+    Evidence is already decoded from JSON when it reaches this boundary. Models
+    sometimes still use prose-style ``\\'`` or ``\\\"`` to represent the quote
+    character inside a matching quote-delimited source span. Remove exactly the
+    one escape slash that quotes the matching delimiter. Every other slash and
+    every other Unicode character remains significant, so the decoded span must
+    still occur verbatim after the existing whitespace/case/Markdown cleanup.
+    """
+
+    spans = []
+    malformed = False
+    index = 0
+    while index < len(text):
+        delimiter = text[index]
+        if delimiter not in {"'", '"'}:
+            index += 1
+            continue
+        if _is_escaped_quote_opener(text, index):
+            malformed = True
+            index += 1
+            continue
+        if not _is_quote_opener(text, index):
+            index += 1
+            continue
+        cursor = index + 1
+        decoded = []
+        while cursor < len(text):
+            char = text[cursor]
+            if char in "\r\n":
+                break
+            if char == "\\":
+                run_end = cursor
+                while run_end < len(text) and text[run_end] == "\\":
+                    run_end += 1
+                if run_end < len(text) and text[run_end] == delimiter:
+                    slash_count = run_end - cursor
+                    if slash_count % 2:
+                        # Preserve every literal slash and remove only the final
+                        # slash whose sole role is escaping this delimiter.
+                        decoded.append("\\" * (slash_count - 1))
+                        decoded.append(delimiter)
+                        cursor = run_end + 1
+                        continue
+                    decoded.append("\\" * slash_count)
+                    cursor = run_end
+                    continue
+                decoded.append("\\" * (run_end - cursor))
+                cursor = run_end
+                continue
+            if char == delimiter:
+                raw_length = cursor - index - 1
+                if 1 <= raw_length <= max_span_len:
+                    spans.append("".join(decoded))
+                index = cursor + 1
+                break
+            decoded.append(char)
+            cursor += 1
+        else:
+            malformed = True
+            index += 1
+            continue
+        if cursor >= len(text) or text[cursor] != delimiter:
+            malformed = True
+            index += 1
+    return spans, malformed
+
+
+def _quoted_evidence_spans(text: str, max_span_len: int = 240) -> list[str]:
+    return _scan_quoted_evidence(text, max_span_len)[0]
+
+
 def evidence_candidates(evidence: Any) -> tuple[list[str], list[str]]:
     """Return quoted spans and conservative unquoted evidence fragments."""
 
     text = flatten_evidence(evidence)
     if text is None:
         return [], []
-    quoted = [left or right for left, right in _EVIDENCE_QUOTE_RE.findall(text)]
+    quoted = []
     fallback = []
     for segment in _EVIDENCE_SEGMENT_RE.split(text):
+        segment_quotes, malformed = _scan_quoted_evidence(segment)
+        quoted.extend(segment_quotes)
+        if malformed:
+            continue
         segment = _EVIDENCE_LIST_PREFIX_RE.sub("", segment, count=1)
         segment = _EVIDENCE_PATH_PREFIX_RE.sub("", segment, count=1)
         for fragment in _EVIDENCE_ELLIPSIS_RE.split(segment):
-            fragment = fragment.strip().strip("'\" ")
+            fragment = fragment.strip()
             if fragment:
                 fallback.append(fragment)
     return quoted, fallback
