@@ -7,9 +7,11 @@ import json
 import tempfile
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent_runtime.admission import event_key_sha256, normalized_event_identity, stage_from_task
 from agent_runtime.claude_bridge import ACTION_COMMIT, ACTION_VERSION, CLAUDE_CODE_VERSION, IMMUTABLE_MODEL, bridge, write_controller_failure_result, write_revision_mismatch_result
 from agent_runtime.config import resolve_selection
 from agent_runtime.consumer import result_text
@@ -44,6 +46,8 @@ def make_bundle(
     include_vision: bool = False,
     allow_automerge_behavior: bool = False,
     target_text: str = "fixture target\n",
+    event_key: str = "a" * 64,
+    execution_id: str = "",
 ):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
@@ -66,11 +70,14 @@ def make_bundle(
         target_kind="pr-review",
         revision="abcdef1",
         wheelhouse_revision="30271b6907e568419cdc48694a11b0c2f699b433",
-        event_key="a" * 64,
+        event_key=event_key,
         target_file=str(target),
         vision_file=str(vision) if include_vision else "",
         allow_automerge_behavior=allow_automerge_behavior,
     )
+    if execution_id:
+        task["metadata"]["executionId"] = execution_id
+        (bundle / "task.json").write_text(json.dumps(task), encoding="utf-8")
     return task, bundle
 
 
@@ -265,12 +272,24 @@ def main():
         consumer_successes = 0
         for case in production:
             case_root = root / ("production-%s" % case["run_id"])
-            _, case_bundle = make_bundle(
+            event_key = event_key_sha256(
+                normalized_event_identity(
+                    action="triage.pr.search",
+                    owner="owner",
+                    repo="repo",
+                    number=7,
+                    card_issue=case["card"],
+                    revision="abcdef1",
+                )
+            )
+            case_task, case_bundle = make_bundle(
                 case_root,
                 action="triage.pr.search",
                 include_vision=True,
                 allow_automerge_behavior=True,
                 target_text=case["target_excerpt"] + "\n",
+                event_key=event_key,
+                execution_id=case["execution_id"],
             )
             case_execution = root / ("production-%s.json" % case["run_id"])
             transcript(
@@ -292,6 +311,74 @@ def main():
                 compact,
                 "",
                 str(case_root / "target.txt"),
+            )
+            item = {
+                "repo": "repo",
+                "number": 7,
+                "kind": "pr-review",
+                "head_sha": "abcdef1",
+                "title": "Production replay %s" % case["run_id"],
+                "author": "fixture",
+                "bucket": "review-needed",
+                "comp": "pass",
+                "tests": "green",
+                "url": "https://example.invalid/repo/pull/7",
+                "summary": "production replay",
+                "recommendation": "Review the normalized result.",
+                "priority": "med",
+                "options": ["merge", "investigate"],
+            }
+            rendered = render_card.render(item)
+            queued_body = render_card.body_with_triage_queued(
+                rendered["body"], item
+            )
+            card = {
+                "number": case["card"],
+                "state": "OPEN",
+                "body": queued_body,
+                "labels": rendered["labels"],
+            }
+            card_writes = []
+            card_error = (
+                "evidence quotes did not match the fetched target"
+                if consumer["outcome"] == "anchor-fail"
+                else None
+            )
+            with (
+                patch.object(render_card, "get_card", return_value=card),
+                patch.object(
+                    render_card,
+                    "_edit_issue_body",
+                    side_effect=lambda number, body, **kwargs: card_writes.append(
+                        (number, body, kwargs)
+                    ),
+                ),
+                patch.object(
+                    render_card,
+                    "_evaluate_automerge_card_projection",
+                    return_value=render_card.criteria_schema.unavailable_criteria(
+                        "offline production replay"
+                    ),
+                ),
+            ):
+                applied = render_card.update_card_triage(
+                    case["card"],
+                    "abcdef1",
+                    triage=consumer["triage"],
+                    error=card_error,
+                    owner="owner",
+                    vision_sha="b" * 40,
+                    base_sha="d" * 40,
+                    automerge_behavior_available=True,
+                    require_queued=True,
+                )
+            committed_body = card_writes[0][1] if applied and len(card_writes) == 1 else ""
+            committed_state = render_card.parse_state_block(committed_body)
+            stage = stage_from_task(
+                case_task,
+                stage="consumer-committed",
+                status="ok",
+                code=case["expected_stage_code"],
             )
             events_rows = [
                 json.loads(line)
@@ -342,6 +429,30 @@ def main():
                 and terminal_events[0]["data"]["status"]
                 == case["expected_normalized_status"],
             )
+            check(
+                "production %s: task binds exact replay execution and event"
+                % case["run_id"],
+                case_task["metadata"]["executionId"] == case["execution_id"]
+                and case_result["executionId"] == case["execution_id"]
+                and case_task["metadata"]["idempotencyKey"] == event_key,
+            )
+            check(
+                "production %s: offline card update commits expected status"
+                % case["run_id"],
+                applied
+                and committed_state.get("triage_status")
+                == case["expected_card_status"],
+            )
+            check(
+                "production %s: projection stage binds task and stays distinct"
+                % case["run_id"],
+                stage["code"] == case["expected_stage_code"]
+                and stage["stage"] == "consumer-committed"
+                and stage["executionId"] == case["execution_id"]
+                and stage["eventKeySha256"] == event_key
+                and stage["sourceSha"]
+                == case_task["metadata"]["wheelhouseRevision"],
+            )
             if case_result["status"] == "succeeded":
                 normalized_successes += 1
             if consumer["outcome"] == "success":
@@ -354,6 +465,19 @@ def main():
                             "automerge_verdict"
                         )
                     ),
+                )
+                check(
+                    "production %s: card persists behavior verdict"
+                    % case["run_id"],
+                    bool(committed_state.get("automerge_verdict")),
+                )
+            else:
+                check(
+                    "production %s: rejected evidence persists no verdict or schema success"
+                    % case["run_id"],
+                    committed_state.get("automerge_verdict") is None
+                    and committed_state.get("triage_status") == "error"
+                    and case_result["error"]["code"] == "output.evidence_invalid",
                 )
         check(
             "production cohort: five normalized and consumer successes",

@@ -336,6 +336,13 @@ def main():
         and 'stage="consumer-committed"' in triage_stage["run"]
         and 'code="consumer.committed"' in triage_stage["run"],
     )
+    check(
+        "triage projection: terminal stage binds the admitted task execution",
+        docs["triage"]["jobs"]["triage"]["outputs"]["execution_id"]
+        == "${{ steps.claude-task.outputs.execution_id }}"
+        and '--execution-id "${{ needs.triage.outputs.execution_id }}"'
+        in triage_stage["run"],
+    )
     execute = next(step for step in steps(docs["decision"]) if step.get("id") == "execute")
     check("NL safety: deterministic FLEET_TOKEN executor remains separate", (execute.get("env") or {}).get("GH_TOKEN") == "${{ secrets.FLEET_TOKEN }}")
     check("NL safety: model runtime never receives FLEET_TOKEN", all("FLEET_TOKEN" not in (step.get("env") or {}) for step in runtime_runs))
