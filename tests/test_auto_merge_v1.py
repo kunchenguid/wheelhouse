@@ -1437,6 +1437,80 @@ def test_class_b_semantic_admission_boundary():
             and render_card._restoration_claim_supported(claim, claim)
             is True,
         )
+    at_defect = "Daemon restart lost an open monitored run @primary."
+    at_restored = "An open monitored run @primary remains recoverable."
+    at_input = candidate(
+        summary="Fixes recovery for @primary after a daemon restart."
+    )
+    at_input["automerge"] = dict(at_input["automerge"])
+    at_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": at_defect,
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": at_defect,
+        },
+        "intended_behavior_restored": at_restored,
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": at_restored,
+        },
+    }
+    at_verified = (
+        ("target.txt", render_card._normalize_evidence_text(at_defect)),
+        ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        (
+            "target-src/lib/recovery.py",
+            render_card._normalize_evidence_text(at_restored),
+        ),
+    )
+    at_bounded = dict(at_input)
+    at_bounded[render_card._VERIFIED_EVIDENCE_SPANS_FIELD] = at_verified
+    at_normalized = render_card.normalize_triage(at_bounded)
+    at_verdict = at_normalized["automerge_verdict"]
+    at_item = make_item("fmt", 5, "ab" * 20)
+    at_body = render_card.body_with_triage_result(
+        render_card.render(at_item)["body"],
+        at_item["head_sha"],
+        triage=at_bounded,
+        automerge_behavior_available=True,
+    )
+    at_state = core.parse_state_block(at_body)
+    at_visible = render_card._existing_triage_section(at_body)
+    check(
+        "class B admission: @identifier survives production semantics",
+        am.verdict_eligible(at_verdict)[0] is True
+        and at_verdict["behavior_admission"]["corrected_defect"]
+        == at_defect
+        and at_verdict["behavior_admission"][
+            "intended_behavior_restored"
+        ]
+        == at_restored
+        and at_state["automerge_verdict"]["behavior_admission"][
+            "corrected_defect"
+        ]
+        == at_defect,
+    )
+    check(
+        "class B admission: rendered @identifier cannot notify",
+        "@primary" not in at_visible
+        and "primary" in at_visible,
+    )
+    for malformed_handle in (
+        "@",
+        "@-primary",
+        "@primary-",
+        "@primary_name",
+        "@primary/secondary",
+        "@primary@secondary",
+    ):
+        malformed = (
+            "Daemon restart lost an open monitored run %s."
+            % malformed_handle
+        )
+        check(
+            "class B admission: malformed handle is unavailable",
+            render_card._restoration_propositions(malformed) is None,
+        )
     scanned = render_card._scan_restoration_lexemes(
         "Daemon restart lost an open monitored run #1622."
     )

@@ -1091,12 +1091,14 @@ def _clean_triage_text(value, limit=700, default="n/a"):
     text = str(value or "").strip()
     text = text.replace("\r", "\n")
     text = re.sub(r"\s+", " ", text)
-    # Cards are private to the owner; never notify contributors from model text.
-    text = text.replace("@", "")
     text = text.replace("<!--", "").replace("-->", "")
     if len(text) > limit:
         text = text[: limit - 3].rstrip() + "..."
     return text or default
+
+
+def _display_safe_triage_text(value):
+    return str(value or "").replace("@", "")
 
 
 AUTOMATED_STATUS_LABEL = "`[automated status]`"
@@ -2560,13 +2562,15 @@ _RESTORATION_ROLE_PATTERNS = frozenset(
 )
 _RESTORATION_LEXEME_RE = re.compile(
     r"(?P<space>\s+)"
-    r"|(?P<symbol>[#@][A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)*)"
+    r"|(?P<handle>@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
+    r"|(?P<reference>#[0-9]+)"
     r"|(?P<number>[0-9]+(?:[._-][A-Za-z0-9]+)*)"
     r"|(?P<word>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)"
     r"|(?P<punct>[.])"
 )
 _RESTORATION_IDENTIFIER_RE = re.compile(
-    r"(?:[#@][a-z0-9]+(?:[._/-][a-z0-9]+)*"
+    r"(?:@[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?"
+    r"|#[0-9]+"
     r"|[0-9]+(?:[._-][a-z0-9]+)*)"
 )
 
@@ -2580,7 +2584,7 @@ def _scan_restoration_lexemes(text):
         if match is None:
             return None
         value = match.group(0)
-        if match.lastgroup in {"symbol", "number"} and len(value) > 64:
+        if match.lastgroup in {"handle", "reference", "number"} and len(value) > 64:
             return None
         lexemes.append(
             (match.lastgroup, value.casefold(), match.start(), match.end())
@@ -2602,12 +2606,9 @@ def _restoration_role_matches_pattern(role):
         if role == pattern:
             return True
         if (
-            len(role) > len(pattern)
+            len(role) == len(pattern) + 1
             and role[: len(pattern)] == pattern
-            and all(
-                _RESTORATION_IDENTIFIER_RE.fullmatch(token)
-                for token in role[len(pattern) :]
-            )
+            and _RESTORATION_IDENTIFIER_RE.fullmatch(role[-1])
         ):
             return True
         if len(role) == len(pattern) and role[:-1] == pattern[:-1]:
@@ -3579,24 +3580,34 @@ def triage_section(triage=None, error=None, owner="", repo=""):
         lines.append(
             "- **Summary:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["summary"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(triage["summary"], owner, repo)
+                )
             )
         )
         lines.append(
             "- **Product implications:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["product_implications"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(
+                        triage["product_implications"], owner, repo
+                    )
+                )
             )
         )
         lines.append(
             "- **Recommended next step:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["recommended_next_step"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(
+                        triage["recommended_next_step"], owner, repo
+                    )
+                )
             )
         )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
-        lines.append("_%s_" % note)
+        lines.append("_%s_" % _display_safe_triage_text(note))
     lines.append(TRIAGE_END)
     return "\n".join(lines)
 
@@ -4254,7 +4265,8 @@ def _automerge_criteria_evidence(value):
     # Criterion evidence can contain target-controlled paths or actor names.
     # Keep it inert in this owner-facing Markdown section.
     return (
-        text.replace("`", "'")
+        _display_safe_triage_text(text)
+        .replace("`", "'")
         .replace("[", "\\[")
         .replace("]", "\\]")
         .replace("*", "\\*")

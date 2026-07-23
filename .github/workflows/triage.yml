@@ -721,6 +721,8 @@ jobs:
               echo "Lexical scanning is lossless after contraction normalization: bounded numeric"
               echo "and symbolic identifiers remain ordered semantic tokens, only terminal sentence"
               echo "punctuation is neutral, and every unsupported character makes evidence unavailable."
+              echo "Bounded @identifiers remain semantic evidence and persisted state; card rendering"
+              echo "removes the @ only at presentation time so model text cannot notify an account."
               echo "Every unmatched default phrase outside a proven documentation/test topic fails"
               echo "closed, except a fully consumed isolated new opt-in disabled-by-default"
               echo "construction with no protected subject or behavior-change effect, and only"
