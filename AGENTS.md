@@ -1066,7 +1066,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
   alignment, ruling out an ineligible existing/default behavior change, and
   recommending merge. Class B additionally requires bounded evidence naming the
-  corrected defect and intended behavior restored; semantic admission marks the
+  corrected defect and intended behavior restored, each with its own verified
+  `target.txt` or `target-src/` reference; semantic admission marks the
   class unavailable when that evidence is missing or ambiguous, and rejects any
   class whose own summary, product implications, or evidence affirmatively says
   an existing mode, default, workflow, or delivery contract is tightened or
@@ -1092,8 +1093,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   That residual risk is bounded by the final CLEAN state, green configured checks, blast-radius caps, and unconditional exclusions.
   Enabling "require branches to be up to date" branch protection, or using a merge queue, closes it server-side because GitHub's `mergeStateStatus` becomes `BEHIND` while auto-merge requires a CLEAN merge state.
   The behavior verdict is PRODUCED by extending the pr-review triage.
-  For every complete immutable diff, `triage.yml` asks for the VISION-independent behavior class, existing/default-behavior-change, and class-C opt-in/default-off facts, plus the bounded `class_b_restoration` pair when the class is B.
-  `render_card.normalize_automerge_verdict` is the semantic admission owner: it projects the versioned `behavior_admission` record from the bounded triage fields, while `auto_merge.behavior_verdict_facts` revalidates that record for both criteria display and acting.
+  For every complete immutable diff, `triage.yml` asks for the VISION-independent behavior class, existing/default-behavior-change, and class-C opt-in/default-off facts, plus typed `behavior_assertions` and the bounded, claim-specific `class_b_restoration` evidence when the class is B.
+  `render_card.normalize_automerge_verdict` is the semantic admission owner: it verifies exact evidence references from `target.txt` or `target-src/`, reconciles every protected-contract clause with the typed assertions, and projects the versioned `behavior_admission` record, while `auto_merge.behavior_verdict_facts` revalidates that record for both criteria display and acting.
   It fetches base-branch VISION.md through the contents API with NO `?ref`, never the PR head, so a PR editing VISION.md cannot bless itself, and VISION.md is also a G2 exclusion.
   Only when that trusted policy exists does triage additionally ask for alignment and the final merge recommendation; `render_card.normalize_automerge_verdict` parses the independent core plus that optional all-or-nothing extension.
   The result is PERSISTED as the

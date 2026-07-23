@@ -58,6 +58,7 @@ def main():
         pr_final["recommended_action"] = "merge"
         pr_final["automerge"] = {
             "behavior_class": "A",
+            "behavior_assertions": [],
             "aligns_with_vision": True,
             "changes_existing_or_default_behavior": False,
             "optin_default_off": False,

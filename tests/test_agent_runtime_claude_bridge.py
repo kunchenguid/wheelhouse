@@ -132,6 +132,7 @@ def main():
                 "evidence": 'target.txt: "fixture target"',
                 "automerge": {
                     "behavior_class": "A",
+                    "behavior_assertions": [],
                     "changes_existing_or_default_behavior": False,
                     "optin_default_off": False,
                 },

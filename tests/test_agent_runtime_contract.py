@@ -173,13 +173,22 @@ def main():
         )
         restoration = {
             "corrected_defect": "Daemon restart lost an open monitored run.",
+            "corrected_defect_evidence": {
+                "source": "target.txt",
+                "quote": "Daemon restart lost an open monitored run.",
+            },
             "intended_behavior_restored": (
                 "An open monitored run remains recoverable after restart."
             ),
+            "intended_behavior_restored_evidence": {
+                "source": "target-src/lib/recovery.py",
+                "quote": "An open monitored run remains recoverable after restart.",
+            },
         }
         pr_valid = dict(valid, recommended_action="merge")
         pr_valid["automerge"] = {
             "behavior_class": "B",
+            "behavior_assertions": [],
             "class_b_restoration": restoration,
             "changes_existing_or_default_behavior": False,
             "optin_default_off": False,

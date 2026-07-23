@@ -330,6 +330,7 @@ BEHAVIOR_ADMISSION_VERSION = 1
 CLASS_B_RESTORATION_MIN_CHARS = 12
 CLASS_B_RESTORATION_MAX_CHARS = 500
 _VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
+BEHAVIOR_ASSERTIONS_FIELD = "behavior_assertions"
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -1326,13 +1327,65 @@ def _triage_evidence_verified(data, target_file):
     return evidence_anchor_ok(evidence, target_text)
 
 
-def _bind_verified_evidence_spans(data, target_file):
+def _read_declared_evidence_source(source, target_file, target_src_dir):
+    if source == "target.txt":
+        return _read_target_text(target_file)
+    if not source.startswith("target-src/") or not target_src_dir:
+        return ""
+    relative = source[len("target-src/") :]
+    if not relative or ".." in relative.split("/"):
+        return ""
+    root = os.path.realpath(target_src_dir)
+    path = os.path.realpath(os.path.join(root, relative))
+    try:
+        if os.path.commonpath((root, path)) != root or not os.path.isfile(path):
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as source_file:
+            return source_file.read(1_000_000)
+    except (OSError, ValueError):
+        return ""
+
+
+def _declared_evidence_refs(data):
+    automerge = data.get("automerge") if isinstance(data, dict) else None
+    if not isinstance(automerge, dict):
+        return ()
+    refs = []
+    restoration = automerge.get(CLASS_B_RESTORATION_FIELD)
+    if isinstance(restoration, dict):
+        refs.extend(
+            restoration.get(field)
+            for field in (
+                "corrected_defect_evidence",
+                "intended_behavior_restored_evidence",
+            )
+        )
+    assertions = automerge.get(BEHAVIOR_ASSERTIONS_FIELD)
+    if isinstance(assertions, list):
+        refs.extend(
+            assertion.get("evidence")
+            for assertion in assertions
+            if isinstance(assertion, dict)
+        )
+    return tuple(refs)
+
+
+def _bind_verified_evidence_spans(data, target_file, target_src_dir=""):
     bounded = dict(data)
-    target_text = _read_target_text(target_file)
-    evidence = _flatten_evidence(bounded.get(EVIDENCE_FIELD)) or ""
-    bounded[_VERIFIED_EVIDENCE_SPANS_FIELD] = _verified_evidence_spans(
-        evidence, target_text
-    )
+    verified = []
+    for raw_ref in _declared_evidence_refs(bounded):
+        evidence_ref = _normalize_evidence_ref(raw_ref)
+        if evidence_ref is None:
+            continue
+        source_text = _read_declared_evidence_source(
+            evidence_ref["source"], target_file, target_src_dir
+        )
+        needle = _normalize_evidence_text(evidence_ref["quote"])
+        if needle and needle in _normalize_evidence_text(source_text):
+            key = (evidence_ref["source"], needle)
+            if key not in verified:
+                verified.append(key)
+    bounded[_VERIFIED_EVIDENCE_SPANS_FIELD] = tuple(verified)
     return bounded
 
 
@@ -1933,48 +1986,6 @@ _BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
     r")\b",
     re.I,
 )
-_BEHAVIOR_CHANGE_RE = re.compile(
-    r"\b(?:"
-    r"tighten(?:s|ed|ing)?|chang(?:e|es|ed|ing)|"
-    r"alter(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|"
-    r"restrict(?:s|ed|ing)?|replac(?:e|es|ed|ing)|"
-    r"remov(?:e|es|ed|ing)|disabl(?:e|es|ed|ing)|"
-    r"enforc(?:e|es|ed|ing)"
-    r")\b",
-    re.I,
-)
-_BEHAVIOR_REQUIREMENT_RE = re.compile(
-    r"\b(?:"
-    r"(?:now|newly)\s+(?:requires?|mandates?|enforces?|"
-    r"must|shall|needs?\s+to)"
-    r"|(?:requires?|mandates?|enforces?)\s+(?:a\s+)?new\b"
-    r"|(?:is|are|was|were|will\s+be|has\s+been|have\s+been|becomes?)"
-    r"(?:\s+\w+){0,3}\s+(?:required|mandatory|enforced)"
-    r"|(?:must|shall|will)\s+now\b"
-    r"|can\s+no\s+longer\b"
-    r")",
-    re.I,
-)
-_BEHAVIOR_NEGATION_RE = re.compile(
-    r"\b(?:"
-    r"without(?:\s+\w+){0,6}\s+(?:changing|tightening|altering|modifying)"
-    r"|(?:does|do|did|will|would|can)\s+not(?:\s+\w+){0,6}\s+"
-    r"(?:change|tighten|alter|modify|require)"
-    r"|no(?:\s+\w+){0,6}\s+(?:change|changes|tightening)"
-    r"|(?:remains?|is|are)\s+unchanged"
-    r"|preserv(?:e|es|ed|ing)\b"
-    r")",
-    re.I,
-)
-_BEHAVIOR_NEUTRAL_ARTIFACT_RE = re.compile(
-    r"\b(?:workflow|contract|mode|behavio[u]?r)[\s/-]+"
-    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b",
-    re.I,
-)
-_BEHAVIOR_NEUTRAL_OBJECT_RE = re.compile(
-    r"\b(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b",
-    re.I,
-)
 _RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
 _RESTORATION_GENERIC_WORDS = frozenset(
     {
@@ -2039,13 +2050,39 @@ def _restoration_subject_tokens(text):
     return tokens
 
 
-def _normalize_class_b_restoration(value, verified_evidence_spans=None):
+def _normalize_evidence_ref(value):
+    if not isinstance(value, dict) or set(value) != {"source", "quote"}:
+        return None
+    source = value.get("source")
+    quote = value.get("quote")
+    if (
+        not isinstance(source, str)
+        or not isinstance(quote, str)
+        or not (
+            source == "target.txt"
+            or re.fullmatch(r"target-src/[A-Za-z0-9._/-]{1,900}", source)
+        )
+        or ".." in source.split("/")
+    ):
+        return None
+    cleaned = _clean_triage_text(quote, limit=241, default="")
+    if not 12 <= len(cleaned) <= 240:
+        return None
+    return {"source": source, "quote": cleaned}
+
+
+def _normalize_class_b_restoration(value, verified_evidence_refs=None):
     """Return canonical bounded class-B restoration evidence or None."""
     required = {"corrected_defect", "intended_behavior_restored"}
+    if verified_evidence_refs is not None:
+        required |= {
+            "corrected_defect_evidence",
+            "intended_behavior_restored_evidence",
+        }
     if not isinstance(value, dict) or set(value) != required:
         return None
     normalized = {}
-    for field in sorted(required):
+    for field in ("corrected_defect", "intended_behavior_restored"):
         raw = value.get(field)
         if not isinstance(raw, str) or len(raw) > CLASS_B_RESTORATION_MAX_CHARS:
             return None
@@ -2061,6 +2098,16 @@ def _normalize_class_b_restoration(value, verified_evidence_spans=None):
         ):
             return None
         normalized[field] = text
+    evidence_refs = {}
+    if verified_evidence_refs is not None:
+        for field in (
+            "corrected_defect_evidence",
+            "intended_behavior_restored_evidence",
+        ):
+            evidence_ref = _normalize_evidence_ref(value.get(field))
+            if evidence_ref is None:
+                return None
+            evidence_refs[field] = evidence_ref
     if (
         normalized["corrected_defect"].casefold()
         == normalized["intended_behavior_restored"].casefold()
@@ -2076,92 +2123,136 @@ def _normalize_class_b_restoration(value, verified_evidence_spans=None):
         or len(defect_tokens.intersection(restored_tokens)) < 2
     ):
         return None
-    if verified_evidence_spans is not None:
-        spans = tuple(verified_evidence_spans)
-        shared_subject = defect_tokens.intersection(restored_tokens)
-        bound = False
-        for defect_index, defect_span in enumerate(spans):
-            defect_source_tokens = _restoration_subject_tokens(defect_span)
-            for restored_index, restored_span in enumerate(spans):
-                if restored_index == defect_index:
-                    continue
-                restored_source_tokens = _restoration_subject_tokens(restored_span)
-                if (
-                    len(
-                        shared_subject
-                        .intersection(defect_source_tokens)
-                        .intersection(restored_source_tokens)
-                    )
-                    >= 2
-                ):
-                    bound = True
-                    break
-            if bound:
-                break
-        if not bound:
+    if verified_evidence_refs is not None:
+        verified = set(verified_evidence_refs)
+        defect_ref = evidence_refs["corrected_defect_evidence"]
+        restored_ref = evidence_refs["intended_behavior_restored_evidence"]
+        if defect_ref == restored_ref:
+            return None
+        if (
+            (defect_ref["source"], _normalize_evidence_text(defect_ref["quote"]))
+            not in verified
+            or (
+                restored_ref["source"],
+                _normalize_evidence_text(restored_ref["quote"]),
+            )
+            not in verified
+        ):
+            return None
+        defect_source_tokens = _restoration_subject_tokens(defect_ref["quote"])
+        restored_source_tokens = _restoration_subject_tokens(restored_ref["quote"])
+        if (
+            not defect_tokens.issubset(defect_source_tokens)
+            or not restored_tokens.issubset(restored_source_tokens)
+            or len(
+                defect_tokens.intersection(restored_tokens)
+                .intersection(defect_source_tokens)
+                .intersection(restored_source_tokens)
+            )
+            < 2
+        ):
             return None
     return normalized
 
 
-def _predicate_governs_protected_contract(clause, predicate_re):
-    protected = tuple(_BEHAVIOR_PROTECTED_CONTRACT_RE.finditer(clause))
-    predicates = tuple(predicate_re.finditer(clause))
-    for contract in protected:
-        for predicate in predicates:
-            if predicate.end() <= contract.start():
-                governed_text = clause[predicate.end() : contract.start()]
-                neutral_objects = tuple(
-                    _BEHAVIOR_NEUTRAL_OBJECT_RE.finditer(governed_text)
-                )
-                if neutral_objects:
-                    after_neutral = governed_text[neutral_objects[-1].end() :]
-                    if not re.search(r"\band\b", after_neutral, re.I):
-                        continue
-                return True
-            if contract.end() <= predicate.start():
-                return True
-    return False
+def _protected_contract_claims(texts):
+    claims = set()
+    for text in texts:
+        for clause in re.split(r"[.!?;]+", str(text or "")):
+            cleaned = _clean_triage_text(clause, limit=700, default="")
+            if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
+                claims.add(cleaned.casefold())
+    return claims
 
 
-def _claims_existing_contract_change(text):
-    """Detect an affirmative claim that protected existing behavior changes."""
-    clauses = re.split(
-        r"(?:[.!?;]\s+|\s+(?:but|however|although|yet)\s+)",
-        str(text or ""),
-        flags=re.I,
-    )
-    for clause in clauses:
-        bounded = _BEHAVIOR_NEUTRAL_ARTIFACT_RE.sub("", clause)
-        if not bounded.strip():
-            continue
-        bounded = _BEHAVIOR_NEGATION_RE.sub("", bounded)
-        if _predicate_governs_protected_contract(
-            bounded, _BEHAVIOR_CHANGE_RE
-        ) or _predicate_governs_protected_contract(
-            bounded, _BEHAVIOR_REQUIREMENT_RE
+def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs):
+    if not isinstance(value, list) or len(value) > 12:
+        return None
+    normalized = []
+    required = {"claim", "subject", "effect", "evidence"}
+    subjects = {
+        "existing_mode",
+        "default_behavior",
+        "existing_workflow",
+        "delivery_contract",
+        "documentation_or_tests",
+    }
+    effects = {"unchanged", "restored", "changed", "tightened", "new_requirement"}
+    verified = set(verified_evidence_refs)
+    for assertion in value:
+        if not isinstance(assertion, dict) or set(assertion) != required:
+            return None
+        claim = _clean_triage_text(assertion.get("claim"), limit=701, default="")
+        subject = assertion.get("subject")
+        effect = assertion.get("effect")
+        evidence_ref = _normalize_evidence_ref(assertion.get("evidence"))
+        if (
+            not claim
+            or subject not in subjects
+            or effect not in effects
+            or evidence_ref is None
+            or (
+                evidence_ref["source"],
+                _normalize_evidence_text(evidence_ref["quote"]),
+            )
+            not in verified
         ):
-            return True
-    return False
+            return None
+        if (
+            len(
+                _restoration_subject_tokens(claim).intersection(
+                    _restoration_subject_tokens(evidence_ref["quote"])
+                )
+            )
+            < 2
+        ):
+            return None
+        normalized.append(
+            {
+                "claim": claim,
+                "subject": subject,
+                "effect": effect,
+                "evidence": evidence_ref,
+            }
+        )
+    if {item["claim"].casefold() for item in normalized} != (
+        _protected_contract_claims(semantic_text)
+    ):
+        return None
+    return normalized
 
 
-def _behavior_admission_record(behavior_class, restoration, triage_data):
+def _behavior_admission_record(
+    behavior_class, restoration, behavior_assertions, triage_data
+):
     if not isinstance(triage_data, dict):
         return None
     evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
-    verified_spans = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
-    if not isinstance(verified_spans, tuple):
-        verified_spans = ()
+    verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
+    if not isinstance(verified_refs, tuple):
+        verified_refs = ()
     normalized = _normalize_class_b_restoration(
-        restoration, verified_evidence_spans=verified_spans
+        restoration, verified_evidence_refs=verified_refs
     )
     semantic_text = [
         triage_data.get("summary", ""),
         triage_data.get("product_implications", ""),
         evidence,
     ]
+    assertions = _normalize_behavior_assertions(
+        behavior_assertions,
+        semantic_text,
+        verified_refs,
+    )
+    if assertions is None:
+        return None
     admission = {
         "version": BEHAVIOR_ADMISSION_VERSION,
-        "contradicts_existing_contract": False,
+        "contradicts_existing_contract": any(
+            assertion["subject"] != "documentation_or_tests"
+            and assertion["effect"] in {"changed", "tightened", "new_requirement"}
+            for assertion in assertions
+        ),
     }
     if behavior_class == "B" and normalized is not None:
         admission.update(normalized)
@@ -2171,9 +2262,6 @@ def _behavior_admission_record(behavior_class, restoration, triage_data):
                 normalized["intended_behavior_restored"],
             ]
         )
-    admission["contradicts_existing_contract"] = any(
-        _claims_existing_contract_change(text) for text in semantic_text
-    )
     return admission
 
 
@@ -2289,7 +2377,10 @@ def normalize_automerge_verdict(data, triage_data=None):
                 return None
         verdict[field] = b
     admission = _behavior_admission_record(
-        cls, data.get(CLASS_B_RESTORATION_FIELD), triage_data
+        cls,
+        data.get(CLASS_B_RESTORATION_FIELD),
+        data.get(BEHAVIOR_ASSERTIONS_FIELD),
+        triage_data,
     )
     if admission is not None:
         verdict[BEHAVIOR_ADMISSION_FIELD] = admission
@@ -5925,6 +6016,7 @@ def decide_triage_apply(
     result_text,
     repaired_text,
     target_file,
+    target_src_dir="",
     repair_claim_admitted=None,
     source_provenance_file="",
     vision_file="",
@@ -5957,7 +6049,9 @@ def decide_triage_apply(
                 "reason": "evidence quotes did not match the fetched target",
                 "candidate": "",
             }
-        triage = _bind_verified_evidence_spans(triage, target_file)
+        triage = _bind_verified_evidence_spans(
+            triage, target_file, target_src_dir
+        )
         triage = enforce_triage_source_provenance(
             triage,
             source_provenance_file,
@@ -5977,7 +6071,9 @@ def decide_triage_apply(
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
-                repaired = _bind_verified_evidence_spans(repaired, target_file)
+                repaired = _bind_verified_evidence_spans(
+                    repaired, target_file, target_src_dir
+                )
                 repaired = enforce_triage_source_provenance(
                     repaired,
                     source_provenance_file,
@@ -6082,6 +6178,7 @@ def main():
         "when absent or unreadable the anchor check is skipped and the required "
         "non-empty evidence schema field remains the primary guard.",
     )
+    ta.add_argument("--target-src-dir", default="")
     ta.add_argument(
         "--repair-execution-file",
         default="",
@@ -6205,6 +6302,7 @@ def main():
             result_text,
             repaired_text,
             args.target_file,
+            target_src_dir=args.target_src_dir,
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
             vision_file=args.vision_file,

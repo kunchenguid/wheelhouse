@@ -1426,6 +1426,7 @@ def test_automerge_verdict_persistence_requires_complete_diff():
         "recommended_reason": "Scope is small.",
         "automerge": {
             "behavior_class": "A",
+            "behavior_assertions": [],
             "changes_existing_or_default_behavior": False,
             "optin_default_off": False,
             "aligns_with_vision": True,

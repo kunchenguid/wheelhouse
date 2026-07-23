@@ -565,32 +565,45 @@ def test_verdict_classes_ABC():
 
 
 def test_class_b_semantic_admission_boundary():
-    target_text = (
-        "Daemon restart lost an open monitored run. "
-        "An open monitored run remains recoverable after restart."
+    defect_quote = "Daemon restart lost an open monitored run."
+    restored_quote = "An open monitored run remains recoverable after restart."
+    product_claim = (
+        "Narrow corrective fix restoring documented recovery behavior "
+        "without changing default behavior"
     )
     restoration = {
-        "corrected_defect": "Daemon restart lost an open monitored run.",
-        "intended_behavior_restored": (
-            "An open monitored run remains recoverable after restart."
-        ),
+        "corrected_defect": defect_quote,
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": defect_quote,
+        },
+        "intended_behavior_restored": restored_quote,
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": restored_quote,
+        },
     }
 
     def candidate(**overrides):
         value = {
             "summary": "Fixes recovery after a daemon restart.",
-            "product_implications": (
-                "Narrow corrective fix restoring documented recovery behavior "
-                "without changing default behavior."
-            ),
+            "product_implications": product_claim + ".",
             "recommended_action": "merge",
             "recommended_reason": "The narrow recovery regression is covered.",
-            "evidence": (
-                "target.txt: 'Daemon restart lost an open monitored run.'; "
-                "target.txt: 'An open monitored run remains recoverable after restart.'"
-            ),
+            "evidence": "target.txt: '%s'" % defect_quote,
             "automerge": {
                 "behavior_class": "B",
+                "behavior_assertions": [
+                    {
+                        "claim": product_claim,
+                        "subject": "default_behavior",
+                        "effect": "unchanged",
+                        "evidence": {
+                            "source": "target.txt",
+                            "quote": product_claim,
+                        },
+                    }
+                ],
                 "class_b_restoration": restoration,
                 "changes_existing_or_default_behavior": False,
                 "optin_default_off": False,
@@ -601,10 +614,19 @@ def test_class_b_semantic_admission_boundary():
         value.update(overrides)
         return value
 
-    def normalize(value, source=target_text):
+    def normalize(value, verified=None):
         bounded = dict(value)
-        bounded[render_card._VERIFIED_EVIDENCE_SPANS_FIELD] = (
-            render_card._verified_evidence_spans(bounded["evidence"], source)
+        bounded[render_card._VERIFIED_EVIDENCE_SPANS_FIELD] = tuple(
+            (
+                ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+                ("target.txt", render_card._normalize_evidence_text(product_claim)),
+                (
+                    "target-src/lib/recovery.py",
+                    render_card._normalize_evidence_text(restored_quote),
+                ),
+            )
+            if verified is None
+            else verified
         )
         return render_card.normalize_triage(bounded)
 
@@ -613,15 +635,68 @@ def test_class_b_semantic_admission_boundary():
         "class B admission: narrow corrective restoration remains eligible",
         am.verdict_eligible(valid)[0] is True,
     )
-
-    observed = normalize(
-        candidate(
-            summary="Adds a pre-push Codex review gate to direct-PR delivery.",
-            product_implications=(
-                "Routine maintainer decision - tightens an existing delivery "
-                "contract without changing a user-facing flag or default."
-            ),
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target_file = os.path.join(temp_dir, "target.txt")
+        target_src = os.path.join(temp_dir, "target-src")
+        os.makedirs(os.path.join(target_src, "lib"))
+        with open(target_file, "w", encoding="utf-8") as source_file:
+            source_file.write(defect_quote + "\n" + product_claim)
+        with open(
+            os.path.join(target_src, "lib", "recovery.py"),
+            "w",
+            encoding="utf-8",
+        ) as source_file:
+            source_file.write(restored_quote)
+        bound = render_card._bind_verified_evidence_spans(
+            candidate(), target_file, target_src
         )
+        check(
+            "class B admission: target-src restoration reference is verified",
+            am.verdict_eligible(
+                render_card.normalize_triage(bound)["automerge_verdict"]
+            )[0]
+            is True,
+        )
+
+    observed_input = candidate(
+        summary="Adds a pre-push Codex review gate to direct-PR delivery.",
+        product_implications=(
+            "Routine maintainer decision - tightens an existing delivery "
+            "contract without changing a user-facing flag or default."
+        ),
+    )
+    observed_input["automerge"] = dict(observed_input["automerge"])
+    observed_input["automerge"]["behavior_assertions"] = [
+        {
+            "claim": (
+                "Routine maintainer decision - tightens an existing delivery "
+                "contract without changing a user-facing flag or default"
+            ),
+            "subject": "delivery_contract",
+            "effect": "tightened",
+            "evidence": {
+                "source": "target.txt",
+                "quote": (
+                    "The existing delivery contract now requires review."
+                ),
+            },
+        }
+    ]
+    observed = normalize(
+        observed_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "The existing delivery contract now requires review."
+                ),
+            ),
+        ),
     )["automerge_verdict"]
     observed_facts, _ = am.behavior_verdict_facts(observed)
     check(
@@ -631,68 +706,14 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNMET,
     )
 
-    for label, field, text in (
-        (
-            "summary existing mode change",
-            "summary",
-            "Changes the existing direct-PR mode to require review.",
-        ),
-        (
-            "product delivery contract change",
-            "product_implications",
-            "The delivery contract is tightened before every push.",
-        ),
-        (
-            "evidence workflow change",
-            "evidence",
-            "target.txt: 'the delivery workflow is changed before push'",
-        ),
-    ):
-        contradictory = normalize(candidate(**{field: text}))[
-            "automerge_verdict"
-        ]
-        check(
-            "class B admission: %s is denied" % label,
-            am.verdict_eligible(contradictory)[0] is False,
-        )
-
     for label, text in (
-        (
-            "new requirement",
-            "The existing direct-PR workflow now requires a Codex review.",
-        ),
-        (
-            "passive requirement",
-            "A Codex review is now required by the existing direct-PR workflow.",
-        ),
-        (
-            "modal requirement",
-            "The default delivery workflow must now obtain a Codex review.",
-        ),
-        (
-            "removed capability",
-            "A review can no longer be skipped in the default delivery workflow.",
-        ),
-        (
-            "mandatory default mode",
-            "Review becomes mandatory in the existing direct-PR mode.",
-        ),
-        (
-            "passive tightening",
-            "The existing direct-PR workflow is being tightened for review.",
-        ),
-        (
-            "neutral prefix before protected change",
-            "Updates tests and changes the existing direct-PR workflow.",
-        ),
-        (
-            "coordinated protected object",
-            "Disables flaky tests and the existing direct-PR workflow.",
-        ),
+        ("active change", "Changes the existing direct-PR workflow"),
+        ("passive change", "The existing direct-PR workflow is changed"),
+        ("new requirement", "The existing workflow now requires review"),
+        ("modal requirement", "The default workflow must now require review"),
+        ("as-well-as evasion", "Disables tests as well as the existing workflow"),
     ):
-        contradictory = normalize(candidate(summary=text))[
-            "automerge_verdict"
-        ]
+        contradictory = normalize(candidate(summary=text + "."))["automerge_verdict"]
         check(
             "semantic admission: %s is denied" % label,
             am.verdict_eligible(contradictory)[0] is False,
@@ -714,7 +735,11 @@ def test_class_b_semantic_admission_boundary():
     ambiguous_input["automerge"] = dict(ambiguous_input["automerge"])
     ambiguous_input["automerge"]["class_b_restoration"] = {
         "corrected_defect": "The same vague behavior statement.",
+        "corrected_defect_evidence": restoration["corrected_defect_evidence"],
         "intended_behavior_restored": "The same vague behavior statement.",
+        "intended_behavior_restored_evidence": restoration[
+            "intended_behavior_restored_evidence"
+        ],
     }
     ambiguous = normalize(ambiguous_input)["automerge_verdict"]
     check(
@@ -724,51 +749,7 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
-    for label, defect, restored, evidence in (
-        (
-            "different generic statements",
-            "A defect affected the relevant behavior.",
-            "The intended behavior is restored by this fix.",
-            "target.txt: 'relevant behavior was affected by a defect'",
-        ),
-        (
-            "unlinked subjects",
-            "Daemon restart lost an open monitored run.",
-            "Archived decisions remain discoverable after retention.",
-            "target.txt: 'restart lost the open monitored run'",
-        ),
-        (
-            "not source bound",
-            "Daemon restart lost an open monitored run.",
-            "An open monitored run remains recoverable after restart.",
-            "target.txt: 'the button color used an incorrect token'",
-        ),
-    ):
-        vague_input = candidate(evidence=evidence)
-        vague_input["automerge"] = dict(vague_input["automerge"])
-        vague_input["automerge"]["class_b_restoration"] = {
-            "corrected_defect": defect,
-            "intended_behavior_restored": restored,
-        }
-        vague = normalize(vague_input)["automerge_verdict"]
-        check(
-            "class B admission: %s is unavailable" % label,
-            am.verdict_eligible(vague)[0] is False
-            and am.behavior_verdict_facts(vague)[0]["g6_behavior_class"]["status"]
-            == schema.STATUS_UNAVAILABLE,
-        )
-
-    fabricated_spans_input = candidate(
-        evidence=(
-            "target.txt: 'Daemon restart lost an open monitored run.'; "
-            "target.txt: 'An open monitored run remains recoverable after restart.'; "
-            "target.txt: 'the button color used an incorrect token'"
-        )
-    )
-    fabricated_spans = normalize(
-        fabricated_spans_input,
-        source="the button color used an incorrect token",
-    )["automerge_verdict"]
+    fabricated_spans = normalize(candidate(), verified=())["automerge_verdict"]
     check(
         "class B admission: separately fabricated matching spans are unavailable",
         am.verdict_eligible(fabricated_spans)[0] is False
@@ -778,30 +759,87 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
-    incidental_input = candidate(
-        evidence=(
-            "target.txt: 'Restart logging lost buffered records.'; "
-            "target.txt: 'Restart authentication recovers expired sessions.'"
-        )
-    )
+    incidental_input = candidate()
     incidental_input["automerge"] = dict(incidental_input["automerge"])
     incidental_input["automerge"]["class_b_restoration"] = {
         "corrected_defect": "Restart logging lost buffered records.",
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Restart logging lost buffered records.",
+        },
         "intended_behavior_restored": (
             "Restart authentication recovers expired sessions."
         ),
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": "Restart authentication recovers expired sessions.",
+        },
     }
     incidental = normalize(
         incidental_input,
-        source=(
-            "Restart logging lost buffered records. "
-            "Restart authentication recovers expired sessions."
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Restart logging lost buffered records."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Restart authentication recovers expired sessions."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
         ),
     )["automerge_verdict"]
     check(
         "class B admission: incidental one-token overlap is unavailable",
         am.verdict_eligible(incidental)[0] is False
         and am.behavior_verdict_facts(incidental)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    unsupported_input = candidate()
+    unsupported_input["automerge"] = dict(unsupported_input["automerge"])
+    unsupported_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Open monitored run diagnostic timestamps disappear."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Open monitored run archival metadata persists.",
+        },
+        "intended_behavior_restored": (
+            "Open monitored run authentication sessions recover."
+        ),
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": "Open monitored run process metadata persists.",
+        },
+    }
+    unsupported = normalize(
+        unsupported_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored run archival metadata persists."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Open monitored run process metadata persists."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: subject-only spans do not support claim content",
+        am.verdict_eligible(unsupported)[0] is False
+        and am.behavior_verdict_facts(unsupported)[0]["g6_behavior_class"]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
 
@@ -824,47 +862,49 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
-    negated = normalize(
-        candidate(summary="Fixes retries without changing the existing workflow.")
-    )["automerge_verdict"]
-    check(
-        "class B disconfirming control: explicit no-change wording remains eligible",
-        am.verdict_eligible(negated)[0] is True,
-    )
-
-    for label, text in (
+    for label, text, subject in (
+        (
+            "passive tests",
+            "Tests for the existing workflow are changed",
+            "documentation_or_tests",
+        ),
         (
             "workflow documentation",
-            "Changes the existing workflow documentation only.",
+            "Changes the existing workflow documentation only",
+            "documentation_or_tests",
         ),
         (
-            "workflow tests",
-            "Updates tests for the existing direct-PR workflow.",
-        ),
-        (
-            "test object before workflow context",
-            "Disables flaky tests for the existing direct-PR workflow.",
-        ),
-        (
-            "multiple neutral objects before workflow context",
-            "Changes documentation and tests for the existing workflow.",
-        ),
-        (
-            "explicit does-not-change",
-            "The fix does not change the existing default workflow.",
-        ),
-        (
-            "preservation",
-            "Preserves the existing workflow behavior while fixing restart recovery.",
-        ),
-        (
-            "unchanged",
-            "The default delivery contract remains unchanged after the fix.",
+            "explicit no-change",
+            "The existing default workflow remains unchanged",
+            "existing_workflow",
         ),
     ):
-        neutral = normalize(candidate(summary=text))[
-            "automerge_verdict"
+        neutral_input = candidate(summary=text + ".")
+        neutral_input["automerge"] = dict(neutral_input["automerge"])
+        neutral_input["automerge"]["behavior_assertions"] = list(
+            neutral_input["automerge"]["behavior_assertions"]
+        ) + [
+            {
+                "claim": text,
+                "subject": subject,
+                "effect": "changed"
+                if subject == "documentation_or_tests"
+                else "unchanged",
+                "evidence": {"source": "target.txt", "quote": text},
+            }
         ]
+        neutral = normalize(
+            neutral_input,
+            verified=(
+                ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+                ("target.txt", render_card._normalize_evidence_text(product_claim)),
+                (
+                    "target-src/lib/recovery.py",
+                    render_card._normalize_evidence_text(restored_quote),
+                ),
+                ("target.txt", render_card._normalize_evidence_text(text)),
+            ),
+        )["automerge_verdict"]
         check(
             "semantic admission: %s remains eligible" % label,
             am.verdict_eligible(neutral)[0] is True,
@@ -884,9 +924,7 @@ def test_class_b_semantic_admission_boundary():
             }
         )
         contradictory_input["automerge"].pop("class_b_restoration")
-        contradictory_non_b = render_card.normalize_triage(contradictory_input)[
-            "automerge_verdict"
-        ]
+        contradictory_non_b = normalize(contradictory_input)["automerge_verdict"]
         check(
             "semantic admission: contradictory class %s is denied" % behavior_class,
             am.verdict_eligible(contradictory_non_b)[0] is False,
@@ -903,9 +941,31 @@ def test_class_b_semantic_admission_boundary():
             }
         )
         unaffected_input["automerge"].pop("class_b_restoration")
-        unaffected = render_card.normalize_triage(unaffected_input)[
-            "automerge_verdict"
+        unaffected_input["automerge"]["behavior_assertions"] = [
+            {
+                "claim": "No existing or default product behavior changes",
+                "subject": "default_behavior",
+                "effect": "unchanged",
+                "evidence": {
+                    "source": "target.txt",
+                    "quote": "No existing or default product behavior changes",
+                },
+            },
+            candidate()["automerge"]["behavior_assertions"][0],
         ]
+        unaffected = normalize(
+            unaffected_input,
+            verified=(
+                ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+                ("target.txt", render_card._normalize_evidence_text(product_claim)),
+                (
+                    "target.txt",
+                    render_card._normalize_evidence_text(
+                        "No existing or default product behavior changes"
+                    ),
+                ),
+            ),
+        )["automerge_verdict"]
         check(
             "semantic admission: valid class %s remains eligible" % behavior_class,
             am.verdict_eligible(unaffected)[0] is True,
@@ -999,7 +1059,7 @@ def test_verdict_normalization_and_persistence_fail_closed():
         good and good["behavior_class"] == "B" and good["aligns_with_vision"] is True,
     )
     independent = render_card.normalize_automerge_verdict(
-        INDEPENDENT_A,
+        dict(INDEPENDENT_A, behavior_assertions=[]),
         triage_data={
             "summary": "No product behavior change.",
             "product_implications": "Routine internal change.",
@@ -4153,9 +4213,12 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
     check(
         "triage: asks for A/B/C, restoration, and independent behavior facts",
         '"behavior_class"' in text
+        and '"behavior_assertions"' in text
         and '"class_b_restoration"' in text
         and '"corrected_defect"' in text
+        and '"corrected_defect_evidence"' in text
         and '"intended_behavior_restored"' in text
+        and '"intended_behavior_restored_evidence"' in text
         and '"optin_default_off"' in text,
     )
     check(

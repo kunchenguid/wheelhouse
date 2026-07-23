@@ -964,6 +964,7 @@ def test_initial_triage_independent_vision_source_review_contract():
             },
             "automerge": {
                 "behavior_class": "A",
+                "behavior_assertions": [],
                 "changes_existing_or_default_behavior": False,
                 "optin_default_off": False,
                 "aligns_with_vision": True,

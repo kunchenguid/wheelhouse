@@ -686,6 +686,10 @@ jobs:
               echo "class_b_restoration for every other class. If the summary, product"
               echo "implications, or evidence says an existing mode, default, workflow,"
               echo "or delivery contract is tightened or changed, the verdict is unavailable."
+              echo "List every summary/product/evidence clause mentioning a protected"
+              echo "contract in behavior_assertions. Copy claim exactly, type its governed"
+              echo "subject and effect, and attach an exact target.txt or target-src path/quote."
+              echo "Missing, extra, ambiguous, or unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
@@ -743,7 +747,8 @@ jobs:
               fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
-              echo '    "class_b_restoration": {"corrected_defect":"bounded defect evidence (class B only)","intended_behavior_restored":"bounded restored-behavior evidence (class B only)"},'
+              echo '    "behavior_assertions": [{"claim":"exact protected-contract clause","subject":"existing_mode | default_behavior | existing_workflow | delivery_contract | documentation_or_tests","effect":"unchanged | restored | changed | tightened | new_requirement","evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"}}],'
+              echo '    "class_b_restoration": {"corrected_defect":"bounded defect claim (class B only)","corrected_defect_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"},"intended_behavior_restored":"bounded restored-behavior claim (class B only)","intended_behavior_restored_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"}},'
               echo '    "changes_existing_or_default_behavior": true or false,'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '    "optin_default_off": true or false,'
@@ -1333,6 +1338,7 @@ jobs:
                 --source-review-number "$SOURCE_REVIEW_NUMBER" \
                 "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
+                --target-src-dir target-src \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
                 --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"
@@ -2020,6 +2026,7 @@ jobs:
               --source-review-number "$SOURCE_REVIEW_NUMBER" \
               "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
+              --target-src-dir target-src \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
               --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
               --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"
