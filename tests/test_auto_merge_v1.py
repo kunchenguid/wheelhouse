@@ -63,18 +63,35 @@ def check(name, cond):
         _failures.append(name)
 
 
+BEHAVIOR_ADMISSION = {
+    "version": 1,
+    "contradicts_existing_contract": False,
+}
+CLASS_B_ADMISSION = {
+    **BEHAVIOR_ADMISSION,
+    "corrected_defect": "Daemon restart lost an open monitored run.",
+    "intended_behavior_restored": (
+        "An open monitored run remains recoverable after restart."
+    ),
+}
 ELIGIBLE_A = {
     "behavior_class": "A",
+    "behavior_admission": BEHAVIOR_ADMISSION,
     "aligns_with_vision": True,
     "changes_existing_or_default_behavior": False,
     "recommend_merge": True,
     "vision_sha": "vsha",
     "base_sha": "b1" * 20,
 }
-ELIGIBLE_B = dict(ELIGIBLE_A, behavior_class="B")
+ELIGIBLE_B = dict(
+    ELIGIBLE_A,
+    behavior_class="B",
+    behavior_admission=CLASS_B_ADMISSION,
+)
 ELIGIBLE_C = dict(ELIGIBLE_A, behavior_class="C", optin_default_off=True)
 INDEPENDENT_A = {
     "behavior_class": "A",
+    "behavior_admission": BEHAVIOR_ADMISSION,
     "changes_existing_or_default_behavior": False,
     "optin_default_off": False,
 }
@@ -547,6 +564,179 @@ def test_verdict_classes_ABC():
         check("verdict: class %s eligible" % label, ok is True and cls == label)
 
 
+def test_class_b_semantic_admission_boundary():
+    restoration = {
+        "corrected_defect": "Daemon restart lost an open monitored run.",
+        "intended_behavior_restored": (
+            "An open monitored run remains recoverable after restart."
+        ),
+    }
+
+    def candidate(**overrides):
+        value = {
+            "summary": "Fixes recovery after a daemon restart.",
+            "product_implications": (
+                "Narrow corrective fix restoring documented recovery behavior "
+                "without changing default behavior."
+            ),
+            "recommended_action": "merge",
+            "recommended_reason": "The narrow recovery regression is covered.",
+            "evidence": "target.txt: 'restart lost the open monitored run'",
+            "automerge": {
+                "behavior_class": "B",
+                "class_b_restoration": restoration,
+                "changes_existing_or_default_behavior": False,
+                "optin_default_off": False,
+                "aligns_with_vision": True,
+                "recommend_merge": True,
+            },
+        }
+        value.update(overrides)
+        return value
+
+    valid = render_card.normalize_triage(candidate())["automerge_verdict"]
+    check(
+        "class B admission: narrow corrective restoration remains eligible",
+        am.verdict_eligible(valid)[0] is True,
+    )
+
+    observed = render_card.normalize_triage(
+        candidate(
+            summary="Adds a pre-push Codex review gate to direct-PR delivery.",
+            product_implications=(
+                "Routine maintainer decision - tightens an existing delivery "
+                "contract without changing a user-facing flag or default."
+            ),
+        )
+    )["automerge_verdict"]
+    observed_facts, _ = am.behavior_verdict_facts(observed)
+    check(
+        "WH-AUD-05: card 1620 contradiction is denied by semantic admission",
+        am.verdict_eligible(observed)[0] is False
+        and observed_facts["g6_behavior_class"]["status"]
+        == schema.STATUS_UNMET,
+    )
+
+    for label, field, text in (
+        (
+            "summary existing mode change",
+            "summary",
+            "Changes the existing direct-PR mode to require review.",
+        ),
+        (
+            "product delivery contract change",
+            "product_implications",
+            "The delivery contract is tightened before every push.",
+        ),
+        (
+            "evidence workflow change",
+            "evidence",
+            "target.txt: 'the delivery workflow is changed before push'",
+        ),
+    ):
+        contradictory = render_card.normalize_triage(candidate(**{field: text}))[
+            "automerge_verdict"
+        ]
+        check(
+            "class B admission: %s is denied" % label,
+            am.verdict_eligible(contradictory)[0] is False,
+        )
+
+    missing_input = candidate()
+    missing_input["automerge"] = dict(missing_input["automerge"])
+    missing_input["automerge"].pop("class_b_restoration")
+    missing = render_card.normalize_triage(missing_input)["automerge_verdict"]
+    missing_facts, _ = am.behavior_verdict_facts(missing)
+    check(
+        "class B admission: missing restoration evidence is unavailable",
+        am.verdict_eligible(missing)[0] is False
+        and missing_facts["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    ambiguous_input = candidate()
+    ambiguous_input["automerge"] = dict(ambiguous_input["automerge"])
+    ambiguous_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": "The same vague behavior statement.",
+        "intended_behavior_restored": "The same vague behavior statement.",
+    }
+    ambiguous = render_card.normalize_triage(ambiguous_input)["automerge_verdict"]
+    check(
+        "class B admission: ambiguous restoration evidence is unavailable",
+        am.verdict_eligible(ambiguous)[0] is False
+        and am.behavior_verdict_facts(ambiguous)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    changed_default = dict(valid, changes_existing_or_default_behavior=True)
+    changed_facts, _ = am.behavior_verdict_facts(changed_default)
+    check(
+        "class B control: independently declared behavior change remains UNMET",
+        changed_facts["g6_behavior_class"]["status"] == schema.STATUS_MET
+        and changed_facts["g6_default_behavior"]["status"]
+        == schema.STATUS_UNMET
+        and am.verdict_eligible(changed_default)[0] is False,
+    )
+
+    legacy = dict(ELIGIBLE_B)
+    legacy.pop("behavior_admission")
+    check(
+        "class B compatibility: historical verdict without evidence is unavailable",
+        am.verdict_eligible(legacy)[0] is False
+        and am.behavior_verdict_facts(legacy)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    negated = render_card.normalize_triage(
+        candidate(summary="Fixes retries without changing the existing workflow.")
+    )["automerge_verdict"]
+    check(
+        "class B disconfirming control: explicit no-change wording remains eligible",
+        am.verdict_eligible(negated)[0] is True,
+    )
+
+    for behavior_class, optin in (("A", False), ("C", True)):
+        contradictory_input = candidate(
+            summary="Changes the existing delivery workflow before each run."
+        )
+        contradictory_input["automerge"] = dict(
+            contradictory_input["automerge"]
+        )
+        contradictory_input["automerge"].update(
+            {
+                "behavior_class": behavior_class,
+                "optin_default_off": optin,
+            }
+        )
+        contradictory_input["automerge"].pop("class_b_restoration")
+        contradictory_non_b = render_card.normalize_triage(contradictory_input)[
+            "automerge_verdict"
+        ]
+        check(
+            "semantic admission: contradictory class %s is denied" % behavior_class,
+            am.verdict_eligible(contradictory_non_b)[0] is False,
+        )
+
+        unaffected_input = candidate(
+            summary="No existing or default product behavior changes."
+        )
+        unaffected_input["automerge"] = dict(unaffected_input["automerge"])
+        unaffected_input["automerge"].update(
+            {
+                "behavior_class": behavior_class,
+                "optin_default_off": optin,
+            }
+        )
+        unaffected_input["automerge"].pop("class_b_restoration")
+        unaffected = render_card.normalize_triage(unaffected_input)[
+            "automerge_verdict"
+        ]
+        check(
+            "semantic admission: valid class %s remains eligible" % behavior_class,
+            am.verdict_eligible(unaffected)[0] is True,
+        )
+
+
 def test_verdict_class_C_requires_optin_default_off():
     ok, cls, reason = am.verdict_eligible(
         dict(ELIGIBLE_A, behavior_class="C")  # no optin_default_off
@@ -633,7 +823,14 @@ def test_verdict_normalization_and_persistence_fail_closed():
         "verdict: normalize coerces + upper-cases class",
         good and good["behavior_class"] == "B" and good["aligns_with_vision"] is True,
     )
-    independent = render_card.normalize_automerge_verdict(INDEPENDENT_A)
+    independent = render_card.normalize_automerge_verdict(
+        INDEPENDENT_A,
+        triage_data={
+            "summary": "No product behavior change.",
+            "product_implications": "Routine internal change.",
+            "evidence": "target.txt: 'internal refactor only'",
+        },
+    )
     check(
         "verdict split: normalizer preserves complete-diff independent facts",
         independent == INDEPENDENT_A,
@@ -3779,8 +3976,12 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         "contents/VISION.md?ref=" not in text and "VISION.md?" not in text,
     )
     check(
-        "triage: asks for A/B/C and both independent behavior facts",
-        '"behavior_class"' in text and '"optin_default_off"' in text,
+        "triage: asks for A/B/C, restoration, and independent behavior facts",
+        '"behavior_class"' in text
+        and '"class_b_restoration"' in text
+        and '"corrected_defect"' in text
+        and '"intended_behavior_restored"' in text
+        and '"optin_default_off"' in text,
     )
     check(
         "triage: complete diffs produce independent facts without VISION.md",

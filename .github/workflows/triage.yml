@@ -678,6 +678,11 @@ jobs:
               echo "  B = a narrow corrective bug fix that RESTORES intended behavior"
               echo "  C = a NEW feature that is strictly opt-in and disabled by default"
               echo "Other existing/default behavior changes are INELIGIBLE."
+              echo "For class B, class_b_restoration is REQUIRED and must separately"
+              echo "name the corrected defect and the intended behavior restored. Omit"
+              echo "class_b_restoration for every other class. If the summary, product"
+              echo "implications, or evidence says an existing mode, default, workflow,"
+              echo "or delivery contract is tightened or changed, the verdict is unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
@@ -735,6 +740,7 @@ jobs:
               fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
+              echo '    "class_b_restoration": {"corrected_defect":"bounded defect evidence (class B only)","intended_behavior_restored":"bounded restored-behavior evidence (class B only)"},'
               echo '    "changes_existing_or_default_behavior": true or false,'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '    "optin_default_off": true or false,'

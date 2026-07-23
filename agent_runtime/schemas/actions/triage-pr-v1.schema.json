@@ -72,6 +72,15 @@
       "required": ["behavior_class", "changes_existing_or_default_behavior", "optin_default_off"],
       "properties": {
         "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
+        "class_b_restoration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["corrected_defect", "intended_behavior_restored"],
+          "properties": {
+            "corrected_defect": {"type": "string", "minLength": 12, "maxLength": 500},
+            "intended_behavior_restored": {"type": "string", "minLength": 12, "maxLength": 500}
+          }
+        },
         "external_source_required": {"type": "boolean"},
         "aligns_with_vision": {"type": "boolean"},
         "changes_existing_or_default_behavior": {"type": "boolean"},

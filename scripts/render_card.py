@@ -324,6 +324,11 @@ ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
 )
 
 TRIAGE_FIELDS = ("summary", "product_implications")
+CLASS_B_RESTORATION_FIELD = "class_b_restoration"
+BEHAVIOR_ADMISSION_FIELD = "behavior_admission"
+BEHAVIOR_ADMISSION_VERSION = 1
+CLASS_B_RESTORATION_MIN_CHARS = 12
+CLASS_B_RESTORATION_MAX_CHARS = 500
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -1218,7 +1223,7 @@ def _normalize_triage_with_reason(data):
     # merge recommendation are included only with trusted base-branch VISION.md.
     # Non-material and advisory - auto_merge.py re-validates every field and
     # holds on any doubt.
-    am = normalize_automerge_verdict(data.get("automerge"))
+    am = normalize_automerge_verdict(data.get("automerge"), triage_data=data)
     if am:
         triage["automerge_verdict"] = am
     return triage, ""
@@ -1886,21 +1891,202 @@ def _coerce_verdict_bool(value):
     return None
 
 
-def normalize_automerge_verdict(data):
-    """Parse the OPTIONAL `automerge` sub-object of the pr-review triage JSON into
-    the structured `automerge_verdict` persisted in card state and later consumed
-    by auto_merge.py (the deterministic auto-merge executor).
+_BEHAVIOR_CHANGE_VERB = (
+    r"(?:tighten(?:s|ed|ing)?|chang(?:e|es|ed|ing)|"
+    r"alter(?:s|ed|ing)?|modif(?:y|ies|ied|ying))"
+)
+_BEHAVIOR_PROTECTED_CONTRACT = (
+    r"(?:existing(?:\s+or\s+default)?(?:\s+[\w./-]+){0,3}\s+"
+    r"(?:mode|behavio[u]?r|workflow|delivery\s+contract|contract)|"
+    r"existing/default(?:\s+(?:mode|behavio[u]?r|workflow|contract))?|"
+    r"default(?:\s+(?:mode|behavio[u]?r|workflow|contract))?|"
+    r"(?:[\w./-]+\s+){0,2}workflow|delivery\s+contract)"
+)
+_BEHAVIOR_CONTRADICTION_RE = re.compile(
+    r"\b(?:"
+    + _BEHAVIOR_CHANGE_VERB
+    + r"(?:\s+to)?\s+(?:an?\s+|the\s+)?"
+    + _BEHAVIOR_PROTECTED_CONTRACT
+    + r"|"
+    + _BEHAVIOR_PROTECTED_CONTRACT
+    + r"\s+(?:(?:is|was|will\s+be|has\s+been|would\s+be)\s+)?"
+    + _BEHAVIOR_CHANGE_VERB
+    + r")\b",
+    re.I,
+)
+_BEHAVIOR_NEGATION_RE = re.compile(
+    r"\b(?:without|never|not|no|does\s+not|do\s+not|did\s+not)\s+"
+    r"(?:[\w'-]+\s+){0,3}$",
+    re.I,
+)
 
-    A complete diff always produces the VISION-independent behavior class,
-    existing/default-behavior, and class-C mode facts. The alignment and final
-    merge recommendation are an optional all-or-nothing extension produced only
-    when trusted default-branch VISION.md input is available. Missing or malformed
-    vision fields therefore retain the independent facts but can never make the
-    verdict eligible.
 
-    `optin_default_off` is only required for class C, so it defaults to False when
-    absent (which itself disqualifies a class-C PR at the executor). This is
-    advisory input only - the executor re-validates every field independently."""
+def _normalize_class_b_restoration(value):
+    """Return canonical bounded class-B restoration evidence or None."""
+    required = {"corrected_defect", "intended_behavior_restored"}
+    if not isinstance(value, dict) or set(value) != required:
+        return None
+    normalized = {}
+    for field in sorted(required):
+        raw = value.get(field)
+        if not isinstance(raw, str) or len(raw) > CLASS_B_RESTORATION_MAX_CHARS:
+            return None
+        text = _clean_triage_text(
+            raw,
+            limit=CLASS_B_RESTORATION_MAX_CHARS + 1,
+            default="",
+        )
+        if not (
+            CLASS_B_RESTORATION_MIN_CHARS
+            <= len(text)
+            <= CLASS_B_RESTORATION_MAX_CHARS
+        ):
+            return None
+        normalized[field] = text
+    if (
+        normalized["corrected_defect"].casefold()
+        == normalized["intended_behavior_restored"].casefold()
+    ):
+        return None
+    return normalized
+
+
+def _claims_existing_contract_change(text):
+    """Detect an affirmative claim that protected existing behavior changes."""
+    value = str(text or "")
+    for match in _BEHAVIOR_CONTRADICTION_RE.finditer(value):
+        prefix = value[max(0, match.start() - 64) : match.start()]
+        if _BEHAVIOR_NEGATION_RE.search(prefix):
+            continue
+        return True
+    return False
+
+
+def _behavior_admission_record(behavior_class, restoration, triage_data):
+    if not isinstance(triage_data, dict):
+        return None
+    normalized = _normalize_class_b_restoration(restoration)
+    evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
+    semantic_text = [
+        triage_data.get("summary", ""),
+        triage_data.get("product_implications", ""),
+        evidence,
+    ]
+    admission = {
+        "version": BEHAVIOR_ADMISSION_VERSION,
+        "contradicts_existing_contract": False,
+    }
+    if behavior_class == "B" and normalized is not None:
+        admission.update(normalized)
+        semantic_text.extend(
+            [
+                normalized["corrected_defect"],
+                normalized["intended_behavior_restored"],
+            ]
+        )
+    admission["contradicts_existing_contract"] = any(
+        _claims_existing_contract_change(text) for text in semantic_text
+    )
+    return admission
+
+
+def behavior_admission_status(verdict):
+    """Validate semantic admission evidence for captain display and acting.
+
+    Returns ``(status, evidence, reason)`` where status is ``admitted``,
+    ``unavailable``, or ``contradictory``. Historical and incomplete verdicts
+    are unavailable, so compatibility never turns missing semantic evidence
+    into eligibility. Class B additionally requires the bounded restoration
+    pair.
+    """
+    cls = str((verdict or {}).get("behavior_class") or "").strip().upper()
+    admission = (
+        verdict.get(BEHAVIOR_ADMISSION_FIELD)
+        if isinstance(verdict, dict)
+        else None
+    )
+    base_fields = {"version", "contradicts_existing_contract"}
+    required = base_fields | (
+        {"corrected_defect", "intended_behavior_restored"}
+        if cls == "B"
+        else set()
+    )
+    if not isinstance(admission, dict) or set(admission) != required:
+        detail = (
+            "class B restoration evidence unavailable"
+            if cls == "B"
+            else "behavior semantic admission evidence unavailable"
+        )
+        reason = (
+            "class B requires bounded corrected-defect and restored-behavior evidence"
+            if cls == "B"
+            else "behavior semantic admission evidence is unavailable"
+        )
+        return ("unavailable", detail, reason)
+    version = admission.get("version")
+    contradiction = admission.get("contradicts_existing_contract")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != BEHAVIOR_ADMISSION_VERSION
+        or not isinstance(contradiction, bool)
+    ):
+        return (
+            "unavailable",
+            "behavior semantic admission evidence malformed or unsupported",
+            "behavior semantic admission evidence is malformed or unsupported",
+        )
+    if cls == "B":
+        normalized = _normalize_class_b_restoration(
+            {
+                "corrected_defect": admission.get("corrected_defect"),
+                "intended_behavior_restored": admission.get(
+                    "intended_behavior_restored"
+                ),
+            }
+        )
+        if (
+            normalized is None
+            or normalized["corrected_defect"]
+            != admission.get("corrected_defect")
+            or normalized["intended_behavior_restored"]
+            != admission.get("intended_behavior_restored")
+        ):
+            return (
+                "unavailable",
+                "class B restoration evidence malformed or ambiguous",
+                "class B restoration evidence is malformed or ambiguous",
+            )
+    if contradiction:
+        return (
+            "contradictory",
+            "verdict contradicts its own existing/default contract-change description",
+            "behavior verdict describes an ineligible existing/default contract change",
+        )
+    if cls == "B":
+        return (
+            "admitted",
+            "class B with bounded corrected-defect and restored-behavior evidence",
+            "",
+        )
+    return ("admitted", "class %s" % cls, "")
+
+
+def normalize_automerge_verdict(data, triage_data=None):
+    """Normalize the optional PR-triage behavior verdict for card persistence.
+
+    Complete diffs always produce the VISION-independent class, existing/default
+    behavior, and class-C mode facts. Class B additionally requires a bounded
+    ``class_b_restoration`` object naming both the corrected defect and intended
+    behavior restored. Admission also rejects an affirmative claim in the same
+    triage summary, product implications, or evidence that an existing mode,
+    default, workflow, or delivery contract is tightened or changed.
+
+    Missing or malformed semantic evidence remains persisted only as an
+    unavailable, denial-only historical verdict. The executor independently
+    validates the admission record through ``behavior_admission_status``. Valid
+    classes A and C retain their existing authorization behavior.
+    """
     if not isinstance(data, dict):
         return None
     cls = str(data.get("behavior_class") or "").strip().upper()
@@ -1915,6 +2101,11 @@ def normalize_automerge_verdict(data):
             else:
                 return None
         verdict[field] = b
+    admission = _behavior_admission_record(
+        cls, data.get(CLASS_B_RESTORATION_FIELD), triage_data
+    )
+    if admission is not None:
+        verdict[BEHAVIOR_ADMISSION_FIELD] = admission
     vision_fields = {
         field: _coerce_verdict_bool(data.get(field))
         for field in ("aligns_with_vision", "recommend_merge")
