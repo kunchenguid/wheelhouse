@@ -85,6 +85,28 @@ The pinned action, `claude_bridge.py`, their workflow steps, and their tests rem
 After rollback, replay is explicit through the existing marker-versioned durable triage replay path; automatic hourly cache retry remains disabled.
 Before another profile is promoted, production observation uses the durable result and stage records for at least 20 successful or expected-failure executions over at least seven days.
 
+## Operator replay exact-card selector
+
+The supported replay owner remains an owner-started `scan-backstop.yml` `workflow_dispatch` with a non-empty validated `replay_wave`. Scheduled runs cannot reach replay, and the default empty `replay_exact_cards` input preserves the legacy sorted-prefix behavior.
+
+For a reviewed non-prefix cohort, set `replay_exact_cards` to the versioned contract `v1:N[,N...]`. Each `N` is a positive decimal card number without leading zeroes. The selector accepts at most 25 unique numbers, canonicalizes them into ascending order, rejects whitespace, empty elements, ranges, wildcards, duplicates, and trailing data, and requires `replay_limit` to equal the selector count. It cannot be combined with `replay_attempts_reset_cards`.
+
+For example, plan six exact cards with zero writes:
+
+```bash
+gh-axi workflow run scan-backstop.yml \
+  --repo OWNER/wheelhouse \
+  --ref main \
+  --field replay_wave=reviewed-wave \
+  --field replay_limit=6 \
+  --field replay_exact_cards='v1:1483,1584,1585,1586,1594,1598' \
+  --field replay_dry_run=true
+```
+
+When this selector is present, the candidate listing is not used for discovery. Every requested card and source is still read by exact number and must pass the existing trusted identity, exact-revision, pure-card, terminal-error, attempt-cap, replay-marker, claim, daily-budget, sealed-permit, and idempotency checks. Selection grants no admission or authority.
+
+The planner reports the canonical selector and one `exact-selector/v1 admitted` line containing each card and revision. Dry-run and write-enabled modes use that same planner. If any requested card is missing, ineligible, changed during the full second-read preflight, already recovered, or the complete cohort exceeds remaining daily budget, the wave fails before writes and no generic candidate is substituted. After mutation starts, an unavoidable later GitHub race or write failure stops the wave immediately; already queued cards remain independently safe, no other card is substituted, and the operator must freeze and dry-run an explicit remaining cohort before another write-enabled dispatch.
+
 ## Disabled and investigated adapters
 
 The authentication audit found no officially supported secure noninteractive way to use the current ChatGPT Pro subscription from this public GitHub Actions repository.

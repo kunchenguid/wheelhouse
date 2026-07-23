@@ -243,6 +243,29 @@ def cards_file(numbers):
     return handle.name
 
 
+def exact_fixture(numbers):
+    cards = {}
+    sources = {}
+    revisions = {}
+    for number in numbers:
+        revision = "%07x" % number
+        target = number + 20_000
+        cards[number] = card(number=number, target=target, revision=revision)
+        sources[("wheelhouse", target, "pr-review")] = source(
+            number=target, revision=revision
+        )
+        revisions[number] = revision
+    return cards, sources, revisions
+
+
+def exact_plan_lines(output):
+    return [
+        line
+        for line in output.splitlines()
+        if line.startswith("replay exact-selector/v1 admitted card #")
+    ]
+
+
 def attempt_reset_fixture(cohort=None):
     cohort = cohort or replay.ATTEMPT_RESET_COHORT
     cards = {}
@@ -1050,6 +1073,328 @@ def test_dry_run_and_budget_bound_list_plans_with_zero_writes():
         os.unlink(path)
 
 
+def test_exact_selector_isolates_non_prefix_cohort_and_emits_revisions():
+    all_numbers = [
+        508,
+        1421,
+        1454,
+        1460,
+        1483,
+        1532,
+        1537,
+        1567,
+        1579,
+        1580,
+        1581,
+        1582,
+        1584,
+        1585,
+        1586,
+        1587,
+        1588,
+        1589,
+        1590,
+        1591,
+        1592,
+        1593,
+        1594,
+        1595,
+        1596,
+        1597,
+        1598,
+        1599,
+        1600,
+        1601,
+        1602,
+    ]
+    requested = (1483, 1584, 1585, 1586, 1594, 1598)
+    selector = "v1:" + ",".join(str(number) for number in requested)
+    cards, sources, revisions = exact_fixture(all_numbers)
+    path = cards_file(list(reversed(all_numbers)))
+    try:
+        output = StringIO()
+        with (
+            replay_environment(cards, sources) as calls,
+            redirect_stdout(output),
+        ):
+            result = replay.run(
+                path,
+                "missing-re-recovery-r2",
+                len(requested),
+                dry_run=True,
+                exact_cards=selector,
+            )
+        assert result == {
+            "eligible": len(requested),
+            "planned": len(requested),
+            "deferred": 0,
+            "written": 0,
+        }
+        assert calls["card_reads"] == list(requested) * 2
+        assert [read[2] for read in calls["source_reads"]] == [
+            cards[number]["number"] + 20_000 for number in requested
+        ] * 2
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+        assert "canonical=%s count=6" % selector in output.getvalue()
+        assert exact_plan_lines(output.getvalue()) == [
+            "replay exact-selector/v1 admitted card #%s: revision=%s clear=error"
+            % (number, revisions[number])
+            for number in requested
+        ]
+        assert "card #508" not in output.getvalue()
+    finally:
+        os.unlink(path)
+
+
+def test_exact_selector_dry_run_and_write_plans_are_identical():
+    requested = (1483, 1584, 1585, 1586, 1594, 1598)
+    selector = "v1:" + ",".join(str(number) for number in requested)
+
+    def execute(dry_run):
+        cards, sources, revisions = exact_fixture(requested)
+        path = cards_file([1, *reversed(requested)])
+        output = StringIO()
+        try:
+            with (
+                replay_environment(cards, sources) as calls,
+                redirect_stdout(output),
+            ):
+                result = replay.run(
+                    path,
+                    "missing-re-recovery-r2",
+                    len(requested),
+                    dry_run=dry_run,
+                    exact_cards=selector,
+                )
+            return result, calls, output.getvalue(), revisions, cards
+        finally:
+            os.unlink(path)
+
+    dry_result, dry_calls, dry_output, revisions, _ = execute(True)
+    write_result, write_calls, write_output, _, written_cards = execute(False)
+    expected_plans = [
+        "replay exact-selector/v1 admitted card #%s: revision=%s clear=error"
+        % (number, revisions[number])
+        for number in requested
+    ]
+    assert exact_plan_lines(dry_output) == exact_plan_lines(write_output)
+    assert exact_plan_lines(write_output) == expected_plans
+    assert dry_result["planned"] == write_result["planned"] == len(requested)
+    assert dry_result["written"] == 0
+    assert write_result["written"] == write_result["queued"] == len(requested)
+    assert not dry_calls["edits"] and not dry_calls["queued"]
+    assert [entry[0] for entry in write_calls["queued"]] == list(requested)
+    assert all(
+        rc._unique_state_block(written_cards[number]["body"])[replay.REPLAY_FIELD][
+            "revision"
+        ]
+        == revisions[number]
+        for number in requested
+    )
+
+
+def test_exact_selector_contract_rejects_malformed_and_limit_mismatches_before_reads():
+    assert replay._exact_card_scope("") == ()
+    assert replay._exact_card_scope("v1:3,1,2") == (1, 2, 3)
+    malformed = (
+        "v1:",
+        "v1:1,",
+        "v1:,1",
+        "v1:1,,2",
+        "v1:1-2",
+        "v1:*",
+        "v1:1x",
+        "v1:01",
+        "v1:1,1",
+        "v2:1",
+        " v1:1",
+        "v1:1 ",
+        "v1:" + ",".join(str(number) for number in range(1, 27)),
+        "v1:9007199254740992",
+        "v1:" + "9" * replay.EXACT_SELECTOR_MAX_BYTES,
+    )
+    path = cards_file([])
+    try:
+        with replay_environment({}, {}) as calls:
+            for value in malformed:
+                try:
+                    replay.run(path, "exact-contract", 1, exact_cards=value)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("accepted malformed selector %r" % value)
+            try:
+                replay.run(path, "exact-contract", 1, exact_cards="v1:1,2")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("accepted limit-inconsistent selector")
+            assert not calls["card_reads"] and not calls["source_reads"]
+            assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+            assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_exact_selector_requested_rejections_are_atomic_and_never_substitute():
+    requested = (42, 43)
+    selector = "v1:42,43"
+
+    def attempt(mutator):
+        cards, sources, _ = exact_fixture((1, *requested))
+        mutator(cards, sources)
+        path = cards_file([1, *requested])
+        output = StringIO()
+        try:
+            with (
+                replay_environment(cards, sources) as calls,
+                redirect_stdout(output),
+            ):
+                try:
+                    replay.run(
+                        path,
+                        "exact-rejection",
+                        len(requested),
+                        exact_cards=selector,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("exact selector accepted rejected request")
+            assert 1 not in calls["card_reads"]
+            assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+            assert not calls["dispatched"]
+            assert "refused card #43" in output.getvalue()
+        finally:
+            os.unlink(path)
+
+    attempt(lambda cards, sources: cards.pop(43))
+
+    def non_refreshable(cards, sources):
+        cards[43]["labels"].append({"name": "processing"})
+
+    attempt(non_refreshable)
+
+    def head_moved(cards, sources):
+        sources[("wheelhouse", 20_043, "pr-review")]["head"]["sha"] = "deadbee"
+
+    attempt(head_moved)
+
+    def already_recovered(cards, sources):
+        state = rc._unique_state_block(cards[43]["body"])
+        state["triage_status"] = "succeeded"
+        cards[43]["body"] = rc._replace_state_block(cards[43]["body"], state)
+
+    attempt(already_recovered)
+
+    def already_replayed(cards, sources):
+        state = rc._unique_state_block(cards[43]["body"])
+        state[replay.REPLAY_FIELD] = valid_marker("%07x" % 43)
+        state["triage_status"] = "queued"
+        cards[43]["body"] = rc._replace_state_block(cards[43]["body"], state)
+
+    attempt(already_replayed)
+
+    def attempt_exhausted(cards, sources):
+        state = rc._unique_state_block(cards[43]["body"])
+        state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+            "version": rc.TRIAGE_ATTEMPTS_VERSION,
+            "kind": "pr-review",
+            "revision": "%07x" % 43,
+            "count": 2,
+        }
+        cards[43]["body"] = rc._replace_state_block(cards[43]["body"], state)
+
+    attempt(attempt_exhausted)
+
+
+def test_exact_selector_refuses_budget_and_preflight_races_before_writes():
+    requested = (42, 43)
+    selector = "v1:42,43"
+    cards, sources, _ = exact_fixture(requested)
+    path = cards_file([1, *requested])
+    try:
+        output = StringIO()
+        with (
+            replay_environment(cards, sources, remaining=1) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(path, "exact-budget", 2, exact_cards=selector)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("exact selector accepted partial budget")
+        assert "refused cards #42,#43: insufficient-budget" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+    finally:
+        os.unlink(path)
+
+    cards, sources, _ = exact_fixture(requested)
+
+    def race_card(number, read_count, live_cards):
+        if number == 43 and read_count == 4:
+            live_cards[number]["labels"].append({"name": "processing"})
+
+    path = cards_file([1, *requested])
+    try:
+        output = StringIO()
+        with (
+            replay_environment(cards, sources, card_read_hook=race_card) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(path, "exact-race", 2, exact_cards=selector)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("exact selector mutated after preflight race")
+        assert "refused card #43: card-not-refreshable" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_exact_selector_keeps_claim_tombstone_authoritative():
+    cards, sources, _ = exact_fixture((42,))
+    path = cards_file([1, 42])
+
+    def fail_tombstone(**kwargs):
+        raise RuntimeError("simulated claim PATCH failure")
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as calls,
+            patched(replay.agent_claim, {"supersede_triage_claim": fail_tombstone}),
+        ):
+            try:
+                replay.run(path, "exact-claim", 1, exact_cards="v1:42")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("exact selector bypassed claim tombstone")
+        assert not calls["edits"] and not calls["queued"] and not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_no_exact_selector_preserves_legacy_sorted_prefix():
+    numbers = (5, 2, 9)
+    cards, sources, _ = exact_fixture(numbers)
+    path = cards_file(numbers)
+    try:
+        output = StringIO()
+        with replay_environment(cards, sources) as calls, redirect_stdout(output):
+            result = replay.run(path, "legacy-prefix", 2, dry_run=True)
+        assert result == {"eligible": 3, "planned": 2, "deferred": 1, "written": 0}
+        assert "DRY-RUN card #2" in output.getvalue()
+        assert "DRY-RUN card #5" in output.getvalue()
+        assert "DRY-RUN card #9" not in output.getvalue()
+        assert calls["card_reads"] == [2, 5, 9]
+    finally:
+        os.unlink(path)
+
+
 def test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit():
     old_env = dict(os.environ)
     valid = {
@@ -1504,6 +1849,9 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert dispatch_inputs["replay_limit"]["default"] == "25"
     assert "1..25" in dispatch_inputs["replay_limit"]["description"]
     assert dispatch_inputs["replay_dry_run"]["default"] is True
+    assert dispatch_inputs["replay_exact_cards"]["default"] == ""
+    assert "v1:N,N" in dispatch_inputs["replay_exact_cards"]["description"]
+    assert "replay_limit" in dispatch_inputs["replay_exact_cards"]["description"]
     assert dispatch_inputs["replay_attempts_reset_cards"]["default"] == ""
     dry_run_guard = (
         "github.event_name == 'workflow_dispatch' && "
@@ -1537,6 +1885,9 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "scripts/triage_replay.py" in step["run"]
     assert "REPLAY_DRY_RUN" in step["run"]
     assert "args+=(--dry-run)" in step["run"]
+    assert "REPLAY_EXACT_CARDS" in step["run"]
+    assert 'args+=(--exact-cards "$REPLAY_EXACT_CARDS")' in step["run"]
+    assert step["env"]["REPLAY_EXACT_CARDS"] == "${{ inputs.replay_exact_cards }}"
     assert "REPLAY_ATTEMPTS_RESET_CARDS" in step["run"]
     assert "--attempts-reset-cards" in step["run"]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
@@ -1551,6 +1902,12 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     )
     replay_text = (ROOT / "scripts/triage_replay.py").read_text(encoding="utf-8")
     assert replay.REPLAY_LIMIT_MAX == 25
+    assert replay.EXACT_SELECTOR_VERSION == 1
+    assert "v1:N[,N...]" in replay.parser().format_help()
+    runtime_doc = (ROOT / "docs/AGENT_RUNTIME.md").read_text(encoding="utf-8")
+    assert "replay_exact_cards" in runtime_doc
+    assert "v1:1483,1584,1585,1586,1594,1598" in runtime_doc
+    assert "no other card is substituted" in runtime_doc
     assert len(replay.ATTEMPT_RESET_COHORT) == 19
     assert replay.ATTEMPT_RESET_WAVE == "evidence-empty-e7-final"
     assert len(replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT) == 15
@@ -1624,6 +1981,13 @@ TESTS = [
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
     test_replay_applies_scan_author_filter_to_live_source,
     test_dry_run_and_budget_bound_list_plans_with_zero_writes,
+    test_exact_selector_isolates_non_prefix_cohort_and_emits_revisions,
+    test_exact_selector_dry_run_and_write_plans_are_identical,
+    test_exact_selector_contract_rejects_malformed_and_limit_mismatches_before_reads,
+    test_exact_selector_requested_rejections_are_atomic_and_never_substitute,
+    test_exact_selector_refuses_budget_and_preflight_races_before_writes,
+    test_exact_selector_keeps_claim_tombstone_authoritative,
+    test_no_exact_selector_preserves_legacy_sorted_prefix,
     test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit,
     test_result_records_cover_success_failure_bound_and_duplicate_editing,
     test_duplicate_only_evidence_requires_a_terminal_pre_replay_claim_and_record,

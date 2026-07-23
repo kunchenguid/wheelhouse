@@ -38,6 +38,10 @@ on:
         required: false
         type: boolean
         default: true
+      replay_exact_cards:
+        description: "Exact selector v1:N,N (max 25; count must equal replay_limit; empty uses legacy prefix)"
+        required: false
+        default: ""
       replay_attempts_reset_cards:
         description: "One-time sanctioned comma-separated cohort cards (empty disables reset)"
         required: false
@@ -159,9 +163,11 @@ jobs:
       # Scheduled runs can never reach this step, and workflow_dispatch keeps
       # replay_wave empty unless the owner explicitly names a reviewed wave.
       # Candidate rows contribute issue numbers only; the script re-reads every
-      # card and target by exact number before any state-only marker write, then
-      # re-enters reconcile.maybe_queue_auto_triage so queue-before-dispatch and
-      # both spend guards stay authoritative.
+      # card and target by exact number before any state-only marker write. The
+      # optional replay_exact_cards v1 selector bypasses generic prefix discovery
+      # but not admission, exact-revision, budget, permit, or idempotency checks.
+      # Replay then re-enters reconcile.maybe_queue_auto_triage so
+      # queue-before-dispatch and both spend guards stay authoritative.
       - name: Replay one bounded auto-triage wave
         if: github.event_name == 'workflow_dispatch' && inputs.replay_wave != ''
         env:
@@ -175,11 +181,15 @@ jobs:
           REPLAY_WAVE: ${{ inputs.replay_wave }}
           REPLAY_LIMIT: ${{ inputs.replay_limit }}
           REPLAY_DRY_RUN: ${{ inputs.replay_dry_run }}
+          REPLAY_EXACT_CARDS: ${{ inputs.replay_exact_cards }}
           REPLAY_ATTEMPTS_RESET_CARDS: ${{ inputs.replay_attempts_reset_cards }}
         run: |
           args=(cards.json --wave "$REPLAY_WAVE" --limit "$REPLAY_LIMIT")
           if [ "$REPLAY_DRY_RUN" = "true" ]; then
             args+=(--dry-run)
+          fi
+          if [ -n "$REPLAY_EXACT_CARDS" ]; then
+            args+=(--exact-cards "$REPLAY_EXACT_CARDS")
           fi
           if [ -n "$REPLAY_ATTEMPTS_RESET_CARDS" ]; then
             args+=(--attempts-reset-cards "$REPLAY_ATTEMPTS_RESET_CARDS")

@@ -31,6 +31,10 @@ REPLAY_VERSION = 1
 ATTEMPT_RESET_REPLAY_VERSION = 2
 REPLAY_LIMIT_DEFAULT = 25
 REPLAY_LIMIT_MAX = 25
+EXACT_SELECTOR_VERSION = 1
+EXACT_SELECTOR_PREFIX = "v%s:" % EXACT_SELECTOR_VERSION
+EXACT_SELECTOR_LABEL = "exact-selector/v%s" % EXACT_SELECTOR_VERSION
+EXACT_SELECTOR_MAX_BYTES = 512
 REPLAY_WAVE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
 PR_REVISION_RE = re.compile(r"^[0-9A-Fa-f]{7,64}$")
 ISSUE_REVISION_RE = re.compile(
@@ -45,6 +49,7 @@ TRIAGE_NON_SUCCESS_FIELDS = (
     "triage_repair_candidate",
 )
 MAX_RUN_NUMBER = 9_007_199_254_740_991
+MAX_CARD_NUMBER = MAX_RUN_NUMBER
 
 # Incident-scoped reset capabilities for captain-approved evidence-array
 # recoveries. Each entry binds the card to the exact source revision and prior
@@ -354,6 +359,43 @@ def _valid_marker(marker, revision):
         and isinstance(run_number, int)
         and 1 <= run_number <= MAX_RUN_NUMBER
     )
+
+
+def _exact_card_scope(value):
+    """Parse the versioned exact-card selector into canonical card order."""
+    if value == "":
+        return ()
+    if (
+        not isinstance(value, str)
+        or len(value.encode("utf-8")) > EXACT_SELECTOR_MAX_BYTES
+    ):
+        raise ValueError(
+            "exact card selector must be at most %s bytes" % EXACT_SELECTOR_MAX_BYTES
+        )
+    match = re.fullmatch(
+        re.escape(EXACT_SELECTOR_PREFIX)
+        + r"([1-9][0-9]*(?:,[1-9][0-9]*)*)",
+        value,
+    )
+    if not match:
+        raise ValueError(
+            "exact card selector must match %sN[,N...] with positive decimal integers"
+            % EXACT_SELECTOR_PREFIX
+        )
+    numbers = [int(part) for part in match.group(1).split(",")]
+    if len(numbers) > REPLAY_LIMIT_MAX:
+        raise ValueError(
+            "exact card selector may contain at most %s cards" % REPLAY_LIMIT_MAX
+        )
+    if len(numbers) != len(set(numbers)):
+        raise ValueError("exact card selector must not contain duplicates")
+    if any(number > MAX_CARD_NUMBER for number in numbers):
+        raise ValueError("exact card selector contains an oversized card number")
+    return tuple(sorted(numbers))
+
+
+def _canonical_exact_selector(numbers):
+    return EXACT_SELECTOR_PREFIX + ",".join(str(number) for number in numbers)
 
 
 def _attempt_reset_scope(wave, value):
@@ -694,7 +736,7 @@ def _card_snapshot_identity(card):
     }
 
 
-def _plans_match_for_reset(initial, reread):
+def _plans_match(initial, reread):
     return bool(
         initial
         and reread
@@ -728,7 +770,7 @@ def _preflight_attempt_reset(
             attempt_reset=attempt_reset_scope.get(number),
             attempt_reset_wave=wave,
         )
-        if not plan or not _plans_match_for_reset(initial, plan):
+        if not plan or not _plans_match(initial, plan):
             print(
                 "::warning::attempt reset preflight refused card #%s: %s"
                 % (number, reason if not plan else "card-raced-before-reset")
@@ -738,6 +780,56 @@ def _preflight_attempt_reset(
             )
         reread_plans.append(plan)
     return reread_plans
+
+
+def _preflight_exact_scope(selected, exact_scope, config, owner, has_token):
+    """Atomically revalidate every requested card before any exact-scope write."""
+    if not exact_scope:
+        return selected
+    if tuple(plan["number"] for plan in selected) != exact_scope:
+        raise ValueError("exact card selector did not produce the requested cohort")
+    reread_plans = []
+    refused = []
+    for initial in selected:
+        number = initial["number"]
+        plan, reason = inspect_candidate(number, config, owner, has_token)
+        if not plan or not _plans_match(initial, plan):
+            refusal = reason if not plan else "card-raced-before-replay"
+            print(
+                "::error::replay %s refused card #%s: %s"
+                % (EXACT_SELECTOR_LABEL, number, refusal)
+            )
+            refused.append(number)
+        else:
+            reread_plans.append(plan)
+    if refused:
+        raise ValueError(
+            "exact card selector refused because a requested card changed before mutation"
+        )
+    return reread_plans
+
+
+def _print_exact_plans(exact_scope, plans):
+    if not exact_scope:
+        return
+    print(
+        "replay %s canonical=%s count=%s"
+        % (
+            EXACT_SELECTOR_LABEL,
+            _canonical_exact_selector(exact_scope),
+            len(exact_scope),
+        )
+    )
+    for plan in plans:
+        print(
+            "replay %s admitted card #%s: revision=%s clear=%s"
+            % (
+                EXACT_SELECTOR_LABEL,
+                plan["number"],
+                plan["revision"],
+                plan["cleared"],
+            )
+        )
 
 
 def _marker(wave, revision, cleared, run_number, attempt_reset=False):
@@ -824,21 +916,35 @@ def _entry(wave, limit):
     return owner, int(value)
 
 
-def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
+def run(
+    cards_path,
+    wave,
+    limit,
+    dry_run=False,
+    attempts_reset_cards="",
+    exact_cards="",
+):
     owner, run_number = _entry(wave, limit)
+    exact_scope = _exact_card_scope(exact_cards)
     attempt_reset_scope = _attempt_reset_scope(wave, attempts_reset_cards)
+    if exact_scope and attempt_reset_scope:
+        raise ValueError("exact card selector cannot be combined with attempt reset")
+    if exact_scope and limit != len(exact_scope):
+        raise ValueError("replay_limit must equal the exact card selector count")
     if attempt_reset_scope and limit != len(attempt_reset_scope):
         raise ValueError("attempt reset limit must equal the sanctioned cohort size")
     repo_slug = _card_repo_slug(owner)
     config = core.load_config()
     has_token = render_card.auto_triage_has_token()
-    numbers = (
-        sorted(attempt_reset_scope)
-        if attempt_reset_scope
-        else _candidate_numbers(cards_path)
-    )
+    if exact_scope:
+        numbers = list(exact_scope)
+    elif attempt_reset_scope:
+        numbers = sorted(attempt_reset_scope)
+    else:
+        numbers = _candidate_numbers(cards_path)
     eligible = []
     skipped = {}
+    refused = []
     for number in numbers:
         plan, reason = inspect_candidate(
             number,
@@ -856,11 +962,22 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             )
         else:
             skipped[reason] = skipped.get(reason, 0) + 1
+            if exact_scope:
+                refused.append((number, reason))
+                print(
+                    "::error::replay %s refused card #%s: %s"
+                    % (EXACT_SELECTOR_LABEL, number, reason)
+                )
     if skipped:
         print(
             "replay skip summary: "
             + json.dumps(skipped, sort_keys=True, separators=(",", ":"))
         )
+        if exact_scope:
+            raise ValueError(
+                "exact card selector refused because %s requested card(s) failed validation"
+                % len(refused)
+            )
         if attempt_reset_scope:
             raise ValueError(
                 "attempt reset refused because a sanctioned card failed validation"
@@ -878,9 +995,24 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
     )
     if attempt_reset_scope and remaining < pending_attempt_resets:
         raise ValueError("attempt reset requires budget for the pending cohort")
-    wave_bound = (
-        len(attempt_reset_scope) if attempt_reset_scope else min(limit, remaining)
-    )
+    if exact_scope and remaining < len(exact_scope):
+        print(
+            "::error::replay %s refused cards %s: "
+            "insufficient-budget remaining=%s required=%s"
+            % (
+                EXACT_SELECTOR_LABEL,
+                ",".join("#%s" % number for number in exact_scope),
+                remaining,
+                len(exact_scope),
+            )
+        )
+        raise ValueError("exact card selector requires budget for the complete cohort")
+    if exact_scope:
+        wave_bound = len(exact_scope)
+    elif attempt_reset_scope:
+        wave_bound = len(attempt_reset_scope)
+    else:
+        wave_bound = min(limit, remaining)
     selected = eligible[:wave_bound]
     deferred = len(eligible) - len(selected)
     if deferred:
@@ -888,13 +1020,24 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             "::notice::replay deferred %s candidates (limit=%s remaining-budget=%s)"
             % (deferred, limit, remaining)
         )
+    selected = _preflight_exact_scope(
+        selected, exact_scope, config, owner, has_token
+    )
+    _print_exact_plans(exact_scope, selected)
     if dry_run:
         for plan in selected:
-            print(
-                "DRY-RUN card #%s: write triage_replay v1 cleared=%s, "
-                "queue through maybe_queue_auto_triage, then dispatch through the existing permit"
-                % (plan["number"], plan["cleared"])
-            )
+            if exact_scope:
+                print(
+                    "DRY-RUN card #%s revision=%s: write triage_replay v1 cleared=%s, "
+                    "queue through maybe_queue_auto_triage, then dispatch through the existing permit"
+                    % (plan["number"], plan["revision"], plan["cleared"])
+                )
+            else:
+                print(
+                    "DRY-RUN card #%s: write triage_replay v1 cleared=%s, "
+                    "queue through maybe_queue_auto_triage, then dispatch through the existing permit"
+                    % (plan["number"], plan["cleared"])
+                )
         print(
             "replay dry-run summary: listed=%s eligible=%s planned=%s deferred=%s writes=0"
             % (len(numbers), len(eligible), len(selected), deferred)
@@ -930,6 +1073,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 raise ValueError(
                     "attempt reset paused because a sanctioned card changed during mutation"
                 )
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because a requested card changed during mutation"
+                )
             continue
         live = render_card.get_card(plan["number"])
         if _card_snapshot_identity(live) != _card_snapshot_identity(plan["card"]):
@@ -940,6 +1087,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             if attempt_reset_scope:
                 raise ValueError(
                     "attempt reset paused because a sanctioned card changed during mutation"
+                )
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because a requested card changed during mutation"
                 )
             continue
         current = reconcile.current_card({"number": plan["number"]})
@@ -961,6 +1112,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
             if attempt_reset_scope:
                 raise ValueError(
                     "attempt reset paused because the cohort could not be claimed"
+                )
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because the cohort could not be claimed"
                 )
             continue
         if superseded["superseded"]:
@@ -988,6 +1143,10 @@ def run(cards_path, wave, limit, dry_run=False, attempts_reset_cards=""):
                 raise ValueError(
                     "attempt reset paused because a sanctioned card could not be queued"
                 )
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because a requested card could not be queued"
+                )
     print(
         "replay summary: listed=%s eligible=%s marked=%s queued=%s deferred=%s"
         % (len(numbers), len(eligible), written, queued, deferred)
@@ -1014,6 +1173,13 @@ def parser():
         help="List exact-number candidates and planned actions with zero writes",
     )
     root.add_argument(
+        "--exact-cards",
+        default="",
+        help="Versioned exact selector v1:N[,N...] (max 25; no whitespace, "
+        "ranges, duplicates, or leading zeroes). Card order is canonicalized "
+        "ascending and count must equal --limit.",
+    )
+    root.add_argument(
         "--attempts-reset-cards",
         default="",
         help="Incident-scoped comma-separated card numbers. Non-empty is "
@@ -1031,6 +1197,7 @@ def main():
             args.limit,
             dry_run=args.dry_run,
             attempts_reset_cards=args.attempts_reset_cards,
+            exact_cards=args.exact_cards,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print("::error::triage replay refused: %s" % str(error)[:240])
