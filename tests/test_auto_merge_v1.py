@@ -1208,6 +1208,14 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: subordinate negation cannot alias polarity",
+        render_card._restoration_claim_supported(
+            "Authentication sessions lose state when audit logs are not written.",
+            "Authentication sessions do not lose state when audit logs are written.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1619,6 +1627,17 @@ def test_class_b_semantic_admission_boundary():
             ("existing_workflow", "changed"),
             ("documentation_or_tests", "changed"),
         },
+    )
+    demonstrative_effect_text = (
+        "Tightens those default requirements while updating documentation "
+        "for the delivery contract"
+    )
+    check(
+        "semantic admission: demonstrative protected effect is unavailable",
+        render_card._derive_behavior_assertion_semantics(
+            demonstrative_effect_text
+        )
+        is None,
     )
 
     for label, text, assertions in (

@@ -2435,7 +2435,20 @@ def _semantic_polarity(text):
 
 
 _RESTORATION_CLAUSE_RE = re.compile(
-    r"\s*(?:[,;]|\b(?:and|but|whereas|while)\b)\s*", re.I
+    r"\s*(?:[,;]|\b(?:and|but)\b)\s*", re.I
+)
+_RESTORATION_SUBORDINATORS = frozenset(
+    {
+        "although",
+        "because",
+        "if",
+        "since",
+        "though",
+        "unless",
+        "when",
+        "whereas",
+        "while",
+    }
 )
 _RESTORATION_AUXILIARIES = frozenset(
     {
@@ -2510,6 +2523,8 @@ def _restoration_propositions(text):
         if not clause.strip():
             return None
         words = re.findall(r"[a-z][a-z0-9_-]*", clause.casefold())
+        if _RESTORATION_SUBORDINATORS.intersection(words):
+            return None
         predicates = [
             (index, _RESTORATION_PREDICATES[word])
             for index, word in enumerate(words)
@@ -2584,8 +2599,32 @@ def _restoration_propositions(text):
             patient = _restoration_role(trailing)
         if not patient or (not agent and not passive):
             return None
+        polarity_start = (
+            passive_start
+            if passive
+            else auxiliary_index
+            if auxiliary_index is not None
+            else max(0, predicate_index - 1)
+        )
+        predicate_negations = {
+            index
+            for index, word in enumerate(words)
+            if word in {"never", "not"}
+        }
+        governed_negations = {
+            index
+            for index in range(polarity_start, predicate_index)
+            if words[index] in {"never", "not"}
+        }
+        if predicate_negations != governed_negations:
+            return None
         propositions.append(
-            (predicate, agent, patient, _semantic_polarity(clause))
+            (
+                predicate,
+                agent,
+                patient,
+                "negative" if governed_negations else "affirmative",
+            )
         )
     return tuple(propositions)
 
@@ -2746,10 +2785,13 @@ def _coordinated_documentation_topic_semantics(text):
             ):
                 continue
             occupied.append(span)
-            effects.append(effect)
-    if len(effects) != 1 or effects[0] != "changed":
+            effects.append((effect, span[0], span[1]))
+    if len(effects) != 1 or effects[0][0] != "changed":
         return None
-    return {("documentation_or_tests", effects[0])}
+    effect, effect_start, _ = effects[0]
+    if reverse and effect_start < documentation_match.end():
+        return None
+    return {("documentation_or_tests", effect)}
 
 
 def _atomic_semantic_spans(text):
@@ -2834,15 +2876,33 @@ def _atomic_semantic_spans(text):
                     "contracts",
                     "her",
                     "hers",
+                    "him",
                     "his",
+                    "i",
                     "it",
                     "its",
+                    "me",
+                    "mine",
+                    "my",
+                    "our",
+                    "ours",
+                    "same",
+                    "she",
+                    "such",
                     "their",
                     "theirs",
                     "them",
+                    "these",
                     "they",
                     "this",
                     "that",
+                    "those",
+                    "us",
+                    "we",
+                    "whose",
+                    "you",
+                    "your",
+                    "yours",
                     "workflow",
                     "workflows",
                 }
