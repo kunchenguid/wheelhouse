@@ -1378,6 +1378,28 @@ def test_class_b_semantic_admission_boundary():
             )
             is False,
         )
+    for relation in (
+        "across",
+        "amid",
+        "beyond",
+        "despite",
+        "near",
+        "past",
+        "per",
+        "via",
+    ):
+        relational = (
+            "Authentication sessions lose monitored runs %s restarts."
+            % relation
+        )
+        check(
+            "class B admission: generated %s relation is unavailable"
+            % relation,
+            render_card._restoration_claim_supported(
+                relational, relational
+            )
+            is False,
+        )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -2053,9 +2075,37 @@ def test_class_b_semantic_admission_boundary():
     optin = normalize(optin_input)["automerge_verdict"]
     check(
         "semantic admission: class C default-off wording remains eligible",
-        render_card._derive_behavior_assertion_semantics(optin_text) is None
+        render_card._derive_behavior_assertion_semantics(optin_text, "C")
+        is None
         and am.verdict_eligible(optin)[0] is True,
     )
+    for behavior_class in ("A", "B"):
+        cross_class_input = candidate(summary=optin_text + ".")
+        cross_class_input["automerge"] = dict(
+            cross_class_input["automerge"]
+        )
+        cross_class_input["automerge"].update(
+            {
+                "behavior_class": behavior_class,
+                "optin_default_off": False,
+            }
+        )
+        if behavior_class == "A":
+            cross_class_input["automerge"].pop("class_b_restoration")
+        cross_class = normalize(cross_class_input)["automerge_verdict"]
+        check(
+            "semantic admission: class-C wording is denied for class %s"
+            % behavior_class,
+            render_card._protected_contract_claims(
+                (optin_text,), behavior_class
+            )
+            == {optin_text.casefold()}
+            and render_card._derive_behavior_assertion_semantics(
+                optin_text, behavior_class
+            )
+            == {("default_behavior", "changed")}
+            and am.verdict_eligible(cross_class)[0] is False,
+        )
     mixed_optin_text = (
         "Adds an opt-in feature that tightens the existing workflow "
         "and is disabled by default"
@@ -2069,7 +2119,9 @@ def test_class_b_semantic_admission_boundary():
     mixed_optin = normalize(mixed_optin_input)["automerge_verdict"]
     check(
         "semantic admission: mixed class C wording remains governed",
-        render_card._protected_contract_claims((mixed_optin_text,))
+        render_card._protected_contract_claims(
+            (mixed_optin_text,), "C"
+        )
         == {mixed_optin_text.casefold()}
         and am.verdict_eligible(mixed_optin)[0] is False,
     )

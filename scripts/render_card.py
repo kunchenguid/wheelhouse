@@ -2405,12 +2405,15 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
     return normalized
 
 
-def _protected_contract_claims(texts):
+def _protected_contract_claims(texts, behavior_class=None):
     claims = set()
     for text in texts:
         for clause in re.split(r"[.!?;]+", str(text or "")):
             cleaned = _clean_triage_text(clause, limit=700, default="")
-            if _CLASS_C_DEFAULT_OFF_RE.fullmatch(cleaned):
+            if (
+                behavior_class == "C"
+                and _CLASS_C_DEFAULT_OFF_RE.fullmatch(cleaned)
+            ):
                 continue
             if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
                 claims.add(cleaned.casefold())
@@ -2548,29 +2551,18 @@ _RESTORATION_PREDICATES = {
 _RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
     {"a", "an", "never", "not", "now", "the"}
 )
-_RESTORATION_RELATION_WORDS = frozenset(
+_RESTORATION_ROLE_PATTERNS = frozenset(
     {
-        "after",
-        "at",
-        "before",
-        "by",
-        "during",
-        "following",
-        "for",
-        "from",
-        "in",
-        "of",
-        "on",
-        "over",
-        "through",
-        "to",
-        "under",
-        "until",
-        "upon",
-        "with",
-        "without",
+        ("authentication", "sessions"),
+        ("daemon", "restart"),
+        ("monitored", "runs"),
+        ("open", "monitored", "run"),
+        ("open", "monitored", "runs"),
+        ("recoverable",),
     }
 )
+
+
 def _restoration_role(words):
     return tuple(
         word
@@ -2580,9 +2572,9 @@ def _restoration_role(words):
 
 
 def _restoration_roles_are_bounded(agent, patient):
-    return not (
-        _RESTORATION_RELATION_WORDS.intersection(agent)
-        or _RESTORATION_RELATION_WORDS.intersection(patient)
+    return (
+        (not agent or agent in _RESTORATION_ROLE_PATTERNS)
+        and patient in _RESTORATION_ROLE_PATTERNS
     )
 
 
@@ -3104,9 +3096,12 @@ def _bind_propagated_semantics(subjects, effects):
     return {(subject, effect) for subject, _, _ in subjects}
 
 
-def _derive_behavior_assertion_semantics(claim):
+def _derive_behavior_assertion_semantics(claim, behavior_class=None):
     text = _normalize_bounded_contractions(claim).casefold()
-    if _CLASS_C_DEFAULT_OFF_RE.fullmatch(text):
+    if (
+        behavior_class == "C"
+        and _CLASS_C_DEFAULT_OFF_RE.fullmatch(text)
+    ):
         return None
     coordinated_topic = _coordinated_documentation_topic_semantics(text)
     if coordinated_topic is not None:
@@ -3175,7 +3170,12 @@ def _derive_behavior_assertion_semantics(claim):
     return semantics
 
 
-def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs):
+def _normalize_behavior_assertions(
+    value,
+    semantic_text,
+    verified_evidence_refs,
+    behavior_class=None,
+):
     if not isinstance(value, list) or len(value) > 12:
         return None
     normalized = []
@@ -3217,9 +3217,11 @@ def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs)
             < 2
         ):
             return None
-        claim_semantics = _derive_behavior_assertion_semantics(claim)
+        claim_semantics = _derive_behavior_assertion_semantics(
+            claim, behavior_class
+        )
         evidence_semantics = _derive_behavior_assertion_semantics(
-            evidence_ref["quote"]
+            evidence_ref["quote"], behavior_class
         )
         if (
             claim_semantics is None
@@ -3236,10 +3238,14 @@ def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs)
                 "evidence": evidence_ref,
             }
         )
-    protected_claims = _protected_contract_claims(semantic_text)
+    protected_claims = _protected_contract_claims(
+        semantic_text, behavior_class
+    )
     expected = set()
     for claim in protected_claims:
-        semantics = _derive_behavior_assertion_semantics(claim)
+        semantics = _derive_behavior_assertion_semantics(
+            claim, behavior_class
+        )
         if semantics is None:
             return None
         expected.update((claim, subject, effect) for subject, effect in semantics)
@@ -3298,6 +3304,7 @@ def _behavior_admission_record(
         behavior_assertions,
         semantic_text,
         verified_refs,
+        behavior_class,
     )
     if assertions is None:
         return None
