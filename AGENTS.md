@@ -468,10 +468,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   The authoritative implementation and offline failure matrix are `scripts/render_card.py`, `scripts/wheelhouse_core.py`, and `tests/test_triage_budget.py`.
 - **Automatic-triage replay is operator-only, exact-revision, and admission-safe.**
   `scripts/triage_replay.py` is reachable only from an owner-started `scan-backstop.yml` `workflow_dispatch` with a non-empty validated `replay_wave`; the input defaults empty and the scheduled path cannot reach it.
-  Candidate listings supply issue numbers only, while every card and live target is re-read by exact number before a marker write.
+  Legacy candidate listings supply issue numbers only; an optional exact-card selector bypasses that discovery step, while every selected card and live target is still re-read by exact number before a marker write.
   Replay clears only a proven current `triage_status:error` non-success cache, marks an entirely absent cache, or re-enters the bounded duplicate-only cohort whose prior replay was denied before task construction.
   It writes the versioned non-material `triage_replay` marker and re-enters `reconcile.maybe_queue_auto_triage` so the existing reservation, queued checkpoint, sealed dispatch permit, and `triage.yml` admission remain authoritative.
-  `docs/AGENT_RUNTIME.md` owns the claim tombstone, duplicate-only evidence, and exact-revision admission-denial contracts.
+  `docs/AGENT_RUNTIME.md` owns the operator selector, claim tombstone, duplicate-only evidence, and exact-revision admission-denial contracts.
   Malformed or mismatched state, markers, identities, revisions, labels, authorship, sources, attempt counts, or budget ledgers fail closed.
   `--dry-run` performs the same exact-number eligibility reads and reports planned actions without any GitHub write.
   The evidence-empty E7 and array-recovery G1 recoveries have separate incident-scoped attempts-reset cohorts in `scripts/triage_replay.py`.
