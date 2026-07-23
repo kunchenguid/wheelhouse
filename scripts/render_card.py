@@ -2440,16 +2440,31 @@ _RESTORATION_CLAUSE_RE = re.compile(
 _RESTORATION_SUBORDINATORS = frozenset(
     {
         "although",
+        "as",
         "because",
+        "during",
         "if",
+        "once",
         "since",
+        "so",
+        "than",
+        "that",
         "though",
         "unless",
+        "until",
         "when",
+        "whenever",
+        "where",
         "whereas",
+        "whether",
+        "which",
         "while",
+        "who",
+        "whom",
+        "whose",
     }
 )
+_RESTORATION_TEMPORAL_PREPOSITIONS = frozenset({"after", "before"})
 _RESTORATION_AUXILIARIES = frozenset(
     {
         "are",
@@ -2534,6 +2549,22 @@ def _restoration_propositions(text):
             return None
         predicate_index, predicate = predicates[0]
         predicate_word = words[predicate_index]
+        temporal_indexes = [
+            index
+            for index, word in enumerate(words)
+            if word in _RESTORATION_TEMPORAL_PREPOSITIONS
+        ]
+        if len(temporal_indexes) > 1:
+            return None
+        if temporal_indexes:
+            temporal_index = temporal_indexes[0]
+            temporal_role = [
+                word
+                for word in words[temporal_index + 1 :]
+                if word != "the"
+            ]
+            if temporal_index <= predicate_index or len(temporal_role) != 1:
+                return None
         auxiliary_index = next(
             (
                 index
@@ -2643,6 +2674,14 @@ def _restoration_claim_supported(claim, evidence):
 
 _DOCUMENTATION_WORD_RE = re.compile(
     r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
+)
+_INDEPENDENT_NON_GOVERNANCE_OBJECT_RE = re.compile(
+    r"^\s*(?:(?:a|an|the)\s+)?(?:"
+    r"changelog|comments?|copy|formatting|labels?|metadata|readme|"
+    r"(?:documented\s+)?recovery\s+behavior|release\s+notes?|spelling"
+    r"|user-facing\s+flag\s+or\s+default"
+    r")\s*(?:only\s*)?(?:while|without)?\s*$",
+    re.I,
 )
 _ATOMIC_COORDINATOR_RE = re.compile(
     r"\s*(?:,?\s+\b(?:and|as\s+well\s+as|along\s+with)\b\s*)", re.I
@@ -2788,9 +2827,21 @@ def _coordinated_documentation_topic_semantics(text):
             effects.append((effect, span[0], span[1]))
     if len(effects) != 1 or effects[0][0] != "changed":
         return None
-    effect, effect_start, _ = effects[0]
-    if reverse and effect_start < documentation_match.end():
-        return None
+    effect, effect_start, effect_end = effects[0]
+    if reverse:
+        between = text[documentation_match.end() : effect_start]
+        residual = text[effect_end:]
+        if (
+            effect_start < documentation_match.end()
+            or re.fullmatch(r"[\s,;:.-]*", between) is None
+            or re.fullmatch(
+                r"[\s,;:.!?-]*(?:only[\s,;:.!?-]*)?",
+                residual,
+                re.I,
+            )
+            is None
+        ):
+            return None
     return {("documentation_or_tests", effect)}
 
 
@@ -2842,12 +2893,6 @@ def _atomic_semantic_spans(text):
             else len(text)
         )
         governed_text = text[end:next_start]
-        governed_words = {
-            word.casefold()
-            for word in re.findall(
-                r"[a-z][a-z0-9_-]*", governed_text, re.I
-            )
-        }
         locally_unprotected = (
             (
                 subordinate_after
@@ -2856,58 +2901,10 @@ def _atomic_semantic_spans(text):
                     and end <= min(start for _, start, _ in subjects)
                 )
             )
-            and
-            len(
-                governed_words.difference(
-                    {
-                        "a",
-                        "an",
-                        "or",
-                        "the",
-                        "while",
-                        "without",
-                    }
-                )
+            and _INDEPENDENT_NON_GOVERNANCE_OBJECT_RE.fullmatch(
+                governed_text
             )
-            >= 2
-            and not governed_words.intersection(
-                {
-                    "contract",
-                    "contracts",
-                    "her",
-                    "hers",
-                    "him",
-                    "his",
-                    "i",
-                    "it",
-                    "its",
-                    "me",
-                    "mine",
-                    "my",
-                    "our",
-                    "ours",
-                    "same",
-                    "she",
-                    "such",
-                    "their",
-                    "theirs",
-                    "them",
-                    "these",
-                    "they",
-                    "this",
-                    "that",
-                    "those",
-                    "us",
-                    "we",
-                    "whose",
-                    "you",
-                    "your",
-                    "yours",
-                    "workflow",
-                    "workflows",
-                }
-            )
-            and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(governed_text) is None
+            is not None
         )
         if locally_unprotected:
             subjects.append(("_unprotected", end, end))

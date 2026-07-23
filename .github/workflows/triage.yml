@@ -716,9 +716,9 @@ jobs:
               echo "each restoration predicate with canonical bounded active, progressive, or"
               echo "supported compound-passive"
               echo "argument roles and"
-              echo "its predicate-local polarity; subordinate propositions are unsupported."
-              echo "Unresolved pronouns, possessives, deictics, and referential determiners"
-              echo "cannot prove an effect unprotected. Missing, extra,"
+              echo "its predicate-local polarity; temporal, subordinate, and residual"
+              echo "propositions are unsupported. Only a fully parsed independent"
+              echo "non-governance object can prove an effect unprotected. Missing, extra,"
               echo "ambiguous, mislabeled, or auxiliary-modified unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then

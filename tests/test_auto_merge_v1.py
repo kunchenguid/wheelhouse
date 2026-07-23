@@ -1216,6 +1216,14 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: temporal subordinate cannot alias roles",
+        render_card._restoration_claim_supported(
+            "Authentication sessions lose state after audit logs overwrite records.",
+            "Authentication sessions lose records after audit logs overwrite state.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1638,6 +1646,33 @@ def test_class_b_semantic_admission_boundary():
             demonstrative_effect_text
         )
         is None,
+    )
+    former_effect_text = (
+        "Tightens the former default requirements while updating "
+        "documentation for the delivery contract"
+    )
+    check(
+        "semantic admission: former reference cannot prove independence",
+        render_card._derive_behavior_assertion_semantics(former_effect_text)
+        is None,
+    )
+    reverse_transitive_text = (
+        "Existing workflow and delivery contract documentation "
+        "changes that contract"
+    )
+    check(
+        "semantic admission: reverse docs reject transitive residual",
+        render_card._coordinated_documentation_topic_semantics(
+            reverse_transitive_text
+        )
+        is None
+        and (
+            "existing_workflow",
+            "changed",
+        )
+        in render_card._derive_behavior_assertion_semantics(
+            reverse_transitive_text
+        ),
     )
 
     for label, text, assertions in (
