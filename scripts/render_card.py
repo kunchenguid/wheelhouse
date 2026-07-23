@@ -2193,7 +2193,14 @@ _PROTECTED_SUBJECT_PATTERNS = (
         r"(?:\s+or\s+default)?"
         r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
         r"|(?:documented\s+)?recovery\s+behavio[u]?r"
-        r"|default(?:\s+[\w./-]+){0,4}\s+(?:setting|value|option)s?"
+        r"|(?<!or\s)default"
+        r"(?!(?:\s+[\w./-]+){0,4}\s+"
+        r"(?:behavio[u]?r|contract|mode|workflow)\b)"
+        r"(?:\s+(?!(?:and|as|documentation|docs?|examples?|fixtures?|"
+        r"tests?|while|without|change|changes|changed|changing|"
+        r"tighten|tightens|tightened|tightening|update|updates|"
+        r"updated|updating|preserve|preserves|preserved|preserving)\b)"
+        r"[\w./-]+){0,4}"
         r"|user-facing\s+flag\s+or\s+default)\b",
     ),
     ("existing_workflow", r"\bworkflow\b"),
@@ -2329,6 +2336,10 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
     if (
         normalized["corrected_defect"].casefold()
         == normalized["intended_behavior_restored"].casefold()
+        or not _restoration_pair_linked(
+            normalized["corrected_defect"],
+            normalized["intended_behavior_restored"],
+        )
     ):
         return None
     defect_tokens = _restoration_subject_tokens(normalized["corrected_defect"])
@@ -2444,22 +2455,15 @@ _RESTORATION_CLAUSE_RE = re.compile(
 _RESTORATION_SUBORDINATORS = frozenset(
     {
         "although",
-        "after",
         "as",
-        "before",
         "because",
-        "during",
         "if",
-        "once",
-        "following",
         "since",
         "so",
         "than",
         "that",
         "though",
         "unless",
-        "until",
-        "upon",
         "when",
         "whenever",
         "where",
@@ -2663,6 +2667,88 @@ def _restoration_claim_supported(claim, evidence):
     return claim_propositions == evidence_propositions
 
 
+_RESTORATION_REPAIR_RELATIONS = {
+    ("affect", "affirmative"): frozenset(
+        {"recover", "remain", "restore", "resume", "return", "support"}
+    ),
+    ("block", "affirmative"): frozenset(
+        {"recover", "reopen", "restore", "resume", "return", "support"}
+    ),
+    ("break", "affirmative"): frozenset(
+        {"persist", "preserve", "recover", "remain", "restore", "support"}
+    ),
+    ("disable", "affirmative"): frozenset(
+        {"recover", "reopen", "restore", "resume", "return", "support"}
+    ),
+    ("drop", "affirmative"): frozenset(
+        {"persist", "preserve", "recover", "restore", "retain", "return"}
+    ),
+    ("emit", "negative"): frozenset({"emit", "restore", "resume"}),
+    ("fail", "affirmative"): frozenset(
+        {"persist", "recover", "remain", "restore", "resume", "return"}
+    ),
+    ("lose", "affirmative"): frozenset(
+        {
+            "persist",
+            "preserve",
+            "recover",
+            "remain",
+            "restore",
+            "retain",
+            "return",
+            "survive",
+        }
+    ),
+    ("persist", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("preserve", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("recover", "negative"): frozenset(
+        {"recover", "remain", "restore", "resume", "return"}
+    ),
+    ("remain", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("reopen", "negative"): frozenset({"reopen", "restore", "resume", "return"}),
+    ("resume", "negative"): frozenset({"recover", "restore", "resume", "return"}),
+    ("retain", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("return", "negative"): frozenset({"recover", "restore", "resume", "return"}),
+    ("support", "negative"): frozenset({"restore", "resume", "support"}),
+    ("survive", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+}
+
+
+def _restoration_pair_linked(defect, restored):
+    defect_propositions = _restoration_propositions(defect)
+    restored_propositions = _restoration_propositions(restored)
+    if (
+        defect_propositions is None
+        or restored_propositions is None
+        or len(defect_propositions) != 1
+        or len(restored_propositions) != 1
+    ):
+        return False
+    defect_predicate, _, defect_patient, defect_polarity = defect_propositions[0]
+    restored_predicate, restored_agent, restored_patient, restored_polarity = (
+        restored_propositions[0]
+    )
+    repair_predicates = _RESTORATION_REPAIR_RELATIONS.get(
+        (defect_predicate, defect_polarity),
+        frozenset(),
+    )
+    return (
+        restored_polarity == "affirmative"
+        and restored_predicate in repair_predicates
+        and defect_patient in {restored_agent, restored_patient}
+    )
+
+
 _DOCUMENTATION_WORD_RE = re.compile(
     r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
 )
@@ -2683,6 +2769,8 @@ _EFFECT_PATTERNS = (
         r"(?:can|could|do|does|did|will|would|shall|should|must)\s+not\s+"
         r"(?:change|tighten|alter|modify|require|"
         r"be\s+(?:changed|tightened|altered|modified|required|updated))"
+        r"|(?:has|have|had)\s+not\s+been\s+"
+        r"(?:changed|tightened|altered|modified|required|updated)"
         r"|(?:is|are|was|were)\s+not\s+"
         r"(?:changed|changing|tightened|required|mandatory)"
         r"|without\s+changing"

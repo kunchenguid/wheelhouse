@@ -929,6 +929,51 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
+    unrelated_input = candidate()
+    unrelated_input["automerge"] = dict(unrelated_input["automerge"])
+    unrelated_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Open monitored runs lose authentication sessions."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Open monitored runs lose authentication sessions.",
+        },
+        "intended_behavior_restored": (
+            "Open monitored runs emit diagnostic timestamps."
+        ),
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": "Open monitored runs emit diagnostic timestamps.",
+        },
+    }
+    unrelated = normalize(
+        unrelated_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs lose authentication sessions."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs emit diagnostic timestamps."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: unrelated shared agent is unavailable",
+        am.verdict_eligible(unrelated)[0] is False
+        and am.behavior_verdict_facts(unrelated)[0]["g6_behavior_class"][
+            "status"
+        ]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
     unsupported_input = candidate()
     unsupported_input["automerge"] = dict(unsupported_input["automerge"])
     unsupported_input["automerge"]["class_b_restoration"] = {
@@ -1273,6 +1318,17 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    for relation in ("after", "before", "during", "upon"):
+        temporal = (
+            "Authentication sessions resume processing %s recovery."
+            % relation
+        )
+        check(
+            "class B admission: exact %s temporal object remains supported"
+            % relation,
+            render_card._restoration_claim_supported(temporal, temporal)
+            is True,
+        )
     check(
         "class B admission: unlisted relation cannot alias ordered roles",
         render_card._restoration_claim_supported(
@@ -1761,6 +1817,15 @@ def test_class_b_semantic_admission_boundary():
             )
             == {("default_behavior", "tightened")},
         )
+    for default_phrase, effect in (
+        ("Tightens the default retry limit", "tightened"),
+        ("Changes the default timeout", "changed"),
+    ):
+        check(
+            "semantic admission: unmatched default phrase fails protected",
+            render_card._derive_behavior_assertion_semantics(default_phrase)
+            == {("default_behavior", effect)},
+        )
     passive_reverse_docs_text = (
         "Existing mode and workflow documentation is changed"
     )
@@ -1792,6 +1857,16 @@ def test_class_b_semantic_admission_boundary():
             render_card._derive_behavior_assertion_semantics(
                 "Existing mode and workflow documentation %s not be changed"
                 % modal
+            )
+            == {("documentation_or_tests", "unchanged")},
+        )
+    for auxiliary in ("has", "have", "had"):
+        check(
+            "semantic admission: %s-not reverse docs remain neutral"
+            % auxiliary,
+            render_card._derive_behavior_assertion_semantics(
+                "Existing mode and workflow documentation "
+                "%s not been changed" % auxiliary
             )
             == {("documentation_or_tests", "unchanged")},
         )
