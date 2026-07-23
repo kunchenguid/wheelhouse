@@ -10,6 +10,8 @@ used for eligibility is re-read by exact number.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -24,11 +26,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
+from agent_runtime import output_validation  # noqa: E402
 from scripts import agent_claim  # noqa: E402
 
 REPLAY_FIELD = "triage_replay"
 REPLAY_VERSION = 1
 ATTEMPT_RESET_REPLAY_VERSION = 2
+INCIDENT_PERMIT_REPLAY_VERSION = 3
 REPLAY_LIMIT_DEFAULT = 25
 REPLAY_LIMIT_MAX = 25
 EXACT_SELECTOR_VERSION = 1
@@ -50,6 +54,66 @@ TRIAGE_NON_SUCCESS_FIELDS = (
 )
 MAX_RUN_NUMBER = 9_007_199_254_740_991
 MAX_CARD_NUMBER = MAX_RUN_NUMBER
+
+# One immutable, self-expiring incident permit. The fixed wave plus exact-card
+# selector is the capability request; there is deliberately no reusable reset
+# input. Runtime admission re-proves the anchor behavior and every trusted
+# source-review binding captured from run 29985490774 before it lets the normal
+# queue checkpoint reserve budget or dispatch.
+CARD_1585_INCIDENT_WAVE = "card-1585-anchor-fix-r3-final"
+CARD_1585_INCIDENT_PERMIT = {
+    "version": 1,
+    "id": "card-1585-anchor-fix-r3",
+    "wave": CARD_1585_INCIDENT_WAVE,
+    "selector": (1585,),
+    "card": 1585,
+    "kind": "pr-review",
+    "source_binding": {
+        "source_identity_sha256": (
+            "a16e805c2cdeaa2293e9129c0b7461baf11820c1befabefb607e1d40cb082294"
+        ),
+        "number": 547,
+        "target_head_sha": "0f29152c44b808064f9a2a2621c9bde6456f6262",
+        "base_sha": "3d4691aedba97d9f877c073e3e652a8fde69d574",
+        "target_facts_sha256": (
+            "c8308310c07e85d840ea41785f78786a04d181bcf25c1b2ae6dbe4db278f6ea9"
+        ),
+        "source_updated_at": "2026-07-23T04:56:49Z",
+        "source_snapshot_sha256": (
+            "a0dd38be93e516c4bd3c376993d2dc3eee89f6e90638f63c55017aac808661a6"
+        ),
+        "vision_sha": "08077197b28d5f6b5b74b405d4617f066f620e33",
+        "vision_content_sha256": (
+            "be04f798e4e616390c87a7fd21db7a3f656a4a7077b897c6a8aeb5cb49721b43"
+        ),
+    },
+    "event_key": "7e7dfd540ff5e6babd7951b72d9bd3169df8fedee071eda13c1c5001f7c371c9",
+    "required_fix_commit": "c45c3c8a8378fb29a12d421f743b7f8d2c8df7a4",
+    "prior_claim": {
+        "id": 5055236986,
+        "created_at": "2026-07-23T06:35:10Z",
+        "updated_at": "2026-07-23T06:38:23Z",
+        "status": "consumer.committed",
+    },
+    "prior_result": {
+        "id": 5052243850,
+        "created_at": "2026-07-22T22:25:37Z",
+        "updated_at": "2026-07-22T22:25:37Z",
+        "status": "error",
+        "code": "consumer.committed",
+    },
+    "prior_marker": {
+        "version": REPLAY_VERSION,
+        "wave": "missing-re-recovery-r2-exact",
+        "revision": "0f29152c44b808064f9a2a2621c9bde6456f6262",
+        "cleared": "error",
+        "at": "2026-07-23T06:34:50Z",
+        "run_number": 318,
+    },
+}
+INCIDENT_REPLAY_PERMITS = {
+    CARD_1585_INCIDENT_WAVE: CARD_1585_INCIDENT_PERMIT,
+}
 
 # Incident-scoped reset capabilities for captain-approved evidence-array
 # recoveries. Each entry binds the card to the exact source revision and prior
@@ -345,6 +409,14 @@ def _valid_marker(marker, revision):
             return False
         if marker.get("attempt_reset") is not True:
             return False
+    elif version == INCIDENT_PERMIT_REPLAY_VERSION:
+        if set(marker) != base_keys | {"incident_permit"}:
+            return False
+        if (
+            not isinstance(marker.get("incident_permit"), str)
+            or not REPLAY_WAVE_RE.fullmatch(marker["incident_permit"])
+        ):
+            return False
     else:
         return False
     run_number = marker.get("run_number")
@@ -398,6 +470,76 @@ def _canonical_exact_selector(numbers):
     return EXACT_SELECTOR_PREFIX + ",".join(str(number) for number in numbers)
 
 
+def _incident_permit_scope(wave, exact_scope):
+    """Admit only the code-defined wave with its one immutable selector."""
+    permit = INCIDENT_REPLAY_PERMITS.get(wave)
+    if permit is None:
+        return None
+    if exact_scope != permit["selector"]:
+        raise ValueError(
+            "incident permit requires exact selector %s"
+            % _canonical_exact_selector(permit["selector"])
+        )
+    return permit
+
+
+def _incident_anchor_fix_present(permit):
+    """Prove the landed escaped-delimiter fix by behavior, even in a shallow clone."""
+    if permit.get("required_fix_commit") != CARD_1585_INCIDENT_PERMIT[
+        "required_fix_commit"
+    ]:
+        return False
+    target = "the repository's effective git identity remains intact"
+    evidence = r"target.txt: 'the repository\'s effective git identity remains intact'"
+    return output_validation.evidence_anchor_ok(evidence, target)
+
+
+def _incident_prior_evidence_reason(owner, permit):
+    """Bind the permit to the exact pre-incident claim and result records."""
+    event_key = permit.get("event_key")
+    issue = permit.get("card")
+    try:
+        marker = agent_claim.event_claim_marker(event_key)
+        claims = agent_claim.list_claims(_card_repo_slug(owner), issue, marker)
+        records = agent_claim.list_triage_records(
+            _card_repo_slug(owner), issue, event_key
+        )
+    except Exception:
+        return "incident-prior-evidence-unreadable"
+    if len(claims) != 1 or len(records) != 1:
+        return "incident-prior-evidence-mismatch"
+    claim = claims[0]
+    expected_claim = permit.get("prior_claim")
+    observed_claim = {
+        "id": claim.get("id"),
+        "created_at": claim.get("created_at"),
+        "updated_at": claim.get("updated_at"),
+        "status": (
+            "consumer.committed"
+            if claim.get("body")
+            == "Agent triage event finished with consumer.committed. %s" % marker
+            else ""
+        ),
+    }
+    record = records[0]
+    record_value = record.get("record") if isinstance(record, dict) else None
+    observed_result = {
+        "id": record.get("id") if isinstance(record, dict) else None,
+        "created_at": record.get("created_at") if isinstance(record, dict) else None,
+        "updated_at": record.get("updated_at") if isinstance(record, dict) else None,
+        "status": (
+            record_value.get("status") if isinstance(record_value, dict) else None
+        ),
+        "code": record_value.get("code") if isinstance(record_value, dict) else None,
+    }
+    return (
+        ""
+        if observed_claim == expected_claim
+        and observed_result == permit.get("prior_result")
+        else "incident-prior-evidence-mismatch"
+    )
+
+
 def _attempt_reset_scope(wave, value):
     """Validate the exact operator-supplied one-time incident cohort."""
     text = str(value or "").strip()
@@ -449,12 +591,10 @@ def _attempt_reset_marker_applied(marker, wave, revision):
     )
 
 
-def _source_json(owner, repo, number, kind):
+def _fleet_json(endpoint):
     token = os.environ.get("FLEET_TOKEN", "")
     if not token:
         raise RuntimeError("FLEET_TOKEN is unavailable")
-    noun = "pulls" if kind == "pr-review" else "issues"
-    endpoint = "repos/%s/%s/%s/%s" % (owner, repo, noun, number)
     env = dict(os.environ)
     env["GH_TOKEN"] = token
     result = subprocess.run(
@@ -466,11 +606,123 @@ def _source_json(owner, repo, number, kind):
         env=env,
     )
     if result.returncode != 0:
-        raise RuntimeError("source by-number read failed")
+        raise RuntimeError("fleet source read failed")
     value = json.loads(result.stdout or "null")
     if not isinstance(value, dict):
-        raise RuntimeError("source by-number read was malformed")
+        raise RuntimeError("fleet source read was malformed")
     return value
+
+
+def _source_json(owner, repo, number, kind):
+    noun = "pulls" if kind == "pr-review" else "issues"
+    return _fleet_json("repos/%s/%s/%s/%s" % (owner, repo, noun, number))
+
+
+def _incident_source_binding_reason(
+    owner, repo, number, kind, permit, before
+):
+    """Rebuild the approved base/VISION/target-facts binding from live reads."""
+    expected = permit.get("source_binding")
+    if not isinstance(expected, dict):
+        return "incident-source-binding-malformed"
+    head_sha = expected.get("target_head_sha")
+    base_sha = expected.get("base_sha")
+    identity = "%s/%s#%s/%s" % (owner, repo, number, kind)
+    if (
+        hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        != expected.get("source_identity_sha256")
+        or permit.get("card") != 1585
+        or kind != "pr-review"
+        or number != expected.get("number")
+        or not isinstance(repo, str)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo)
+        or isinstance(number, bool)
+        or not isinstance(number, int)
+        or not isinstance(head_sha, str)
+        or not isinstance(base_sha, str)
+    ):
+        return "incident-source-identity-mismatch"
+    try:
+        comparison = _fleet_json(
+            "repos/%s/%s/compare/%s...%s" % (owner, repo, base_sha, head_sha)
+        )
+        after = _source_json(owner, repo, number, "pr-review")
+        vision = _fleet_json("repos/%s/%s/contents/VISION.md" % (owner, repo))
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeError):
+        return "incident-source-unreadable"
+    facts = render_card.build_triage_target_facts(
+        before,
+        comparison,
+        after,
+        owner=owner,
+        repo=repo,
+        number=number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+    )
+    facts_bytes = render_card.serialize_triage_target_facts(facts)
+
+    def source_snapshot(value):
+        if not isinstance(value, dict):
+            return None
+        fields = {
+            "title": value.get("title"),
+            "body": value.get("body"),
+            "updated_at": value.get("updated_at"),
+        }
+        if not all(isinstance(item, str) for item in fields.values()):
+            return None
+        payload = (
+            json.dumps(
+                fields,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    before_snapshot = source_snapshot(before)
+    after_snapshot = source_snapshot(after)
+    try:
+        encoded = vision.get("content")
+        if (
+            vision.get("name") != "VISION.md"
+            or vision.get("path") != "VISION.md"
+            or vision.get("type") != "file"
+            or not isinstance(encoded, str)
+            or isinstance(vision.get("size"), bool)
+            or not isinstance(vision.get("size"), int)
+        ):
+            raise ValueError("VISION response identity mismatch")
+        vision_bytes = base64.b64decode("".join(encoded.split()), validate=True)
+        if not vision_bytes or len(vision_bytes) != vision["size"]:
+            raise ValueError("VISION response size mismatch")
+    except (TypeError, ValueError):
+        return "incident-vision-unreadable"
+    if facts_bytes is None:
+        return "incident-target-facts-unavailable"
+    observed = {
+        "source_identity_sha256": hashlib.sha256(
+            identity.encode("utf-8")
+        ).hexdigest(),
+        "number": number,
+        "target_head_sha": head_sha,
+        "base_sha": base_sha,
+        "target_facts_sha256": hashlib.sha256(facts_bytes).hexdigest(),
+        "source_updated_at": before.get("updated_at"),
+        "source_snapshot_sha256": before_snapshot,
+        "vision_sha": vision.get("sha"),
+        "vision_content_sha256": hashlib.sha256(vision_bytes).hexdigest(),
+    }
+    return (
+        ""
+        if before_snapshot is not None
+        and before_snapshot == after_snapshot
+        and observed == expected
+        else "incident-source-binding-mismatch"
+    )
 
 
 def _effective_policy(config, repo, kind):
@@ -505,7 +757,13 @@ def _maintainer_logins(config, owner):
 
 
 def inspect_candidate(
-    number, config, owner, has_token, attempt_reset=None, attempt_reset_wave=""
+    number,
+    config,
+    owner,
+    has_token,
+    attempt_reset=None,
+    attempt_reset_wave="",
+    incident_permit=None,
 ):
     """Return an eligible replay plan or a fail-closed skip reason."""
     card = render_card.get_card(number)
@@ -581,10 +839,30 @@ def inspect_candidate(
         source_updated_at = ""
     if render_card.state_revision(state, kind) != revision:
         return None, "source-revision-moved"
+    if incident_permit is not None:
+        binding_reason = _incident_source_binding_reason(
+            owner, repo, target_number, kind, incident_permit, source
+        )
+        if binding_reason:
+            return None, binding_reason
     triaged_sha = state.get("triaged_sha")
     if triaged_sha is not None and triaged_sha != revision:
         return None, "triage-cache-stale"
     action = _triage_action(kind)
+    if incident_permit is not None:
+        identity = agent_claim.normalized_event_identity(
+            action=action,
+            owner=owner,
+            repo=repo,
+            number=target_number,
+            card_issue=number,
+            revision=revision,
+        )
+        if (
+            agent_claim.event_key_sha256(identity)
+            != incident_permit.get("event_key")
+        ):
+            return None, "incident-event-key-mismatch"
     marker = state.get(REPLAY_FIELD) if REPLAY_FIELD in state else None
     if marker is not None and not _valid_marker(marker, revision):
         return None, "replay-marker-untrusted"
@@ -592,6 +870,12 @@ def inspect_candidate(
         attempt_reset is None
         and marker is not None
         and marker.get("version") == ATTEMPT_RESET_REPLAY_VERSION
+    ):
+        return None, "replay-marker-untrusted"
+    if (
+        incident_permit is None
+        and marker is not None
+        and marker.get("version") == INCIDENT_PERMIT_REPLAY_VERSION
     ):
         return None, "replay-marker-untrusted"
     status = state.get("triage_status")
@@ -602,7 +886,31 @@ def inspect_candidate(
         )
     )
     duplicate_reentry = False
-    if attempt_reset is not None:
+    if incident_permit is not None:
+        if number != incident_permit.get("card"):
+            return None, "incident-card-mismatch"
+        expected_binding = incident_permit["source_binding"]
+        if (
+            kind != incident_permit.get("kind")
+            or target_number != expected_binding.get("number")
+            or revision != expected_binding.get("target_head_sha")
+        ):
+            return None, "incident-source-identity-mismatch"
+        if (
+            marker is not None
+            and marker.get("version") == INCIDENT_PERMIT_REPLAY_VERSION
+            and marker.get("incident_permit") == incident_permit.get("id")
+        ):
+            return None, "incident-permit-consumed"
+        if marker != incident_permit.get("prior_marker"):
+            return None, "incident-prior-marker-mismatch"
+        if state.get("held") or triaged_sha != revision or status != "error":
+            return None, "incident-state-mismatch"
+        evidence_reason = _incident_prior_evidence_reason(owner, incident_permit)
+        if evidence_reason:
+            return None, evidence_reason
+        cleared = "error"
+    elif attempt_reset is not None:
         expected_marker = attempt_reset
         expected_revision = expected_marker["revision"]
         if revision != expected_revision:
@@ -677,7 +985,11 @@ def inspect_candidate(
         **policy,
     }
     cap = policy["triage_attempt_cap_per_revision"]
-    if attempt_reset is not None:
+    if incident_permit is not None:
+        attempt_count = _attempt_reset_count(state, kind, revision, cap)
+        if attempt_count is None:
+            return None, "incident-attempt-count-mismatch"
+    elif attempt_reset is not None:
         attempt_count = _attempt_reset_count(state, kind, revision, cap)
         if attempt_count is None:
             return None, "attempt-reset-count-mismatch"
@@ -697,7 +1009,7 @@ def inspect_candidate(
             }, "eligible"
     if not render_card.should_hold(item, has_token):
         return None, "auto-triage-disabled"
-    if attempt_reset is None:
+    if attempt_reset is None and incident_permit is None:
         attempt_count = render_card.triage_attempt_count(state, kind, revision, cap)
     if duplicate_reentry:
         if attempt_count < 1:
@@ -717,6 +1029,9 @@ def inspect_candidate(
         "duplicate_reentry": duplicate_reentry,
         "attempt_reset": attempt_reset is not None,
         "attempt_reset_applied": False,
+        "incident_permit": (
+            incident_permit.get("id") if incident_permit is not None else ""
+        ),
     }, "eligible"
 
 
@@ -745,6 +1060,7 @@ def _plans_match(initial, reread):
         and initial.get("cleared") == reread.get("cleared")
         and initial.get("attempt_count") == reread.get("attempt_count")
         and initial.get("action") == reread.get("action")
+        and initial.get("incident_permit") == reread.get("incident_permit")
         and initial.get("item") == reread.get("item")
         and initial.get("state") == reread.get("state")
         and _card_snapshot_identity(initial.get("card"))
@@ -782,7 +1098,9 @@ def _preflight_attempt_reset(
     return reread_plans
 
 
-def _preflight_exact_scope(selected, exact_scope, config, owner, has_token):
+def _preflight_exact_scope(
+    selected, exact_scope, config, owner, has_token, incident_permit=None
+):
     """Atomically revalidate every requested card before any exact-scope write."""
     if not exact_scope:
         return selected
@@ -792,7 +1110,13 @@ def _preflight_exact_scope(selected, exact_scope, config, owner, has_token):
     refused = []
     for initial in selected:
         number = initial["number"]
-        plan, reason = inspect_candidate(number, config, owner, has_token)
+        plan, reason = inspect_candidate(
+            number,
+            config,
+            owner,
+            has_token,
+            incident_permit=incident_permit,
+        )
         if not plan or not _plans_match(initial, plan):
             refusal = reason if not plan else "card-raced-before-replay"
             print(
@@ -832,9 +1156,24 @@ def _print_exact_plans(exact_scope, plans):
         )
 
 
-def _marker(wave, revision, cleared, run_number, attempt_reset=False):
+def _marker(
+    wave,
+    revision,
+    cleared,
+    run_number,
+    attempt_reset=False,
+    incident_permit="",
+):
+    if attempt_reset and incident_permit:
+        raise ValueError("replay marker capabilities are mutually exclusive")
+    if incident_permit:
+        version = INCIDENT_PERMIT_REPLAY_VERSION
+    elif attempt_reset:
+        version = ATTEMPT_RESET_REPLAY_VERSION
+    else:
+        version = REPLAY_VERSION
     marker = {
-        "version": (ATTEMPT_RESET_REPLAY_VERSION if attempt_reset else REPLAY_VERSION),
+        "version": version,
         "wave": wave,
         "revision": revision,
         "cleared": cleared,
@@ -846,6 +1185,8 @@ def _marker(wave, revision, cleared, run_number, attempt_reset=False):
     }
     if attempt_reset:
         marker["attempt_reset"] = True
+    if incident_permit:
+        marker["incident_permit"] = incident_permit
     return marker
 
 
@@ -869,6 +1210,7 @@ def _body_with_replay_marker(body, plan, wave, run_number):
         plan["cleared"],
         run_number,
         attempt_reset=plan.get("attempt_reset", False),
+        incident_permit=plan.get("incident_permit", ""),
     )
     clean = (
         render_card.remove_triage_section(body)
@@ -927,8 +1269,13 @@ def run(
     owner, run_number = _entry(wave, limit)
     exact_scope = _exact_card_scope(exact_cards)
     attempt_reset_scope = _attempt_reset_scope(wave, attempts_reset_cards)
+    incident_permit = _incident_permit_scope(wave, exact_scope)
     if exact_scope and attempt_reset_scope:
         raise ValueError("exact card selector cannot be combined with attempt reset")
+    if incident_permit is not None and not _incident_anchor_fix_present(
+        incident_permit
+    ):
+        raise ValueError("incident permit requires the landed card-1585 anchor fix")
     if exact_scope and limit != len(exact_scope):
         raise ValueError("replay_limit must equal the exact card selector count")
     if attempt_reset_scope and limit != len(attempt_reset_scope):
@@ -953,6 +1300,7 @@ def run(
             has_token,
             attempt_reset=attempt_reset_scope.get(number),
             attempt_reset_wave=wave,
+            incident_permit=incident_permit,
         )
         if plan:
             eligible.append(plan)
@@ -1021,16 +1369,37 @@ def run(
             % (deferred, limit, remaining)
         )
     selected = _preflight_exact_scope(
-        selected, exact_scope, config, owner, has_token
+        selected,
+        exact_scope,
+        config,
+        owner,
+        has_token,
+        incident_permit=incident_permit,
     )
     _print_exact_plans(exact_scope, selected)
     if dry_run:
         for plan in selected:
             if exact_scope:
+                marker_version = (
+                    INCIDENT_PERMIT_REPLAY_VERSION
+                    if incident_permit is not None
+                    else REPLAY_VERSION
+                )
+                capability = (
+                    " incident_permit=%s" % incident_permit["id"]
+                    if incident_permit is not None
+                    else ""
+                )
                 print(
-                    "DRY-RUN card #%s revision=%s: write triage_replay v1 cleared=%s, "
+                    "DRY-RUN card #%s revision=%s: write triage_replay v%s%s cleared=%s, "
                     "queue through maybe_queue_auto_triage, then dispatch through the existing permit"
-                    % (plan["number"], plan["revision"], plan["cleared"])
+                    % (
+                        plan["number"],
+                        plan["revision"],
+                        marker_version,
+                        capability,
+                        plan["cleared"],
+                    )
                 )
             else:
                 print(
@@ -1063,6 +1432,7 @@ def run(
             has_token,
             attempt_reset=attempt_reset_scope.get(initial["number"]),
             attempt_reset_wave=wave,
+            incident_permit=incident_permit,
         )
         if not plan or (exact_scope and not _plans_match(initial, plan)):
             refusal = reason if not plan else "card-raced-before-replay"
@@ -1119,6 +1489,13 @@ def run(
                     "exact replay paused because the cohort could not be claimed"
                 )
             continue
+        if incident_permit is not None and (
+            superseded.get("event_key") != incident_permit["event_key"]
+            or superseded.get("superseded") is not True
+        ):
+            raise ValueError(
+                "incident permit requires the exact prior claim to be superseded"
+            )
         if superseded["superseded"]:
             print("replay superseded stale triage claim for card #%s" % plan["number"])
 

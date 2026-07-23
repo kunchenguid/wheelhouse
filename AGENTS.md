@@ -484,6 +484,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   Every card is bound to its exact diagnosed revision and prior replay marker before its trusted count of 2 is reset to 1 for the queued write.
   A full cohort second-read preflight refuses any mismatch before a reset write, and a one-use v2 marker excludes completed members from ordinary replay while allowing only the same sanctioned cohort's pending members to resume.
   Each reset refuses policy drift away from cap 2 and leaves both the global per-revision cap and daily ceiling unchanged.
+  Card 1585 has one separate immutable, self-expiring incident permit keyed by its exact selector, wave, head/base/VISION/source-review binding, prior marker, event key, and landed anchor-fix behavior; it is not a reusable reset and cannot affect ordinary caps or maintenance. The exact invocation is in `docs/AGENT_RUNTIME.md`.
   `docs/AGENT_RUNTIME.md` owns the additive `wheelhouse-triage-record` migration record shape.
 - **Accept recommendation is a deterministic shortcut, not model action.** A
   successful current auto-triage attempt for pr-review or issue-triage may

@@ -109,6 +109,36 @@ When this selector is present, the candidate listing is not used for discovery. 
 
 The planner reports the canonical selector and one `exact-selector/v1 admitted` line per card containing its revision. Dry-run and write-enabled modes use that same planner. If any requested card is missing, ineligible, changed during the full second-read preflight, already recovered, or the complete cohort exceeds remaining daily budget, the wave fails before writes and no generic candidate is substituted. After mutation starts, an unavoidable later GitHub race or write failure stops the wave immediately; already queued cards remain independently safe, no other card is substituted, and the operator must freeze and dry-run an explicit remaining cohort before another write-enabled dispatch.
 
+### One-use card 1585 incident permit
+
+`card-1585-anchor-fix-r3-final` is a code-defined, one-use permit for card 1585 only. It is not a general reset. It requires `replay_exact_cards='v1:1585'`, limit 1, the owner actor, the search action and its exact event key, the existing 2/2 attempt record, reviewed prior replay marker, exact terminal claim and result records, and the landed escaped-quote anchor behavior. Every planning and mutation reread rebuilds the approved source-review binding: `kunchenguid/no-mistakes#547` at head `0f29152c44b808064f9a2a2621c9bde6456f6262`, base `3d4691aedba97d9f877c073e3e652a8fde69d574`, target-facts digest `c8308310c07e85d840ea41785f78786a04d181bcf25c1b2ae6dbe4db278f6ea9`, immutable title/body/update snapshot digest `a0dd38be93e516c4bd3c376993d2dc3eee89f6e90638f63c55017aac808661a6` at `2026-07-23T04:56:49Z`, VISION blob `08077197b28d5f6b5b74b405d4617f066f620e33`, and VISION content digest `be04f798e4e616390c87a7fd21db7a3f656a4a7077b897c6a8aeb5cb49721b43`. Any mismatch stops before reservation.
+
+The permit makes one counter slot available without changing the effective cap of 2, then uses the ordinary budget reservation, queued checkpoint, claim/idempotency key, sealed dispatch permit, and token boundaries. Its version 3 replay marker is written atomically with that checkpoint and permanently consumes the permit whether dispatch succeeds or fails. Other cards, revisions, waves, selectors, reset inputs, and ordinary replay remain under the existing cap. The incident wave itself enters replay-only workflow posture before selector validation, as does any non-empty exact selector, so a missing or malformed incident selector still runs no scan, reconciliation, auto-merge, target action, or ordinary maintenance.
+
+First run the exact zero-write plan:
+
+```bash
+gh-axi workflow run scan-backstop.yml \
+  --repo OWNER/wheelhouse \
+  --ref main \
+  --field replay_wave=card-1585-anchor-fix-r3-final \
+  --field replay_limit=1 \
+  --field replay_exact_cards='v1:1585' \
+  --field replay_dry_run=true
+```
+
+Only after that run is green and its admitted binding exactly matches the values above, consume the permit once with the identical invocation except for `replay_dry_run=false`:
+
+```bash
+gh-axi workflow run scan-backstop.yml \
+  --repo OWNER/wheelhouse \
+  --ref main \
+  --field replay_wave=card-1585-anchor-fix-r3-final \
+  --field replay_limit=1 \
+  --field replay_exact_cards='v1:1585' \
+  --field replay_dry_run=false
+```
+
 ## Disabled and investigated adapters
 
 The authentication audit found no officially supported secure noninteractive way to use the current ChatGPT Pro subscription from this public GitHub Actions repository.

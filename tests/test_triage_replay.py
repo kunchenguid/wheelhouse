@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -16,6 +18,8 @@ import sys
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+INCIDENT_OWNER = "kunchenguid"
+INCIDENT_REPO = "no-mistakes"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -42,9 +46,9 @@ def patched(module, replacements):
             setattr(module, name, value)
 
 
-def base_item(number=17, kind="pr-review", revision="abcdef1"):
+def base_item(number=17, kind="pr-review", revision="abcdef1", repo="wheelhouse"):
     return {
-        "repo": "wheelhouse",
+        "repo": repo,
         "number": number,
         "kind": kind,
         "head_sha": revision if kind == "pr-review" else "",
@@ -54,7 +58,7 @@ def base_item(number=17, kind="pr-review", revision="abcdef1"):
         "bucket": "merge-ready" if kind == "pr-review" else "issue-triage",
         "comp": "pass" if kind == "pr-review" else "n/a",
         "tests": "green" if kind == "pr-review" else "n/a",
-        "url": "https://github.com/example/wheelhouse/pull/%s" % number,
+        "url": "https://github.com/example/%s/pull/%s" % (repo, number),
         "summary": "offline replay fixture",
         "recommendation": "Review it.",
         "priority": "med",
@@ -87,8 +91,15 @@ def source(
     return value
 
 
-def card(number=42, target=17, kind="pr-review", revision="abcdef1", status="error"):
-    candidate = base_item(target, kind, revision)
+def card(
+    number=42,
+    target=17,
+    kind="pr-review",
+    revision="abcdef1",
+    status="error",
+    repo="wheelhouse",
+):
+    candidate = base_item(target, kind, revision, repo=repo)
     rendered = rc.render(candidate)
     body = rendered["body"]
     state = rc._unique_state_block(body)
@@ -116,12 +127,15 @@ def card(number=42, target=17, kind="pr-review", revision="abcdef1", status="err
 
 def config():
     return {
-        "repos": {"wheelhouse": {"name": "wheelhouse"}},
+        "repos": {
+            "wheelhouse": {"name": "wheelhouse"},
+            "no-mistakes": {"name": "no-mistakes"},
+        },
         "maintainer": "co-maintainer",
         "auto_triage": True,
         "auto_triage_issues": True,
         "triage_attempt_cap_per_revision": 2,
-        "triage_attempt_caps": {"wheelhouse": 2},
+        "triage_attempt_caps": {"wheelhouse": 2, "no-mistakes": 2},
         "triage_daily_ceiling": 1200,
     }
 
@@ -134,6 +148,10 @@ def replay_environment(
     stub_queue=True,
     stub_claim=True,
     card_read_hook=None,
+    incident_binding_reason="",
+    incident_prior_evidence_reason="",
+    has_readonly_token=False,
+    repository_owner="owner",
 ):
     card_reads = []
     source_reads = []
@@ -186,21 +204,32 @@ def replay_environment(
     os.environ.update(
         {
             "GITHUB_EVENT_NAME": "workflow_dispatch",
-            "GITHUB_REPOSITORY_OWNER": "owner",
-            "GITHUB_REPOSITORY": "owner/wheelhouse",
-            "GITHUB_ACTOR": "owner",
+            "GITHUB_REPOSITORY_OWNER": repository_owner,
+            "GITHUB_REPOSITORY": "%s/wheelhouse" % repository_owner,
+            "GITHUB_ACTOR": repository_owner,
             "GITHUB_RUN_NUMBER": "77",
             "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN": "true",
-            "WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN": "false",
+            "WHEELHOUSE_AUTO_TRIAGE_HAS_READONLY_TOKEN": (
+                "true" if has_readonly_token else "false"
+            ),
         }
     )
     try:
 
         def supersede(**kwargs):
             claims.append(kwargs)
+            identity = replay.agent_claim.normalized_event_identity(
+                action=kwargs["action"],
+                owner=kwargs["owner"],
+                repo=kwargs["repo"],
+                number=kwargs["number"],
+                card_issue=kwargs["issue"],
+                revision=kwargs["revision"],
+            )
             return {
-                "event_key": "a" * 64,
-                "superseded": False,
+                "event_key": replay.agent_claim.event_key_sha256(identity),
+                "superseded": kwargs["issue"]
+                == replay.CARD_1585_INCIDENT_PERMIT["card"],
             }
 
         claim_context = (
@@ -216,7 +245,20 @@ def replay_environment(
         )
         with (
             patched(rc, replacements),
-            patched(replay, {"_source_json": source_read}),
+            patched(
+                replay,
+                {
+                    "_source_json": source_read,
+                    "_incident_source_binding_reason": (
+                        lambda owner, repo, number, kind, permit, before: (
+                            incident_binding_reason
+                        )
+                    ),
+                    "_incident_prior_evidence_reason": (
+                        lambda owner, permit: incident_prior_evidence_reason
+                    ),
+                },
+            ),
             patched(replay.core, {"load_config": config}),
             claim_context,
         ):
@@ -297,6 +339,34 @@ def attempt_reset_fixture(cohort=None):
         )
     supplied = ",".join(str(number) for number in sorted(cards))
     return cards, sources, supplied
+
+
+def card_1585_incident_fixture():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    binding = permit["source_binding"]
+    card_number = permit["card"]
+    revision = binding["target_head_sha"]
+    value = card(
+        number=card_number,
+        target=binding["number"],
+        kind=permit["kind"],
+        revision=revision,
+        repo=INCIDENT_REPO,
+    )
+    state = rc._unique_state_block(value["body"])
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": permit["kind"],
+        "revision": revision,
+        "count": 2,
+    }
+    state[replay.REPLAY_FIELD] = copy.deepcopy(permit["prior_marker"])
+    value["body"] = rc._replace_state_block(value["body"], state)
+    target = source(number=binding["number"], revision=revision)
+    return (
+        {card_number: value},
+        {(INCIDENT_REPO, binding["number"], permit["kind"]): target},
+    )
 
 
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
@@ -1069,6 +1139,308 @@ def test_dry_run_and_budget_bound_list_plans_with_zero_writes():
             assert "DRY-RUN card #42" in output.getvalue()
             assert "replay deferred 1 candidates" in output.getvalue()
             assert "writes=0" in output.getvalue()
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_source_binding_rebuilds_exact_review_identity():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    binding = permit["source_binding"]
+    before = source(number=binding["number"], revision=binding["target_head_sha"])
+    target_bytes = base64.b64decode(
+        b"".join(
+            (ROOT / "tests/fixtures/card-1585-target.txt.b64").read_bytes().split()
+        ),
+        validate=True,
+    )
+    target_text = target_bytes.decode("utf-8")
+    source_text = target_text.split("\n", 1)[1].split("\n## Diff\n", 1)[0]
+    title, body = source_text[2:].split("\n\n", 1)
+    before.update(
+        {
+            "title": title,
+            "body": body[:-1],
+            "updated_at": binding["source_updated_at"],
+            "changed_files": 5,
+            "base": {
+                "sha": binding["base_sha"],
+                "ref": "main",
+                "repo": {"full_name": "%s/%s" % (INCIDENT_OWNER, INCIDENT_REPO)},
+            },
+        }
+    )
+    after = copy.deepcopy(before)
+    paths = json.loads(
+        (ROOT / "tests/fixtures/card-1585-target-facts.json").read_text()
+    )["paths"]
+    comparison = {
+        "base_commit": {"sha": binding["base_sha"]},
+        "commits": [{"sha": binding["target_head_sha"]}],
+        "total_commits": 1,
+        "files": [{"filename": path} for path in paths],
+    }
+    vision_bytes = (ROOT / "tests/fixtures/card-1585-vision.md").read_bytes()
+    vision = {
+        "name": "VISION.md",
+        "path": "VISION.md",
+        "type": "file",
+        "sha": binding["vision_sha"],
+        "size": len(vision_bytes),
+        "content": base64.b64encode(vision_bytes).decode("ascii"),
+    }
+
+    def fleet_read(endpoint):
+        if "/compare/" in endpoint:
+            return copy.deepcopy(comparison)
+        if endpoint.endswith("/contents/VISION.md"):
+            return copy.deepcopy(vision)
+        raise AssertionError(endpoint)
+
+    def binding_reason():
+        return replay._incident_source_binding_reason(
+            INCIDENT_OWNER,
+            INCIDENT_REPO,
+            binding["number"],
+            permit["kind"],
+            permit,
+            before,
+        )
+
+    with (
+        patched(replay, {"_fleet_json": fleet_read}),
+        patched(replay, {"_source_json": lambda *args: copy.deepcopy(after)}),
+    ):
+        assert binding_reason() == ""
+        comparison["files"][0]["filename"] = "substituted/path.go"
+        assert binding_reason() == "incident-source-binding-mismatch"
+        comparison["files"][0]["filename"] = paths[0]
+        vision["content"] = base64.b64encode(vision_bytes + b"changed").decode(
+            "ascii"
+        )
+        vision["size"] += len(b"changed")
+        assert binding_reason() == "incident-source-binding-mismatch"
+    assert hashlib.sha256(vision_bytes).hexdigest() == binding[
+        "vision_content_sha256"
+    ]
+
+
+def test_card_1585_incident_permit_binds_prior_claim_and_result():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    marker = agent_claim.event_claim_marker(permit["event_key"])
+    claim = {
+        **permit["prior_claim"],
+        "body": "Agent triage event finished with consumer.committed. %s" % marker,
+    }
+    claim.pop("status")
+    result = {
+        "id": permit["prior_result"]["id"],
+        "created_at": permit["prior_result"]["created_at"],
+        "updated_at": permit["prior_result"]["updated_at"],
+        "record": {
+            "status": permit["prior_result"]["status"],
+            "code": permit["prior_result"]["code"],
+        },
+    }
+    with (
+        patched(
+            agent_claim,
+            {
+                "list_claims": lambda *args: [copy.deepcopy(claim)],
+                "list_triage_records": lambda *args: [copy.deepcopy(result)],
+            },
+        ),
+        patched(replay, {"_card_repo_slug": lambda owner: "%s/wheelhouse" % owner}),
+    ):
+        assert replay._incident_prior_evidence_reason(INCIDENT_OWNER, permit) == ""
+        result["updated_at"] = "2026-07-23T06:38:24Z"
+        assert replay._incident_prior_evidence_reason(
+            INCIDENT_OWNER, permit
+        ) == "incident-prior-evidence-mismatch"
+
+
+def test_card_1585_incident_permit_dry_run_consumption_and_second_use():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as calls, redirect_stdout(StringIO()) as output:
+            dry = replay.run(
+                path,
+                permit["wave"],
+                1,
+                dry_run=True,
+                exact_cards=selector,
+            )
+        assert dry == {"eligible": 1, "planned": 1, "deferred": 0, "written": 0}
+        assert "triage_replay v3 incident_permit=%s" % permit["id"] in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+
+        write_output = StringIO()
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as calls, redirect_stdout(write_output):
+            written = replay.run(path, permit["wave"], 1, exact_cards=selector)
+            assert exact_plan_lines(output.getvalue()) == exact_plan_lines(
+                write_output.getvalue()
+            )
+            assert written == {
+                "eligible": 1,
+                "planned": 1,
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            state = rc._unique_state_block(cards[permit["card"]]["body"])
+            assert state[replay.REPLAY_FIELD]["version"] == (
+                replay.INCIDENT_PERMIT_REPLAY_VERSION
+            )
+            assert state[replay.REPLAY_FIELD]["incident_permit"] == permit["id"]
+            assert state[replay.REPLAY_FIELD]["wave"] == permit["wave"]
+            assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+            assert state["triage_status"] == "queued"
+            assert len(calls["claims"]) == len(calls["queued"]) == 1
+            assert calls["claims"][0]["issue"] == permit["card"]
+            before_second = {key: len(value) for key, value in calls.items()}
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError as error:
+                assert "requested card(s) failed validation" in str(error)
+            else:
+                raise AssertionError("consumed incident permit was reused")
+            assert len(calls["edits"]) == before_second["edits"]
+            assert len(calls["queued"]) == before_second["queued"]
+            assert len(calls["claims"]) == before_second["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_permit_rejects_wrong_scope_and_bindings():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    cases = []
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as calls:
+            for wave, exact in (
+                (permit["wave"], "v1:1584"),
+                ("card-1585-wrong-wave", selector),
+            ):
+                try:
+                    replay.run(path, wave, 1, exact_cards=exact)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError((wave, exact))
+            try:
+                replay.run(
+                    path,
+                    permit["wave"],
+                    1,
+                    exact_cards=selector,
+                    attempts_reset_cards="1585",
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incident accepted a reset-input combination")
+            assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=False,
+            repository_owner="kunchenguid",
+        ) as calls:
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incident changed its bound action/token mode")
+            assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+
+        binding = permit["source_binding"]
+        moved_sources = copy.deepcopy(sources)
+        moved_sources[(INCIDENT_REPO, binding["number"], permit["kind"])][
+            "head"
+        ]["sha"] = "1" * 40
+        cases.append((moved_sources, ""))
+        cases.append((sources, "incident-source-binding-mismatch"))
+        for candidate_sources, binding_reason in cases:
+            with replay_environment(
+                copy.deepcopy(cards),
+                candidate_sources,
+                has_readonly_token=True,
+                incident_binding_reason=binding_reason,
+                repository_owner="kunchenguid",
+            ) as calls:
+                try:
+                    replay.run(path, permit["wave"], 1, exact_cards=selector)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("incident accepted a moved source binding")
+                assert not calls["edits"]
+                assert not calls["queued"]
+                assert not calls["claims"]
+
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as calls:
+            with patched(replay, {"_incident_anchor_fix_present": lambda value: False}):
+                try:
+                    replay.run(path, permit["wave"], 1, exact_cards=selector)
+                except ValueError as error:
+                    assert "anchor fix" in str(error)
+                else:
+                    raise AssertionError("incident permit ran without the landed fix")
+            assert not calls["card_reads"] and not calls["source_reads"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_permit_leaves_normal_attempt_cap_unchanged():
+    revision = "abcdef1"
+    value = card(number=42, target=17, revision=revision)
+    state = rc._unique_state_block(value["body"])
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": revision,
+        "count": 2,
+    }
+    value["body"] = rc._replace_state_block(value["body"], state)
+    cards = {42: value}
+    sources = {("wheelhouse", 17, "pr-review"): source(revision=revision)}
+    path = cards_file([])
+    try:
+        with replay_environment(cards, sources) as calls:
+            try:
+                replay.run(path, "ordinary-exhausted", 1, exact_cards="v1:42")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("ordinary replay exceeded the normal cap")
+            assert config()["triage_attempt_cap_per_revision"] == 2
+            assert not calls["edits"] and not calls["queued"] and not calls["claims"]
     finally:
         os.unlink(path)
 
@@ -1955,6 +2327,21 @@ def test_workflow_exact_selector_replay_only_posture_matrix():
         assert planned == prerequisites | {replay_step}
         assert planned.isdisjoint(ordinary_steps)
 
+    # The sanctioned incident wave is replay-only even when its exact selector
+    # is missing, malformed, or wrong. Script-level refusal cannot fall through
+    # to ordinary maintenance first.
+    for exact_cards in ("", "not-a-selector", "v1:1584"):
+        planned = set(
+            _scan_workflow_step_plan(
+                "workflow_dispatch",
+                wave=replay.CARD_1585_INCIDENT_WAVE,
+                dry_run=False,
+                exact_cards=exact_cards,
+            )
+        )
+        assert planned == prerequisites | {replay_step}
+        assert planned.isdisjoint(ordinary_steps)
+
     # Even malformed or incomplete raw input cannot fall through to ordinary
     # scan/backstop acting. It reaches the replay owner, which rejects it before
     # any exact-card read or write.
@@ -2020,8 +2407,9 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         "github.event_name == 'workflow_dispatch' && "
         "inputs.replay_wave != '' && inputs.replay_dry_run"
     )
-    exact_isolation_guard = (
-        "github.event_name == 'workflow_dispatch' && inputs.replay_exact_cards != ''"
+    exact_isolation_guard = "inputs.replay_exact_cards != ''"
+    incident_isolation_guard = (
+        "inputs.replay_wave == '%s'" % replay.CARD_1585_INCIDENT_WAVE
     )
     assert scan["permissions"] == {
         "contents": "read",
@@ -2037,6 +2425,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         if value.get("name") == "List open cards"
     )
     assert exact_isolation_guard in list_step["if"]
+    assert incident_isolation_guard in list_step["if"]
     assert "!" in list_step["if"]
     write_capable_steps = {
         "Scan the fleet",
@@ -2056,6 +2445,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         condition = guarded_step.get("if", "")
         assert dry_run_guard in condition, guarded
         assert exact_isolation_guard in condition, guarded
+        assert incident_isolation_guard in condition, guarded
         assert "!" in condition, guarded
     step = next(
         value
@@ -2092,6 +2482,12 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "replay_exact_cards" in runtime_doc
     assert "v1:1483,1584,1585,1586,1594,1598" in runtime_doc
     assert "no other card is substituted" in runtime_doc
+    assert replay.CARD_1585_INCIDENT_WAVE in runtime_doc
+    assert "replay_exact_cards='v1:1585'" in runtime_doc
+    assert replay.CARD_1585_INCIDENT_PERMIT["selector"] == (1585,)
+    assert replay.CARD_1585_INCIDENT_PERMIT["source_binding"][
+        "target_head_sha"
+    ] == "0f29152c44b808064f9a2a2621c9bde6456f6262"
     assert len(replay.ATTEMPT_RESET_COHORT) == 19
     assert replay.ATTEMPT_RESET_WAVE == "evidence-empty-e7-final"
     assert len(replay.ARRAY_RECOVERY_ATTEMPT_RESET_COHORT) == 15
@@ -2165,6 +2561,11 @@ TESTS = [
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
     test_replay_applies_scan_author_filter_to_live_source,
     test_dry_run_and_budget_bound_list_plans_with_zero_writes,
+    test_card_1585_incident_source_binding_rebuilds_exact_review_identity,
+    test_card_1585_incident_permit_binds_prior_claim_and_result,
+    test_card_1585_incident_permit_dry_run_consumption_and_second_use,
+    test_card_1585_incident_permit_rejects_wrong_scope_and_bindings,
+    test_card_1585_incident_permit_leaves_normal_attempt_cap_unchanged,
     test_exact_selector_isolates_non_prefix_cohort_and_emits_revisions,
     test_exact_selector_dry_run_and_write_plans_are_identical,
     test_exact_selector_contract_rejects_malformed_and_limit_mismatches_before_reads,
