@@ -1220,6 +1220,56 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     return render_card._replace_state_block(clean, new_state)
 
 
+def _consume_incident_permit(plan, wave, run_number, owner):
+    before = render_card.get_card(plan["number"])
+    body = plan["card"].get("body", "")
+    if (
+        _card_snapshot_identity(before) != _card_snapshot_identity(plan["card"])
+        or not render_card._queue_card_snapshot_matches(
+            before,
+            plan["number"],
+            plan["item"],
+            body,
+        )
+    ):
+        return None
+    marked_body = _body_with_replay_marker(body, plan, wave, run_number)
+    if marked_body == body:
+        return None
+    marked_body = render_card._atomic_automerge_card_body(
+        marked_body,
+        before,
+        owner=owner,
+    )
+    render_card._edit_issue_body(plan["number"], marked_body)
+    verified = render_card.get_card(plan["number"])
+    if not render_card._queue_card_snapshot_matches(
+        verified,
+        plan["number"],
+        plan["item"],
+        marked_body,
+    ):
+        return None
+    state = render_card.parse_state_block(marked_body)
+    marker = state.get(REPLAY_FIELD) if isinstance(state, dict) else None
+    if (
+        not _valid_marker(marker, plan["revision"])
+        or marker.get("version") != INCIDENT_PERMIT_REPLAY_VERSION
+        or marker.get("incident_permit") != plan["incident_permit"]
+        or marker.get("wave") != wave
+    ):
+        return None
+    return {
+        "number": verified["number"],
+        "title": verified.get("title", ""),
+        "body": marked_body,
+        "state": state,
+        "labels": verified.get("labels", []),
+        "updated_at": render_card.card_updated_at(verified),
+        "comments": reconcile._comment_count(verified.get("comments")),
+    }
+
+
 def _candidate_numbers(path):
     with open(path, encoding="utf-8") as handle:
         rows = json.load(handle)
@@ -1465,6 +1515,29 @@ def run(
                 )
             continue
         current = reconcile.current_card({"number": plan["number"]})
+        if current is None:
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because a requested card changed during mutation"
+                )
+            continue
+        if incident_permit is not None:
+            try:
+                current = _consume_incident_permit(plan, wave, run_number, owner)
+            except Exception as error:
+                print(
+                    "::error::replay refused card #%s before claim mutation: "
+                    "incident marker write failed (%s)"
+                    % (plan["number"], str(error)[:180])
+                )
+                raise ValueError(
+                    "incident replay paused because permit consumption failed"
+                )
+            if current is None:
+                raise ValueError(
+                    "incident replay paused because permit consumption did not verify"
+                )
+            written += 1
         try:
             superseded = agent_claim.supersede_triage_claim(
                 action=plan["action"],
@@ -1507,11 +1580,12 @@ def run(
             current,
             has_token,
             owner=owner,
-            prepare_body=prepare_body,
+            prepare_body=None if incident_permit is not None else prepare_body,
             publish_budget_deferral=False,
         ):
             queued += 1
-            written += 1
+            if incident_permit is None:
+                written += 1
         else:
             print(
                 "::warning::replay queueing deferred without card unlock for card #%s"

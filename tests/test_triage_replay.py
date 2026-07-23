@@ -152,6 +152,9 @@ def replay_environment(
     incident_prior_evidence_reason="",
     has_readonly_token=False,
     repository_owner="owner",
+    edit_error=None,
+    queue_error=None,
+    dispatch_error=None,
 ):
     card_reads = []
     source_reads = []
@@ -159,6 +162,7 @@ def replay_environment(
     queued = []
     dispatched = []
     claims = []
+    events = []
 
     def get_card(number):
         card_reads.append(number)
@@ -168,6 +172,9 @@ def replay_environment(
         return copy.deepcopy(value) if value is not None else None
 
     def edit(number, body, remove_labels=None):
+        events.append("marker-write")
+        if edit_error is not None:
+            raise edit_error
         edits.append((number, body))
         cards[number]["body"] = body
         cards[number]["updatedAt"] = "2026-07-16T10:02:00Z"
@@ -180,6 +187,9 @@ def replay_environment(
         return copy.deepcopy(value)
 
     def mark(number, item, body, prepare_body=None, publish_budget_deferral=True):
+        events.append("queue")
+        if queue_error is not None:
+            raise queue_error
         queued.append((number, item["repo"], item["number"]))
         body = prepare_body(body) if prepare_body else body
         new_body = rc.body_with_triage_queued(body, item, attempt_cap=2)
@@ -189,7 +199,10 @@ def replay_environment(
         return object()
 
     def dispatch(permit):
+        events.append("dispatch")
         dispatched.append(permit)
+        if dispatch_error is not None:
+            raise dispatch_error
 
     replacements = {
         "get_card": get_card,
@@ -217,6 +230,7 @@ def replay_environment(
     try:
 
         def supersede(**kwargs):
+            events.append("tombstone")
             claims.append(kwargs)
             identity = replay.agent_claim.normalized_event_identity(
                 action=kwargs["action"],
@@ -269,6 +283,7 @@ def replay_environment(
                 "queued": queued,
                 "dispatched": dispatched,
                 "claims": claims,
+                "events": events,
             }
     finally:
         os.environ.clear()
@@ -367,6 +382,15 @@ def card_1585_incident_fixture():
         {card_number: value},
         {(INCIDENT_REPO, binding["number"], permit["kind"]): target},
     )
+
+
+def assert_card_1585_incident_second_use_rejected(path, permit, selector):
+    try:
+        replay.run(path, permit["wave"], 1, exact_cards=selector)
+    except ValueError as error:
+        assert "requested card(s) failed validation" in str(error)
+    else:
+        raise AssertionError("consumed incident permit was reused")
 
 
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
@@ -1319,6 +1343,197 @@ def test_card_1585_incident_permit_dry_run_consumption_and_second_use():
             assert len(calls["edits"]) == before_second["edits"]
             assert len(calls["queued"]) == before_second["queued"]
             assert len(calls["claims"]) == before_second["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_marker_failure_preserves_prior_claim_and_retryability():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+            edit_error=RuntimeError("simulated marker failure"),
+        ) as calls:
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError as error:
+                assert "permit consumption failed" in str(error)
+            else:
+                raise AssertionError("incident continued after marker failure")
+        state = rc._unique_state_block(cards[permit["card"]]["body"])
+        assert state[replay.REPLAY_FIELD] == permit["prior_marker"]
+        assert calls["events"] == ["marker-write"]
+        assert not calls["claims"] and not calls["queued"] and not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_tombstone_failure_leaves_consumed_marker():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+            stub_claim=False,
+        ) as calls:
+            def fail_tombstone(**kwargs):
+                calls["events"].append("tombstone")
+                raise RuntimeError("simulated tombstone failure")
+
+            with patched(
+                replay.agent_claim,
+                {"supersede_triage_claim": fail_tombstone},
+            ):
+                try:
+                    replay.run(path, permit["wave"], 1, exact_cards=selector)
+                except ValueError as error:
+                    assert "could not be claimed" in str(error)
+                else:
+                    raise AssertionError("incident continued after tombstone failure")
+        state = rc._unique_state_block(cards[permit["card"]]["body"])
+        assert state[replay.REPLAY_FIELD]["version"] == (
+            replay.INCIDENT_PERMIT_REPLAY_VERSION
+        )
+        assert calls["events"] == ["marker-write", "tombstone"]
+        assert not calls["queued"] and not calls["dispatched"]
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as second_calls:
+            assert_card_1585_incident_second_use_rejected(path, permit, selector)
+            assert not second_calls["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_reservation_failure_leaves_consumed_marker():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with (
+            replay_environment(
+                cards,
+                sources,
+                has_readonly_token=True,
+                repository_owner="kunchenguid",
+                stub_queue=False,
+            ) as calls,
+            patched(
+                rc,
+                {"reserve_triage_budget": lambda number, item, ceiling: False},
+            ),
+        ):
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("incident continued after reservation failure")
+        state = rc._unique_state_block(cards[permit["card"]]["body"])
+        assert state[replay.REPLAY_FIELD]["version"] == (
+            replay.INCIDENT_PERMIT_REPLAY_VERSION
+        )
+        assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
+        assert calls["events"] == ["marker-write", "tombstone"]
+        assert not calls["queued"] and not calls["dispatched"]
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as second_calls:
+            assert_card_1585_incident_second_use_rejected(path, permit, selector)
+            assert not second_calls["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_queue_failure_leaves_consumed_marker():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+            queue_error=RuntimeError("simulated queue failure"),
+        ) as calls:
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("incident continued after queue failure")
+        state = rc._unique_state_block(cards[permit["card"]]["body"])
+        assert state[replay.REPLAY_FIELD]["version"] == (
+            replay.INCIDENT_PERMIT_REPLAY_VERSION
+        )
+        assert calls["events"] == ["marker-write", "tombstone", "queue"]
+        assert not calls["queued"] and not calls["dispatched"]
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as second_calls:
+            assert_card_1585_incident_second_use_rejected(path, permit, selector)
+            assert not second_calls["claims"]
+    finally:
+        os.unlink(path)
+
+
+def test_card_1585_incident_dispatch_failure_consumes_and_rejects_second_use():
+    permit = replay.CARD_1585_INCIDENT_PERMIT
+    selector = replay._canonical_exact_selector(permit["selector"])
+    cards, sources = card_1585_incident_fixture()
+    path = cards_file([])
+    try:
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+            dispatch_error=RuntimeError("simulated dispatch failure"),
+        ) as calls:
+            try:
+                replay.run(path, permit["wave"], 1, exact_cards=selector)
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("incident reported a failed dispatch as queued")
+            state = rc._unique_state_block(cards[permit["card"]]["body"])
+            assert state[replay.REPLAY_FIELD]["version"] == (
+                replay.INCIDENT_PERMIT_REPLAY_VERSION
+            )
+            assert calls["events"][:4] == [
+                "marker-write",
+                "tombstone",
+                "queue",
+                "dispatch",
+            ]
+            before_second = {key: len(value) for key, value in calls.items()}
+            assert_card_1585_incident_second_use_rejected(path, permit, selector)
+            assert len(calls["claims"]) == before_second["claims"]
+            assert len(calls["queued"]) == before_second["queued"]
+            assert len(calls["dispatched"]) == before_second["dispatched"]
     finally:
         os.unlink(path)
 
@@ -2564,6 +2779,11 @@ TESTS = [
     test_card_1585_incident_source_binding_rebuilds_exact_review_identity,
     test_card_1585_incident_permit_binds_prior_claim_and_result,
     test_card_1585_incident_permit_dry_run_consumption_and_second_use,
+    test_card_1585_incident_marker_failure_preserves_prior_claim_and_retryability,
+    test_card_1585_incident_tombstone_failure_leaves_consumed_marker,
+    test_card_1585_incident_reservation_failure_leaves_consumed_marker,
+    test_card_1585_incident_queue_failure_leaves_consumed_marker,
+    test_card_1585_incident_dispatch_failure_consumes_and_rejects_second_use,
     test_card_1585_incident_permit_rejects_wrong_scope_and_bindings,
     test_card_1585_incident_permit_leaves_normal_attempt_cap_unchanged,
     test_exact_selector_isolates_non_prefix_cohort_and_emits_revisions,
