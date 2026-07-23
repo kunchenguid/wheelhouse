@@ -2356,10 +2356,13 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
         if (
             not defect_tokens.issubset(defect_source_tokens)
             or not restored_tokens.issubset(restored_source_tokens)
-            or _semantic_polarity(normalized["corrected_defect"])
-            != _semantic_polarity(defect_ref["quote"])
-            or _semantic_polarity(normalized["intended_behavior_restored"])
-            != _semantic_polarity(restored_ref["quote"])
+            or not _restoration_claim_supported(
+                normalized["corrected_defect"], defect_ref["quote"]
+            )
+            or not _restoration_claim_supported(
+                normalized["intended_behavior_restored"],
+                restored_ref["quote"],
+            )
             or len(
                 defect_tokens.intersection(restored_tokens)
                 .intersection(defect_source_tokens)
@@ -2429,6 +2432,76 @@ def _semantic_polarity(text):
     return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
 
 
+_RESTORATION_CLAUSE_RE = re.compile(
+    r"\s*(?:[,;]|\b(?:and|but|whereas|while)\b)\s*", re.I
+)
+_RESTORATION_POLARITY_WORDS = frozenset(
+    {
+        "are",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "had",
+        "has",
+        "have",
+        "is",
+        "must",
+        "never",
+        "not",
+        "shall",
+        "should",
+        "was",
+        "were",
+        "will",
+        "would",
+    }
+)
+
+
+def _restoration_propositions(text):
+    normalized = _normalize_bounded_contractions(text)
+    propositions = []
+    for clause in _RESTORATION_CLAUSE_RE.split(normalized):
+        if not clause.strip():
+            return None
+        tokens = _restoration_subject_tokens(clause).difference(
+            _RESTORATION_POLARITY_WORDS
+        )
+        if not tokens:
+            return None
+        propositions.append((frozenset(tokens), _semantic_polarity(clause)))
+    return tuple(propositions)
+
+
+def _restoration_claim_supported(claim, evidence):
+    claim_propositions = _restoration_propositions(claim)
+    evidence_propositions = _restoration_propositions(evidence)
+    if (
+        claim_propositions is None
+        or evidence_propositions is None
+        or len(claim_propositions) != len(evidence_propositions)
+    ):
+        return False
+    matched = set()
+    for claim_tokens, claim_polarity in claim_propositions:
+        candidates = [
+            (index, evidence_polarity)
+            for index, (evidence_tokens, evidence_polarity) in enumerate(
+                evidence_propositions
+            )
+            if claim_tokens.issubset(evidence_tokens)
+        ]
+        if len(candidates) != 1:
+            return False
+        index, evidence_polarity = candidates[0]
+        if index in matched or claim_polarity != evidence_polarity:
+            return False
+        matched.add(index)
+    return len(matched) == len(evidence_propositions)
+
+
 _DOCUMENTATION_WORD_RE = re.compile(
     r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
 )
@@ -2474,10 +2547,13 @@ def _documentation_spans(text):
         if word in {"test", "tests"}:
             before = text[: match.start()]
             after = text[match.end() :]
-            follows_workflow = re.search(r"\bworkflow\s*$", before) is not None
+            follows_protected = any(
+                re.search(r"(?:%s)\s*$" % pattern, before, re.I) is not None
+                for _, pattern in _PROTECTED_SUBJECT_PATTERNS
+            )
             next_word = re.match(r"\s+([a-z][\w-]*)", after)
             if (
-                follows_workflow
+                follows_protected
                 and next_word is not None
                 and next_word.group(1)
                 not in {
@@ -2580,6 +2656,14 @@ def _bind_atomic_semantics(subjects, effects):
     return semantics
 
 
+def _bind_propagated_semantics(subjects, effects):
+    propagated = {effect for effect, _, _, _ in effects}
+    if len(propagated) != 1:
+        return None
+    effect = next(iter(propagated))
+    return {(subject, effect) for subject, _, _ in subjects}
+
+
 def _derive_behavior_assertion_semantics(claim):
     text = _normalize_bounded_contractions(claim).casefold()
     atomic = [
@@ -2598,25 +2682,33 @@ def _derive_behavior_assertion_semantics(claim):
             return None
         subjects, effects = spans
         if subjects and effects:
+            if pending_subjects is not None:
+                propagated = _bind_propagated_semantics(
+                    pending_subjects, effects
+                )
+                if propagated is None:
+                    return None
+                semantics.update(propagated)
+                pending_subjects = None
             bound = _bind_atomic_semantics(subjects, effects)
             if bound is None:
                 return None
             semantics.update(bound)
-            pending_subjects = subjects
             prior_effects = effects
         elif subjects:
             if prior_effects is not None:
-                bound = _bind_atomic_semantics(subjects, prior_effects)
+                bound = _bind_propagated_semantics(subjects, prior_effects)
                 if bound is None:
                     return None
                 semantics.update(bound)
+                pending_subjects = None
             else:
-                pending_subjects = subjects
+                pending_subjects = (pending_subjects or []) + subjects
             prior_effects = None
         elif effects:
             if pending_subjects is None:
                 return None
-            bound = _bind_atomic_semantics(pending_subjects, effects)
+            bound = _bind_propagated_semantics(pending_subjects, effects)
             if bound is None:
                 return None
             semantics.update(bound)

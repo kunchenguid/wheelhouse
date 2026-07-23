@@ -1055,6 +1055,53 @@ def test_class_b_semantic_admission_boundary():
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    governed_polarity_input = candidate()
+    governed_polarity_input["automerge"] = dict(
+        governed_polarity_input["automerge"]
+    )
+    governed_polarity_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Open monitored runs lose authentication sessions but "
+            "diagnostic logs are not emitted."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": (
+                "Open monitored runs do not lose authentication sessions "
+                "but diagnostic logs are emitted."
+            ),
+        },
+        "intended_behavior_restored": restored_quote,
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": restored_quote,
+        },
+    }
+    governed_polarity = normalize(
+        governed_polarity_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs do not lose authentication sessions "
+                    "but diagnostic logs are emitted."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: governed polarity inversion is unavailable",
+        am.verdict_eligible(governed_polarity)[0] is False
+        and am.behavior_verdict_facts(governed_polarity)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1247,6 +1294,19 @@ def test_class_b_semantic_admission_boundary():
             "workflow tests verb mapping",
             "The existing workflow tests credentials and now requires approval",
             (("existing_workflow", "new_requirement"),),
+        ),
+        (
+            "delivery contract tests verb mapping",
+            "The delivery contract tests credentials and now requires approval",
+            (("delivery_contract", "new_requirement"),),
+        ),
+        (
+            "pending coordinated subject mapping",
+            "Existing workflow and documentation change",
+            (
+                ("existing_workflow", "changed"),
+                ("documentation_or_tests", "changed"),
+            ),
         ),
     ):
         mapped_input = candidate(summary=text + ".")
