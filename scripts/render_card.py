@@ -2210,10 +2210,17 @@ _BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
     re.I,
 )
 _CLASS_C_DEFAULT_OFF_RE = re.compile(
-    r"\b(?:adds?|introduces?|new)\b"
-    r"(?=[^.!?;]{0,100}\b(?:strictly\s+)?opt-in\b)"
-    r"[^.!?;]{0,120}\b(?:strictly\s+)?opt-in\b"
-    r"[^.!?;]{0,80}\bdisabled\s+by\s+default\b",
+    r"(?:"
+    r"(?:adds?|introduces?)\s+(?:a|an)\s+(?:"
+    r"(?:new\s+)?(?:strictly\s+)?opt-in\s+"
+    r"(?:capability|feature|mode|option)"
+    r"|(?:new\s+)?(?:capability|feature|mode|option)\s+"
+    r"that\s+is\s+(?:strictly\s+)?opt-in"
+    r")"
+    r"|(?:a|the)\s+new\s+(?:capability|feature|mode|option)\s+"
+    r"that\s+is\s+(?:strictly\s+)?opt-in"
+    r")"
+    r"(?:\s+(?:and|is|that\s+is))?\s+disabled\s+by\s+default",
     re.I,
 )
 _RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
@@ -2403,8 +2410,9 @@ def _protected_contract_claims(texts):
     for text in texts:
         for clause in re.split(r"[.!?;]+", str(text or "")):
             cleaned = _clean_triage_text(clause, limit=700, default="")
-            masked = _CLASS_C_DEFAULT_OFF_RE.sub("", cleaned)
-            if masked and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(masked):
+            if _CLASS_C_DEFAULT_OFF_RE.fullmatch(cleaned):
+                continue
+            if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
                 claims.add(cleaned.casefold())
     return claims
 
@@ -2563,31 +2571,6 @@ _RESTORATION_RELATION_WORDS = frozenset(
         "without",
     }
 )
-_RESTORATION_TEMPORAL_RELATIONS = frozenset(
-    {"after", "before", "during", "following", "on", "until", "upon"}
-)
-_RESTORATION_TEMPORAL_HEADS = frozenset(
-    {
-        "completion",
-        "failure",
-        "migration",
-        "reconnection",
-        "recovery",
-        "reopening",
-        "restart",
-        "restoration",
-        "resumption",
-        "retry",
-        "rollback",
-        "shutdown",
-        "startup",
-        "success",
-        "timeout",
-        "upgrade",
-    }
-)
-
-
 def _restoration_role(words):
     return tuple(
         word
@@ -2597,27 +2580,9 @@ def _restoration_role(words):
 
 
 def _restoration_roles_are_bounded(agent, patient):
-    if _RESTORATION_RELATION_WORDS.intersection(agent):
-        return False
-    relation_indexes = [
-        index
-        for index, word in enumerate(patient)
-        if word in _RESTORATION_RELATION_WORDS
-    ]
-    if not relation_indexes:
-        return True
-    if len(relation_indexes) != 1:
-        return False
-    relation_index = relation_indexes[0]
-    relation = patient[relation_index]
-    temporal_object = patient[relation_index + 1 :]
-    return (
-        relation in _RESTORATION_TEMPORAL_RELATIONS
-        and relation_index > 0
-        and 1 <= len(temporal_object) <= 2
-        and temporal_object[-1] in _RESTORATION_TEMPORAL_HEADS
-        and not _RESTORATION_AUXILIARIES.intersection(temporal_object)
-        and not set(_RESTORATION_PREDICATES).intersection(temporal_object)
+    return not (
+        _RESTORATION_RELATION_WORDS.intersection(agent)
+        or _RESTORATION_RELATION_WORDS.intersection(patient)
     )
 
 
@@ -3141,7 +3106,8 @@ def _bind_propagated_semantics(subjects, effects):
 
 def _derive_behavior_assertion_semantics(claim):
     text = _normalize_bounded_contractions(claim).casefold()
-    text = _CLASS_C_DEFAULT_OFF_RE.sub("", text)
+    if _CLASS_C_DEFAULT_OFF_RE.fullmatch(text):
+        return None
     coordinated_topic = _coordinated_documentation_topic_semantics(text)
     if coordinated_topic is not None:
         return coordinated_topic

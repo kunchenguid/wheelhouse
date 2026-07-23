@@ -1332,10 +1332,10 @@ def test_class_b_semantic_admission_boundary():
             % relation
         )
         check(
-            "class B admission: exact %s temporal object remains supported"
+            "class B admission: exact %s temporal object is unavailable"
             % relation,
             render_card._restoration_claim_supported(temporal, temporal)
-            is True,
+            is False,
         )
     unknown_temporal_clause = (
         "Authentication sessions lose processing after audit logs write state."
@@ -1345,6 +1345,17 @@ def test_class_b_semantic_admission_boundary():
         render_card._restoration_claim_supported(
             unknown_temporal_clause,
             unknown_temporal_clause,
+        )
+        is False,
+    )
+    temporal_head_clause = (
+        "Authentication sessions lose processing after jobs restart."
+    )
+    check(
+        "class B admission: temporal head clause is unavailable",
+        render_card._restoration_claim_supported(
+            temporal_head_clause,
+            temporal_head_clause,
         )
         is False,
     )
@@ -2044,6 +2055,23 @@ def test_class_b_semantic_admission_boundary():
         "semantic admission: class C default-off wording remains eligible",
         render_card._derive_behavior_assertion_semantics(optin_text) is None
         and am.verdict_eligible(optin)[0] is True,
+    )
+    mixed_optin_text = (
+        "Adds an opt-in feature that tightens the existing workflow "
+        "and is disabled by default"
+    )
+    mixed_optin_input = candidate(summary=mixed_optin_text + ".")
+    mixed_optin_input["automerge"] = dict(mixed_optin_input["automerge"])
+    mixed_optin_input["automerge"].update(
+        {"behavior_class": "C", "optin_default_off": True}
+    )
+    mixed_optin_input["automerge"].pop("class_b_restoration")
+    mixed_optin = normalize(mixed_optin_input)["automerge_verdict"]
+    check(
+        "semantic admission: mixed class C wording remains governed",
+        render_card._protected_contract_claims((mixed_optin_text,))
+        == {mixed_optin_text.casefold()}
+        and am.verdict_eligible(mixed_optin)[0] is False,
     )
     check(
         "semantic admission: actual default change remains protected",
