@@ -657,6 +657,62 @@ def test_class_b_semantic_admission_boundary():
             )[0]
             is True,
         )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repository = os.path.join(temp_dir, "repository")
+        bundle = os.path.join(temp_dir, "bundle")
+        os.makedirs(os.path.join(repository, "lib"))
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.name", "fixture"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.email", "fixture@example.com"],
+            check=True,
+        )
+        with open(
+            os.path.join(repository, "lib", "recovery.py"),
+            "w",
+            encoding="utf-8",
+        ) as source_file:
+            source_file.write(restored_quote)
+        subprocess.run(["git", "-C", repository, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "commit", "-qm", "fixture"],
+            check=True,
+        )
+        revision = subprocess.run(
+            ["git", "-C", repository, "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        render_card.build_target_source_evidence(repository, bundle, revision)
+        manifest = os.path.join(bundle, "manifest.json")
+        files = os.path.join(bundle, "files")
+        check(
+            "source evidence: exact-revision manifest verifies",
+            render_card.verify_target_source_evidence(files, manifest, revision)
+            is not None,
+        )
+        check(
+            "source evidence: revision mismatch fails closed",
+            render_card.verify_target_source_evidence(
+                files, manifest, "0" * len(revision)
+            )
+            is None,
+        )
+        with open(
+            os.path.join(files, "lib", "recovery.py"),
+            "a",
+            encoding="utf-8",
+        ) as source_file:
+            source_file.write("tampered")
+        check(
+            "source evidence: digest mismatch fails closed",
+            render_card.verify_target_source_evidence(files, manifest, revision)
+            is None,
+        )
 
     observed_input = candidate(
         summary="Adds a pre-push Codex review gate to direct-PR delivery.",
@@ -704,6 +760,33 @@ def test_class_b_semantic_admission_boundary():
         am.verdict_eligible(observed)[0] is False
         and observed_facts["g6_behavior_class"]["status"]
         == schema.STATUS_UNMET,
+    )
+    mislabeled_input = json.loads(json.dumps(observed_input))
+    mislabeled_input["automerge"]["behavior_assertions"][0].update(
+        subject="documentation_or_tests",
+        effect="unchanged",
+    )
+    mislabeled = normalize(
+        mislabeled_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "The existing delivery contract now requires review."
+                ),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: mislabeled card-1620 assertion is unavailable",
+        am.verdict_eligible(mislabeled)[0] is False
+        and am.behavior_verdict_facts(mislabeled)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
     )
 
     for label, text in (
@@ -4273,6 +4356,19 @@ def test_triage_reads_vision_from_base_only_and_asks_verdict():
         "repos/$SLUG/compare/$BASE_SHA...$HEAD_SHA" in text
         and "HEAD_SHA: ${{ steps.resolve.outputs.revision }}" in text
         and 'gh pr diff "$NUMBER"' not in text,
+    )
+    check(
+        "triage: in-job source evidence uses the actual workspace checkout",
+        "TARGET_SRC_DIR: ${{ github.workspace }}/target-src" in text
+        and '--target-src-dir "${TARGET_SRC_DIR:-}"' in text,
+    )
+    check(
+        "triage: cross-job source evidence is bounded and manifest-bound",
+        "source-evidence-build" in text
+        and "target-src-evidence" in text
+        and "target_source_revision:" in text
+        and '--target-src-manifest "${TARGET_SRC_MANIFEST:-}"' in text
+        and '--target-src-revision "${TARGET_SRC_REVISION:-}"' in text,
     )
 
 

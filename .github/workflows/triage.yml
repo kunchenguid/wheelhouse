@@ -124,6 +124,7 @@ jobs:
       correlation_id: ${{ steps.claude-model.outputs.correlation-id }}
       child_timeout_minutes: ${{ steps.claude-model.outputs.child-timeout-minutes }}
       target_artifact: ${{ steps.target-artifact-name.outputs.artifact }}
+      target_source_revision: ${{ steps.source-evidence.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -352,6 +353,18 @@ jobs:
           else
             echo "head_ok=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - id: source-evidence
+        name: Build bounded exact-revision target source evidence
+        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false'
+        run: |
+          set -euo pipefail
+          revision="$(git -C target-src rev-parse HEAD)"
+          python scripts/render_card.py source-evidence-build \
+            --repository-dir target-src \
+            --output-dir target-src-evidence \
+            --expected-revision "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - id: readonly
         if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false'
@@ -689,7 +702,8 @@ jobs:
               echo "List every summary/product/evidence clause mentioning a protected"
               echo "contract in behavior_assertions. Copy claim exactly, type its governed"
               echo "subject and effect, and attach an exact target.txt or target-src path/quote."
-              echo "Missing, extra, ambiguous, or unsupported assertions are unavailable."
+              echo "Trusted code derives subject/effect independently and requires a match."
+              echo "Missing, extra, ambiguous, mislabeled, or unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
@@ -973,6 +987,7 @@ jobs:
             target.txt
             vision.md
             target-facts.json
+            target-src-evidence
           if-no-files-found: error
           retention-days: 1
 
@@ -1271,6 +1286,8 @@ jobs:
           # NOT in the trusted-src snapshot (that predates target.txt), so pass
           # the absolute workspace path.
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          TARGET_SRC_DIR: ${{ github.workspace }}/target-src
+          TARGET_SRC_REVISION: ${{ steps.source-evidence.outputs.revision }}
           VISION_FILE: ${{ github.workspace }}/vision.md
           TARGET_FACTS_FILE: ${{ github.workspace }}/target-facts.json
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -1338,7 +1355,8 @@ jobs:
                 --source-review-number "$SOURCE_REVIEW_NUMBER" \
                 "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
-                --target-src-dir target-src \
+                --target-src-dir "${TARGET_SRC_DIR:-}" \
+                --target-src-revision "${TARGET_SRC_REVISION:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
                 --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"
@@ -1984,6 +2002,9 @@ jobs:
           SOURCE_REVIEW_REPO: ${{ needs.triage.outputs.repo }}
           SOURCE_REVIEW_NUMBER: ${{ needs.triage.outputs.number }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          TARGET_SRC_DIR: ${{ github.workspace }}/target-src-evidence/files
+          TARGET_SRC_MANIFEST: ${{ github.workspace }}/target-src-evidence/manifest.json
+          TARGET_SRC_REVISION: ${{ needs.triage.outputs.target_source_revision }}
           VISION_FILE: ${{ github.workspace }}/vision.md
           TARGET_FACTS_FILE: ${{ github.workspace }}/target-facts.json
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -2026,7 +2047,9 @@ jobs:
               --source-review-number "$SOURCE_REVIEW_NUMBER" \
               "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
-              --target-src-dir target-src \
+              --target-src-dir "${TARGET_SRC_DIR:-}" \
+              --target-src-manifest "${TARGET_SRC_MANIFEST:-}" \
+              --target-src-revision "${TARGET_SRC_REVISION:-}" \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
               --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
               --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"

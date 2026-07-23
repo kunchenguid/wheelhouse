@@ -41,6 +41,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -331,6 +332,10 @@ CLASS_B_RESTORATION_MIN_CHARS = 12
 CLASS_B_RESTORATION_MAX_CHARS = 500
 _VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
 BEHAVIOR_ASSERTIONS_FIELD = "behavior_assertions"
+SOURCE_EVIDENCE_VERSION = 1
+SOURCE_EVIDENCE_MAX_FILES = 1024
+SOURCE_EVIDENCE_MAX_FILE_BYTES = 1_000_000
+SOURCE_EVIDENCE_MAX_TOTAL_BYTES = 32_000_000
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -1327,7 +1332,153 @@ def _triage_evidence_verified(data, target_file):
     return evidence_anchor_ok(evidence, target_text)
 
 
-def _read_declared_evidence_source(source, target_file, target_src_dir):
+def build_target_source_evidence(repository_dir, output_dir, expected_revision):
+    actual_revision = subprocess.run(
+        ["git", "-C", repository_dir, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if actual_revision != expected_revision:
+        raise ValueError("target source revision mismatch")
+    files_dir = os.path.join(output_dir, "files")
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(files_dir)
+    entries = []
+    total = 0
+    available = True
+    for root, dirs, files in os.walk(repository_dir, followlinks=False):
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name != ".git"
+            and not os.path.islink(os.path.join(root, name))
+        )
+        for name in sorted(files):
+            source_path = os.path.join(root, name)
+            if os.path.islink(source_path) or not os.path.isfile(source_path):
+                continue
+            relative = os.path.relpath(source_path, repository_dir)
+            size = os.path.getsize(source_path)
+            if (
+                size > SOURCE_EVIDENCE_MAX_FILE_BYTES
+                or len(entries) >= SOURCE_EVIDENCE_MAX_FILES
+                or total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+            ):
+                available = False
+                break
+            with open(source_path, "rb") as source_file:
+                content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
+            if len(content) != size:
+                available = False
+                break
+            destination = os.path.join(files_dir, relative)
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as destination_file:
+                destination_file.write(content)
+            entries.append(
+                {
+                    "path": relative.replace(os.sep, "/"),
+                    "size": size,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+            total += size
+        if not available:
+            break
+    if not available:
+        shutil.rmtree(files_dir)
+        os.makedirs(files_dir)
+        entries = []
+        total = 0
+    manifest = {
+        "version": SOURCE_EVIDENCE_VERSION,
+        "revision": actual_revision,
+        "available": available,
+        "file_count": len(entries),
+        "total_bytes": total,
+        "files": entries,
+    }
+    with open(os.path.join(output_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, sort_keys=True, separators=(",", ":"))
+    return manifest
+
+
+def verify_target_source_evidence(
+    files_dir, manifest_file, expected_revision
+):
+    try:
+        with open(manifest_file, encoding="utf-8") as manifest_stream:
+            manifest = json.load(manifest_stream)
+    except (OSError, json.JSONDecodeError):
+        return None
+    required = {
+        "version",
+        "revision",
+        "available",
+        "file_count",
+        "total_bytes",
+        "files",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != required
+        or manifest.get("version") != SOURCE_EVIDENCE_VERSION
+        or manifest.get("revision") != expected_revision
+        or manifest.get("available") is not True
+        or not isinstance(manifest.get("files"), list)
+        or manifest.get("file_count") != len(manifest["files"])
+        or not isinstance(manifest.get("total_bytes"), int)
+        or manifest["file_count"] > SOURCE_EVIDENCE_MAX_FILES
+        or manifest["total_bytes"] > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+    ):
+        return None
+    root = os.path.realpath(files_dir)
+    indexed = {}
+    total = 0
+    for entry in manifest["files"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size", "sha256"}
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("size"), int)
+            or entry["size"] < 0
+            or entry["size"] > SOURCE_EVIDENCE_MAX_FILE_BYTES
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or ""))
+            or entry["path"] in indexed
+            or ".." in entry["path"].split("/")
+        ):
+            return None
+        path = os.path.realpath(os.path.join(root, entry["path"]))
+        try:
+            if (
+                os.path.commonpath((root, path)) != root
+                or os.path.islink(os.path.join(root, entry["path"]))
+                or not os.path.isfile(path)
+                or os.path.getsize(path) != entry["size"]
+            ):
+                return None
+            with open(path, "rb") as source_file:
+                content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
+        except (OSError, ValueError):
+            return None
+        if hashlib.sha256(content).hexdigest() != entry["sha256"]:
+            return None
+        indexed[entry["path"]] = path
+        total += entry["size"]
+    if total != manifest["total_bytes"]:
+        return None
+    return indexed
+
+
+def _read_declared_evidence_source(
+    source,
+    target_file,
+    target_src_dir,
+    target_src_manifest="",
+    target_src_revision="",
+):
     if source == "target.txt":
         return _read_target_text(target_file)
     if not source.startswith("target-src/") or not target_src_dir:
@@ -1335,8 +1486,46 @@ def _read_declared_evidence_source(source, target_file, target_src_dir):
     relative = source[len("target-src/") :]
     if not relative or ".." in relative.split("/"):
         return ""
-    root = os.path.realpath(target_src_dir)
-    path = os.path.realpath(os.path.join(root, relative))
+    if target_src_manifest:
+        indexed = verify_target_source_evidence(
+            target_src_dir, target_src_manifest, target_src_revision
+        )
+        if indexed is None or relative not in indexed:
+            return ""
+        path = indexed[relative]
+        root = os.path.realpath(target_src_dir)
+    else:
+        root = os.path.realpath(target_src_dir)
+        if target_src_revision:
+            try:
+                actual_revision = subprocess.run(
+                    ["git", "-C", root, "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError):
+                return ""
+            if actual_revision != target_src_revision:
+                return ""
+            try:
+                content = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        root,
+                        "show",
+                        "%s:%s" % (target_src_revision, relative),
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+            except (OSError, subprocess.CalledProcessError):
+                return ""
+            if len(content) > SOURCE_EVIDENCE_MAX_FILE_BYTES:
+                return ""
+            return content.decode("utf-8", "replace")
+        path = os.path.realpath(os.path.join(root, relative))
     try:
         if os.path.commonpath((root, path)) != root or not os.path.isfile(path):
             return ""
@@ -1370,7 +1559,13 @@ def _declared_evidence_refs(data):
     return tuple(refs)
 
 
-def _bind_verified_evidence_spans(data, target_file, target_src_dir=""):
+def _bind_verified_evidence_spans(
+    data,
+    target_file,
+    target_src_dir="",
+    target_src_manifest="",
+    target_src_revision="",
+):
     bounded = dict(data)
     verified = []
     for raw_ref in _declared_evidence_refs(bounded):
@@ -1378,7 +1573,11 @@ def _bind_verified_evidence_spans(data, target_file, target_src_dir=""):
         if evidence_ref is None:
             continue
         source_text = _read_declared_evidence_source(
-            evidence_ref["source"], target_file, target_src_dir
+            evidence_ref["source"],
+            target_file,
+            target_src_dir,
+            target_src_manifest,
+            target_src_revision,
         )
         needle = _normalize_evidence_text(evidence_ref["quote"])
         if needle and needle in _normalize_evidence_text(source_text):
@@ -2165,6 +2364,74 @@ def _protected_contract_claims(texts):
     return claims
 
 
+def _derive_behavior_assertion_semantics(claim):
+    text = str(claim or "").casefold()
+    subjects = set()
+    documentation = bool(
+        re.search(r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", text)
+    )
+    coordinated_contract = bool(
+        re.search(
+            r"\b(?:and|as\s+well\s+as|along\s+with)\b"
+            r".{0,80}\b(?:existing|default)\b.{0,50}\b(?:workflow|mode|behavio[u]?r|contract)\b",
+            text,
+        )
+    )
+    if documentation:
+        subjects.add("documentation_or_tests")
+    if "delivery contract" in text:
+        subjects.add("delivery_contract")
+    if re.search(r"\b(?:existing|default)\b.{0,50}\bmode\b", text):
+        subjects.add("existing_mode")
+    if re.search(r"\b(?:existing|default)\b.{0,50}\bbehavio[u]?r\b", text):
+        subjects.add("default_behavior")
+    if re.search(r"\bworkflow\b", text) and (
+        not documentation or coordinated_contract
+    ):
+        subjects.add("existing_workflow")
+    affirmative_text = re.sub(
+        r"\b(?:without\s+changing|does\s+not\s+change|"
+        r"no(?:\s+\w+){0,7}\s+changes?)\b",
+        "",
+        text,
+    )
+    effects = set()
+    if re.search(
+        r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
+        r"(?:is|are|becomes?)\s+(?:now\s+)?(?:required|mandatory)|"
+        r"can\s+no\s+longer)\b",
+        affirmative_text,
+    ):
+        effects.add("new_requirement")
+    if re.search(r"\btighten(?:s|ed|ing)?\b", affirmative_text):
+        effects.add("tightened")
+    if re.search(
+        r"\b(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
+        r"modif(?:y|ies|ied|ying)|disabl(?:e|es|ed|ing)|"
+        r"replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing))\b",
+        affirmative_text,
+    ):
+        effects.add("changed")
+    if re.search(r"\brestor(?:e|es|ed|ing)\b", affirmative_text):
+        effects.add("restored")
+    if re.search(
+        r"\b(?:without\s+changing|does\s+not\s+change|"
+        r"no(?:\s+\w+){0,7}\s+changes?|"
+        r"(?:remains?|is|are)\s+unchanged|preserv(?:e|es|ed|ing))\b",
+        text,
+    ):
+        effects.add("unchanged")
+    denying = effects.intersection({"changed", "tightened", "new_requirement"})
+    if denying:
+        effects = denying
+    elif "unchanged" in effects:
+        effects = {"unchanged"}
+    if len(effects) != 1 or not subjects:
+        return None
+    effect = next(iter(effects))
+    return {(subject, effect) for subject in subjects}
+
+
 def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs):
     if not isinstance(value, list) or len(value) > 12:
         return None
@@ -2215,9 +2482,18 @@ def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs)
                 "evidence": evidence_ref,
             }
         )
-    if {item["claim"].casefold() for item in normalized} != (
-        _protected_contract_claims(semantic_text)
-    ):
+    protected_claims = _protected_contract_claims(semantic_text)
+    expected = set()
+    for claim in protected_claims:
+        semantics = _derive_behavior_assertion_semantics(claim)
+        if semantics is None:
+            return None
+        expected.update((claim, subject, effect) for subject, effect in semantics)
+    observed = {
+        (item["claim"].casefold(), item["subject"], item["effect"])
+        for item in normalized
+    }
+    if observed != expected:
         return None
     return normalized
 
@@ -6017,6 +6293,8 @@ def decide_triage_apply(
     repaired_text,
     target_file,
     target_src_dir="",
+    target_src_manifest="",
+    target_src_revision="",
     repair_claim_admitted=None,
     source_provenance_file="",
     vision_file="",
@@ -6050,7 +6328,11 @@ def decide_triage_apply(
                 "candidate": "",
             }
         triage = _bind_verified_evidence_spans(
-            triage, target_file, target_src_dir
+            triage,
+            target_file,
+            target_src_dir,
+            target_src_manifest,
+            target_src_revision,
         )
         triage = enforce_triage_source_provenance(
             triage,
@@ -6072,7 +6354,11 @@ def decide_triage_apply(
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
                 repaired = _bind_verified_evidence_spans(
-                    repaired, target_file, target_src_dir
+                    repaired,
+                    target_file,
+                    target_src_dir,
+                    target_src_manifest,
+                    target_src_revision,
                 )
                 repaired = enforce_triage_source_provenance(
                     repaired,
@@ -6179,6 +6465,8 @@ def main():
         "non-empty evidence schema field remains the primary guard.",
     )
     ta.add_argument("--target-src-dir", default="")
+    ta.add_argument("--target-src-manifest", default="")
+    ta.add_argument("--target-src-revision", default="")
     ta.add_argument(
         "--repair-execution-file",
         default="",
@@ -6198,6 +6486,11 @@ def main():
     rp = sub.add_parser("triage-repair-prep")
     rp.add_argument("--execution-file", required=True)
     rp.add_argument("--kind", required=True)
+
+    seb = sub.add_parser("source-evidence-build")
+    seb.add_argument("--repository-dir", required=True)
+    seb.add_argument("--output-dir", required=True)
+    seb.add_argument("--expected-revision", required=True)
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
@@ -6264,6 +6557,13 @@ def main():
         if payload is None:
             raise SystemExit("target facts identity or completeness check failed")
         sys.stdout.buffer.write(payload)
+    elif args.cmd == "source-evidence-build":
+        manifest = build_target_source_evidence(
+            args.repository_dir,
+            args.output_dir,
+            args.expected_revision,
+        )
+        print(manifest["revision"])
     elif args.cmd == "upsert":
         item = load_item(args.item_file)
         number = upsert_card(item, has_token=auto_triage_has_token())
@@ -6303,6 +6603,8 @@ def main():
             repaired_text,
             args.target_file,
             target_src_dir=args.target_src_dir,
+            target_src_manifest=args.target_src_manifest,
+            target_src_revision=args.target_src_revision,
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
             vision_file=args.vision_file,
