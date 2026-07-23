@@ -1064,10 +1064,11 @@ def run(
             attempt_reset=attempt_reset_scope.get(initial["number"]),
             attempt_reset_wave=wave,
         )
-        if not plan:
+        if not plan or (exact_scope and not _plans_match(initial, plan)):
+            refusal = reason if not plan else "card-raced-before-replay"
             print(
                 "::notice::replay skipped card #%s after re-read: %s"
-                % (initial["number"], reason)
+                % (initial["number"], refusal)
             )
             if attempt_reset_scope:
                 raise ValueError(

@@ -1355,6 +1355,57 @@ def test_exact_selector_refuses_budget_and_preflight_races_before_writes():
         os.unlink(path)
 
 
+def test_exact_selector_never_replaces_reviewed_revision_during_write():
+    cards, sources, revisions = exact_fixture((42,))
+    path = cards_file([42])
+    output = StringIO()
+
+    def advance_card_and_target(number, read_count, live_cards):
+        if read_count != 3:
+            return
+        replacement_revision = "deadbee"
+        live_cards[number] = card(
+            number=number,
+            target=20_042,
+            revision=replacement_revision,
+        )
+        sources[("wheelhouse", 20_042, "pr-review")] = source(
+            number=20_042,
+            revision=replacement_revision,
+        )
+
+    try:
+        with (
+            replay_environment(
+                cards,
+                sources,
+                card_read_hook=advance_card_and_target,
+            ) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(
+                    path,
+                    "exact-revision-race",
+                    1,
+                    exact_cards="v1:42",
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("exact selector replaced the reviewed revision")
+        assert (
+            "replay exact-selector/v1 admitted card #42: revision=%s clear=error"
+            % revisions[42]
+            in output.getvalue()
+        )
+        assert "card-raced-before-replay" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+        assert not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
 def test_exact_selector_keeps_claim_tombstone_authoritative():
     cards, sources, _ = exact_fixture((42,))
     path = cards_file([1, 42])
@@ -1986,6 +2037,7 @@ TESTS = [
     test_exact_selector_contract_rejects_malformed_and_limit_mismatches_before_reads,
     test_exact_selector_requested_rejections_are_atomic_and_never_substitute,
     test_exact_selector_refuses_budget_and_preflight_races_before_writes,
+    test_exact_selector_never_replaces_reviewed_revision_during_write,
     test_exact_selector_keeps_claim_tombstone_authoritative,
     test_no_exact_selector_preserves_legacy_sorted_prefix,
     test_entry_conditions_reject_schedule_non_owner_bad_wave_and_bad_limit,
