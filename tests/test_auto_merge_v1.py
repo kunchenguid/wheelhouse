@@ -597,6 +597,15 @@ def test_class_b_semantic_admission_boundary():
                     {
                         "claim": product_claim,
                         "subject": "default_behavior",
+                        "effect": "restored",
+                        "evidence": {
+                            "source": "target.txt",
+                            "quote": product_claim,
+                        },
+                    },
+                    {
+                        "claim": product_claim,
+                        "subject": "default_behavior",
                         "effect": "unchanged",
                         "evidence": {
                             "source": "target.txt",
@@ -1256,6 +1265,14 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: upon temporal roles remain unavailable",
+        render_card._restoration_claim_supported(
+            "Authentication sessions resume processing upon recovery.",
+            "Authentication sessions resume recovery upon processing.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1702,6 +1719,20 @@ def test_class_b_semantic_admission_boundary():
             ("existing_workflow", "unchanged"),
         },
     )
+    changed_recovery_text = (
+        "Changes documented recovery behavior while preserving "
+        "the existing workflow"
+    )
+    check(
+        "semantic admission: changed recovery behavior remains protected",
+        render_card._derive_behavior_assertion_semantics(
+            changed_recovery_text
+        )
+        == {
+            ("default_behavior", "changed"),
+            ("existing_workflow", "unchanged"),
+        },
+    )
     passive_reverse_docs_text = (
         "Existing mode and workflow documentation is changed"
     )
@@ -1712,6 +1743,21 @@ def test_class_b_semantic_admission_boundary():
         )
         == {("documentation_or_tests", "changed")},
     )
+    for label, text in (
+        (
+            "compound passive",
+            "Existing mode and workflow documentation has been changed",
+        ),
+        (
+            "modal passive",
+            "Existing mode and workflow documentation will be updated",
+        ),
+    ):
+        check(
+            "semantic admission: %s reverse docs remain neutral" % label,
+            render_card._derive_behavior_assertion_semantics(text)
+            == {("documentation_or_tests", "changed")},
+        )
     reverse_transitive_text = (
         "Existing workflow and delivery contract documentation "
         "changes that contract"
@@ -1836,8 +1882,7 @@ def test_class_b_semantic_admission_boundary():
                     "quote": "No existing or default product behavior changes",
                 },
             },
-            candidate()["automerge"]["behavior_assertions"][0],
-        ]
+        ] + candidate()["automerge"]["behavior_assertions"]
         unaffected = normalize(
             unaffected_input,
             verified=(

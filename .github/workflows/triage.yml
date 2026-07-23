@@ -716,7 +716,7 @@ jobs:
               echo "each restoration predicate with canonical bounded active, progressive, or"
               echo "supported compound-passive"
               echo "argument roles and"
-              echo "its predicate-local polarity; all temporal, subordinate, and residual"
+              echo "its predicate-local polarity. All temporal, subordinate, and residual"
               echo "propositions are unsupported. Defaults are always explicitly bound."
               echo "Only a fully parsed independent"
               echo "non-governance object can prove an effect unprotected. Missing, extra,"

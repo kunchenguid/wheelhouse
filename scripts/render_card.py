@@ -2192,6 +2192,7 @@ _PROTECTED_SUBJECT_PATTERNS = (
         r"\b(?:(?:existing|default|existing/default)"
         r"(?:\s+or\s+default)?"
         r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
+        r"|(?:documented\s+)?recovery\s+behavio[u]?r"
         r"|user-facing\s+flag\s+or\s+default)\b",
     ),
     ("existing_workflow", r"\bworkflow\b"),
@@ -2449,6 +2450,7 @@ _RESTORATION_SUBORDINATORS = frozenset(
         "during",
         "if",
         "once",
+        "following",
         "since",
         "so",
         "than",
@@ -2456,6 +2458,7 @@ _RESTORATION_SUBORDINATORS = frozenset(
         "though",
         "unless",
         "until",
+        "upon",
         "when",
         "whenever",
         "where",
@@ -2665,7 +2668,7 @@ _DOCUMENTATION_WORD_RE = re.compile(
 _INDEPENDENT_NON_GOVERNANCE_OBJECT_RE = re.compile(
     r"^\s*(?:(?:a|an|the)\s+)?(?:"
     r"changelog|comments?|copy|formatting|labels?|metadata|readme|"
-    r"(?:documented\s+)?recovery\s+behavior|release\s+notes?|spelling"
+    r"release\s+notes?|spelling"
     r")\s*(?:only\s*)?(?:while|without)?\s*$",
     re.I,
 )
@@ -2820,7 +2823,11 @@ def _coordinated_documentation_topic_semantics(text):
         if (
             effect_start < documentation_match.end()
             or re.fullmatch(
-                r"[\s,;:.-]*(?:(?:is|are|was|were)\s+)?",
+                r"[\s,;:.-]*(?:(?:"
+                r"is|are|was|were"
+                r"|(?:has|have|had)\s+been"
+                r"|(?:can|could|will|would|shall|should|must)\s+be"
+                r")\s+)?",
                 between,
                 re.I,
             )
