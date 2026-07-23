@@ -695,7 +695,9 @@ jobs:
               echo "name the concrete corrected defect and intended behavior restored,"
               echo "share a concrete multi-token domain subject, and bind each claim to"
               echo "its own exact-source evidence quote carrying that subject. Generic,"
-              echo "incidentally overlapping, or unrelated statements are unavailable. Omit"
+              echo "incidentally overlapping, polarity-inverted, or unrelated statements"
+              echo "are unavailable. Every restoration claim and quote is also reconciled"
+              echo "as semantic input. Omit"
               echo "class_b_restoration for every other class. If the summary, product"
               echo "implications, or evidence says an existing mode, default, workflow,"
               echo "or delivery contract is tightened or changed, the verdict is unavailable."
@@ -703,7 +705,8 @@ jobs:
               echo "contract in behavior_assertions. Copy claim exactly, type its governed"
               echo "subject and effect, and attach an exact target.txt or target-src path/quote."
               echo "Trusted code derives subject/effect independently and requires a match."
-              echo "Missing, extra, ambiguous, mislabeled, or unsupported assertions are unavailable."
+              echo "Every coordinated protected subject must be represented. Missing, extra,"
+              echo "ambiguous, mislabeled, or unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo

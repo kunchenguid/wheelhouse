@@ -732,11 +732,18 @@ def test_class_b_semantic_admission_boundary():
             "effect": "tightened",
             "evidence": {
                 "source": "target.txt",
-                "quote": (
-                    "The existing delivery contract now requires review."
-                ),
+                "quote": "Existing delivery contract is tightened for review.",
             },
-        }
+        },
+        {
+            "claim": "Existing delivery contract is tightened for review",
+            "subject": "delivery_contract",
+            "effect": "tightened",
+            "evidence": {
+                "source": "target.txt",
+                "quote": "Existing delivery contract is tightened for review.",
+            },
+        },
     ]
     observed = normalize(
         observed_input,
@@ -749,7 +756,7 @@ def test_class_b_semantic_admission_boundary():
             (
                 "target.txt",
                 render_card._normalize_evidence_text(
-                    "The existing delivery contract now requires review."
+                    "Existing delivery contract is tightened for review."
                 ),
             ),
         ),
@@ -762,10 +769,8 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNMET,
     )
     mislabeled_input = json.loads(json.dumps(observed_input))
-    mislabeled_input["automerge"]["behavior_assertions"][0].update(
-        subject="documentation_or_tests",
-        effect="unchanged",
-    )
+    for assertion in mislabeled_input["automerge"]["behavior_assertions"]:
+        assertion.update(subject="documentation_or_tests", effect="unchanged")
     mislabeled = normalize(
         mislabeled_input,
         verified=(
@@ -777,7 +782,7 @@ def test_class_b_semantic_admission_boundary():
             (
                 "target.txt",
                 render_card._normalize_evidence_text(
-                    "The existing delivery contract now requires review."
+                    "Existing delivery contract is tightened for review."
                 ),
             ),
         ),
@@ -795,6 +800,10 @@ def test_class_b_semantic_admission_boundary():
         ("new requirement", "The existing workflow now requires review"),
         ("modal requirement", "The default workflow must now require review"),
         ("as-well-as evasion", "Disables tests as well as the existing workflow"),
+        (
+            "mixed documentation clause",
+            "The existing workflow now requires approval and documentation is updated",
+        ),
     ):
         contradictory = normalize(candidate(summary=text + "."))["automerge_verdict"]
         check(
@@ -926,6 +935,96 @@ def test_class_b_semantic_admission_boundary():
         == schema.STATUS_UNAVAILABLE,
     )
 
+    polarity_input = candidate()
+    polarity_input["automerge"] = dict(polarity_input["automerge"])
+    polarity_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Open monitored runs lose authentication sessions."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Open monitored runs never lose authentication sessions.",
+        },
+        "intended_behavior_restored": (
+            "Open monitored runs restore authentication sessions."
+        ),
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": (
+                "Open monitored runs do not restore authentication sessions."
+            ),
+        },
+    }
+    polarity = normalize(
+        polarity_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs never lose authentication sessions."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs do not restore authentication sessions."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: restoration polarity inversion is unavailable",
+        am.verdict_eligible(polarity)[0] is False
+        and am.behavior_verdict_facts(polarity)[0]["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    hidden_contract_input = candidate()
+    hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
+    hidden_contract_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Existing direct-PR workflow now requires Codex review."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Existing direct-PR workflow now requires Codex review.",
+        },
+        "intended_behavior_restored": (
+            "Existing direct-PR workflow restores Codex review routing."
+        ),
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": "Existing direct-PR workflow restores Codex review routing.",
+        },
+    }
+    hidden_contract = normalize(
+        hidden_contract_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Existing direct-PR workflow now requires Codex review."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Existing direct-PR workflow restores Codex review routing."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: restoration-only contract change is unavailable",
+        am.verdict_eligible(hidden_contract)[0] is False
+        and am.behavior_verdict_facts(hidden_contract)[0]["g6_behavior_class"][
+            "status"
+        ]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
     changed_default = dict(valid, changes_existing_or_default_behavior=True)
     changed_facts, _ = am.behavior_verdict_facts(changed_default)
     check(
@@ -959,6 +1058,16 @@ def test_class_b_semantic_admission_boundary():
         (
             "explicit no-change",
             "The existing default workflow remains unchanged",
+            "existing_workflow",
+        ),
+        (
+            "negative modal",
+            "The existing workflow will not change",
+            "existing_workflow",
+        ),
+        (
+            "negative passive",
+            "The existing workflow is not changed",
             "existing_workflow",
         ),
     ):

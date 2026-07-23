@@ -2343,6 +2343,10 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
         if (
             not defect_tokens.issubset(defect_source_tokens)
             or not restored_tokens.issubset(restored_source_tokens)
+            or _semantic_polarity(normalized["corrected_defect"])
+            != _semantic_polarity(defect_ref["quote"])
+            or _semantic_polarity(normalized["intended_behavior_restored"])
+            != _semantic_polarity(restored_ref["quote"])
             or len(
                 defect_tokens.intersection(restored_tokens)
                 .intersection(defect_source_tokens)
@@ -2364,16 +2368,50 @@ def _protected_contract_claims(texts):
     return claims
 
 
+_EXPLICIT_NEGATION_RE = re.compile(
+    r"\b(?:never|"
+    r"(?:do|does|did|will|would|must|is|are|was|were|has|have)\s+not|"
+    r"(?:is|are|was|were)\s+not\s+\w+ed)\b",
+    re.I,
+)
+_NEGATED_CONTRACT_EFFECT_RE = re.compile(
+    r"\b(?:"
+    r"(?:will|would|must|does|do|did)\s+not\s+"
+    r"(?:change|tighten|alter|modify|require)"
+    r"|(?:is|are|was|were)\s+not\s+"
+    r"(?:changed|changing|tightened|required|mandatory)"
+    r"|without\s+changing"
+    r"|does\s+not\s+change"
+    r"|no(?:\s+\w+){0,7}\s+changes?"
+    r")\b",
+    re.I,
+)
+
+
+def _semantic_polarity(text):
+    value = str(text or "")
+    return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
+
+
 def _derive_behavior_assertion_semantics(claim):
     text = str(claim or "").casefold()
     subjects = set()
     documentation = bool(
         re.search(r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", text)
     )
-    coordinated_contract = bool(
+    documentation_only_workflow = bool(
         re.search(
-            r"\b(?:and|as\s+well\s+as|along\s+with)\b"
-            r".{0,80}\b(?:existing|default)\b.{0,50}\b(?:workflow|mode|behavio[u]?r|contract)\b",
+            r"\b(?:workflow[\s/-]+(?:documentation|docs?|tests?|fixtures?|examples?)|"
+            r"(?:documentation|docs?|tests?|fixtures?|examples?)"
+            r".{0,50}\b(?:for|of)\b.{0,30}\bworkflow)\b",
+            text,
+        )
+    )
+    mixed_workflow = bool(
+        documentation
+        and re.search(
+            r"\bworkflow\b.{0,80}\b(?:and|as\s+well\s+as|along\s+with)\b"
+            r".{0,80}\b(?:documentation|docs?|tests?|fixtures?|examples?)\b",
             text,
         )
     )
@@ -2386,15 +2424,11 @@ def _derive_behavior_assertion_semantics(claim):
     if re.search(r"\b(?:existing|default)\b.{0,50}\bbehavio[u]?r\b", text):
         subjects.add("default_behavior")
     if re.search(r"\bworkflow\b", text) and (
-        not documentation or coordinated_contract
+        not documentation_only_workflow or mixed_workflow
     ):
         subjects.add("existing_workflow")
-    affirmative_text = re.sub(
-        r"\b(?:without\s+changing|does\s+not\s+change|"
-        r"no(?:\s+\w+){0,7}\s+changes?)\b",
-        "",
-        text,
-    )
+    negative_contract_effect = bool(_NEGATED_CONTRACT_EFFECT_RE.search(text))
+    affirmative_text = _NEGATED_CONTRACT_EFFECT_RE.sub("", text)
     effects = set()
     if re.search(
         r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
@@ -2414,10 +2448,8 @@ def _derive_behavior_assertion_semantics(claim):
         effects.add("changed")
     if re.search(r"\brestor(?:e|es|ed|ing)\b", affirmative_text):
         effects.add("restored")
-    if re.search(
-        r"\b(?:without\s+changing|does\s+not\s+change|"
-        r"no(?:\s+\w+){0,7}\s+changes?|"
-        r"(?:remains?|is|are)\s+unchanged|preserv(?:e|es|ed|ing))\b",
+    if negative_contract_effect or re.search(
+        r"\b(?:(?:remains?|is|are)\s+unchanged|preserv(?:e|es|ed|ing))\b",
         text,
     ):
         effects.add("unchanged")
@@ -2474,6 +2506,17 @@ def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs)
             < 2
         ):
             return None
+        claim_semantics = _derive_behavior_assertion_semantics(claim)
+        evidence_semantics = _derive_behavior_assertion_semantics(
+            evidence_ref["quote"]
+        )
+        if (
+            claim_semantics is None
+            or evidence_semantics is None
+            or (subject, effect) not in claim_semantics
+            or (subject, effect) not in evidence_semantics
+        ):
+            return None
         normalized.append(
             {
                 "claim": claim,
@@ -2507,14 +2550,39 @@ def _behavior_admission_record(
     verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
     if not isinstance(verified_refs, tuple):
         verified_refs = ()
-    normalized = _normalize_class_b_restoration(
-        restoration, verified_evidence_refs=verified_refs
-    )
     semantic_text = [
         triage_data.get("summary", ""),
         triage_data.get("product_implications", ""),
         evidence,
     ]
+    if isinstance(restoration, dict):
+        semantic_text.extend(
+            restoration.get(field, "")
+            for field in ("corrected_defect", "intended_behavior_restored")
+        )
+        semantic_text.extend(
+            (restoration.get(field) or {}).get("quote", "")
+            if isinstance(restoration.get(field), dict)
+            else ""
+            for field in (
+                "corrected_defect_evidence",
+                "intended_behavior_restored_evidence",
+            )
+        )
+    if isinstance(behavior_assertions, list):
+        for assertion in behavior_assertions:
+            if not isinstance(assertion, dict):
+                continue
+            semantic_text.append(assertion.get("claim", ""))
+            assertion_evidence = assertion.get("evidence")
+            semantic_text.append(
+                assertion_evidence.get("quote", "")
+                if isinstance(assertion_evidence, dict)
+                else ""
+            )
+    normalized = _normalize_class_b_restoration(
+        restoration, verified_evidence_refs=verified_refs
+    )
     assertions = _normalize_behavior_assertions(
         behavior_assertions,
         semantic_text,
@@ -2532,12 +2600,6 @@ def _behavior_admission_record(
     }
     if behavior_class == "B" and normalized is not None:
         admission.update(normalized)
-        semantic_text.extend(
-            [
-                normalized["corrected_defect"],
-                normalized["intended_behavior_restored"],
-            ]
-        )
     return admission
 
 
