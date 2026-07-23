@@ -2554,6 +2554,13 @@ def _restoration_propositions(text):
             if not predicate_word.endswith("ing"):
                 return None
             passive_start = None
+        if auxiliary_index is not None and passive_start is None:
+            intervening = words[auxiliary_index + 1 : predicate_index]
+            if any(
+                word not in {"never", "not", "now"}
+                for word in intervening
+            ):
+                return None
         passive = passive_start is not None
         subject_end = (
             passive_start
@@ -2843,7 +2850,7 @@ def _atomic_semantic_spans(text):
             and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(governed_text) is None
         )
         if locally_unprotected:
-            subjects.append(("_unprotected", end, next_start))
+            subjects.append(("_unprotected", end, end))
     return subjects, effects, documentation_topic
 
 

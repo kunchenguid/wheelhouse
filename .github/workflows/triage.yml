@@ -717,7 +717,7 @@ jobs:
               echo "supported compound-passive"
               echo "argument roles and"
               echo "its own polarity. Missing, extra,"
-              echo "ambiguous, mislabeled, or unsupported assertions are unavailable."
+              echo "ambiguous, mislabeled, or auxiliary-modified unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo

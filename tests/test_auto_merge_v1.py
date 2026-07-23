@@ -1200,6 +1200,14 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: unsupported auxiliary modifier is unavailable",
+        render_card._restoration_claim_supported(
+            "Authentication sessions are currently blocked by monitored runs.",
+            "Authentication sessions are currently blocking monitored runs.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1305,6 +1313,11 @@ def test_class_b_semantic_admission_boundary():
             "default behavior examples",
             "Changes examples of the default behavior",
             "documentation_or_tests",
+        ),
+        (
+            "unprotected update before preserved workflow",
+            "Updates release notes while preserving the existing workflow",
+            "existing_workflow",
         ),
     ):
         neutral_input = candidate(summary=text + ".")
@@ -1592,6 +1605,19 @@ def test_class_b_semantic_admission_boundary():
         == {
             ("existing_workflow", "tightened"),
             ("documentation_or_tests", "tightened"),
+        },
+    )
+    changed_mixed_reverse_text = (
+        "Changes existing workflow and delivery contract documentation"
+    )
+    check(
+        "semantic admission: leading change cannot acquire docs neutrality",
+        render_card._derive_behavior_assertion_semantics(
+            changed_mixed_reverse_text
+        )
+        == {
+            ("existing_workflow", "changed"),
+            ("documentation_or_tests", "changed"),
         },
     )
 
