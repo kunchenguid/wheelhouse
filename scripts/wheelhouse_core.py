@@ -1368,21 +1368,23 @@ def _compliance_context_identity(context, owner, repo):
     if check_run_id is None or not isinstance(details_url, str):
         return None
     parsed = urlparse(details_url)
-    parts = parsed.path.strip("/").split("/")
+    parts = parsed.path.split("/")
     if (
         parsed.scheme != "https"
+        or parsed.netloc != "github.com"
         or parsed.params
         or parsed.query
         or parsed.fragment
-        or len(parts) != 7
-        or parts[0].casefold() != str(owner).casefold()
-        or parts[1].casefold() != str(repo).casefold()
-        or parts[2:4] != ["actions", "runs"]
-        or parts[5] != "job"
+        or len(parts) != 8
+        or parts[0]
+        or parts[1].casefold() != str(owner).casefold()
+        or parts[2].casefold() != str(repo).casefold()
+        or parts[3:5] != ["actions", "runs"]
+        or parts[6] != "job"
     ):
         return None
-    run_id = _positive_api_int(parts[4])
-    url_job_id = _positive_api_int(parts[6])
+    run_id = _positive_api_int(parts[5])
+    url_job_id = _positive_api_int(parts[7])
     if run_id is None or url_job_id != check_run_id:
         return None
     return (check_run_id, run_id)
@@ -1642,8 +1644,10 @@ def _event_rollup_failure_is_accounted(contexts, cfg, evidence):
                 if binding.get("run_number") == latest_number:
                     if check_id != latest_check_id or outcome != "pass":
                         return False
-                elif outcome != "pass":
+                elif outcome in ("fail", "cancelled"):
                     saw_accounted_nonpass = True
+                elif outcome != "pass":
+                    return False
                 continue
             other_by_name.setdefault(name, []).append(outcome)
         elif context.get("__typename") == "StatusContext" or "context" in context:

@@ -311,6 +311,95 @@ def test_identity_and_order_mismatches_are_rejected():
     )
 
 
+def test_check_details_url_requires_canonical_github_authority_and_path():
+    run = workflow_run(1001, 10, "opened")
+    canonical = check_run(5001, 1001)
+    invalid_urls = {
+        "alternate host": (
+            "https://attacker.example/%s/%s/actions/runs/1001/job/5001"
+            % (OWNER, REPO)
+        ),
+        "credentials": (
+            "https://attacker@github.com/%s/%s/actions/runs/1001/job/5001"
+            % (OWNER, REPO)
+        ),
+        "port": (
+            "https://github.com:443/%s/%s/actions/runs/1001/job/5001"
+            % (OWNER, REPO)
+        ),
+        "trailing-dot host": (
+            "https://github.com./%s/%s/actions/runs/1001/job/5001"
+            % (OWNER, REPO)
+        ),
+        "host case": (
+            "https://GITHUB.com/%s/%s/actions/runs/1001/job/5001"
+            % (OWNER, REPO)
+        ),
+        "trailing slash": canonical["detailsUrl"] + "/",
+        "duplicate path separator": canonical["detailsUrl"].replace(
+            "/actions/", "//actions/"
+        ),
+    }
+    for label, details_url in invalid_urls.items():
+        context = copy.deepcopy(canonical)
+        context["detailsUrl"] = details_url
+        (comp, _, _, _), evidence = reduce([run], [context])
+        check(
+            "check details URL rejects %s" % label,
+            comp == "pending" and evidence.get("complete") is False,
+        )
+
+
+def test_only_substantive_history_accounts_for_rollup_failure():
+    latest = workflow_run(1002, 11, "edited")
+    latest_context = check_run(5002, 1002)
+    historical_states = {
+        "pending": (
+            workflow_run(
+                1001, 10, "opened", status="in_progress", conclusion=None
+            ),
+            check_run(5001, 1001, conclusion=None, status="IN_PROGRESS"),
+        ),
+        "neutral": (
+            workflow_run(1001, 10, "opened", conclusion="neutral"),
+            check_run(5001, 1001, conclusion="NEUTRAL"),
+        ),
+        "skipped": (
+            workflow_run(1001, 10, "opened", conclusion="skipped"),
+            check_run(5001, 1001, conclusion="SKIPPED"),
+        ),
+        "stale": (
+            workflow_run(1001, 10, "opened", conclusion="stale"),
+            check_run(5001, 1001, conclusion="STALE"),
+        ),
+    }
+    for label, (historical, historical_context) in historical_states.items():
+        (comp, _, _, _), evidence = reduce(
+            [historical, latest],
+            [historical_context, latest_context],
+            rollup_state="FAILURE",
+        )
+        check(
+            "historical %s cannot explain raw rollup failure" % label,
+            comp == "fail" and evidence.get("complete") is True,
+        )
+
+    for conclusion in ("failure", "cancelled"):
+        historical = workflow_run(1001, 10, "opened", conclusion=conclusion)
+        historical_context = check_run(
+            5001, 1001, conclusion=conclusion.upper()
+        )
+        (comp, _, _, _), evidence = reduce(
+            [historical, latest],
+            [historical_context, latest_context],
+            rollup_state="FAILURE",
+        )
+        check(
+            "historical %s may explain raw rollup failure" % conclusion,
+            comp == "pass" and evidence.get("complete") is True,
+        )
+
+
 def test_untracked_rollup_failure_still_fails_closed():
     run = workflow_run(1001, 10, "opened")
     nodes = [
@@ -467,6 +556,8 @@ def main():
     test_monotonic_event_order_beats_completion_order()
     test_latest_conservative_states_never_fall_back()
     test_identity_and_order_mismatches_are_rejected()
+    test_check_details_url_requires_canonical_github_authority_and_path()
+    test_only_substantive_history_accounts_for_rollup_failure()
     test_untracked_rollup_failure_still_fails_closed()
     test_pr549_production_shaped_open_edit_edit_history()
     test_actions_reads_are_complete_bounded_and_cached()
