@@ -68,6 +68,16 @@ def test_every_repo_entry_is_well_formed():
             comp is None
             or (isinstance(comp, str) and bool(comp) and comp == comp.strip()),
         )
+        # Event-aware compliance is an explicit, exact-schema opt-in. A present
+        # mapping must normalize successfully; malformed opt-ins may never be
+        # silently treated as legacy same-name reduction.
+        evidence = entry.get("compliance_evidence")
+        normalized_evidence, evidence_error = core.compliance_evidence_config(entry)
+        check(
+            "%s: compliance_evidence is absent or valid exact-schema config" % label,
+            (evidence is None and normalized_evidence is None and not evidence_error)
+            or (evidence is not None and normalized_evidence is not None and not evidence_error),
+        )
         # test_check_patterns, when present, is a list of non-empty strings.
         pats = entry.get("test_check_patterns")
         ok_pats = pats is None or (

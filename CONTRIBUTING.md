@@ -55,6 +55,7 @@ python tests/test_target_observation.py
 python tests/test_target_reconcile_transaction.py
 python tests/test_ci_security_summary.py
 python tests/test_check_status.py
+python tests/test_compliance_event_evidence.py
 python tests/test_author_filter.py
 python tests/test_auto_triage.py
 python tests/test_triage_replay.py

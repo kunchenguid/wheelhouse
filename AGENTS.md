@@ -226,7 +226,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   would otherwise say `"pass"`/`"n/a"`, except when every non-pass rollup
   context is an ignorable CANCELLED sibling of a proven same-name SUCCESS
   (card #1537 concurrency poison). Untracked/optional failures still fail
-  closed. See `tests/test_check_status.py`.
+  closed. Repositories whose compliance check depends on mutable PR-body events
+  may explicitly opt into `wheelhouse.actions-current-body/v1`; the producer,
+  bounded Actions API reads, exact workflow/run/CheckRun bindings, latest
+  `run_number` semantics, and fail-closed freshness rules are authoritative in
+  `docs/CURRENT_BODY_COMPLIANCE.md` and covered by
+  `tests/test_compliance_event_evidence.py`. Non-opted-in reduction is unchanged.
+  See `tests/test_check_status.py`.
 - **Failed decision = durable open `blocked`, never pure `needs-decision`
   (card #447), except recoverable merge conflicts.** `decision-handler.yml`
   maps `terminal_state == 'error'` onto the same label path as `blocked` (add
