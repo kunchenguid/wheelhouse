@@ -990,6 +990,20 @@ def test_card_1585_escaped_quote_anchor_regression():
             "the repository's sufficiently long exact target span",
         ),
     )
+    unquoted_punctuation = [
+        "the users' permissions remain sufficiently precise and stable",
+        "the maintainer's choice remains sufficiently precise and stable",
+        'the 12" display remains sufficiently bright and readable',
+        'the size is 12"x14" with sufficiently stable proportions',
+        'the embedded token foo"bar remains sufficiently exact here',
+    ]
+    check(
+        "anchor: unquoted possessives and measurements remain accepted",
+        all(
+            rc.evidence_anchor_ok("target.txt: %s" % value, value)
+            for value in unquoted_punctuation
+        ),
+    )
     malformed_quotes = [
         "target.txt: '%s\"" % exact_span,
         'target.txt: "%s\'' % exact_span,

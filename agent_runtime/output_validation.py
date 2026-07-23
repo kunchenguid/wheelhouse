@@ -63,12 +63,8 @@ def normalize_evidence_text(text: Any) -> str:
 
 
 def _is_quote_opener(text: str, index: int) -> bool:
-    delimiter = text[index]
-    if delimiter == '"':
-        return True
     before = text[index - 1] if index else ""
-    after = text[index + 1] if index + 1 < len(text) else ""
-    return not (before.isalnum() and after.isalnum())
+    return not before or before.isspace() or before in ":([{=,`\\"
 
 
 def _scan_quoted_evidence(
