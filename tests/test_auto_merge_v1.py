@@ -1102,6 +1102,46 @@ def test_class_b_semantic_admission_boundary():
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    role_reversal_input = candidate()
+    role_reversal_input["automerge"] = dict(role_reversal_input["automerge"])
+    role_reversal_input["automerge"]["class_b_restoration"] = {
+        "corrected_defect": (
+            "Authentication sessions block monitored runs."
+        ),
+        "corrected_defect_evidence": {
+            "source": "target.txt",
+            "quote": "Monitored runs block authentication sessions.",
+        },
+        "intended_behavior_restored": restored_quote,
+        "intended_behavior_restored_evidence": {
+            "source": "target-src/lib/recovery.py",
+            "quote": restored_quote,
+        },
+    }
+    role_reversal = normalize(
+        role_reversal_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Monitored runs block authentication sessions."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: reversed argument roles are unavailable",
+        am.verdict_eligible(role_reversal)[0] is False
+        and am.behavior_verdict_facts(role_reversal)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1276,6 +1316,90 @@ def test_class_b_semantic_admission_boundary():
     check(
         "semantic admission: preserved workflow with docs change remains eligible",
         am.verdict_eligible(preserved)[0] is True,
+    )
+
+    coordinated_docs_text = (
+        "Changes documentation for the existing mode and workflow"
+    )
+    coordinated_docs_input = candidate(summary=coordinated_docs_text + ".")
+    coordinated_docs_input["automerge"] = dict(
+        coordinated_docs_input["automerge"]
+    )
+    coordinated_docs_input["automerge"]["behavior_assertions"] = list(
+        coordinated_docs_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": coordinated_docs_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {
+                "source": "target.txt",
+                "quote": coordinated_docs_text,
+            },
+        }
+    ]
+    coordinated_docs = normalize(
+        coordinated_docs_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(coordinated_docs_text),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: coordinated docs topics remain eligible",
+        am.verdict_eligible(coordinated_docs)[0] is True,
+    )
+
+    unbound_effect_text = (
+        "Updates documentation for the delivery contract while tightening it"
+    )
+    unbound_effect_input = candidate(summary=unbound_effect_text + ".")
+    unbound_effect_input["automerge"] = dict(
+        unbound_effect_input["automerge"]
+    )
+    unbound_effect_input["automerge"]["behavior_assertions"] = list(
+        unbound_effect_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": unbound_effect_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {
+                "source": "target.txt",
+                "quote": unbound_effect_text,
+            },
+        }
+    ]
+    unbound_effect = normalize(
+        unbound_effect_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(unbound_effect_text),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: unbound protected effect is unavailable",
+        am.verdict_eligible(unbound_effect)[0] is False
+        and am.behavior_verdict_facts(unbound_effect)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
     )
 
     for label, text, assertions in (

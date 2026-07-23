@@ -2435,7 +2435,7 @@ def _semantic_polarity(text):
 _RESTORATION_CLAUSE_RE = re.compile(
     r"\s*(?:[,;]|\b(?:and|but|whereas|while)\b)\s*", re.I
 )
-_RESTORATION_POLARITY_WORDS = frozenset(
+_RESTORATION_AUXILIARIES = frozenset(
     {
         "are",
         "can",
@@ -2448,8 +2448,6 @@ _RESTORATION_POLARITY_WORDS = frozenset(
         "have",
         "is",
         "must",
-        "never",
-        "not",
         "shall",
         "should",
         "was",
@@ -2458,6 +2456,47 @@ _RESTORATION_POLARITY_WORDS = frozenset(
         "would",
     }
 )
+_RESTORATION_PREDICATES = {
+    word: lemma
+    for lemma, words in {
+        "affect": ("affect", "affects", "affected", "affecting"),
+        "block": ("block", "blocks", "blocked", "blocking"),
+        "break": ("break", "breaks", "broke", "broken", "breaking"),
+        "change": ("change", "changes", "changed", "changing"),
+        "disable": ("disable", "disables", "disabled", "disabling"),
+        "drop": ("drop", "drops", "dropped", "dropping"),
+        "emit": ("emit", "emits", "emitted", "emitting"),
+        "fail": ("fail", "fails", "failed", "failing"),
+        "lose": ("lose", "loses", "lost", "losing"),
+        "persist": ("persist", "persists", "persisted", "persisting"),
+        "preserve": ("preserve", "preserves", "preserved", "preserving"),
+        "recover": ("recover", "recovers", "recovered", "recovering"),
+        "remain": ("remain", "remains", "remained", "remaining"),
+        "reopen": ("reopen", "reopens", "reopened", "reopening"),
+        "require": ("require", "requires", "required", "requiring"),
+        "restore": ("restore", "restores", "restored", "restoring"),
+        "resume": ("resume", "resumes", "resumed", "resuming"),
+        "retain": ("retain", "retains", "retained", "retaining"),
+        "return": ("return", "returns", "returned", "returning"),
+        "route": ("route", "routes", "routed", "routing"),
+        "support": ("support", "supports", "supported", "supporting"),
+        "survive": ("survive", "survives", "survived", "surviving"),
+        "tighten": ("tighten", "tightens", "tightened", "tightening"),
+        "update": ("update", "updates", "updated", "updating"),
+    }.items()
+    for word in words
+}
+_RESTORATION_ROLE_STOP_WORDS = _RESTORATION_AUXILIARIES | frozenset(
+    {"after", "before", "by", "never", "not", "now", "the"}
+)
+
+
+def _restoration_role(words):
+    return frozenset(
+        _restoration_subject_tokens(" ".join(words)).difference(
+            _RESTORATION_ROLE_STOP_WORDS
+        )
+    )
 
 
 def _restoration_propositions(text):
@@ -2466,12 +2505,52 @@ def _restoration_propositions(text):
     for clause in _RESTORATION_CLAUSE_RE.split(normalized):
         if not clause.strip():
             return None
-        tokens = _restoration_subject_tokens(clause).difference(
-            _RESTORATION_POLARITY_WORDS
-        )
-        if not tokens:
+        words = re.findall(r"[a-z][a-z0-9_-]*", clause.casefold())
+        predicates = [
+            (index, _RESTORATION_PREDICATES[word])
+            for index, word in enumerate(words)
+            if word in _RESTORATION_PREDICATES
+        ]
+        if len(predicates) != 1:
             return None
-        propositions.append((frozenset(tokens), _semantic_polarity(clause)))
+        predicate_index, predicate = predicates[0]
+        auxiliary_index = next(
+            (
+                index
+                for index in range(predicate_index - 1, -1, -1)
+                if words[index] in _RESTORATION_AUXILIARIES
+            ),
+            None,
+        )
+        passive = (
+            auxiliary_index is not None
+            and words[auxiliary_index] in {"are", "is", "was", "were"}
+            and all(
+                word in {"never", "not", "now"}
+                for word in words[auxiliary_index + 1 : predicate_index]
+            )
+        )
+        subject_end = (
+            auxiliary_index if auxiliary_index is not None else predicate_index
+        )
+        left_role = _restoration_role(words[:subject_end])
+        trailing = words[predicate_index + 1 :]
+        if passive:
+            if "by" in trailing:
+                by_index = trailing.index("by")
+                agent = _restoration_role(trailing[by_index + 1 :])
+                patient = left_role | _restoration_role(trailing[:by_index])
+            else:
+                agent = frozenset()
+                patient = left_role | _restoration_role(trailing)
+        else:
+            agent = left_role
+            patient = _restoration_role(trailing)
+        if not patient or (not agent and not passive):
+            return None
+        propositions.append(
+            (predicate, agent, patient, _semantic_polarity(clause))
+        )
     return tuple(propositions)
 
 
@@ -2484,22 +2563,7 @@ def _restoration_claim_supported(claim, evidence):
         or len(claim_propositions) != len(evidence_propositions)
     ):
         return False
-    matched = set()
-    for claim_tokens, claim_polarity in claim_propositions:
-        candidates = [
-            (index, evidence_polarity)
-            for index, (evidence_tokens, evidence_polarity) in enumerate(
-                evidence_propositions
-            )
-            if claim_tokens.issubset(evidence_tokens)
-        ]
-        if len(candidates) != 1:
-            return False
-        index, evidence_polarity = candidates[0]
-        if index in matched or claim_polarity != evidence_polarity:
-            return False
-        matched.add(index)
-    return len(matched) == len(evidence_propositions)
+    return claim_propositions == evidence_propositions
 
 
 _DOCUMENTATION_WORD_RE = re.compile(
@@ -2602,14 +2666,15 @@ def _atomic_semantic_spans(text):
             protected_matches.append((subject, match.start(), match.end()))
     protected_matches.sort(key=lambda item: (item[1], item[2], item[0]))
     seen_spans = set()
+    documentation_topic = False
     for subject, start, end in protected_matches:
         identity = (start, end)
         if identity in seen_spans:
             return None
         seen_spans.add(identity)
-        if not _is_documentation_topic(
-            text, (start, end), documentation_spans
-        ):
+        if _is_documentation_topic(text, (start, end), documentation_spans):
+            documentation_topic = True
+        else:
             subjects.append((subject, start, end))
 
     effects = []
@@ -2626,16 +2691,69 @@ def _atomic_semantic_spans(text):
                     span[0],
                     span[1],
                     match.group(0).casefold().startswith("without "),
+                    False,
                 )
             )
-    return subjects, effects
+    semantic_starts = sorted(
+        [start for _, start, _ in subjects]
+        + [start for _, start, _, _, _ in effects]
+    )
+    effects = [
+        (
+            effect,
+            start,
+            end,
+            subordinate_after,
+            len(
+                {
+                    word
+                    for word in re.findall(
+                        r"[a-z][a-z0-9_-]*",
+                        text[
+                            end : next(
+                                (
+                                    item
+                                    for item in semantic_starts
+                                    if item > end
+                                ),
+                                len(text),
+                            )
+                        ],
+                        re.I,
+                    )
+                    if word.casefold()
+                    not in {
+                        "a",
+                        "an",
+                        "it",
+                        "that",
+                        "the",
+                        "them",
+                        "this",
+                        "while",
+                        "without",
+                    }
+                }
+            )
+            >= 2,
+        )
+        for effect, start, end, subordinate_after, _ in effects
+    ]
+    return subjects, effects, documentation_topic
 
 
 def _bind_atomic_semantics(subjects, effects):
     semantics = set()
+    consumed_effects = set()
     for subject, start, end in subjects:
         ranked = []
-        for effect, effect_start, effect_end, subordinate_after in effects:
+        for index, (
+            effect,
+            effect_start,
+            effect_end,
+            subordinate_after,
+            _,
+        ) in enumerate(effects):
             if subordinate_after and effect_start >= end:
                 continue
             distance = (
@@ -2645,19 +2763,40 @@ def _bind_atomic_semantics(subjects, effects):
                 if effect_start >= end
                 else 0
             )
-            ranked.append((max(0, distance), effect))
+            ranked.append((max(0, distance), effect, index))
         if not ranked:
             return None
         nearest_distance = min(item[0] for item in ranked)
-        nearest = {effect for distance, effect in ranked if distance == nearest_distance}
+        nearest = {
+            (effect, index)
+            for distance, effect, index in ranked
+            if distance == nearest_distance
+        }
         if len(nearest) != 1:
             return None
-        semantics.add((subject, next(iter(nearest))))
+        effect, index = next(iter(nearest))
+        consumed_effects.add(index)
+        semantics.add((subject, effect))
+    for index, (
+        _,
+        effect_start,
+        _,
+        subordinate_after,
+        explicit_unprotected_object,
+    ) in enumerate(effects):
+        if index not in consumed_effects and not (
+            explicit_unprotected_object
+            or (
+                subordinate_after
+                and effect_start >= max(end for _, _, end in subjects)
+            )
+        ):
+            return None
     return semantics
 
 
 def _bind_propagated_semantics(subjects, effects):
-    propagated = {effect for effect, _, _, _ in effects}
+    propagated = {effect for effect, _, _, _, _ in effects}
     if len(propagated) != 1:
         return None
     effect = next(iter(propagated))
@@ -2676,11 +2815,12 @@ def _derive_behavior_assertion_semantics(claim):
     semantics = set()
     pending_subjects = None
     prior_effects = None
+    prior_documentation_topic = False
     for part in atomic:
         spans = _atomic_semantic_spans(part)
         if spans is None:
             return None
-        subjects, effects = spans
+        subjects, effects, documentation_topic = spans
         if subjects and effects:
             if pending_subjects is not None:
                 propagated = _bind_propagated_semantics(
@@ -2695,13 +2835,22 @@ def _derive_behavior_assertion_semantics(claim):
                 return None
             semantics.update(bound)
             prior_effects = effects
+            prior_documentation_topic = documentation_topic
         elif subjects:
-            if prior_effects is not None:
+            if prior_documentation_topic and all(
+                subject != "documentation_or_tests"
+                for subject, _, _ in subjects
+            ):
+                pending_subjects = None
+                prior_effects = None
+                prior_documentation_topic = False
+            elif prior_effects is not None:
                 bound = _bind_propagated_semantics(subjects, prior_effects)
                 if bound is None:
                     return None
                 semantics.update(bound)
                 pending_subjects = None
+                prior_documentation_topic = False
             else:
                 pending_subjects = (pending_subjects or []) + subjects
             prior_effects = None
@@ -2714,6 +2863,7 @@ def _derive_behavior_assertion_semantics(claim):
             semantics.update(bound)
             pending_subjects = None
             prior_effects = effects
+            prior_documentation_topic = False
     if not semantics or (pending_subjects is not None and prior_effects is None):
         return None
     return semantics
