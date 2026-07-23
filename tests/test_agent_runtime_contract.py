@@ -168,6 +168,62 @@ def main():
         else:
             check("action schema: issue action allowlist enforced", False)
 
+        pr_schema = json.load(
+            open(ACTION_SCHEMAS / "triage-pr-v1.schema.json", encoding="utf-8")
+        )
+        restoration = {
+            "corrected_defect": "Daemon restart lost an open monitored run.",
+            "corrected_defect_evidence": {
+                "source": "target.txt",
+                "quote": "Daemon restart lost an open monitored run.",
+            },
+            "intended_behavior_restored": (
+                "An open monitored run remains recoverable."
+            ),
+            "intended_behavior_restored_evidence": {
+                "source": "target-src/lib/recovery.py",
+                "quote": "An open monitored run remains recoverable.",
+            },
+        }
+        pr_valid = dict(valid, recommended_action="merge")
+        pr_valid["automerge"] = {
+            "behavior_class": "B",
+            "behavior_assertions": [],
+            "class_b_restoration": restoration,
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+        }
+        validate_schema(pr_valid, pr_schema)
+        check("action schema: bounded class B restoration evidence accepted", True)
+        for label, bad_restoration in (
+            (
+                "short",
+                dict(restoration, corrected_defect="too short"),
+            ),
+            (
+                "oversized",
+                dict(restoration, intended_behavior_restored="x" * 501),
+            ),
+            (
+                "unknown-field",
+                dict(restoration, unsupported="value"),
+            ),
+        ):
+            malformed = copy.deepcopy(pr_valid)
+            malformed["automerge"]["class_b_restoration"] = bad_restoration
+            try:
+                validate_schema(malformed, pr_schema)
+            except ContractError:
+                check(
+                    "action schema: class B restoration %s rejected" % label,
+                    True,
+                )
+            else:
+                check(
+                    "action schema: class B restoration %s rejected" % label,
+                    False,
+                )
+
         task_schema = load_schema("AgentTask")
         check("schema: draft 2020-12 pinned", task_schema["$schema"].endswith("2020-12/schema"))
         check("schema: exact API version pinned", task_schema["properties"]["apiVersion"]["const"] == "wheelhouse.agent-runtime/v1alpha1")

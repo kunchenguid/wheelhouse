@@ -121,6 +121,7 @@ def valid_triage():
         "recommended_reason": "Checks and behavior are safe.",
         "automerge": {
             "behavior_class": "A",
+            "behavior_assertions": [],
             "aligns_with_vision": True,
             "changes_existing_or_default_behavior": False,
             "recommend_merge": True,

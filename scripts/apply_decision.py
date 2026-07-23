@@ -483,6 +483,11 @@ def _comment_target(slug, number, text):
     )
 
 
+def _target_safe_action_text(text):
+    """Remove GitHub mention markers from owner/model-authored target text."""
+    return str(text or "").replace("@", "")
+
+
 def _close_target(slug, number):
     core.gh_rest(
         "/repos/%s/issues/%s" % (slug, number),
@@ -1060,7 +1065,7 @@ def do_approve_ci(owner, repo, number):
 def do_close(owner, repo, number, reason=None):
     slug = "%s/%s" % (owner, repo)
     if reason:
-        _comment_target(slug, number, reason)
+        _comment_target(slug, number, _target_safe_action_text(reason))
     try:
         _close_target(slug, number)
     except RuntimeError as e:
@@ -1072,7 +1077,7 @@ def do_close(owner, repo, number, reason=None):
 def do_comment(owner, repo, number, text):
     slug = "%s/%s" % (owner, repo)
     try:
-        _comment_target(slug, number, text)
+        _comment_target(slug, number, _target_safe_action_text(text))
     except RuntimeError as e:
         return ("Comment on %s#%s failed: %s" % (repo, number, str(e)[:200]), "error")
     return ("Posted your comment on %s#%s." % (repo, number), "none")
@@ -1122,7 +1127,10 @@ def do_request_changes(owner, repo, number, head_sha, text):
         review = core.gh_rest(
             "/repos/%s/pulls/%s/reviews" % (slug, number),
             method="POST",
-            fields={"body": text, "event": "REQUEST_CHANGES"},
+            fields={
+                "body": _target_safe_action_text(text),
+                "event": "REQUEST_CHANGES",
+            },
         )
         review_id = (review or {}).get("id") if isinstance(review, dict) else None
         submitted_at = (

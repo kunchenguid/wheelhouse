@@ -231,6 +231,18 @@ def behavior_verdict_facts(verdict):
         "class %s" % cls if cls else class_reason,
         class_reason,
     )
+    if cls:
+        admission_status, admission_evidence, admission_reason = (
+            render_card.behavior_admission_status(verdict)
+        )
+        facts["g6_behavior_class"] = {
+            "status": {
+                "admitted": criteria_schema.STATUS_MET,
+                "contradictory": criteria_schema.STATUS_UNMET,
+            }.get(admission_status, criteria_schema.STATUS_UNAVAILABLE),
+            "evidence": admission_evidence,
+            "reason": admission_reason,
+        }
     fact(
         "g6_default_behavior",
         verdict.get("changes_existing_or_default_behavior") is False,
@@ -292,6 +304,7 @@ def verdict_eligible(verdict):
 
     Fields (each defaulting to its disqualifying value if absent):
       behavior_class                        one of A/B/C, else ineligible
+      behavior_admission             (dict)  required, with restoration for B
       aligns_with_vision            (bool)  must be True
       changes_existing_or_default_behavior (bool) must be False
       recommend_merge               (bool)  must be True

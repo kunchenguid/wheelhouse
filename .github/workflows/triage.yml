@@ -124,6 +124,7 @@ jobs:
       correlation_id: ${{ steps.claude-model.outputs.correlation-id }}
       child_timeout_minutes: ${{ steps.claude-model.outputs.child-timeout-minutes }}
       target_artifact: ${{ steps.target-artifact-name.outputs.artifact }}
+      target_source_revision: ${{ steps.source-evidence.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -352,6 +353,18 @@ jobs:
           else
             echo "head_ok=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - id: source-evidence
+        name: Build bounded exact-revision target source evidence
+        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false'
+        run: |
+          set -euo pipefail
+          revision="$(git -C target-src rev-parse HEAD)"
+          python scripts/render_card.py source-evidence-build \
+            --repository-dir target-src \
+            --output-dir target-src-evidence \
+            --expected-revision "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - id: readonly
         if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.skip != 'true' && steps.verify_head.outputs.head_ok != 'false'
@@ -678,6 +691,49 @@ jobs:
               echo "  B = a narrow corrective bug fix that RESTORES intended behavior"
               echo "  C = a NEW feature that is strictly opt-in and disabled by default"
               echo "Other existing/default behavior changes are INELIGIBLE."
+              echo "For class B, class_b_restoration is REQUIRED and must separately"
+              echo "name the concrete corrected defect and intended behavior restored,"
+              echo "share a concrete multi-token domain subject, and bind each claim to"
+              echo "its own exact-source evidence quote carrying that subject. Generic,"
+              echo "incidentally overlapping, polarity-inverted, or unrelated statements"
+              echo "are unavailable. Every restoration claim and quote is also reconciled"
+              echo "as semantic input. Omit"
+              echo "class_b_restoration for every other class. If the summary, product"
+              echo "implications, or evidence says an existing mode, default, workflow,"
+              echo "or delivery contract is tightened or changed, the verdict is unavailable."
+              echo "List every summary/product/evidence clause mentioning a protected"
+              echo "contract in behavior_assertions. Copy claim exactly, type its governed"
+              echo "subject and effect, and attach an exact target.txt or target-src path/quote."
+              echo "Trusted code derives subject/effect independently and requires a match."
+              echo "Every coordinated protected occurrence must be represented in either order;"
+              echo "pending coordinated subjects are unioned and consumed, never overwritten."
+              echo "Bind and consume every effect exactly once at its governed occurrence."
+              echo "Documentation/test coordinated protected objects in either word order remain"
+              echo "neutral topic edges only when one documentation-edit predicate owns every topic;"
+              echo "do not propagate editing effects or suppress mixed behavior predicates. Object topics"
+              echo "are neutral for every protected category, but cannot suppress a mixed contract"
+              echo "change or a verb named test. Normalize every bounded contraction and match"
+              echo "each restoration predicate with canonical bounded active, progressive, or"
+              echo "supported compound-passive"
+              echo "complete ordered argument-role spans from the explicit supported grammar and"
+              echo "its predicate-local polarity. Every temporal or relational complement,"
+              echo "extra proposition, subordinate clause, and residual token is unsupported."
+              echo "Lexical scanning is lossless after contraction normalization: bounded numeric"
+              echo "and symbolic identifiers remain ordered semantic tokens, only terminal sentence"
+              echo "punctuation is neutral, and every unsupported character makes evidence unavailable."
+              echo "Bounded @identifiers remain semantic evidence and persisted state; card rendering"
+              echo "removes the @ only at presentation time so model text cannot notify an account."
+              echo "Every unmatched default phrase outside a proven documentation/test topic fails"
+              echo "closed, except a fully consumed isolated new opt-in disabled-by-default"
+              echo "construction with no protected subject or behavior-change effect, and only"
+              echo "when the declared class is C."
+              echo "Defect and restoration must share the same complete canonical affected-object"
+              echo "role under a bounded repair relation, never a generic or agent-only overlap."
+              echo "Bounded negated modal and compound-passive documentation edits have local"
+              echo "unchanged polarity."
+              echo "Only a fully parsed independent"
+              echo "non-governance object can prove an effect unprotected. Missing, extra,"
+              echo "ambiguous, mislabeled, or auxiliary-modified unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
@@ -735,6 +791,8 @@ jobs:
               fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
+              echo '    "behavior_assertions": [{"claim":"exact protected-contract clause","subject":"existing_mode | default_behavior | existing_workflow | delivery_contract | documentation_or_tests","effect":"unchanged | restored | changed | tightened | new_requirement","evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"}}],'
+              echo '    "class_b_restoration": {"corrected_defect":"bounded defect claim (class B only)","corrected_defect_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"},"intended_behavior_restored":"bounded restored-behavior claim (class B only)","intended_behavior_restored_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"}},'
               echo '    "changes_existing_or_default_behavior": true or false,'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '    "optin_default_off": true or false,'
@@ -959,6 +1017,7 @@ jobs:
             target.txt
             vision.md
             target-facts.json
+            target-src-evidence
           if-no-files-found: error
           retention-days: 1
 
@@ -1257,6 +1316,8 @@ jobs:
           # NOT in the trusted-src snapshot (that predates target.txt), so pass
           # the absolute workspace path.
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          TARGET_SRC_DIR: ${{ github.workspace }}/target-src
+          TARGET_SRC_REVISION: ${{ steps.source-evidence.outputs.revision }}
           VISION_FILE: ${{ github.workspace }}/vision.md
           TARGET_FACTS_FILE: ${{ github.workspace }}/target-facts.json
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -1324,6 +1385,8 @@ jobs:
                 --source-review-number "$SOURCE_REVIEW_NUMBER" \
                 "${behavior_args[@]}" \
                 --target-file "${TARGET_FILE:-}" \
+                --target-src-dir "${TARGET_SRC_DIR:-}" \
+                --target-src-revision "${TARGET_SRC_REVISION:-}" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
                 --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
                 --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"
@@ -1969,6 +2032,9 @@ jobs:
           SOURCE_REVIEW_REPO: ${{ needs.triage.outputs.repo }}
           SOURCE_REVIEW_NUMBER: ${{ needs.triage.outputs.number }}
           TARGET_FILE: ${{ github.workspace }}/target.txt
+          TARGET_SRC_DIR: ${{ github.workspace }}/target-src-evidence/files
+          TARGET_SRC_MANIFEST: ${{ github.workspace }}/target-src-evidence/manifest.json
+          TARGET_SRC_REVISION: ${{ needs.triage.outputs.target_source_revision }}
           VISION_FILE: ${{ github.workspace }}/vision.md
           TARGET_FACTS_FILE: ${{ github.workspace }}/target-facts.json
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -2011,6 +2077,9 @@ jobs:
               --source-review-number "$SOURCE_REVIEW_NUMBER" \
               "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
+              --target-src-dir "${TARGET_SRC_DIR:-}" \
+              --target-src-manifest "${TARGET_SRC_MANIFEST:-}" \
+              --target-src-revision "${TARGET_SRC_REVISION:-}" \
               --execution-file "${TRIAGE_EXECUTION_FILE:-}" \
               --repair-execution-file "${REPAIR_EXECUTION_FILE:-}" \
               --repair-claim-admitted "${REPAIR_CLAIM_ADMITTED:-}"

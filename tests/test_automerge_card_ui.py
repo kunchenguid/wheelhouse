@@ -24,6 +24,23 @@ BASE = "b" * 40
 VISION = "vsha"
 
 
+def behavior_admission(behavior_class="A", contradiction=False):
+    value = {
+        "version": 1,
+        "contradicts_existing_contract": contradiction,
+    }
+    if behavior_class == "B":
+        value.update(
+            {
+                "corrected_defect": "Daemon restart lost an open monitored run.",
+                "intended_behavior_restored": (
+                    "An open monitored run remains recoverable."
+                ),
+            }
+        )
+    return value
+
+
 def check(name, condition):
     print(("ok   " if condition else "FAIL ") + name)
     if not condition:
@@ -64,6 +81,8 @@ def verdict(**overrides):
         "base_sha": BASE,
     }
     value.update(overrides)
+    if "behavior_admission" not in overrides:
+        value["behavior_admission"] = behavior_admission(value["behavior_class"])
     return value
 
 
@@ -74,6 +93,8 @@ def independent_verdict(**overrides):
         "optin_default_off": False,
     }
     value.update(overrides)
+    if "behavior_admission" not in overrides:
+        value["behavior_admission"] = behavior_admission(value["behavior_class"])
     return value
 
 
@@ -328,6 +349,87 @@ def test_each_guarded_criterion_has_a_fail_closed_negative():
             "negative: %s is never displayed MET when its guard fails" % criterion,
             status in (schema.STATUS_UNMET, schema.STATUS_UNAVAILABLE),
         )
+
+
+def test_wh_aud_05_semantic_denial_is_visible_without_masking_other_gates():
+    contradictory = verdict(
+        behavior_class="B",
+        behavior_admission=behavior_admission("B", contradiction=True),
+    )
+    result = evaluate(
+        card_value=card_entry(automerge_verdict=contradictory),
+        full=False,
+    )
+    criterion_rows = rows(result)
+    check(
+        "WH-AUD-05 UI: contradictory class B is visibly UNMET and cannot act",
+        result["eligible"] is False
+        and criterion_rows["g6_behavior_class"]["status"]
+        == schema.STATUS_UNMET
+        and "contradicts" in criterion_rows["g6_behavior_class"]["evidence"],
+    )
+
+    masked = evaluate(
+        card_value=card_entry(automerge_verdict=contradictory),
+        vision=(False, ""),
+        prior=False,
+    )
+    masked_rows = rows(masked)
+    check(
+        "WH-AUD-05 controls: G0 and G3 remain independent denials",
+        masked["eligible"] is False
+        and masked_rows["g0_vision_present"]["status"]
+        == schema.STATUS_UNAVAILABLE
+        and masked_rows["g3_prior_merge"]["status"] == schema.STATUS_UNMET
+        and masked_rows["g6_behavior_class"]["status"] == schema.STATUS_UNMET,
+    )
+
+    control_evidence = {
+        1622: (
+            "Archive retention lost resolved decisions.",
+            "Archive retention retains resolved decisions.",
+        ),
+        1624: (
+            "Normal decision retention broke lifecycle retries.",
+            "Normal decision retention supports lifecycle retries.",
+        ),
+    }
+    for card_number, evidence_pair in control_evidence.items():
+        control = verdict(
+            behavior_class="B",
+            behavior_admission={
+                "version": 1,
+                "contradicts_existing_contract": False,
+                "corrected_defect": evidence_pair[0],
+                "intended_behavior_restored": evidence_pair[1],
+            },
+            changes_existing_or_default_behavior=True,
+        )
+        control_result = evaluate(
+            card_value=card_entry(automerge_verdict=control),
+            full=False,
+        )
+        control_rows = rows(control_result)
+        check(
+            "class B control %s: independent contract-change denial remains" % card_number,
+            control_result["eligible"] is False
+            and control_rows["g6_behavior_class"]["status"] == schema.STATUS_MET
+            and control_rows["g6_default_behavior"]["status"]
+            == schema.STATUS_UNMET,
+        )
+
+    historical = verdict(behavior_class="B")
+    historical.pop("behavior_admission")
+    historical_result = evaluate(
+        card_value=card_entry(automerge_verdict=historical),
+        full=False,
+    )
+    check(
+        "WH-AUD-05 compatibility: incomplete historical class B is unavailable",
+        historical_result["eligible"] is False
+        and rows(historical_result)["g6_behavior_class"]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
 
 def test_owner_bot_and_security_exclusion_evidence_is_distinct():

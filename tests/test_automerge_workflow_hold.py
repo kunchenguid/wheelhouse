@@ -40,6 +40,10 @@ HISTORY_COMMIT = "f" * 40
 def eligible_verdict():
     return {
         "behavior_class": "A",
+        "behavior_admission": {
+            "version": 1,
+            "contradicts_existing_contract": False,
+        },
         "aligns_with_vision": True,
         "changes_existing_or_default_behavior": False,
         "recommend_merge": True,

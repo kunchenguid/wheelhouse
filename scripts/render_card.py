@@ -41,6 +41,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -324,6 +325,17 @@ ACCEPT_TEXT_REQUIRED_ACTIONS = frozenset(
 )
 
 TRIAGE_FIELDS = ("summary", "product_implications")
+CLASS_B_RESTORATION_FIELD = "class_b_restoration"
+BEHAVIOR_ADMISSION_FIELD = "behavior_admission"
+BEHAVIOR_ADMISSION_VERSION = 1
+CLASS_B_RESTORATION_MIN_CHARS = 12
+CLASS_B_RESTORATION_MAX_CHARS = 500
+_VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
+BEHAVIOR_ASSERTIONS_FIELD = "behavior_assertions"
+SOURCE_EVIDENCE_VERSION = 1
+SOURCE_EVIDENCE_MAX_FILES = 1024
+SOURCE_EVIDENCE_MAX_FILE_BYTES = 1_000_000
+SOURCE_EVIDENCE_MAX_TOTAL_BYTES = 32_000_000
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -1075,16 +1087,28 @@ def plan_label_update(desired, current):
     return to_add, to_remove
 
 
-def _clean_triage_text(value, limit=700, default="n/a"):
+def _clean_triage_text_value(value, limit, default, preserve_handles):
     text = str(value or "").strip()
     text = text.replace("\r", "\n")
     text = re.sub(r"\s+", " ", text)
-    # Cards are private to the owner; never notify contributors from model text.
-    text = text.replace("@", "")
     text = text.replace("<!--", "").replace("-->", "")
+    if not preserve_handles:
+        text = text.replace("@", "")
     if len(text) > limit:
         text = text[: limit - 3].rstrip() + "..."
     return text or default
+
+
+def _clean_triage_text(value, limit=700, default="n/a"):
+    return _clean_triage_text_value(value, limit, default, False)
+
+
+def _clean_semantic_triage_text(value, limit=700, default="n/a"):
+    return _clean_triage_text_value(value, limit, default, True)
+
+
+def _display_safe_triage_text(value):
+    return str(value or "").replace("@", "")
 
 
 AUTOMATED_STATUS_LABEL = "`[automated status]`"
@@ -1218,7 +1242,7 @@ def _normalize_triage_with_reason(data):
     # merge recommendation are included only with trusted base-branch VISION.md.
     # Non-material and advisory - auto_merge.py re-validates every field and
     # holds on any doubt.
-    am = normalize_automerge_verdict(data.get("automerge"))
+    am = normalize_automerge_verdict(data.get("automerge"), triage_data=data)
     if am:
         triage["automerge_verdict"] = am
     return triage, ""
@@ -1267,6 +1291,27 @@ def evidence_anchor_ok(evidence, target_text, min_quote_len=12, min_fallback_len
     )
 
 
+def _verified_evidence_spans(
+    evidence, target_text, min_quote_len=12, min_fallback_len=20
+):
+    quotes, fallback = _evidence_candidates(evidence)
+    haystack = _normalize_evidence_text(target_text)
+    verified = []
+    for candidates, minimum in (
+        (quotes, min_quote_len),
+        (fallback, min_fallback_len),
+    ):
+        for candidate in candidates:
+            needle = _normalize_evidence_text(candidate)
+            if (
+                len(needle) >= minimum
+                and needle in haystack
+                and candidate not in verified
+            ):
+                verified.append(candidate)
+    return tuple(verified)
+
+
 def _read_target_text(path, limit=4_000_000):
     """Read the on-disk target.txt for the evidence anchor check, size-bounded.
     Returns "" on any read failure so the caller can fail open (skip the anchor
@@ -1297,6 +1342,262 @@ def _triage_evidence_verified(data, target_file):
     if evidence is None:
         return False
     return evidence_anchor_ok(evidence, target_text)
+
+
+def build_target_source_evidence(repository_dir, output_dir, expected_revision):
+    actual_revision = subprocess.run(
+        ["git", "-C", repository_dir, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if actual_revision != expected_revision:
+        raise ValueError("target source revision mismatch")
+    files_dir = os.path.join(output_dir, "files")
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(files_dir)
+    entries = []
+    total = 0
+    available = True
+    for root, dirs, files in os.walk(repository_dir, followlinks=False):
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name != ".git"
+            and not os.path.islink(os.path.join(root, name))
+        )
+        for name in sorted(files):
+            source_path = os.path.join(root, name)
+            if os.path.islink(source_path) or not os.path.isfile(source_path):
+                continue
+            relative = os.path.relpath(source_path, repository_dir)
+            size = os.path.getsize(source_path)
+            if (
+                size > SOURCE_EVIDENCE_MAX_FILE_BYTES
+                or len(entries) >= SOURCE_EVIDENCE_MAX_FILES
+                or total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+            ):
+                available = False
+                break
+            with open(source_path, "rb") as source_file:
+                content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
+            if len(content) != size:
+                available = False
+                break
+            destination = os.path.join(files_dir, relative)
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as destination_file:
+                destination_file.write(content)
+            entries.append(
+                {
+                    "path": relative.replace(os.sep, "/"),
+                    "size": size,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+            total += size
+        if not available:
+            break
+    if not available:
+        shutil.rmtree(files_dir)
+        os.makedirs(files_dir)
+        entries = []
+        total = 0
+    manifest = {
+        "version": SOURCE_EVIDENCE_VERSION,
+        "revision": actual_revision,
+        "available": available,
+        "file_count": len(entries),
+        "total_bytes": total,
+        "files": entries,
+    }
+    with open(os.path.join(output_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, sort_keys=True, separators=(",", ":"))
+    return manifest
+
+
+def verify_target_source_evidence(
+    files_dir, manifest_file, expected_revision
+):
+    try:
+        with open(manifest_file, encoding="utf-8") as manifest_stream:
+            manifest = json.load(manifest_stream)
+    except (OSError, json.JSONDecodeError):
+        return None
+    required = {
+        "version",
+        "revision",
+        "available",
+        "file_count",
+        "total_bytes",
+        "files",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != required
+        or manifest.get("version") != SOURCE_EVIDENCE_VERSION
+        or manifest.get("revision") != expected_revision
+        or manifest.get("available") is not True
+        or not isinstance(manifest.get("files"), list)
+        or manifest.get("file_count") != len(manifest["files"])
+        or not isinstance(manifest.get("total_bytes"), int)
+        or manifest["file_count"] > SOURCE_EVIDENCE_MAX_FILES
+        or manifest["total_bytes"] > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+    ):
+        return None
+    root = os.path.realpath(files_dir)
+    indexed = {}
+    total = 0
+    for entry in manifest["files"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size", "sha256"}
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("size"), int)
+            or entry["size"] < 0
+            or entry["size"] > SOURCE_EVIDENCE_MAX_FILE_BYTES
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or ""))
+            or entry["path"] in indexed
+            or ".." in entry["path"].split("/")
+        ):
+            return None
+        path = os.path.realpath(os.path.join(root, entry["path"]))
+        try:
+            if (
+                os.path.commonpath((root, path)) != root
+                or os.path.islink(os.path.join(root, entry["path"]))
+                or not os.path.isfile(path)
+                or os.path.getsize(path) != entry["size"]
+            ):
+                return None
+            with open(path, "rb") as source_file:
+                content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
+        except (OSError, ValueError):
+            return None
+        if hashlib.sha256(content).hexdigest() != entry["sha256"]:
+            return None
+        indexed[entry["path"]] = path
+        total += entry["size"]
+    if total != manifest["total_bytes"]:
+        return None
+    return indexed
+
+
+def _read_declared_evidence_source(
+    source,
+    target_file,
+    target_src_dir,
+    target_src_manifest="",
+    target_src_revision="",
+):
+    if source == "target.txt":
+        return _read_target_text(target_file)
+    if not source.startswith("target-src/") or not target_src_dir:
+        return ""
+    relative = source[len("target-src/") :]
+    if not relative or ".." in relative.split("/"):
+        return ""
+    if target_src_manifest:
+        indexed = verify_target_source_evidence(
+            target_src_dir, target_src_manifest, target_src_revision
+        )
+        if indexed is None or relative not in indexed:
+            return ""
+        path = indexed[relative]
+        root = os.path.realpath(target_src_dir)
+    else:
+        root = os.path.realpath(target_src_dir)
+        if target_src_revision:
+            try:
+                actual_revision = subprocess.run(
+                    ["git", "-C", root, "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError):
+                return ""
+            if actual_revision != target_src_revision:
+                return ""
+            try:
+                content = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        root,
+                        "show",
+                        "%s:%s" % (target_src_revision, relative),
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+            except (OSError, subprocess.CalledProcessError):
+                return ""
+            if len(content) > SOURCE_EVIDENCE_MAX_FILE_BYTES:
+                return ""
+            return content.decode("utf-8", "replace")
+        path = os.path.realpath(os.path.join(root, relative))
+    try:
+        if os.path.commonpath((root, path)) != root or not os.path.isfile(path):
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as source_file:
+            return source_file.read(1_000_000)
+    except (OSError, ValueError):
+        return ""
+
+
+def _declared_evidence_refs(data):
+    automerge = data.get("automerge") if isinstance(data, dict) else None
+    if not isinstance(automerge, dict):
+        return ()
+    refs = []
+    restoration = automerge.get(CLASS_B_RESTORATION_FIELD)
+    if isinstance(restoration, dict):
+        refs.extend(
+            (restoration.get(field), True)
+            for field in (
+                "corrected_defect_evidence",
+                "intended_behavior_restored_evidence",
+            )
+        )
+    assertions = automerge.get(BEHAVIOR_ASSERTIONS_FIELD)
+    if isinstance(assertions, list):
+        refs.extend(
+            (assertion.get("evidence"), False)
+            for assertion in assertions
+            if isinstance(assertion, dict)
+        )
+    return tuple(refs)
+
+
+def _bind_verified_evidence_spans(
+    data,
+    target_file,
+    target_src_dir="",
+    target_src_manifest="",
+    target_src_revision="",
+):
+    bounded = dict(data)
+    verified = []
+    for raw_ref, preserve_handles in _declared_evidence_refs(bounded):
+        evidence_ref = _normalize_evidence_ref(raw_ref, preserve_handles)
+        if evidence_ref is None:
+            continue
+        source_text = _read_declared_evidence_source(
+            evidence_ref["source"],
+            target_file,
+            target_src_dir,
+            target_src_manifest,
+            target_src_revision,
+        )
+        needle = _normalize_evidence_text(evidence_ref["quote"])
+        if needle and needle in _normalize_evidence_text(source_text):
+            key = (evidence_ref["source"], needle)
+            if key not in verified:
+                verified.append(key)
+    bounded[_VERIFIED_EVIDENCE_SPANS_FIELD] = tuple(verified)
+    return bounded
 
 
 def triage_source_provenance_verified(
@@ -1886,21 +2187,1311 @@ def _coerce_verdict_bool(value):
     return None
 
 
-def normalize_automerge_verdict(data):
-    """Parse the OPTIONAL `automerge` sub-object of the pr-review triage JSON into
-    the structured `automerge_verdict` persisted in card state and later consumed
-    by auto_merge.py (the deterministic auto-merge executor).
+_PROTECTED_SUBJECT_PATTERNS = (
+    (
+        "delivery_contract",
+        r"\b(?:delivery\s+contract|"
+        r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+contract)\b",
+    ),
+    (
+        "existing_mode",
+        r"\b(?:existing|default|existing/default)(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+mode\b",
+    ),
+    (
+        "default_behavior",
+        r"\b(?:(?:existing|default|existing/default)"
+        r"(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
+        r"|(?:documented\s+)?recovery\s+behavio[u]?r"
+        r"|(?<!or\s)default"
+        r"(?!(?:\s+[\w./-]+){0,4}\s+"
+        r"(?:behavio[u]?r|contract|mode|workflow)\b)"
+        r"(?:\s+(?!(?:and|as|documentation|docs?|examples?|fixtures?|"
+        r"tests?|while|without|change|changes|changed|changing|"
+        r"tighten|tightens|tightened|tightening|update|updates|"
+        r"updated|updating|preserve|preserves|preserved|preserving)\b)"
+        r"[\w./-]+){0,4}"
+        r"|user-facing\s+flag\s+or\s+default)\b",
+    ),
+    ("existing_workflow", r"\bworkflow\b"),
+)
+_BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
+    "|".join("(?:%s)" % pattern for _, pattern in _PROTECTED_SUBJECT_PATTERNS),
+    re.I,
+)
+_CLASS_C_DEFAULT_OFF_RE = re.compile(
+    r"(?:"
+    r"(?:adds?|introduces?)\s+(?:a|an)\s+(?:"
+    r"(?:new\s+)?(?:strictly\s+)?opt-in\s+"
+    r"(?:capability|feature|mode|option)"
+    r"|(?:new\s+)?(?:capability|feature|mode|option)\s+"
+    r"that\s+is\s+(?:strictly\s+)?opt-in"
+    r")"
+    r"|(?:a|the)\s+new\s+(?:capability|feature|mode|option)\s+"
+    r"that\s+is\s+(?:strictly\s+)?opt-in"
+    r")"
+    r"(?:\s+(?:and|is|that\s+is))?\s+disabled\s+by\s+default",
+    re.I,
+)
+_RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
+_RESTORATION_GENERIC_WORDS = frozenset(
+    {
+        "affected",
+        "behavior",
+        "bug",
+        "change",
+        "changed",
+        "code",
+        "corrected",
+        "defect",
+        "expected",
+        "feature",
+        "fix",
+        "fixed",
+        "functionality",
+        "intended",
+        "issue",
+        "problem",
+        "relevant",
+        "restore",
+        "restored",
+        "system",
+        "thing",
+        "works",
+    }
+)
+_RESTORATION_STOP_WORDS = _RESTORATION_GENERIC_WORDS | frozenset(
+    {
+        "after",
+        "again",
+        "also",
+        "before",
+        "be",
+        "been",
+        "from",
+        "into",
+        "remains",
+        "that",
+        "their",
+        "then",
+        "there",
+        "these",
+        "this",
+        "through",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+    }
+)
 
-    A complete diff always produces the VISION-independent behavior class,
-    existing/default-behavior, and class-C mode facts. The alignment and final
-    merge recommendation are an optional all-or-nothing extension produced only
-    when trusted default-branch VISION.md input is available. Missing or malformed
-    vision fields therefore retain the independent facts but can never make the
-    verdict eligible.
 
-    `optin_default_off` is only required for class C, so it defaults to False when
-    absent (which itself disqualifies a class-C PR at the executor). This is
-    advisory input only - the executor re-validates every field independently."""
+def _restoration_subject_tokens(text):
+    tokens = set()
+    for token in _RESTORATION_WORD_RE.findall(str(text or "").casefold()):
+        if token.endswith("ies") and len(token) > 5:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 4:
+            token = token[:-1]
+        if token not in _RESTORATION_STOP_WORDS:
+            tokens.add(token)
+    return tokens
+
+
+def _normalize_evidence_ref(value, preserve_handles=False):
+    if not isinstance(value, dict) or set(value) != {"source", "quote"}:
+        return None
+    source = value.get("source")
+    quote = value.get("quote")
+    if (
+        not isinstance(source, str)
+        or not isinstance(quote, str)
+        or not (
+            source == "target.txt"
+            or re.fullmatch(r"target-src/[A-Za-z0-9._/-]{1,900}", source)
+        )
+        or ".." in source.split("/")
+    ):
+        return None
+    cleaner = (
+        _clean_semantic_triage_text if preserve_handles else _clean_triage_text
+    )
+    cleaned = cleaner(quote, limit=241, default="")
+    if not 12 <= len(cleaned) <= 240:
+        return None
+    return {"source": source, "quote": cleaned}
+
+
+def _normalize_class_b_restoration(value, verified_evidence_refs=None):
+    """Return canonical bounded class-B restoration evidence or None."""
+    required = {"corrected_defect", "intended_behavior_restored"}
+    if verified_evidence_refs is not None:
+        required |= {
+            "corrected_defect_evidence",
+            "intended_behavior_restored_evidence",
+        }
+    if not isinstance(value, dict) or set(value) != required:
+        return None
+    normalized = {}
+    for field in ("corrected_defect", "intended_behavior_restored"):
+        raw = value.get(field)
+        if not isinstance(raw, str) or len(raw) > CLASS_B_RESTORATION_MAX_CHARS:
+            return None
+        text = _clean_semantic_triage_text(
+            raw,
+            limit=CLASS_B_RESTORATION_MAX_CHARS + 1,
+            default="",
+        )
+        if not (
+            CLASS_B_RESTORATION_MIN_CHARS
+            <= len(text)
+            <= CLASS_B_RESTORATION_MAX_CHARS
+        ):
+            return None
+        normalized[field] = text
+    evidence_refs = {}
+    if verified_evidence_refs is not None:
+        for field in (
+            "corrected_defect_evidence",
+            "intended_behavior_restored_evidence",
+        ):
+            evidence_ref = _normalize_evidence_ref(
+                value.get(field), preserve_handles=True
+            )
+            if evidence_ref is None:
+                return None
+            evidence_refs[field] = evidence_ref
+    if (
+        normalized["corrected_defect"].casefold()
+        == normalized["intended_behavior_restored"].casefold()
+        or not _restoration_pair_linked(
+            normalized["corrected_defect"],
+            normalized["intended_behavior_restored"],
+        )
+    ):
+        return None
+    defect_tokens = _restoration_subject_tokens(normalized["corrected_defect"])
+    restored_tokens = _restoration_subject_tokens(
+        normalized["intended_behavior_restored"]
+    )
+    if (
+        len(defect_tokens) < 2
+        or len(restored_tokens) < 2
+        or len(defect_tokens.intersection(restored_tokens)) < 2
+    ):
+        return None
+    if verified_evidence_refs is not None:
+        verified = set(verified_evidence_refs)
+        defect_ref = evidence_refs["corrected_defect_evidence"]
+        restored_ref = evidence_refs["intended_behavior_restored_evidence"]
+        if defect_ref == restored_ref:
+            return None
+        if (
+            (defect_ref["source"], _normalize_evidence_text(defect_ref["quote"]))
+            not in verified
+            or (
+                restored_ref["source"],
+                _normalize_evidence_text(restored_ref["quote"]),
+            )
+            not in verified
+        ):
+            return None
+        defect_source_tokens = _restoration_subject_tokens(defect_ref["quote"])
+        restored_source_tokens = _restoration_subject_tokens(restored_ref["quote"])
+        if (
+            not defect_tokens.issubset(defect_source_tokens)
+            or not restored_tokens.issubset(restored_source_tokens)
+            or not _restoration_claim_supported(
+                normalized["corrected_defect"], defect_ref["quote"]
+            )
+            or not _restoration_claim_supported(
+                normalized["intended_behavior_restored"],
+                restored_ref["quote"],
+            )
+            or len(
+                defect_tokens.intersection(restored_tokens)
+                .intersection(defect_source_tokens)
+                .intersection(restored_source_tokens)
+            )
+            < 2
+        ):
+            return None
+    return normalized
+
+
+def _protected_contract_claims(texts, behavior_class=None):
+    claims = set()
+    for text in texts:
+        for clause in re.split(r"[.!?;]+", str(text or "")):
+            cleaned = _clean_triage_text(clause, limit=700, default="")
+            if (
+                behavior_class == "C"
+                and _CLASS_C_DEFAULT_OFF_RE.fullmatch(cleaned)
+            ):
+                continue
+            if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
+                claims.add(cleaned.casefold())
+    return claims
+
+
+_EXPLICIT_NEGATION_RE = re.compile(
+    r"\b(?:never|"
+    r"(?:can|could|do|does|did|will|would|shall|should|must|"
+    r"is|are|was|were|has|have|had)\s+not|"
+    r"(?:is|are|was|were)\s+not\s+\w+ed)\b",
+    re.I,
+)
+_NEGATED_CONTRACT_EFFECT_RE = re.compile(
+    r"\b(?:"
+    r"(?:will|would|must|does|do|did)\s+not\s+"
+    r"(?:change|tighten|alter|modify|require)"
+    r"|(?:is|are|was|were)\s+not\s+"
+    r"(?:changed|changing|tightened|required|mandatory)"
+    r"|without\s+changing"
+    r"|does\s+not\s+change"
+    r"|no(?:\s+\w+){0,7}\s+changes?"
+    r")\b",
+    re.I,
+)
+
+
+def _normalize_bounded_contractions(text):
+    value = str(text or "")
+    replacements = (
+        (r"\bwon['’]t\b", "will not"),
+        (r"\bcan['’]t\b", "can not"),
+        (r"\bshan['’]t\b", "shall not"),
+        (
+            r"\b(do|does|did|is|are|was|were|has|have|had|"
+            r"would|should|could|must) n['’]t\b",
+            r"\1 not",
+        ),
+        (
+            r"\b(do|does|did|is|are|was|were|has|have|had|"
+            r"would|should|could|must)n['’]t\b",
+            r"\1 not",
+        ),
+    )
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.I)
+    return value
+
+
+def _semantic_polarity(text):
+    value = _normalize_bounded_contractions(text)
+    return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
+
+
+_RESTORATION_SUBORDINATORS = frozenset(
+    {
+        "although",
+        "as",
+        "because",
+        "if",
+        "since",
+        "so",
+        "than",
+        "that",
+        "though",
+        "unless",
+        "when",
+        "whenever",
+        "where",
+        "whereas",
+        "whether",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "whose",
+    }
+)
+_RESTORATION_AUXILIARIES = frozenset(
+    {
+        "are",
+        "be",
+        "been",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "had",
+        "has",
+        "have",
+        "is",
+        "must",
+        "shall",
+        "should",
+        "was",
+        "were",
+        "will",
+        "would",
+    }
+)
+_RESTORATION_PREDICATES = {
+    word: lemma
+    for lemma, words in {
+        "affect": ("affect", "affects", "affected", "affecting"),
+        "block": ("block", "blocks", "blocked", "blocking"),
+        "break": ("break", "breaks", "broke", "broken", "breaking"),
+        "change": ("change", "changes", "changed", "changing"),
+        "disable": ("disable", "disables", "disabled", "disabling"),
+        "drop": ("drop", "drops", "dropped", "dropping"),
+        "emit": ("emit", "emits", "emitted", "emitting"),
+        "fail": ("fail", "fails", "failed", "failing"),
+        "lose": ("lose", "loses", "lost", "losing"),
+        "persist": ("persist", "persists", "persisted", "persisting"),
+        "preserve": ("preserve", "preserves", "preserved", "preserving"),
+        "recover": ("recover", "recovers", "recovered", "recovering"),
+        "remain": ("remain", "remains", "remained", "remaining"),
+        "reopen": ("reopen", "reopens", "reopened", "reopening"),
+        "require": ("require", "requires", "required", "requiring"),
+        "restore": ("restore", "restores", "restored", "restoring"),
+        "resume": ("resume", "resumes", "resumed", "resuming"),
+        "retain": ("retain", "retains", "retained", "retaining"),
+        "return": ("return", "returns", "returned", "returning"),
+        "route": ("route", "routes", "routed", "routing"),
+        "support": ("support", "supports", "supported", "supporting"),
+        "survive": ("survive", "survives", "survived", "surviving"),
+        "tighten": ("tighten", "tightens", "tightened", "tightening"),
+        "update": ("update", "updates", "updated", "updating"),
+    }.items()
+    for word in words
+}
+_RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
+    {"a", "an", "never", "not", "now", "the"}
+)
+_RESTORATION_ROLE_PATTERNS = frozenset(
+    {
+        ("archive", "retention"),
+        ("authentication", "sessions"),
+        ("daemon", "restart"),
+        ("lifecycle", "retries"),
+        ("monitored", "runs"),
+        ("normal", "decision", "retention"),
+        ("open", "monitored", "run"),
+        ("open", "monitored", "runs"),
+        ("recoverable",),
+        ("resolved", "decisions"),
+    }
+)
+_RESTORATION_LEXEME_RE = re.compile(
+    r"(?P<space>\s+)"
+    r"|(?P<handle>@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
+    r"|(?P<reference>#[0-9]+)"
+    r"|(?P<number>[0-9]+(?:[._-][A-Za-z0-9]+)*)"
+    r"|(?P<word>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)"
+    r"|(?P<punct>[.])"
+)
+_RESTORATION_IDENTIFIER_RE = re.compile(
+    r"(?:@[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?"
+    r"|#[0-9]+"
+    r"|[0-9]+(?:[._-][a-z0-9]+)*)"
+)
+
+
+def _scan_restoration_lexemes(text):
+    normalized = _normalize_bounded_contractions(text)
+    lexemes = []
+    position = 0
+    while position < len(normalized):
+        match = _RESTORATION_LEXEME_RE.match(normalized, position)
+        if match is None:
+            return None
+        value = match.group(0)
+        if match.lastgroup in {"handle", "reference", "number"} and len(value) > 64:
+            return None
+        lexemes.append(
+            (match.lastgroup, value.casefold(), match.start(), match.end())
+        )
+        position = match.end()
+    return normalized, tuple(lexemes)
+
+
+def _restoration_role(words):
+    return tuple(
+        word
+        for word in words
+        if word not in _RESTORATION_ROLE_STRUCTURE_WORDS
+    )
+
+
+def _restoration_role_matches_pattern(role):
+    for pattern in _RESTORATION_ROLE_PATTERNS:
+        if role == pattern:
+            return True
+        if (
+            len(role) == len(pattern) + 1
+            and role[: len(pattern)] == pattern
+            and _RESTORATION_IDENTIFIER_RE.fullmatch(role[-1])
+        ):
+            return True
+        if len(role) == len(pattern) and role[:-1] == pattern[:-1]:
+            final = role[-1]
+            for separator in ("-", "_"):
+                prefix = pattern[-1] + separator
+                if final.startswith(prefix) and re.fullmatch(
+                    r"[a-z0-9]+(?:[._-][a-z0-9]+)*",
+                    final[len(prefix) :],
+                ):
+                    return True
+    return False
+
+
+def _restoration_roles_are_bounded(agent, patient):
+    return (
+        (not agent or _restoration_role_matches_pattern(agent))
+        and _restoration_role_matches_pattern(patient)
+    )
+
+
+def _restoration_propositions(text):
+    scanned = _scan_restoration_lexemes(text)
+    if scanned is None:
+        return None
+    _, lexemes = scanned
+    punctuation = [
+        (index, value)
+        for index, (kind, value, _, _) in enumerate(lexemes)
+        if kind == "punct"
+    ]
+    if punctuation and (
+        len(punctuation) != 1
+        or punctuation[0][0] != len(lexemes) - 1
+        or punctuation[0][1] != "."
+    ):
+        return None
+    words = [
+        value
+        for kind, value, _, _ in lexemes
+        if kind not in {"space", "punct"}
+    ]
+    if not words or _RESTORATION_SUBORDINATORS.intersection(words):
+        return None
+    predicates = [
+        (index, _RESTORATION_PREDICATES[word])
+        for index, word in enumerate(words)
+        if word in _RESTORATION_PREDICATES
+    ]
+    if len(predicates) != 1:
+        return None
+    predicate_index, predicate = predicates[0]
+    predicate_word = words[predicate_index]
+    auxiliary_index = next(
+        (
+            index
+            for index in range(predicate_index - 1, -1, -1)
+            if words[index] in _RESTORATION_AUXILIARIES
+        ),
+        None,
+    )
+    passive_start = None
+    passive_prefix = " ".join(words[:predicate_index])
+    passive_match = re.search(
+        r"(?:^|\s)("
+        r"(?:is|are|was|were)(?:\s+(?:never|not|now))*"
+        r"|(?:has|have|had)(?:\s+(?:never|not|now))*\s+been"
+        r"(?:\s+(?:never|not|now))*"
+        r"|(?:can|could|will|would|shall|should|must)"
+        r"(?:\s+(?:never|not|now))*\s+be"
+        r"(?:\s+(?:never|not|now))*"
+        r")$",
+        passive_prefix,
+    )
+    if passive_match is not None:
+        passive_start = len(passive_prefix[: passive_match.start(1)].split())
+    passive_morphology = predicate_word.endswith(("ed", "en")) or (
+        predicate_word == "lost"
+    )
+    if passive_start is not None and not passive_morphology:
+        if not predicate_word.endswith("ing"):
+            return None
+        passive_start = None
+    if auxiliary_index is not None and passive_start is None:
+        intervening = words[auxiliary_index + 1 : predicate_index]
+        if any(word not in {"never", "not", "now"} for word in intervening):
+            return None
+    passive = passive_start is not None
+    subject_end = (
+        passive_start
+        if passive
+        else auxiliary_index
+        if auxiliary_index is not None
+        else predicate_index
+    )
+    left_role = _restoration_role(words[:subject_end])
+    trailing = words[predicate_index + 1 :]
+    if passive:
+        if "by" in trailing:
+            by_index = trailing.index("by")
+            agent = _restoration_role(trailing[by_index + 1 :])
+            patient = left_role + _restoration_role(trailing[:by_index])
+        else:
+            agent = ()
+            patient = left_role + _restoration_role(trailing)
+    else:
+        agent = left_role
+        patient = _restoration_role(trailing)
+    if (
+        not patient
+        or (not agent and not passive)
+        or not _restoration_roles_are_bounded(agent, patient)
+    ):
+        return None
+    polarity_start = (
+        passive_start
+        if passive
+        else auxiliary_index
+        if auxiliary_index is not None
+        else max(0, predicate_index - 1)
+    )
+    predicate_negations = {
+        index for index, word in enumerate(words) if word in {"never", "not"}
+    }
+    governed_negations = {
+        index
+        for index in range(polarity_start, predicate_index)
+        if words[index] in {"never", "not"}
+    }
+    if predicate_negations != governed_negations:
+        return None
+    return (
+        (
+            predicate,
+            agent,
+            patient,
+            "negative" if governed_negations else "affirmative",
+        ),
+    )
+
+
+def _restoration_claim_supported(claim, evidence):
+    claim_propositions = _restoration_propositions(claim)
+    evidence_propositions = _restoration_propositions(evidence)
+    if (
+        claim_propositions is None
+        or evidence_propositions is None
+        or len(claim_propositions) != len(evidence_propositions)
+    ):
+        return False
+    return claim_propositions == evidence_propositions
+
+
+_RESTORATION_REPAIR_RELATIONS = {
+    ("affect", "affirmative"): frozenset(
+        {"recover", "remain", "restore", "resume", "return", "support"}
+    ),
+    ("block", "affirmative"): frozenset(
+        {"recover", "reopen", "restore", "resume", "return", "support"}
+    ),
+    ("break", "affirmative"): frozenset(
+        {"persist", "preserve", "recover", "remain", "restore", "support"}
+    ),
+    ("disable", "affirmative"): frozenset(
+        {"recover", "reopen", "restore", "resume", "return", "support"}
+    ),
+    ("drop", "affirmative"): frozenset(
+        {"persist", "preserve", "recover", "restore", "retain", "return"}
+    ),
+    ("emit", "negative"): frozenset({"emit", "restore", "resume"}),
+    ("fail", "affirmative"): frozenset(
+        {"persist", "recover", "remain", "restore", "resume", "return"}
+    ),
+    ("lose", "affirmative"): frozenset(
+        {
+            "persist",
+            "preserve",
+            "recover",
+            "remain",
+            "restore",
+            "retain",
+            "return",
+            "survive",
+        }
+    ),
+    ("persist", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("preserve", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("recover", "negative"): frozenset(
+        {"recover", "remain", "restore", "resume", "return"}
+    ),
+    ("remain", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("reopen", "negative"): frozenset({"reopen", "restore", "resume", "return"}),
+    ("resume", "negative"): frozenset({"recover", "restore", "resume", "return"}),
+    ("retain", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+    ("return", "negative"): frozenset({"recover", "restore", "resume", "return"}),
+    ("support", "negative"): frozenset({"restore", "resume", "support"}),
+    ("survive", "negative"): frozenset(
+        {"persist", "preserve", "remain", "restore", "retain", "survive"}
+    ),
+}
+_RESTORATION_SUBJECT_OBJECT_REPAIRS = frozenset(
+    {"persist", "recover", "remain", "reopen", "resume", "return", "survive"}
+)
+
+
+def _restoration_pair_linked(defect, restored):
+    defect_propositions = _restoration_propositions(defect)
+    restored_propositions = _restoration_propositions(restored)
+    if (
+        defect_propositions is None
+        or restored_propositions is None
+        or len(defect_propositions) != 1
+        or len(restored_propositions) != 1
+    ):
+        return False
+    defect_predicate, _, defect_patient, defect_polarity = defect_propositions[0]
+    restored_predicate, restored_agent, restored_patient, restored_polarity = (
+        restored_propositions[0]
+    )
+    restored_object = (
+        restored_agent
+        if restored_predicate in _RESTORATION_SUBJECT_OBJECT_REPAIRS
+        else restored_patient
+    )
+    repair_predicates = _RESTORATION_REPAIR_RELATIONS.get(
+        (defect_predicate, defect_polarity),
+        frozenset(),
+    )
+    return (
+        restored_polarity == "affirmative"
+        and restored_predicate in repair_predicates
+        and defect_patient == restored_object
+    )
+
+
+_DOCUMENTATION_WORD_RE = re.compile(
+    r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
+)
+_INDEPENDENT_NON_GOVERNANCE_OBJECT_RE = re.compile(
+    r"^\s*(?:(?:a|an|the)\s+)?(?:"
+    r"changelog|comments?|copy|formatting|labels?|metadata|readme|"
+    r"release\s+notes?|spelling"
+    r")\s*(?:only\s*)?(?:while|without)?\s*$",
+    re.I,
+)
+_ATOMIC_COORDINATOR_RE = re.compile(
+    r"\s*(?:,?\s+\b(?:and|as\s+well\s+as|along\s+with)\b\s*)", re.I
+)
+_EFFECT_PATTERNS = (
+    (
+        "unchanged",
+        r"\b(?:"
+        r"(?:can|could|do|does|did|will|would|shall|should|must)\s+not\s+"
+        r"(?:change|tighten|alter|modify|require|"
+        r"be\s+(?:changed|tightened|altered|modified|required|updated))"
+        r"|(?:has|have|had)\s+not\s+been\s+"
+        r"(?:changed|tightened|altered|modified|required|updated)"
+        r"|(?:is|are|was|were)\s+not\s+"
+        r"(?:changed|changing|tightened|required|mandatory)"
+        r"|without\s+changing"
+        r"|no(?:\s+\w+){0,7}\s+changes?"
+        r"|(?:remains?|is|are)\s+unchanged"
+        r"|preserv(?:e|es|ed|ing)"
+        r")\b",
+    ),
+    (
+        "new_requirement",
+        r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
+        r"(?:is|are|becomes?)\s+(?:now\s+)?(?:required|mandatory)|"
+        r"can\s+no\s+longer)\b",
+    ),
+    ("tightened", r"\btighten(?:s|ed|ing)?\b"),
+    (
+        "changed",
+        r"\b(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
+        r"modif(?:y|ies|ied|ying)|disabl(?:e|es|ed|ing)|"
+        r"replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|"
+        r"updat(?:e|es|ed|ing))\b",
+    ),
+    ("restored", r"\brestor(?:e|es|ed|ing)\b"),
+)
+
+
+def _documentation_spans(text):
+    spans = []
+    for match in _DOCUMENTATION_WORD_RE.finditer(text):
+        word = match.group(0).casefold()
+        if word in {"test", "tests"}:
+            before = text[: match.start()]
+            after = text[match.end() :]
+            follows_protected = any(
+                re.search(r"(?:%s)\s*$" % pattern, before, re.I) is not None
+                for _, pattern in _PROTECTED_SUBJECT_PATTERNS
+            )
+            next_word = re.match(r"\s+([a-z][\w-]*)", after)
+            if (
+                follows_protected
+                and next_word is not None
+                and next_word.group(1)
+                not in {
+                    "are",
+                    "change",
+                    "changed",
+                    "is",
+                    "remain",
+                    "remains",
+                    "were",
+                }
+            ):
+                continue
+        spans.append((match.start(), match.end()))
+    return spans
+
+
+def _is_documentation_topic(text, protected_span, documentation_spans):
+    protected_start, protected_end = protected_span
+    for documentation_start, documentation_end in documentation_spans:
+        if documentation_end <= protected_start:
+            between = text[documentation_end:protected_start]
+            if re.fullmatch(
+                r"(?:\s+\w+){0,4}\s+(?:for|of)\s+(?:the\s+)?"
+                r"(?:(?:existing|default|direct-pr)\s+)?",
+                between,
+                re.I,
+            ):
+                return True
+        elif documentation_start >= protected_end:
+            between = text[protected_end:documentation_start]
+            if re.fullmatch(r"[\s/-]*", between):
+                return True
+    return False
+
+
+def _coordinated_documentation_topic_semantics(text):
+    documentation = list(_DOCUMENTATION_WORD_RE.finditer(text))
+    protected = sorted(
+        (
+            match.start(),
+            match.end(),
+        )
+        for _, pattern in _PROTECTED_SUBJECT_PATTERNS
+        for match in re.finditer(pattern, text, re.I)
+    )
+    if len(documentation) != 1 or len(protected) < 2:
+        return None
+    documentation_match = documentation[0]
+    first_start, first_end = protected[0]
+    last_start, last_end = protected[-1]
+    coordinated = all(
+        re.search(
+            r"\b(?:and|as\s+well\s+as|along\s+with)\b",
+            text[left_end:right_start],
+            re.I,
+        )
+        is not None
+        for (_, left_end), (right_start, _) in zip(
+            protected, protected[1:]
+        )
+    )
+    forward = (
+        documentation_match.end() <= first_start
+        and re.search(
+            r"\b(?:for|of)\b",
+            text[documentation_match.end() : first_start],
+            re.I,
+        )
+        is not None
+    )
+    reverse = (
+        documentation_match.start() >= last_end
+        and re.fullmatch(
+            r"[\s/-]*",
+            text[last_end : documentation_match.start()],
+        )
+        is not None
+    )
+    if not coordinated or not (forward or reverse):
+        return None
+    effects = []
+    occupied = []
+    for effect, pattern in _EFFECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            span = (match.start(), match.end())
+            if any(
+                span[0] < end and span[1] > start
+                for start, end in occupied
+            ):
+                continue
+            occupied.append(span)
+            effects.append((effect, span[0], span[1]))
+    if len(effects) != 1 or effects[0][0] not in {"changed", "unchanged"}:
+        return None
+    effect, effect_start, effect_end = effects[0]
+    if reverse:
+        between = text[documentation_match.end() : effect_start]
+        residual = text[effect_end:]
+        if (
+            effect_start < documentation_match.end()
+            or re.fullmatch(
+                r"[\s,;:.-]*(?:(?:"
+                r"is|are|was|were"
+                r"|(?:has|have|had)\s+been"
+                r"|(?:can|could|will|would|shall|should|must)\s+be"
+                r")\s+)?",
+                between,
+                re.I,
+            )
+            is None
+            or re.fullmatch(
+                r"[\s,;:.!?-]*(?:only[\s,;:.!?-]*)?",
+                residual,
+                re.I,
+            )
+            is None
+        ):
+            return None
+    return {("documentation_or_tests", effect)}
+
+
+def _atomic_semantic_spans(text):
+    documentation_spans = _documentation_spans(text)
+    subjects = [
+        ("documentation_or_tests", start, end)
+        for start, end in documentation_spans
+    ]
+    protected_matches = []
+    for subject, pattern in _PROTECTED_SUBJECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            protected_matches.append((subject, match.start(), match.end()))
+    protected_matches.sort(key=lambda item: (item[1], item[2], item[0]))
+    seen_spans = set()
+    documentation_topic = False
+    for subject, start, end in protected_matches:
+        identity = (start, end)
+        if identity in seen_spans:
+            return None
+        seen_spans.add(identity)
+        if _is_documentation_topic(text, (start, end), documentation_spans):
+            documentation_topic = True
+        else:
+            subjects.append((subject, start, end))
+
+    effects = []
+    occupied = []
+    for effect, pattern in _EFFECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            span = (match.start(), match.end())
+            if any(span[0] < end and span[1] > start for start, end in occupied):
+                continue
+            occupied.append(span)
+            effects.append(
+                (
+                    effect,
+                    span[0],
+                    span[1],
+                    match.group(0).casefold().startswith("without "),
+                )
+            )
+    effects = sorted(effects, key=lambda value: value[1])
+    for index, item in enumerate(effects):
+        effect, start, end, subordinate_after = item
+        next_start = (
+            effects[index + 1][1]
+            if index + 1 < len(effects)
+            else len(text)
+        )
+        governed_text = text[end:next_start]
+        locally_unprotected = (
+            (
+                subordinate_after
+                or (
+                    subjects
+                    and end <= min(start for _, start, _ in subjects)
+                )
+            )
+            and _INDEPENDENT_NON_GOVERNANCE_OBJECT_RE.fullmatch(
+                governed_text
+            )
+            is not None
+        )
+        if locally_unprotected:
+            subjects.append(("_unprotected", end, end))
+    return subjects, effects, documentation_topic
+
+
+def _bind_atomic_semantics(subjects, effects):
+    semantics = set()
+    consumed_effects = set()
+    for subject, start, end in subjects:
+        ranked = []
+        for index, (
+            effect,
+            effect_start,
+            effect_end,
+            subordinate_after,
+        ) in enumerate(effects):
+            if subordinate_after and effect_start >= end:
+                continue
+            distance = (
+                start - effect_end
+                if effect_end <= start
+                else effect_start - end
+                if effect_start >= end
+                else 0
+            )
+            ranked.append((max(0, distance), effect, index))
+        if not ranked:
+            return None
+        nearest_distance = min(item[0] for item in ranked)
+        nearest = {
+            (effect, index)
+            for distance, effect, index in ranked
+            if distance == nearest_distance
+        }
+        if len(nearest) != 1:
+            return None
+        effect, index = next(iter(nearest))
+        consumed_effects.add(index)
+        if subject != "_unprotected":
+            semantics.add((subject, effect))
+    for index, _ in enumerate(effects):
+        if index not in consumed_effects:
+            return None
+    return semantics
+
+
+def _bind_propagated_semantics(subjects, effects):
+    propagated = {effect for effect, _, _, _ in effects}
+    if len(propagated) != 1:
+        return None
+    effect = next(iter(propagated))
+    return {(subject, effect) for subject, _, _ in subjects}
+
+
+def _derive_behavior_assertion_semantics(claim, behavior_class=None):
+    text = _normalize_bounded_contractions(claim).casefold()
+    if (
+        behavior_class == "C"
+        and _CLASS_C_DEFAULT_OFF_RE.fullmatch(text)
+    ):
+        return None
+    coordinated_topic = _coordinated_documentation_topic_semantics(text)
+    if coordinated_topic is not None:
+        return coordinated_topic
+    atomic = [
+        part.strip()
+        for part in _ATOMIC_COORDINATOR_RE.split(text)
+        if part.strip()
+    ]
+    if not atomic:
+        return None
+    semantics = set()
+    pending_subjects = None
+    prior_effects = None
+    prior_documentation_topic = False
+    for part in atomic:
+        spans = _atomic_semantic_spans(part)
+        if spans is None:
+            return None
+        subjects, effects, documentation_topic = spans
+        if subjects and effects:
+            if pending_subjects is not None:
+                propagated = _bind_propagated_semantics(
+                    pending_subjects, effects
+                )
+                if propagated is None:
+                    return None
+                semantics.update(propagated)
+                pending_subjects = None
+            bound = _bind_atomic_semantics(subjects, effects)
+            if bound is None:
+                return None
+            semantics.update(bound)
+            prior_effects = effects
+            prior_documentation_topic = documentation_topic
+        elif subjects:
+            if prior_documentation_topic and all(
+                subject != "documentation_or_tests"
+                for subject, _, _ in subjects
+            ):
+                pending_subjects = None
+                prior_effects = None
+                prior_documentation_topic = False
+            elif prior_effects is not None:
+                bound = _bind_propagated_semantics(subjects, prior_effects)
+                if bound is None:
+                    return None
+                semantics.update(bound)
+                pending_subjects = None
+                prior_documentation_topic = False
+            else:
+                pending_subjects = (pending_subjects or []) + subjects
+            prior_effects = None
+        elif effects:
+            if pending_subjects is None:
+                return None
+            bound = _bind_propagated_semantics(pending_subjects, effects)
+            if bound is None:
+                return None
+            semantics.update(bound)
+            pending_subjects = None
+            prior_effects = effects
+            prior_documentation_topic = False
+    if not semantics or (pending_subjects is not None and prior_effects is None):
+        return None
+    return semantics
+
+
+def _normalize_behavior_assertions(
+    value,
+    semantic_text,
+    verified_evidence_refs,
+    behavior_class=None,
+):
+    if not isinstance(value, list) or len(value) > 12:
+        return None
+    normalized = []
+    required = {"claim", "subject", "effect", "evidence"}
+    subjects = {
+        "existing_mode",
+        "default_behavior",
+        "existing_workflow",
+        "delivery_contract",
+        "documentation_or_tests",
+    }
+    effects = {"unchanged", "restored", "changed", "tightened", "new_requirement"}
+    verified = set(verified_evidence_refs)
+    for assertion in value:
+        if not isinstance(assertion, dict) or set(assertion) != required:
+            return None
+        claim = _clean_triage_text(assertion.get("claim"), limit=701, default="")
+        subject = assertion.get("subject")
+        effect = assertion.get("effect")
+        evidence_ref = _normalize_evidence_ref(assertion.get("evidence"))
+        if (
+            not claim
+            or subject not in subjects
+            or effect not in effects
+            or evidence_ref is None
+            or (
+                evidence_ref["source"],
+                _normalize_evidence_text(evidence_ref["quote"]),
+            )
+            not in verified
+        ):
+            return None
+        if (
+            len(
+                _restoration_subject_tokens(claim).intersection(
+                    _restoration_subject_tokens(evidence_ref["quote"])
+                )
+            )
+            < 2
+        ):
+            return None
+        claim_semantics = _derive_behavior_assertion_semantics(
+            claim, behavior_class
+        )
+        evidence_semantics = _derive_behavior_assertion_semantics(
+            evidence_ref["quote"], behavior_class
+        )
+        if (
+            claim_semantics is None
+            or evidence_semantics is None
+            or (subject, effect) not in claim_semantics
+            or (subject, effect) not in evidence_semantics
+        ):
+            return None
+        normalized.append(
+            {
+                "claim": claim,
+                "subject": subject,
+                "effect": effect,
+                "evidence": evidence_ref,
+            }
+        )
+    protected_claims = _protected_contract_claims(
+        semantic_text, behavior_class
+    )
+    expected = set()
+    for claim in protected_claims:
+        semantics = _derive_behavior_assertion_semantics(
+            claim, behavior_class
+        )
+        if semantics is None:
+            return None
+        expected.update((claim, subject, effect) for subject, effect in semantics)
+    observed = {
+        (item["claim"].casefold(), item["subject"], item["effect"])
+        for item in normalized
+    }
+    if observed != expected:
+        return None
+    return normalized
+
+
+def _behavior_admission_record(
+    behavior_class, restoration, behavior_assertions, triage_data
+):
+    if not isinstance(triage_data, dict):
+        return None
+    evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
+    verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
+    if not isinstance(verified_refs, tuple):
+        verified_refs = ()
+    semantic_text = [
+        triage_data.get("summary", ""),
+        triage_data.get("product_implications", ""),
+        evidence,
+    ]
+    if isinstance(restoration, dict):
+        semantic_text.extend(
+            restoration.get(field, "")
+            for field in ("corrected_defect", "intended_behavior_restored")
+        )
+        semantic_text.extend(
+            (restoration.get(field) or {}).get("quote", "")
+            if isinstance(restoration.get(field), dict)
+            else ""
+            for field in (
+                "corrected_defect_evidence",
+                "intended_behavior_restored_evidence",
+            )
+        )
+    if isinstance(behavior_assertions, list):
+        for assertion in behavior_assertions:
+            if not isinstance(assertion, dict):
+                continue
+            semantic_text.append(assertion.get("claim", ""))
+            assertion_evidence = assertion.get("evidence")
+            semantic_text.append(
+                assertion_evidence.get("quote", "")
+                if isinstance(assertion_evidence, dict)
+                else ""
+            )
+    normalized = _normalize_class_b_restoration(
+        restoration, verified_evidence_refs=verified_refs
+    )
+    assertions = _normalize_behavior_assertions(
+        behavior_assertions,
+        semantic_text,
+        verified_refs,
+        behavior_class,
+    )
+    if assertions is None:
+        return None
+    admission = {
+        "version": BEHAVIOR_ADMISSION_VERSION,
+        "contradicts_existing_contract": any(
+            assertion["subject"] != "documentation_or_tests"
+            and assertion["effect"] in {"changed", "tightened", "new_requirement"}
+            for assertion in assertions
+        ),
+    }
+    if behavior_class == "B" and normalized is not None:
+        admission.update(normalized)
+    return admission
+
+
+def behavior_admission_status(verdict):
+    """Validate semantic admission evidence for captain display and acting.
+
+    Returns ``(status, evidence, reason)`` where status is ``admitted``,
+    ``unavailable``, or ``contradictory``. Historical and incomplete verdicts
+    are unavailable, so compatibility never turns missing semantic evidence
+    into eligibility. Class B additionally requires the bounded restoration
+    pair.
+    """
+    cls = str((verdict or {}).get("behavior_class") or "").strip().upper()
+    admission = (
+        verdict.get(BEHAVIOR_ADMISSION_FIELD)
+        if isinstance(verdict, dict)
+        else None
+    )
+    base_fields = {"version", "contradicts_existing_contract"}
+    required = base_fields | (
+        {"corrected_defect", "intended_behavior_restored"}
+        if cls == "B"
+        else set()
+    )
+    if not isinstance(admission, dict) or set(admission) != required:
+        detail = (
+            "class B restoration evidence unavailable"
+            if cls == "B"
+            else "behavior semantic admission evidence unavailable"
+        )
+        reason = (
+            "class B requires bounded corrected-defect and restored-behavior evidence"
+            if cls == "B"
+            else "behavior semantic admission evidence is unavailable"
+        )
+        return ("unavailable", detail, reason)
+    version = admission.get("version")
+    contradiction = admission.get("contradicts_existing_contract")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != BEHAVIOR_ADMISSION_VERSION
+        or not isinstance(contradiction, bool)
+    ):
+        return (
+            "unavailable",
+            "behavior semantic admission evidence malformed or unsupported",
+            "behavior semantic admission evidence is malformed or unsupported",
+        )
+    if cls == "B":
+        normalized = _normalize_class_b_restoration(
+            {
+                "corrected_defect": admission.get("corrected_defect"),
+                "intended_behavior_restored": admission.get(
+                    "intended_behavior_restored"
+                ),
+            }
+        )
+        if (
+            normalized is None
+            or normalized["corrected_defect"]
+            != admission.get("corrected_defect")
+            or normalized["intended_behavior_restored"]
+            != admission.get("intended_behavior_restored")
+        ):
+            return (
+                "unavailable",
+                "class B restoration evidence malformed or ambiguous",
+                "class B restoration evidence is malformed or ambiguous",
+            )
+    if contradiction:
+        return (
+            "contradictory",
+            "verdict contradicts its own existing/default contract-change description",
+            "behavior verdict describes an ineligible existing/default contract change",
+        )
+    if cls == "B":
+        return (
+            "admitted",
+            "class B with bounded corrected-defect and restored-behavior evidence",
+            "",
+        )
+    return ("admitted", "class %s" % cls, "")
+
+
+def normalize_automerge_verdict(data, triage_data=None):
+    """Normalize the optional PR-triage behavior verdict for card persistence.
+
+    Complete diffs always produce the VISION-independent class, existing/default
+    behavior, and class-C mode facts. Class B additionally requires a bounded
+    ``class_b_restoration`` object naming both the corrected defect and intended
+    behavior restored. Admission also rejects an affirmative claim in the same
+    triage summary, product implications, or evidence that an existing mode,
+    default, workflow, or delivery contract is tightened or changed.
+
+    Missing or malformed semantic evidence remains persisted only as an
+    unavailable, denial-only historical verdict. The executor independently
+    validates the admission record through ``behavior_admission_status``. Valid
+    classes A and C retain their existing authorization behavior.
+    """
     if not isinstance(data, dict):
         return None
     cls = str(data.get("behavior_class") or "").strip().upper()
@@ -1915,6 +3506,37 @@ def normalize_automerge_verdict(data):
             else:
                 return None
         verdict[field] = b
+    admission = _behavior_admission_record(
+        cls,
+        data.get(CLASS_B_RESTORATION_FIELD),
+        data.get(BEHAVIOR_ASSERTIONS_FIELD),
+        triage_data,
+    )
+    if (
+        admission is None
+        and cls != "B"
+        and BEHAVIOR_ASSERTIONS_FIELD not in data
+        and isinstance(triage_data, dict)
+        and not _protected_contract_claims(
+            (
+                triage_data.get("summary", ""),
+                triage_data.get("product_implications", ""),
+                _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or "",
+            ),
+            cls,
+        )
+    ):
+        persisted = data.get(BEHAVIOR_ADMISSION_FIELD)
+        persisted_status = behavior_admission_status(
+            {
+                "behavior_class": cls,
+                BEHAVIOR_ADMISSION_FIELD: persisted,
+            }
+        )[0]
+        if persisted_status in {"admitted", "contradictory"}:
+            admission = dict(persisted)
+    if admission is not None:
+        verdict[BEHAVIOR_ADMISSION_FIELD] = admission
     vision_fields = {
         field: _coerce_verdict_bool(data.get(field))
         for field in ("aligns_with_vision", "recommend_merge")
@@ -2000,24 +3622,34 @@ def triage_section(triage=None, error=None, owner="", repo=""):
         lines.append(
             "- **Summary:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["summary"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(triage["summary"], owner, repo)
+                )
             )
         )
         lines.append(
             "- **Product implications:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["product_implications"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(
+                        triage["product_implications"], owner, repo
+                    )
+                )
             )
         )
         lines.append(
             "- **Recommended next step:** %s"
             % label_automated_status_lines(
-                qualify_issue_refs(triage["recommended_next_step"], owner, repo)
+                _display_safe_triage_text(
+                    qualify_issue_refs(
+                        triage["recommended_next_step"], owner, repo
+                    )
+                )
             )
         )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
-        lines.append("_%s_" % note)
+        lines.append("_%s_" % _display_safe_triage_text(note))
     lines.append(TRIAGE_END)
     return "\n".join(lines)
 
@@ -2675,7 +4307,8 @@ def _automerge_criteria_evidence(value):
     # Criterion evidence can contain target-controlled paths or actor names.
     # Keep it inert in this owner-facing Markdown section.
     return (
-        text.replace("`", "'")
+        _display_safe_triage_text(text)
+        .replace("`", "'")
         .replace("[", "\\[")
         .replace("]", "\\]")
         .replace("*", "\\*")
@@ -5547,6 +7180,9 @@ def decide_triage_apply(
     result_text,
     repaired_text,
     target_file,
+    target_src_dir="",
+    target_src_manifest="",
+    target_src_revision="",
     repair_claim_admitted=None,
     source_provenance_file="",
     vision_file="",
@@ -5579,6 +7215,13 @@ def decide_triage_apply(
                 "reason": "evidence quotes did not match the fetched target",
                 "candidate": "",
             }
+        triage = _bind_verified_evidence_spans(
+            triage,
+            target_file,
+            target_src_dir,
+            target_src_manifest,
+            target_src_revision,
+        )
         triage = enforce_triage_source_provenance(
             triage,
             source_provenance_file,
@@ -5598,6 +7241,13 @@ def decide_triage_apply(
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):
+                repaired = _bind_verified_evidence_spans(
+                    repaired,
+                    target_file,
+                    target_src_dir,
+                    target_src_manifest,
+                    target_src_revision,
+                )
                 repaired = enforce_triage_source_provenance(
                     repaired,
                     source_provenance_file,
@@ -5702,6 +7352,9 @@ def main():
         "when absent or unreadable the anchor check is skipped and the required "
         "non-empty evidence schema field remains the primary guard.",
     )
+    ta.add_argument("--target-src-dir", default="")
+    ta.add_argument("--target-src-manifest", default="")
+    ta.add_argument("--target-src-revision", default="")
     ta.add_argument(
         "--repair-execution-file",
         default="",
@@ -5721,6 +7374,11 @@ def main():
     rp = sub.add_parser("triage-repair-prep")
     rp.add_argument("--execution-file", required=True)
     rp.add_argument("--kind", required=True)
+
+    seb = sub.add_parser("source-evidence-build")
+    seb.add_argument("--repository-dir", required=True)
+    seb.add_argument("--output-dir", required=True)
+    seb.add_argument("--expected-revision", required=True)
 
     tf = sub.add_parser("triage-fail")
     tf.add_argument("--issue", required=True)
@@ -5787,6 +7445,13 @@ def main():
         if payload is None:
             raise SystemExit("target facts identity or completeness check failed")
         sys.stdout.buffer.write(payload)
+    elif args.cmd == "source-evidence-build":
+        manifest = build_target_source_evidence(
+            args.repository_dir,
+            args.output_dir,
+            args.expected_revision,
+        )
+        print(manifest["revision"])
     elif args.cmd == "upsert":
         item = load_item(args.item_file)
         number = upsert_card(item, has_token=auto_triage_has_token())
@@ -5825,6 +7490,9 @@ def main():
             result_text,
             repaired_text,
             args.target_file,
+            target_src_dir=args.target_src_dir,
+            target_src_manifest=args.target_src_manifest,
+            target_src_revision=args.target_src_revision,
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
             vision_file=args.vision_file,

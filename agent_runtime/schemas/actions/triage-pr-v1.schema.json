@@ -69,14 +69,52 @@
     "automerge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["behavior_class", "changes_existing_or_default_behavior", "optin_default_off"],
+      "required": ["behavior_class", "behavior_assertions", "changes_existing_or_default_behavior", "optin_default_off"],
       "properties": {
         "behavior_class": {"type": "string", "enum": ["A", "B", "C", "ineligible"]},
+        "behavior_assertions": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["claim", "subject", "effect", "evidence"],
+            "properties": {
+              "claim": {"type": "string", "minLength": 1, "maxLength": 700},
+              "subject": {"type": "string", "enum": ["existing_mode", "default_behavior", "existing_workflow", "delivery_contract", "documentation_or_tests"]},
+              "effect": {"type": "string", "enum": ["unchanged", "restored", "changed", "tightened", "new_requirement"]},
+              "evidence": {"$ref": "#/$defs/evidenceRef"}
+            }
+          }
+        },
+        "class_b_restoration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["corrected_defect", "corrected_defect_evidence", "intended_behavior_restored", "intended_behavior_restored_evidence"],
+          "properties": {
+            "corrected_defect": {"type": "string", "minLength": 12, "maxLength": 500},
+            "corrected_defect_evidence": {"$ref": "#/$defs/evidenceRef"},
+            "intended_behavior_restored": {"type": "string", "minLength": 12, "maxLength": 500},
+            "intended_behavior_restored_evidence": {"$ref": "#/$defs/evidenceRef"}
+          }
+        },
         "external_source_required": {"type": "boolean"},
         "aligns_with_vision": {"type": "boolean"},
         "changes_existing_or_default_behavior": {"type": "boolean"},
         "optin_default_off": {"type": "boolean"},
         "recommend_merge": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "quote"],
+      "properties": {
+        "source": {"type": "string", "pattern": "^(target\\.txt|target-src/[A-Za-z0-9._/-]{1,900})$"},
+        "quote": {"type": "string", "minLength": 12, "maxLength": 240}
       }
     }
   }
