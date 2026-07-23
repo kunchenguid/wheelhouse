@@ -31,8 +31,10 @@ Before pushing, validate locally:
 
 ```
 python -m py_compile agent_runtime/*.py agent_runtime/adapters/*.py scripts/*.py tests/*.py
+ruff check --select F821 agent_runtime scripts tests
 python scripts/agent_runtime.py verify-pins
 python tests/test_agent_runtime_contract.py
+python tests/test_agent_runtime_source_review.py
 python tests/test_agent_runtime_capabilities.py
 python tests/test_agent_runtime_security.py
 python tests/test_agent_runtime_lifecycle.py
