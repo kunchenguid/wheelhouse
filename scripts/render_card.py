@@ -2388,45 +2388,74 @@ _NEGATED_CONTRACT_EFFECT_RE = re.compile(
 )
 
 
-def _semantic_polarity(text):
+def _normalize_bounded_contractions(text):
     value = str(text or "")
+    replacements = (
+        (r"\bwon['’]t\b", "will not"),
+        (r"\bcan['’]t\b", "cannot"),
+        (r"\bshan['’]t\b", "shall not"),
+        (
+            r"\b(do|does|did|is|are|was|were|has|have|had|"
+            r"would|should|could|must) n['’]t\b",
+            r"\1 not",
+        ),
+        (
+            r"\b(do|does|did|is|are|was|were|has|have|had|"
+            r"would|should|could|must)n['’]t\b",
+            r"\1 not",
+        ),
+    )
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.I)
+    return value
+
+
+def _semantic_polarity(text):
+    value = _normalize_bounded_contractions(text)
     return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
 
 
+def _protected_subject_occurrences(text):
+    patterns = (
+        ("delivery_contract", r"\bdelivery\s+contract\b"),
+        (
+            "existing_mode",
+            r"\b(?:existing|default)\b(?:\s+\w+){0,7}\s+mode\b",
+        ),
+        (
+            "default_behavior",
+            r"\b(?:existing|default)\b(?:\s+\w+){0,7}\s+behavio[u]?r\b",
+        ),
+        ("existing_workflow", r"\bworkflow\b"),
+    )
+    topic = (
+        r"(?:documentation|docs?|tests?|fixtures?|examples?)"
+        r"(?:\s+\w+){0,4}\s+(?:for|of)\s+(?:the\s+)?"
+        r"(?:(?:existing|default|direct-pr)\s+)?$"
+    )
+    suffix = r"^\s+(?:documentation|docs?|tests?|fixtures?|examples?)\b"
+    occurrences = []
+    for subject, pattern in patterns:
+        for match in re.finditer(pattern, text):
+            prefix = text[max(0, match.start() - 100) : match.start()]
+            following = text[match.end() : match.end() + 40]
+            occurrences.append(
+                (subject, bool(re.search(topic, prefix) or re.search(suffix, following)))
+            )
+    return occurrences
+
+
 def _derive_behavior_assertion_semantics(claim):
-    text = str(claim or "").casefold()
+    text = _normalize_bounded_contractions(claim).casefold()
     subjects = set()
     documentation = bool(
         re.search(r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", text)
     )
-    documentation_only_workflow = bool(
-        re.search(
-            r"\b(?:workflow[\s/-]+(?:documentation|docs?|tests?|fixtures?|examples?)|"
-            r"(?:documentation|docs?|tests?|fixtures?|examples?)"
-            r".{0,50}\b(?:for|of)\b.{0,30}\bworkflow)\b",
-            text,
-        )
-    )
-    mixed_workflow = bool(
-        documentation
-        and re.search(
-            r"\bworkflow\b.{0,80}\b(?:and|as\s+well\s+as|along\s+with)\b"
-            r".{0,80}\b(?:documentation|docs?|tests?|fixtures?|examples?)\b",
-            text,
-        )
-    )
     if documentation:
         subjects.add("documentation_or_tests")
-    if "delivery contract" in text:
-        subjects.add("delivery_contract")
-    if re.search(r"\b(?:existing|default)\b.{0,50}\bmode\b", text):
-        subjects.add("existing_mode")
-    if re.search(r"\b(?:existing|default)\b.{0,50}\bbehavio[u]?r\b", text):
-        subjects.add("default_behavior")
-    if re.search(r"\bworkflow\b", text) and (
-        not documentation_only_workflow or mixed_workflow
-    ):
-        subjects.add("existing_workflow")
+    for subject, is_documentation_topic in _protected_subject_occurrences(text):
+        if not is_documentation_topic:
+            subjects.add(subject)
     negative_contract_effect = bool(_NEGATED_CONTRACT_EFFECT_RE.search(text))
     affirmative_text = _NEGATED_CONTRACT_EFFECT_RE.sub("", text)
     effects = set()

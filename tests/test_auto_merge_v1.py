@@ -804,6 +804,10 @@ def test_class_b_semantic_admission_boundary():
             "mixed documentation clause",
             "The existing workflow now requires approval and documentation is updated",
         ),
+        (
+            "reversed mixed documentation clause",
+            "Existing workflow documentation is updated and the existing workflow now requires approval",
+        ),
     ):
         contradictory = normalize(candidate(summary=text + "."))["automerge_verdict"]
         check(
@@ -979,6 +983,42 @@ def test_class_b_semantic_admission_boundary():
         and am.behavior_verdict_facts(polarity)[0]["g6_behavior_class"]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    contracted_polarity_input = json.loads(json.dumps(polarity_input))
+    contracted_restoration = contracted_polarity_input["automerge"][
+        "class_b_restoration"
+    ]
+    contracted_restoration["corrected_defect_evidence"]["quote"] = (
+        "Open monitored runs don't lose authentication sessions."
+    )
+    contracted_restoration["intended_behavior_restored_evidence"]["quote"] = (
+        "Open monitored runs don't restore authentication sessions."
+    )
+    contracted_polarity = normalize(
+        contracted_polarity_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs don't lose authentication sessions."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs don't restore authentication sessions."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: contracted polarity inversion is unavailable",
+        am.verdict_eligible(contracted_polarity)[0] is False
+        and am.behavior_verdict_facts(contracted_polarity)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1069,6 +1109,21 @@ def test_class_b_semantic_admission_boundary():
             "negative passive",
             "The existing workflow is not changed",
             "existing_workflow",
+        ),
+        (
+            "delivery contract documentation",
+            "Changes documentation for the delivery contract",
+            "documentation_or_tests",
+        ),
+        (
+            "existing mode tests",
+            "Changes tests for the existing mode",
+            "documentation_or_tests",
+        ),
+        (
+            "default behavior examples",
+            "Changes examples of the default behavior",
+            "documentation_or_tests",
         ),
     ):
         neutral_input = candidate(summary=text + ".")

@@ -705,7 +705,10 @@ jobs:
               echo "contract in behavior_assertions. Copy claim exactly, type its governed"
               echo "subject and effect, and attach an exact target.txt or target-src path/quote."
               echo "Trusted code derives subject/effect independently and requires a match."
-              echo "Every coordinated protected subject must be represented. Missing, extra,"
+              echo "Every coordinated protected subject must be represented in either order."
+              echo "Documentation/test topic effects are neutral for every protected category,"
+              echo "but cannot suppress a mixed contract change. Normalize bounded contractions"
+              echo "before comparing governed-predicate polarity. Missing, extra,"
               echo "ambiguous, mislabeled, or unsupported assertions are unavailable."
               echo "Be conservative when classifying these facts."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
