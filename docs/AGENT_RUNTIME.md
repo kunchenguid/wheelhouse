@@ -89,7 +89,7 @@ Before another profile is promoted, production observation uses the durable resu
 
 The supported replay owner remains an owner-started `scan-backstop.yml` `workflow_dispatch` with a non-empty validated `replay_wave`. Scheduled runs cannot reach replay, and the default empty `replay_exact_cards` input preserves the legacy sorted-prefix behavior.
 
-For a reviewed non-prefix cohort, set `replay_exact_cards` to the versioned contract `v1:N[,N...]`. Each `N` is a positive decimal card number without leading zeroes. The selector accepts at most 25 unique numbers, canonicalizes them into ascending order, rejects whitespace, empty elements, ranges, wildcards, duplicates, and trailing data, and requires `replay_limit` to equal the selector count. It cannot be combined with `replay_attempts_reset_cards`.
+For a reviewed non-prefix cohort, set `replay_exact_cards` to the versioned contract `v1:N[,N...]`. Each `N` is a positive decimal card number from 1 through 9,007,199,254,740,991 without leading zeroes. The selector accepts at most 25 unique numbers, canonicalizes them into ascending order, rejects whitespace, empty elements, ranges, wildcards, duplicates, and trailing data, and requires `replay_limit` to equal the selector count. It cannot be combined with `replay_attempts_reset_cards`.
 
 For example, plan six exact cards with zero writes:
 
@@ -105,7 +105,7 @@ gh-axi workflow run scan-backstop.yml \
 
 When this selector is present, the candidate listing is not used for discovery. Every requested card and source is still read by exact number and must pass the existing trusted identity, exact-revision, pure-card, terminal-error, attempt-cap, replay-marker, claim, daily-budget, sealed-permit, and idempotency checks. Selection grants no admission or authority.
 
-The planner reports the canonical selector and one `exact-selector/v1 admitted` line containing each card and revision. Dry-run and write-enabled modes use that same planner. If any requested card is missing, ineligible, changed during the full second-read preflight, already recovered, or the complete cohort exceeds remaining daily budget, the wave fails before writes and no generic candidate is substituted. After mutation starts, an unavoidable later GitHub race or write failure stops the wave immediately; already queued cards remain independently safe, no other card is substituted, and the operator must freeze and dry-run an explicit remaining cohort before another write-enabled dispatch.
+The planner reports the canonical selector and one `exact-selector/v1 admitted` line per card containing its revision. Dry-run and write-enabled modes use that same planner. If any requested card is missing, ineligible, changed during the full second-read preflight, already recovered, or the complete cohort exceeds remaining daily budget, the wave fails before writes and no generic candidate is substituted. After mutation starts, an unavoidable later GitHub race or write failure stops the wave immediately; already queued cards remain independently safe, no other card is substituted, and the operator must freeze and dry-run an explicit remaining cohort before another write-enabled dispatch.
 
 ## Disabled and investigated adapters
 
