@@ -2193,6 +2193,7 @@ _PROTECTED_SUBJECT_PATTERNS = (
         r"(?:\s+or\s+default)?"
         r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
         r"|(?:documented\s+)?recovery\s+behavio[u]?r"
+        r"|default(?:\s+[\w./-]+){0,4}\s+(?:setting|value|option)s?"
         r"|user-facing\s+flag\s+or\s+default)\b",
     ),
     ("existing_workflow", r"\bworkflow\b"),
@@ -2524,16 +2525,16 @@ _RESTORATION_PREDICATES = {
     }.items()
     for word in words
 }
-_RESTORATION_ROLE_STOP_WORDS = _RESTORATION_AUXILIARIES | frozenset(
-    {"after", "before", "by", "never", "not", "now", "the"}
+_RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
+    {"a", "an", "never", "not", "now", "the"}
 )
 
 
 def _restoration_role(words):
-    return frozenset(
-        _restoration_subject_tokens(" ".join(words)).difference(
-            _RESTORATION_ROLE_STOP_WORDS
-        )
+    return tuple(
+        word
+        for word in words
+        if word not in _RESTORATION_ROLE_STRUCTURE_WORDS
     )
 
 
@@ -2611,10 +2612,10 @@ def _restoration_propositions(text):
             if "by" in trailing:
                 by_index = trailing.index("by")
                 agent = _restoration_role(trailing[by_index + 1 :])
-                patient = left_role | _restoration_role(trailing[:by_index])
+                patient = left_role + _restoration_role(trailing[:by_index])
             else:
-                agent = frozenset()
-                patient = left_role | _restoration_role(trailing)
+                agent = ()
+                patient = left_role + _restoration_role(trailing)
         else:
             agent = left_role
             patient = _restoration_role(trailing)
@@ -2680,7 +2681,8 @@ _EFFECT_PATTERNS = (
         "unchanged",
         r"\b(?:"
         r"(?:can|could|do|does|did|will|would|shall|should|must)\s+not\s+"
-        r"(?:change|tighten|alter|modify|require)"
+        r"(?:change|tighten|alter|modify|require|"
+        r"be\s+(?:changed|tightened|altered|modified|required|updated))"
         r"|(?:is|are|was|were)\s+not\s+"
         r"(?:changed|changing|tightened|required|mandatory)"
         r"|without\s+changing"
@@ -2814,7 +2816,7 @@ def _coordinated_documentation_topic_semantics(text):
                 continue
             occupied.append(span)
             effects.append((effect, span[0], span[1]))
-    if len(effects) != 1 or effects[0][0] != "changed":
+    if len(effects) != 1 or effects[0][0] not in {"changed", "unchanged"}:
         return None
     effect, effect_start, effect_end = effects[0]
     if reverse:

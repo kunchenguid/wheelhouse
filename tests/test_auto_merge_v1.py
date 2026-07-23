@@ -1273,6 +1273,25 @@ def test_class_b_semantic_admission_boundary():
         )
         is False,
     )
+    check(
+        "class B admission: unlisted relation cannot alias ordered roles",
+        render_card._restoration_claim_supported(
+            "Authentication sessions resume processing on recovery.",
+            "Authentication sessions resume recovery on processing.",
+        )
+        is False,
+    )
+    for relation in ("on", "under", "through"):
+        check(
+            "class B admission: %s relation preserves ordered roles" % relation,
+            render_card._restoration_claim_supported(
+                "Authentication sessions resume processing %s recovery."
+                % relation,
+                "Authentication sessions resume recovery %s processing."
+                % relation,
+            )
+            is False,
+        )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1733,6 +1752,15 @@ def test_class_b_semantic_admission_boundary():
             ("existing_workflow", "unchanged"),
         },
     )
+    for default_noun in ("setting", "value", "option"):
+        check(
+            "semantic admission: standalone default %s remains protected"
+            % default_noun,
+            render_card._derive_behavior_assertion_semantics(
+                "Tightens the default retry %s" % default_noun
+            )
+            == {("default_behavior", "tightened")},
+        )
     passive_reverse_docs_text = (
         "Existing mode and workflow documentation is changed"
     )
@@ -1757,6 +1785,15 @@ def test_class_b_semantic_admission_boundary():
             "semantic admission: %s reverse docs remain neutral" % label,
             render_card._derive_behavior_assertion_semantics(text)
             == {("documentation_or_tests", "changed")},
+        )
+    for modal in ("will", "would", "should", "must"):
+        check(
+            "semantic admission: %s-not reverse docs remain neutral" % modal,
+            render_card._derive_behavior_assertion_semantics(
+                "Existing mode and workflow documentation %s not be changed"
+                % modal
+            )
+            == {("documentation_or_tests", "unchanged")},
         )
     reverse_transitive_text = (
         "Existing workflow and delivery contract documentation "
