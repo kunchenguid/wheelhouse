@@ -834,16 +834,24 @@ def test_ci_wait_refresh_is_noop_when_card_already_current():
         }
     )
     already["body"] = reconcile.render_card._replace_state_block(already["body"], state)
-    calls = run_reconcile(
-        scan_payload(
-            items=[],
-            ci_wait_pr_numbers=[42],
-            ci_wait_refresh_items=[
-                ci_wait_refresh_item(head_sha="newsha", comp="none", tests="none")
-            ],
-        ),
-        [already],
-    )
+    # This is a semantic no-churn unit, not an exact-observer transport test.
+    # Return the already-complete pending projection unchanged; production exact
+    # reread transitions are covered by test_target_reconcile_transaction.py.
+    saved_final_projection = reconcile._final_ci_wait_projection
+    reconcile._final_ci_wait_projection = lambda _owner, item, _cfg: item
+    try:
+        calls = run_reconcile(
+            scan_payload(
+                items=[],
+                ci_wait_pr_numbers=[42],
+                ci_wait_refresh_items=[
+                    ci_wait_refresh_item(head_sha="newsha", comp="none", tests="none")
+                ],
+            ),
+            [already],
+        )
+    finally:
+        reconcile._final_ci_wait_projection = saved_final_projection
     check(
         "ci-wait-antimasq: already-current card is not re-refreshed",
         calls["upsert"] == [],

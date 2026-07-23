@@ -2056,6 +2056,7 @@ def test_triage_workflow_issue_path_isolation():
     resolve = step_by_id(steps, "resolve")
     verify_head = step_by_id(steps, "verify_head")
     prepare = step_by_id(steps, "prepare")
+    update = step_by_name(steps, "Update the decision card")
     model_steps = load_yaml(".github", "workflows", "claude-model.yml")["jobs"][
         "model"
     ]["steps"]
@@ -2158,7 +2159,8 @@ def test_triage_workflow_issue_path_isolation():
         )
         check(
             "workflow: issue prompt marks it as an issue with no diff",
-            "This is an ISSUE, not a PR" in run,
+            "issue title/body/comments in <target-content>" in run
+            and "PR title/body/full diff in <target-content>" in run,
         )
         check(
             "workflow: issue prompt requests an issue-appropriate recommendation",
@@ -2207,7 +2209,7 @@ def test_triage_workflow_issue_path_isolation():
     )
     check(
         "workflow: final card update no longer uses the old --head-sha flag name",
-        "--head-sha" not in text,
+        update is not None and "--head-sha" not in str(update.get("run", "")),
     )
 
 
@@ -2515,7 +2517,7 @@ def test_triage_workflow_security_wiring():
 
     check(
         "workflow: triage prompt instructs the model to fully qualify cross-repo refs",
-        "fully qualified as $SLUG#N" in text and "never a bare #N" in text,
+        "qualify references as $SLUG#N, never #N" in text,
     )
 
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
