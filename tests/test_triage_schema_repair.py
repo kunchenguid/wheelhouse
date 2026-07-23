@@ -873,7 +873,8 @@ def test_triage_yml_repair_wiring():
     ]["model"]["steps"]
     check(
         "yaml: every primary evidence schema asks for one JSON string",
-        triage_source.count("a single JSON string, not an array") == 3,
+        triage_source.count('"evidence": "one string:') == 2
+        and triage_source.count('"evidence": "one JSON string') == 1,
     )
 
     def idx(steps, pred):

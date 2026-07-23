@@ -23,6 +23,7 @@ from .contract import (
     result_projection_sha256,
 )
 from .events import EventWriter
+from .output_validation import extract_json_object
 from .supervisor import _anchor_ok, _error, _verify_artifacts
 from .task_builder import (
     claude_capabilities,
@@ -109,6 +110,11 @@ def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> An
         raise ContractError("Claude action delivered no final result")
     if action.startswith("deep-review"):
         return {"text": text}
+    if action.startswith("triage."):
+        value, reason = extract_json_object(text)
+        if value is None:
+            raise ContractError(reason)
+        return value
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) >= 3 and lines[-1].strip() == "```":
@@ -159,7 +165,10 @@ def _repair_candidate(
     result_text = _result_text(terminal)
     if result_text:
         try:
-            value = json.loads(result_text)
+            if action.startswith("triage."):
+                value, _ = extract_json_object(result_text)
+            else:
+                value = json.loads(result_text)
             if (
                 isinstance(value, dict)
                 and len(canonical_json_bytes(value)) <= max_bytes

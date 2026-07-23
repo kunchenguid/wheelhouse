@@ -25,7 +25,7 @@
         "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
         "applicable_criteria": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 0,
           "maxItems": 32,
           "uniqueItems": true,
           "items": {
