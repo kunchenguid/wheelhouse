@@ -2021,8 +2021,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
         "inputs.replay_wave != '' && inputs.replay_dry_run"
     )
     exact_isolation_guard = (
-        "github.event_name == 'workflow_dispatch' && "
-        "inputs.replay_exact_cards != ''"
+        "github.event_name == 'workflow_dispatch' && inputs.replay_exact_cards != ''"
     )
     assert scan["permissions"] == {
         "contents": "read",
