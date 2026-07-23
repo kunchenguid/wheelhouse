@@ -1220,6 +1220,45 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     return render_card._replace_state_block(clean, new_state)
 
 
+def _body_with_incident_consumption_marker(body, plan, wave, run_number):
+    state = render_card._unique_state_block(body)
+    if state != plan["state"]:
+        return body
+    new_state = dict(state)
+    new_state[REPLAY_FIELD] = _marker(
+        wave,
+        plan["revision"],
+        plan["cleared"],
+        run_number,
+        incident_permit=plan["incident_permit"],
+    )
+    return render_card._replace_state_block(body, new_state)
+
+
+def _body_with_incident_queue_transition(body, plan, consumed_state):
+    state = render_card._unique_state_block(body)
+    if state != consumed_state:
+        return body
+    marker = state.get(REPLAY_FIELD)
+    if (
+        not _valid_marker(marker, plan["revision"])
+        or marker.get("version") != INCIDENT_PERMIT_REPLAY_VERSION
+        or marker.get("incident_permit") != plan["incident_permit"]
+    ):
+        return body
+    new_state = dict(state)
+    for field in TRIAGE_NON_SUCCESS_FIELDS:
+        new_state.pop(field, None)
+    new_state[render_card.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": render_card.TRIAGE_ATTEMPTS_VERSION,
+        "kind": plan["item"]["kind"],
+        "revision": plan["revision"],
+        "count": plan["attempt_count"],
+    }
+    clean = render_card.remove_triage_section(body)
+    return render_card._replace_state_block(clean, new_state)
+
+
 def _consume_incident_permit(plan, wave, run_number, owner):
     before = render_card.get_card(plan["number"])
     body = plan["card"].get("body", "")
@@ -1233,7 +1272,9 @@ def _consume_incident_permit(plan, wave, run_number, owner):
         )
     ):
         return None
-    marked_body = _body_with_replay_marker(body, plan, wave, run_number)
+    marked_body = _body_with_incident_consumption_marker(
+        body, plan, wave, run_number
+    )
     if marked_body == body:
         return None
     marked_body = render_card._atomic_automerge_card_body(
@@ -1572,15 +1613,25 @@ def run(
         if superseded["superseded"]:
             print("replay superseded stale triage claim for card #%s" % plan["number"])
 
-        def prepare_body(body, plan=plan):
-            return _body_with_replay_marker(body, plan, wave, run_number)
+        if incident_permit is not None:
+            consumed_state = current["state"]
+
+            def prepare_body(body, plan=plan, consumed_state=consumed_state):
+                return _body_with_incident_queue_transition(
+                    body, plan, consumed_state
+                )
+
+        else:
+
+            def prepare_body(body, plan=plan):
+                return _body_with_replay_marker(body, plan, wave, run_number)
 
         if reconcile.maybe_queue_auto_triage(
             plan["item"],
             current,
             has_token,
             owner=owner,
-            prepare_body=None if incident_permit is not None else prepare_body,
+            prepare_body=prepare_body,
             publish_budget_deferral=False,
         ):
             queued += 1

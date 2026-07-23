@@ -393,6 +393,27 @@ def assert_card_1585_incident_second_use_rejected(path, permit, selector):
         raise AssertionError("consumed incident permit was reused")
 
 
+def assert_card_1585_residual_state_is_scheduler_inert(cards, permit):
+    binding = permit["source_binding"]
+    item = {
+        "repo": INCIDENT_REPO,
+        "number": binding["number"],
+        "kind": permit["kind"],
+        "head_sha": binding["target_head_sha"],
+        "updated_at": "",
+        "auto_triage": True,
+    }
+    row = replay.reconcile.current_card({"number": permit["card"]})
+    assert row is not None
+    assert not replay.reconcile.maybe_queue_auto_triage(
+        item,
+        row,
+        True,
+        owner="kunchenguid",
+        publish_budget_deferral=False,
+    )
+
+
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
     cards = {42: card()}
     sources = {("wheelhouse", 17, "pr-review"): source()}
@@ -1370,6 +1391,14 @@ def test_card_1585_incident_marker_failure_preserves_prior_claim_and_retryabilit
         assert state[replay.REPLAY_FIELD] == permit["prior_marker"]
         assert calls["events"] == ["marker-write"]
         assert not calls["claims"] and not calls["queued"] and not calls["dispatched"]
+        with replay_environment(
+            cards,
+            sources,
+            has_readonly_token=True,
+            repository_owner="kunchenguid",
+        ) as scheduler_calls:
+            assert_card_1585_residual_state_is_scheduler_inert(cards, permit)
+            assert not scheduler_calls["queued"] and not scheduler_calls["dispatched"]
     finally:
         os.unlink(path)
 
@@ -1413,8 +1442,13 @@ def test_card_1585_incident_tombstone_failure_leaves_consumed_marker():
             has_readonly_token=True,
             repository_owner="kunchenguid",
         ) as second_calls:
+            assert_card_1585_residual_state_is_scheduler_inert(cards, permit)
             assert_card_1585_incident_second_use_rejected(path, permit, selector)
-            assert not second_calls["claims"]
+            assert (
+                not second_calls["claims"]
+                and not second_calls["queued"]
+                and not second_calls["dispatched"]
+            )
     finally:
         os.unlink(path)
 
@@ -1448,7 +1482,8 @@ def test_card_1585_incident_reservation_failure_leaves_consumed_marker():
         assert state[replay.REPLAY_FIELD]["version"] == (
             replay.INCIDENT_PERMIT_REPLAY_VERSION
         )
-        assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
+        assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+        assert state["triage_status"] == "error"
         assert calls["events"] == ["marker-write", "tombstone"]
         assert not calls["queued"] and not calls["dispatched"]
         with replay_environment(
@@ -1457,8 +1492,13 @@ def test_card_1585_incident_reservation_failure_leaves_consumed_marker():
             has_readonly_token=True,
             repository_owner="kunchenguid",
         ) as second_calls:
+            assert_card_1585_residual_state_is_scheduler_inert(cards, permit)
             assert_card_1585_incident_second_use_rejected(path, permit, selector)
-            assert not second_calls["claims"]
+            assert (
+                not second_calls["claims"]
+                and not second_calls["queued"]
+                and not second_calls["dispatched"]
+            )
     finally:
         os.unlink(path)
 
@@ -1486,6 +1526,8 @@ def test_card_1585_incident_queue_failure_leaves_consumed_marker():
         assert state[replay.REPLAY_FIELD]["version"] == (
             replay.INCIDENT_PERMIT_REPLAY_VERSION
         )
+        assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+        assert state["triage_status"] == "error"
         assert calls["events"] == ["marker-write", "tombstone", "queue"]
         assert not calls["queued"] and not calls["dispatched"]
         with replay_environment(
@@ -1494,8 +1536,13 @@ def test_card_1585_incident_queue_failure_leaves_consumed_marker():
             has_readonly_token=True,
             repository_owner="kunchenguid",
         ) as second_calls:
+            assert_card_1585_residual_state_is_scheduler_inert(cards, permit)
             assert_card_1585_incident_second_use_rejected(path, permit, selector)
-            assert not second_calls["claims"]
+            assert (
+                not second_calls["claims"]
+                and not second_calls["queued"]
+                and not second_calls["dispatched"]
+            )
     finally:
         os.unlink(path)
 
@@ -1529,6 +1576,10 @@ def test_card_1585_incident_dispatch_failure_consumes_and_rejects_second_use():
                 "queue",
                 "dispatch",
             ]
+            before_scheduler = {key: len(value) for key, value in calls.items()}
+            assert_card_1585_residual_state_is_scheduler_inert(cards, permit)
+            assert len(calls["queued"]) == before_scheduler["queued"]
+            assert len(calls["dispatched"]) == before_scheduler["dispatched"]
             before_second = {key: len(value) for key, value in calls.items()}
             assert_card_1585_incident_second_use_rejected(path, permit, selector)
             assert len(calls["claims"]) == before_second["claims"]
