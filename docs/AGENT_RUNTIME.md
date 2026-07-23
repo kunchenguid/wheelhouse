@@ -327,27 +327,7 @@ Any abort criterion stops further admission, preserves existing terminal evidenc
 ## Local verification
 
 No paid model call is required for local validation.
-
-Run:
-
-```bash
-python scripts/agent_runtime.py verify-pins
-python tests/test_agent_runtime_contract.py
-python tests/test_agent_runtime_capabilities.py
-python tests/test_agent_runtime_claude_adapter.py
-python tests/test_agent_runtime_security.py
-python tests/test_agent_runtime_lifecycle.py
-python tests/test_agent_runtime_consumers.py
-python tests/test_agent_runtime_dispatch.py
-python tests/test_agent_runtime_claude_handoff.py
-python tests/test_agent_runtime_claude_bridge.py
-python tests/test_agent_runtime_workflows.py
-python tests/test_claude_model_dispatch.py
-python tests/test_agent_runtime_repo_snapshot.py
-python tests/test_agent_runtime_admission.py
-python tests/test_agent_runtime_result_binding.py
-python tests/test_agent_outage_recovery_gate.py
-```
+The authoritative command list is [Local validation](../CONTRIBUTING.md#local-validation).
 
 The fake adapter exercises all action profiles without network or credentials.
 Do not run a paid live proof or mutate repository secrets without explicit approval.
