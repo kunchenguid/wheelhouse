@@ -996,6 +996,8 @@ def test_card_1585_escaped_quote_anchor_regression():
         'the 12" display remains sufficiently bright and readable',
         'the size is 12"x14" with sufficiently stable proportions',
         'the embedded token foo"bar remains sufficiently exact here',
+        "the path C:\\users\\wheelhouse remains sufficiently exact here",
+        "the regex /users\\/wheelhouse/ remains sufficiently exact here",
     ]
     check(
         "anchor: unquoted possessives and measurements remain accepted",
@@ -1013,6 +1015,8 @@ def test_card_1585_escaped_quote_anchor_regression():
         "target.txt: %s\\'" % exact_span,
         '- target.txt: \\"%s' % exact_span,
         '1. target.txt: %s\\"' % exact_span,
+        "target.txt: \\'%s'" % exact_span,
+        'target.txt: \\"%s"' % exact_span,
     ]
     check(
         "anchor: malformed delimiters never fall back to unquoted anchoring",
@@ -1020,6 +1024,32 @@ def test_card_1585_escaped_quote_anchor_regression():
             not rc.evidence_anchor_ok(evidence, exact_span)
             for evidence in malformed_quotes
         ),
+    )
+    odd_slash_evidence = (
+        "target.txt: 'the source preserves "
+        + "\\" * 3
+        + "'quoted"
+        + "\\" * 3
+        + "' text exactly'"
+    )
+    odd_slash_target = (
+        "the source preserves "
+        + "\\" * 2
+        + "'quoted"
+        + "\\" * 2
+        + "' text exactly"
+    )
+    check(
+        "anchor: odd internal slash runs decode only their escape slash",
+        rc.evidence_anchor_ok(odd_slash_evidence, odd_slash_target),
+    )
+    even_slash_evidence = (
+        "target.txt: 'a sufficiently long exact target span" + "\\" * 2 + "'"
+    )
+    even_slash_target = "a sufficiently long exact target span" + "\\" * 2
+    check(
+        "anchor: even internal slash runs remain literal",
+        rc.evidence_anchor_ok(even_slash_evidence, even_slash_target),
     )
     check(
         "anchor(card 1585): even slash runs are not over-normalized",

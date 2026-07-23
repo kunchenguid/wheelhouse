@@ -64,7 +64,17 @@ def normalize_evidence_text(text: Any) -> str:
 
 def _is_quote_opener(text: str, index: int) -> bool:
     before = text[index - 1] if index else ""
-    return not before or before.isspace() or before in ":([{=,`\\"
+    return not before or before.isspace() or before in ":([{=,`"
+
+
+def _is_escaped_quote_opener(text: str, index: int) -> bool:
+    run_start = index
+    while run_start and text[run_start - 1] == "\\":
+        run_start -= 1
+    if run_start == index:
+        return False
+    before = text[run_start - 1] if run_start else ""
+    return not before or before.isspace() or before in ":([{=,`"
 
 
 def _scan_quoted_evidence(
@@ -85,7 +95,14 @@ def _scan_quoted_evidence(
     index = 0
     while index < len(text):
         delimiter = text[index]
-        if delimiter not in {"'", '"'} or not _is_quote_opener(text, index):
+        if delimiter not in {"'", '"'}:
+            index += 1
+            continue
+        if _is_escaped_quote_opener(text, index):
+            malformed = True
+            index += 1
+            continue
+        if not _is_quote_opener(text, index):
             index += 1
             continue
         cursor = index + 1
