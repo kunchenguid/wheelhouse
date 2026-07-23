@@ -642,6 +642,40 @@ def test_class_b_semantic_admission_boundary():
             am.verdict_eligible(contradictory)[0] is False,
         )
 
+    for label, text in (
+        (
+            "new requirement",
+            "The existing direct-PR workflow now requires a Codex review.",
+        ),
+        (
+            "passive requirement",
+            "A Codex review is now required by the existing direct-PR workflow.",
+        ),
+        (
+            "modal requirement",
+            "The default delivery workflow must now obtain a Codex review.",
+        ),
+        (
+            "removed capability",
+            "A review can no longer be skipped in the default delivery workflow.",
+        ),
+        (
+            "mandatory default mode",
+            "Review becomes mandatory in the existing direct-PR mode.",
+        ),
+        (
+            "passive tightening",
+            "The existing direct-PR workflow is being tightened for review.",
+        ),
+    ):
+        contradictory = render_card.normalize_triage(candidate(summary=text))[
+            "automerge_verdict"
+        ]
+        check(
+            "semantic admission: %s is denied" % label,
+            am.verdict_eligible(contradictory)[0] is False,
+        )
+
     missing_input = candidate()
     missing_input["automerge"] = dict(missing_input["automerge"])
     missing_input["automerge"].pop("class_b_restoration")
@@ -667,6 +701,40 @@ def test_class_b_semantic_admission_boundary():
         and am.behavior_verdict_facts(ambiguous)[0]["g6_behavior_class"]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+
+    for label, defect, restored, evidence in (
+        (
+            "different generic statements",
+            "A defect affected the relevant behavior.",
+            "The intended behavior is restored by this fix.",
+            "target.txt: 'relevant behavior was affected by a defect'",
+        ),
+        (
+            "unlinked subjects",
+            "Daemon restart lost an open monitored run.",
+            "Archived decisions remain discoverable after retention.",
+            "target.txt: 'restart lost the open monitored run'",
+        ),
+        (
+            "not source bound",
+            "Daemon restart lost an open monitored run.",
+            "An open monitored run remains recoverable after restart.",
+            "target.txt: 'the button color used an incorrect token'",
+        ),
+    ):
+        vague_input = candidate(evidence=evidence)
+        vague_input["automerge"] = dict(vague_input["automerge"])
+        vague_input["automerge"]["class_b_restoration"] = {
+            "corrected_defect": defect,
+            "intended_behavior_restored": restored,
+        }
+        vague = render_card.normalize_triage(vague_input)["automerge_verdict"]
+        check(
+            "class B admission: %s is unavailable" % label,
+            am.verdict_eligible(vague)[0] is False
+            and am.behavior_verdict_facts(vague)[0]["g6_behavior_class"]["status"]
+            == schema.STATUS_UNAVAILABLE,
+        )
 
     changed_default = dict(valid, changes_existing_or_default_behavior=True)
     changed_facts, _ = am.behavior_verdict_facts(changed_default)
@@ -694,6 +762,36 @@ def test_class_b_semantic_admission_boundary():
         "class B disconfirming control: explicit no-change wording remains eligible",
         am.verdict_eligible(negated)[0] is True,
     )
+
+    for label, text in (
+        (
+            "workflow documentation",
+            "Changes the existing workflow documentation only.",
+        ),
+        (
+            "workflow tests",
+            "Updates tests for the existing direct-PR workflow.",
+        ),
+        (
+            "explicit does-not-change",
+            "The fix does not change the existing default workflow.",
+        ),
+        (
+            "preservation",
+            "Preserves the existing workflow behavior while fixing restart recovery.",
+        ),
+        (
+            "unchanged",
+            "The default delivery contract remains unchanged after the fix.",
+        ),
+    ):
+        neutral = render_card.normalize_triage(candidate(summary=text))[
+            "automerge_verdict"
+        ]
+        check(
+            "semantic admission: %s remains eligible" % label,
+            am.verdict_eligible(neutral)[0] is True,
+        )
 
     for behavior_class, optin in (("A", False), ("C", True)):
         contradictory_input = candidate(

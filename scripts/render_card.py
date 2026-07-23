@@ -1891,37 +1891,129 @@ def _coerce_verdict_bool(value):
     return None
 
 
-_BEHAVIOR_CHANGE_VERB = (
-    r"(?:tighten(?:s|ed|ing)?|chang(?:e|es|ed|ing)|"
-    r"alter(?:s|ed|ing)?|modif(?:y|ies|ied|ying))"
-)
-_BEHAVIOR_PROTECTED_CONTRACT = (
-    r"(?:existing(?:\s+or\s+default)?(?:\s+[\w./-]+){0,3}\s+"
-    r"(?:mode|behavio[u]?r|workflow|delivery\s+contract|contract)|"
-    r"existing/default(?:\s+(?:mode|behavio[u]?r|workflow|contract))?|"
-    r"default(?:\s+(?:mode|behavio[u]?r|workflow|contract))?|"
-    r"(?:[\w./-]+\s+){0,2}workflow|delivery\s+contract)"
-)
-_BEHAVIOR_CONTRADICTION_RE = re.compile(
+_BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
     r"\b(?:"
-    + _BEHAVIOR_CHANGE_VERB
-    + r"(?:\s+to)?\s+(?:an?\s+|the\s+)?"
-    + _BEHAVIOR_PROTECTED_CONTRACT
-    + r"|"
-    + _BEHAVIOR_PROTECTED_CONTRACT
-    + r"\s+(?:(?:is|was|will\s+be|has\s+been|would\s+be)\s+)?"
-    + _BEHAVIOR_CHANGE_VERB
-    + r")\b",
+    r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
+    r"(?:\s+[\w./-]+){0,4}\s+"
+    r"(?:mode|behavio[u]?r|workflow|delivery\s+contract|contract)"
+    r"|(?:[\w./-]+\s+){0,3}workflow"
+    r"|delivery\s+contract"
+    r")\b",
+    re.I,
+)
+_BEHAVIOR_CHANGE_RE = re.compile(
+    r"\b(?:"
+    r"tighten(?:s|ed|ing)?|chang(?:e|es|ed|ing)|"
+    r"alter(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|"
+    r"restrict(?:s|ed|ing)?|replac(?:e|es|ed|ing)|"
+    r"remov(?:e|es|ed|ing)|disabl(?:e|es|ed|ing)|"
+    r"enforc(?:e|es|ed|ing)"
+    r")\b",
+    re.I,
+)
+_BEHAVIOR_REQUIREMENT_RE = re.compile(
+    r"\b(?:"
+    r"(?:now|newly)\s+(?:requires?|mandates?|enforces?|"
+    r"must|shall|needs?\s+to)"
+    r"|(?:requires?|mandates?|enforces?)\s+(?:a\s+)?new\b"
+    r"|(?:is|are|was|were|will\s+be|has\s+been|have\s+been|becomes?)"
+    r"(?:\s+\w+){0,3}\s+(?:required|mandatory|enforced)"
+    r"|(?:must|shall|will)\s+now\b"
+    r"|can\s+no\s+longer\b"
+    r")",
     re.I,
 )
 _BEHAVIOR_NEGATION_RE = re.compile(
-    r"\b(?:without|never|not|no|does\s+not|do\s+not|did\s+not)\s+"
-    r"(?:[\w'-]+\s+){0,3}$",
+    r"\b(?:"
+    r"without(?:\s+\w+){0,6}\s+(?:changing|tightening|altering|modifying)"
+    r"|(?:does|do|did|will|would|can)\s+not(?:\s+\w+){0,6}\s+"
+    r"(?:change|tighten|alter|modify|require)"
+    r"|no(?:\s+\w+){0,6}\s+(?:change|changes|tightening)"
+    r"|(?:remains?|is|are)\s+unchanged"
+    r"|preserv(?:e|es|ed|ing)\b"
+    r")",
     re.I,
+)
+_BEHAVIOR_NEUTRAL_ARTIFACT_RE = re.compile(
+    r"\b(?:workflow|contract|mode|behavio[u]?r)[\s/-]+"
+    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b",
+    re.I,
+)
+_BEHAVIOR_NEUTRAL_CLAUSE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b"
+    r"|(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
+    r"modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing))"
+    r"(?:\s+\w+){0,3}\s+"
+    r"(?:documentation|docs?|tests?|fixtures?|examples?|comments?)\b"
+    r")",
+    re.I,
+)
+_RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
+_RESTORATION_GENERIC_WORDS = frozenset(
+    {
+        "affected",
+        "behavior",
+        "bug",
+        "change",
+        "changed",
+        "code",
+        "corrected",
+        "defect",
+        "expected",
+        "feature",
+        "fix",
+        "fixed",
+        "functionality",
+        "intended",
+        "issue",
+        "problem",
+        "relevant",
+        "restore",
+        "restored",
+        "system",
+        "thing",
+        "works",
+    }
+)
+_RESTORATION_STOP_WORDS = _RESTORATION_GENERIC_WORDS | frozenset(
+    {
+        "after",
+        "again",
+        "also",
+        "before",
+        "from",
+        "into",
+        "remains",
+        "that",
+        "their",
+        "then",
+        "there",
+        "these",
+        "this",
+        "through",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+    }
 )
 
 
-def _normalize_class_b_restoration(value):
+def _restoration_subject_tokens(text):
+    tokens = set()
+    for token in _RESTORATION_WORD_RE.findall(str(text or "").casefold()):
+        if token.endswith("ies") and len(token) > 5:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 4:
+            token = token[:-1]
+        if token not in _RESTORATION_STOP_WORDS:
+            tokens.add(token)
+    return tokens
+
+
+def _normalize_class_b_restoration(value, source_evidence=None):
     """Return canonical bounded class-B restoration evidence or None."""
     required = {"corrected_defect", "intended_behavior_restored"}
     if not isinstance(value, dict) or set(value) != required:
@@ -1948,25 +2040,57 @@ def _normalize_class_b_restoration(value):
         == normalized["intended_behavior_restored"].casefold()
     ):
         return None
+    defect_tokens = _restoration_subject_tokens(normalized["corrected_defect"])
+    restored_tokens = _restoration_subject_tokens(
+        normalized["intended_behavior_restored"]
+    )
+    if (
+        len(defect_tokens) < 2
+        or len(restored_tokens) < 2
+        or not defect_tokens.intersection(restored_tokens)
+    ):
+        return None
+    if source_evidence is not None:
+        source_tokens = _restoration_subject_tokens(source_evidence)
+        if not (
+            defect_tokens.intersection(source_tokens)
+            and restored_tokens.intersection(source_tokens)
+        ):
+            return None
     return normalized
 
 
 def _claims_existing_contract_change(text):
     """Detect an affirmative claim that protected existing behavior changes."""
-    value = str(text or "")
-    for match in _BEHAVIOR_CONTRADICTION_RE.finditer(value):
-        prefix = value[max(0, match.start() - 64) : match.start()]
-        if _BEHAVIOR_NEGATION_RE.search(prefix):
+    clauses = re.split(
+        r"(?:[.!?;]\s+|\s+(?:but|however|although|yet)\s+)",
+        str(text or ""),
+        flags=re.I,
+    )
+    for clause in clauses:
+        bounded = _BEHAVIOR_NEUTRAL_ARTIFACT_RE.sub("", clause)
+        if (
+            not bounded.strip()
+            or _BEHAVIOR_NEUTRAL_CLAUSE_RE.search(bounded)
+        ):
             continue
-        return True
+        bounded = _BEHAVIOR_NEGATION_RE.sub("", bounded)
+        if not _BEHAVIOR_PROTECTED_CONTRACT_RE.search(bounded):
+            continue
+        if _BEHAVIOR_CHANGE_RE.search(bounded) or _BEHAVIOR_REQUIREMENT_RE.search(
+            bounded
+        ):
+            return True
     return False
 
 
 def _behavior_admission_record(behavior_class, restoration, triage_data):
     if not isinstance(triage_data, dict):
         return None
-    normalized = _normalize_class_b_restoration(restoration)
     evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
+    normalized = _normalize_class_b_restoration(
+        restoration, source_evidence=evidence
+    )
     semantic_text = [
         triage_data.get("summary", ""),
         triage_data.get("product_implications", ""),
