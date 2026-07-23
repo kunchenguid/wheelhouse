@@ -1192,6 +1192,14 @@ def test_class_b_semantic_admission_boundary():
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    check(
+        "class B admission: active progressive preserves argument roles",
+        render_card._restoration_claim_supported(
+            "Authentication sessions are blocking monitored runs.",
+            "Monitored runs are blocking authentication sessions.",
+        )
+        is False,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1529,6 +1537,62 @@ def test_class_b_semantic_admission_boundary():
             "g6_behavior_class"
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
+    )
+    possessive_effect_text = (
+        "Tightens the contract's default requirements while updating "
+        "documentation for the delivery contract"
+    )
+    possessive_effect_input = candidate(summary=possessive_effect_text + ".")
+    possessive_effect_input["automerge"] = dict(
+        possessive_effect_input["automerge"]
+    )
+    possessive_effect_input["automerge"]["behavior_assertions"] = list(
+        possessive_effect_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": possessive_effect_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {
+                "source": "target.txt",
+                "quote": possessive_effect_text,
+            },
+        }
+    ]
+    possessive_effect = normalize(
+        possessive_effect_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(possessive_effect_text),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: possessive protected effect is unavailable",
+        am.verdict_eligible(possessive_effect)[0] is False
+        and am.behavior_verdict_facts(possessive_effect)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
+
+    mixed_reverse_text = (
+        "Tightens existing workflow and delivery contract documentation"
+    )
+    check(
+        "semantic admission: mixed reverse docs preserve workflow change",
+        render_card._derive_behavior_assertion_semantics(mixed_reverse_text)
+        == {
+            ("existing_workflow", "tightened"),
+            ("documentation_or_tests", "tightened"),
+        },
     )
 
     for label, text, assertions in (

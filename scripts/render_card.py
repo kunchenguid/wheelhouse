@@ -2518,6 +2518,7 @@ def _restoration_propositions(text):
         if len(predicates) != 1:
             return None
         predicate_index, predicate = predicates[0]
+        predicate_word = words[predicate_index]
         auxiliary_index = next(
             (
                 index
@@ -2546,6 +2547,13 @@ def _restoration_propositions(text):
                     passive_prefix[: passive_match.start(1)],
                 )
             )
+        passive_morphology = predicate_word.endswith(("ed", "en")) or (
+            predicate_word == "lost"
+        )
+        if passive_start is not None and not passive_morphology:
+            if not predicate_word.endswith("ing"):
+                return None
+            passive_start = None
         passive = passive_start is not None
         subject_end = (
             passive_start
@@ -2732,7 +2740,7 @@ def _coordinated_documentation_topic_semantics(text):
                 continue
             occupied.append(span)
             effects.append(effect)
-    if len(effects) != 1:
+    if len(effects) != 1 or effects[0] != "changed":
         return None
     return {("documentation_or_tests", effects[0])}
 
@@ -2776,11 +2784,11 @@ def _atomic_semantic_spans(text):
                     match.group(0).casefold().startswith("without "),
                 )
             )
-    scoped_effects = []
-    for index, item in enumerate(sorted(effects, key=lambda value: value[1])):
+    effects = sorted(effects, key=lambda value: value[1])
+    for index, item in enumerate(effects):
         effect, start, end, subordinate_after = item
         next_start = (
-            sorted(effects, key=lambda value: value[1])[index + 1][1]
+            effects[index + 1][1]
             if index + 1 < len(effects)
             else len(text)
         )
@@ -2815,6 +2823,8 @@ def _atomic_semantic_spans(text):
             >= 2
             and not governed_words.intersection(
                 {
+                    "contract",
+                    "contracts",
                     "her",
                     "hers",
                     "his",
@@ -2826,15 +2836,14 @@ def _atomic_semantic_spans(text):
                     "they",
                     "this",
                     "that",
+                    "workflow",
+                    "workflows",
                 }
             )
             and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(governed_text) is None
         )
-        if not locally_unprotected:
-            scoped_effects.append(
-                (effect, start, end, subordinate_after)
-            )
-    effects = scoped_effects
+        if locally_unprotected:
+            subjects.append(("_unprotected", end, next_start))
     return subjects, effects, documentation_topic
 
 
@@ -2871,7 +2880,8 @@ def _bind_atomic_semantics(subjects, effects):
             return None
         effect, index = next(iter(nearest))
         consumed_effects.add(index)
-        semantics.add((subject, effect))
+        if subject != "_unprotected":
+            semantics.add((subject, effect))
     for index, _ in enumerate(effects):
         if index not in consumed_effects:
             return None
