@@ -1019,6 +1019,42 @@ def test_class_b_semantic_admission_boundary():
         ]["status"]
         == schema.STATUS_UNAVAILABLE,
     )
+    cannot_polarity_input = json.loads(json.dumps(contracted_polarity_input))
+    cannot_restoration = cannot_polarity_input["automerge"][
+        "class_b_restoration"
+    ]
+    cannot_restoration["corrected_defect_evidence"]["quote"] = (
+        "Open monitored runs can't lose authentication sessions."
+    )
+    cannot_restoration["intended_behavior_restored_evidence"]["quote"] = (
+        "Open monitored runs can't restore authentication sessions."
+    )
+    cannot_polarity = normalize(
+        cannot_polarity_input,
+        verified=(
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs can't lose authentication sessions."
+                ),
+            ),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(
+                    "Open monitored runs can't restore authentication sessions."
+                ),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B admission: cannot polarity inversion is unavailable",
+        am.verdict_eligible(cannot_polarity)[0] is False
+        and am.behavior_verdict_facts(cannot_polarity)[0][
+            "g6_behavior_class"
+        ]["status"]
+        == schema.STATUS_UNAVAILABLE,
+    )
 
     hidden_contract_input = candidate()
     hidden_contract_input["automerge"] = dict(hidden_contract_input["automerge"])
@@ -1155,6 +1191,95 @@ def test_class_b_semantic_admission_boundary():
         check(
             "semantic admission: %s remains eligible" % label,
             am.verdict_eligible(neutral)[0] is True,
+        )
+
+    preserved_text = (
+        "Changes workflow documentation and preserves the existing workflow"
+    )
+    preserved_input = candidate(summary=preserved_text + ".")
+    preserved_input["automerge"] = dict(preserved_input["automerge"])
+    preserved_input["automerge"]["behavior_assertions"] = list(
+        preserved_input["automerge"]["behavior_assertions"]
+    ) + [
+        {
+            "claim": preserved_text,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {"source": "target.txt", "quote": preserved_text},
+        },
+        {
+            "claim": preserved_text,
+            "subject": "existing_workflow",
+            "effect": "unchanged",
+            "evidence": {"source": "target.txt", "quote": preserved_text},
+        },
+    ]
+    preserved = normalize(
+        preserved_input,
+        verified=(
+            ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+            ("target.txt", render_card._normalize_evidence_text(product_claim)),
+            (
+                "target-src/lib/recovery.py",
+                render_card._normalize_evidence_text(restored_quote),
+            ),
+            ("target.txt", render_card._normalize_evidence_text(preserved_text)),
+        ),
+    )["automerge_verdict"]
+    check(
+        "semantic admission: preserved workflow with docs change remains eligible",
+        am.verdict_eligible(preserved)[0] is True,
+    )
+
+    for label, text, assertions in (
+        (
+            "generic existing contract mapping",
+            (
+                "Updates documentation for the delivery contract and "
+                "tightens the existing contract"
+            ),
+            (
+                ("documentation_or_tests", "changed"),
+                ("delivery_contract", "tightened"),
+            ),
+        ),
+        (
+            "workflow tests verb mapping",
+            "The existing workflow tests credentials and now requires approval",
+            (("existing_workflow", "new_requirement"),),
+        ),
+    ):
+        mapped_input = candidate(summary=text + ".")
+        mapped_input["automerge"] = dict(mapped_input["automerge"])
+        mapped_input["automerge"]["behavior_assertions"] = list(
+            mapped_input["automerge"]["behavior_assertions"]
+        ) + [
+            {
+                "claim": text,
+                "subject": subject,
+                "effect": effect,
+                "evidence": {"source": "target.txt", "quote": text},
+            }
+            for subject, effect in assertions
+        ]
+        mapped = normalize(
+            mapped_input,
+            verified=(
+                ("target.txt", render_card._normalize_evidence_text(defect_quote)),
+                ("target.txt", render_card._normalize_evidence_text(product_claim)),
+                (
+                    "target-src/lib/recovery.py",
+                    render_card._normalize_evidence_text(restored_quote),
+                ),
+                ("target.txt", render_card._normalize_evidence_text(text)),
+            ),
+        )["automerge_verdict"]
+        mapped_facts, _ = am.behavior_verdict_facts(mapped)
+        check(
+            "semantic admission: %s is denied" % label,
+            am.verdict_eligible(mapped)[0] is False
+            and mapped_facts["g6_behavior_class"]["status"]
+            == schema.STATUS_UNMET,
         )
 
     for behavior_class, optin in (("A", False), ("C", True)):

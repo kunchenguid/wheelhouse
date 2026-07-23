@@ -2175,14 +2175,27 @@ def _coerce_verdict_bool(value):
     return None
 
 
+_PROTECTED_SUBJECT_PATTERNS = (
+    (
+        "delivery_contract",
+        r"\b(?:delivery\s+contract|"
+        r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+contract)\b",
+    ),
+    (
+        "existing_mode",
+        r"\b(?:existing|default|existing/default)(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+mode\b",
+    ),
+    (
+        "default_behavior",
+        r"\b(?:existing|default|existing/default)(?:\s+or\s+default)?"
+        r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r\b",
+    ),
+    ("existing_workflow", r"\bworkflow\b"),
+)
 _BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
-    r"\b(?:"
-    r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
-    r"(?:\s+[\w./-]+){0,4}\s+"
-    r"(?:mode|behavio[u]?r|workflow|delivery\s+contract|contract)"
-    r"|workflow"
-    r"|delivery\s+contract"
-    r")\b",
+    "|".join("(?:%s)" % pattern for _, pattern in _PROTECTED_SUBJECT_PATTERNS),
     re.I,
 )
 _RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
@@ -2370,7 +2383,8 @@ def _protected_contract_claims(texts):
 
 _EXPLICIT_NEGATION_RE = re.compile(
     r"\b(?:never|"
-    r"(?:do|does|did|will|would|must|is|are|was|were|has|have)\s+not|"
+    r"(?:can|could|do|does|did|will|would|shall|should|must|"
+    r"is|are|was|were|has|have|had)\s+not|"
     r"(?:is|are|was|were)\s+not\s+\w+ed)\b",
     re.I,
 )
@@ -2392,7 +2406,7 @@ def _normalize_bounded_contractions(text):
     value = str(text or "")
     replacements = (
         (r"\bwon['’]t\b", "will not"),
-        (r"\bcan['’]t\b", "cannot"),
+        (r"\bcan['’]t\b", "can not"),
         (r"\bshan['’]t\b", "shall not"),
         (
             r"\b(do|does|did|is|are|was|were|has|have|had|"
@@ -2415,82 +2429,202 @@ def _semantic_polarity(text):
     return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
 
 
-def _protected_subject_occurrences(text):
-    patterns = (
-        ("delivery_contract", r"\bdelivery\s+contract\b"),
-        (
-            "existing_mode",
-            r"\b(?:existing|default)\b(?:\s+\w+){0,7}\s+mode\b",
-        ),
-        (
-            "default_behavior",
-            r"\b(?:existing|default)\b(?:\s+\w+){0,7}\s+behavio[u]?r\b",
-        ),
-        ("existing_workflow", r"\bworkflow\b"),
-    )
-    topic = (
-        r"(?:documentation|docs?|tests?|fixtures?|examples?)"
-        r"(?:\s+\w+){0,4}\s+(?:for|of)\s+(?:the\s+)?"
-        r"(?:(?:existing|default|direct-pr)\s+)?$"
-    )
-    suffix = r"^\s+(?:documentation|docs?|tests?|fixtures?|examples?)\b"
-    occurrences = []
-    for subject, pattern in patterns:
-        for match in re.finditer(pattern, text):
-            prefix = text[max(0, match.start() - 100) : match.start()]
-            following = text[match.end() : match.end() + 40]
-            occurrences.append(
-                (subject, bool(re.search(topic, prefix) or re.search(suffix, following)))
+_DOCUMENTATION_WORD_RE = re.compile(
+    r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
+)
+_ATOMIC_COORDINATOR_RE = re.compile(
+    r"\s*(?:,?\s+\b(?:and|as\s+well\s+as|along\s+with)\b\s*)", re.I
+)
+_EFFECT_PATTERNS = (
+    (
+        "unchanged",
+        r"\b(?:"
+        r"(?:can|could|do|does|did|will|would|shall|should|must)\s+not\s+"
+        r"(?:change|tighten|alter|modify|require)"
+        r"|(?:is|are|was|were)\s+not\s+"
+        r"(?:changed|changing|tightened|required|mandatory)"
+        r"|without\s+changing"
+        r"|no(?:\s+\w+){0,7}\s+changes?"
+        r"|(?:remains?|is|are)\s+unchanged"
+        r"|preserv(?:e|es|ed|ing)"
+        r")\b",
+    ),
+    (
+        "new_requirement",
+        r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
+        r"(?:is|are|becomes?)\s+(?:now\s+)?(?:required|mandatory)|"
+        r"can\s+no\s+longer)\b",
+    ),
+    ("tightened", r"\btighten(?:s|ed|ing)?\b"),
+    (
+        "changed",
+        r"\b(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
+        r"modif(?:y|ies|ied|ying)|disabl(?:e|es|ed|ing)|"
+        r"replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|"
+        r"updat(?:e|es|ed|ing))\b",
+    ),
+    ("restored", r"\brestor(?:e|es|ed|ing)\b"),
+)
+
+
+def _documentation_spans(text):
+    spans = []
+    for match in _DOCUMENTATION_WORD_RE.finditer(text):
+        word = match.group(0).casefold()
+        if word in {"test", "tests"}:
+            before = text[: match.start()]
+            after = text[match.end() :]
+            follows_workflow = re.search(r"\bworkflow\s*$", before) is not None
+            next_word = re.match(r"\s+([a-z][\w-]*)", after)
+            if (
+                follows_workflow
+                and next_word is not None
+                and next_word.group(1)
+                not in {
+                    "are",
+                    "change",
+                    "changed",
+                    "is",
+                    "remain",
+                    "remains",
+                    "were",
+                }
+            ):
+                continue
+        spans.append((match.start(), match.end()))
+    return spans
+
+
+def _is_documentation_topic(text, protected_span, documentation_spans):
+    protected_start, protected_end = protected_span
+    for documentation_start, documentation_end in documentation_spans:
+        if documentation_end <= protected_start:
+            between = text[documentation_end:protected_start]
+            if re.fullmatch(
+                r"(?:\s+\w+){0,4}\s+(?:for|of)\s+(?:the\s+)?"
+                r"(?:(?:existing|default|direct-pr)\s+)?",
+                between,
+                re.I,
+            ):
+                return True
+        elif documentation_start >= protected_end:
+            between = text[protected_end:documentation_start]
+            if re.fullmatch(r"[\s/-]*", between):
+                return True
+    return False
+
+
+def _atomic_semantic_spans(text):
+    documentation_spans = _documentation_spans(text)
+    subjects = [
+        ("documentation_or_tests", start, end)
+        for start, end in documentation_spans
+    ]
+    protected_matches = []
+    for subject, pattern in _PROTECTED_SUBJECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            protected_matches.append((subject, match.start(), match.end()))
+    protected_matches.sort(key=lambda item: (item[1], item[2], item[0]))
+    seen_spans = set()
+    for subject, start, end in protected_matches:
+        identity = (start, end)
+        if identity in seen_spans:
+            return None
+        seen_spans.add(identity)
+        if not _is_documentation_topic(
+            text, (start, end), documentation_spans
+        ):
+            subjects.append((subject, start, end))
+
+    effects = []
+    occupied = []
+    for effect, pattern in _EFFECT_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            span = (match.start(), match.end())
+            if any(span[0] < end and span[1] > start for start, end in occupied):
+                continue
+            occupied.append(span)
+            effects.append(
+                (
+                    effect,
+                    span[0],
+                    span[1],
+                    match.group(0).casefold().startswith("without "),
+                )
             )
-    return occurrences
+    return subjects, effects
+
+
+def _bind_atomic_semantics(subjects, effects):
+    semantics = set()
+    for subject, start, end in subjects:
+        ranked = []
+        for effect, effect_start, effect_end, subordinate_after in effects:
+            if subordinate_after and effect_start >= end:
+                continue
+            distance = (
+                start - effect_end
+                if effect_end <= start
+                else effect_start - end
+                if effect_start >= end
+                else 0
+            )
+            ranked.append((max(0, distance), effect))
+        if not ranked:
+            return None
+        nearest_distance = min(item[0] for item in ranked)
+        nearest = {effect for distance, effect in ranked if distance == nearest_distance}
+        if len(nearest) != 1:
+            return None
+        semantics.add((subject, next(iter(nearest))))
+    return semantics
 
 
 def _derive_behavior_assertion_semantics(claim):
     text = _normalize_bounded_contractions(claim).casefold()
-    subjects = set()
-    documentation = bool(
-        re.search(r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", text)
-    )
-    if documentation:
-        subjects.add("documentation_or_tests")
-    for subject, is_documentation_topic in _protected_subject_occurrences(text):
-        if not is_documentation_topic:
-            subjects.add(subject)
-    negative_contract_effect = bool(_NEGATED_CONTRACT_EFFECT_RE.search(text))
-    affirmative_text = _NEGATED_CONTRACT_EFFECT_RE.sub("", text)
-    effects = set()
-    if re.search(
-        r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
-        r"(?:is|are|becomes?)\s+(?:now\s+)?(?:required|mandatory)|"
-        r"can\s+no\s+longer)\b",
-        affirmative_text,
-    ):
-        effects.add("new_requirement")
-    if re.search(r"\btighten(?:s|ed|ing)?\b", affirmative_text):
-        effects.add("tightened")
-    if re.search(
-        r"\b(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
-        r"modif(?:y|ies|ied|ying)|disabl(?:e|es|ed|ing)|"
-        r"replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing))\b",
-        affirmative_text,
-    ):
-        effects.add("changed")
-    if re.search(r"\brestor(?:e|es|ed|ing)\b", affirmative_text):
-        effects.add("restored")
-    if negative_contract_effect or re.search(
-        r"\b(?:(?:remains?|is|are)\s+unchanged|preserv(?:e|es|ed|ing))\b",
-        text,
-    ):
-        effects.add("unchanged")
-    denying = effects.intersection({"changed", "tightened", "new_requirement"})
-    if denying:
-        effects = denying
-    elif "unchanged" in effects:
-        effects = {"unchanged"}
-    if len(effects) != 1 or not subjects:
+    atomic = [
+        part.strip()
+        for part in _ATOMIC_COORDINATOR_RE.split(text)
+        if part.strip()
+    ]
+    if not atomic:
         return None
-    effect = next(iter(effects))
-    return {(subject, effect) for subject in subjects}
+    semantics = set()
+    pending_subjects = None
+    prior_effects = None
+    for part in atomic:
+        spans = _atomic_semantic_spans(part)
+        if spans is None:
+            return None
+        subjects, effects = spans
+        if subjects and effects:
+            bound = _bind_atomic_semantics(subjects, effects)
+            if bound is None:
+                return None
+            semantics.update(bound)
+            pending_subjects = subjects
+            prior_effects = effects
+        elif subjects:
+            if prior_effects is not None:
+                bound = _bind_atomic_semantics(subjects, prior_effects)
+                if bound is None:
+                    return None
+                semantics.update(bound)
+            else:
+                pending_subjects = subjects
+            prior_effects = None
+        elif effects:
+            if pending_subjects is None:
+                return None
+            bound = _bind_atomic_semantics(pending_subjects, effects)
+            if bound is None:
+                return None
+            semantics.update(bound)
+            pending_subjects = None
+            prior_effects = effects
+    if not semantics or (pending_subjects is not None and prior_effects is None):
+        return None
+    return semantics
 
 
 def _normalize_behavior_assertions(value, semantic_text, verified_evidence_refs):
