@@ -60,6 +60,7 @@ python tests/test_pending_contributor_cleanup.py
 python tests/test_ci_autoapprove.py
 python tests/test_target_observation.py
 python tests/test_option_b_architecture.py
+python tests/test_option_b_path_completeness.py
 python tests/test_decision_label_recovery.py
 python tests/test_target_reconcile_transaction.py
 python tests/test_ci_security_summary.py

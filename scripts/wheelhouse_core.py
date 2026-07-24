@@ -2315,13 +2315,16 @@ def observe_exact_pr(owner, repo_cfg, number, expected_head_sha=""):
         comp, tests, ci, _, configured_checks = check_status(
             pr, repo_cfg, return_rows=True
         )
-        files, files_ok, files_complete = _list_pr_files(
-            "%s/%s" % (owner, name), number, pr.get("changedFiles")
+        files, files_ok, files_complete = immutable_compare_files(
+            "%s/%s" % (owner, name),
+            pr.get("baseRefOid"),
+            pr.get("headRefOid"),
+            pr.get("changedFiles"),
         )
         changed_paths = target_contracts.changed_path_facts(
             files if files_ok and files_complete else [],
             complete=bool(files_ok and files_complete),
-            count=(pr.get("changedFiles") if files_ok and files_complete else None),
+            count=(len(set(files)) if files_ok and files_complete else None),
         )
         cross_repo = _pr_is_cross_repo(pr)
         pending_ci_approval = False
@@ -4313,7 +4316,6 @@ def build_repo(
             settlement_failure,
             [],
         )
-    context_paths_enabled = len(pr_contexts) <= REVIEW_CONTEXT_PR_CAP
     for (
         pr,
         author,
@@ -4324,18 +4326,22 @@ def build_repo(
         pending_ci_approval,
         configured_checks,
     ) in pr_contexts:
-        if context_paths_enabled:
-            paths, paths_ok, paths_complete = _list_pr_files(
-                slug, pr["number"], pr.get("changedFiles")
-            )
-        else:
-            paths, paths_ok, paths_complete = [], False, False
+        # Observation paths are authority-bearing current facts, unlike the
+        # bounded repository candidate set below. Read each candidate once from
+        # its immutable base/head comparison even when repository context is
+        # truncated; the API's bounded rows plus changedFiles prove completeness.
+        paths, paths_ok, paths_complete = immutable_compare_files(
+            slug,
+            pr.get("baseRefOid"),
+            pr.get("headRefOid"),
+            pr.get("changedFiles"),
+        )
         try:
             changed_paths = target_contracts.changed_path_facts(
                 paths if paths_ok and paths_complete else [],
                 complete=bool(paths_ok and paths_complete),
                 count=(
-                    pr.get("changedFiles")
+                    len(set(paths))
                     if paths_ok and paths_complete
                     else None
                 ),
@@ -5152,6 +5158,46 @@ def _changed_file_count(value):
     except (TypeError, ValueError):
         return None
     return count if count >= 0 else None
+
+
+def immutable_compare_files(slug, base_sha, head_sha, expected_count):
+    """Read changed paths from one immutable base/head comparison.
+
+    GitHub bounds comparison file rows. The expected GraphQL changed-file count
+    therefore proves completeness instead of treating a partial response as
+    complete. Rename source paths are retained for path-based safety gates.
+    """
+    object_id = re.compile(r"[0-9a-fA-F]{7,64}")
+    base_sha = str(base_sha or "").strip()
+    head_sha = str(head_sha or "").strip()
+    if not object_id.fullmatch(base_sha) or not object_id.fullmatch(head_sha):
+        return ([], False, False)
+    try:
+        comparison = gh_rest(
+            "/repos/%s/compare/%s...%s" % (slug, base_sha, head_sha)
+        )
+    except RuntimeError:
+        return ([], False, False)
+    if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
+        return ([], False, False)
+    paths = []
+    entry_count = 0
+    for changed in comparison["files"]:
+        if not isinstance(changed, dict):
+            return ([], False, False)
+        filename = str(changed.get("filename") or "").strip()
+        if not filename:
+            return ([], False, False)
+        paths.append(filename)
+        entry_count += 1
+        if "previous_filename" in changed:
+            previous = changed.get("previous_filename")
+            if not isinstance(previous, str) or not previous.strip():
+                return ([], False, False)
+            paths.append(previous.strip())
+    count = _changed_file_count(expected_count)
+    return (paths, True, count is not None and entry_count == count)
+
 
 
 def _list_pr_files(slug, pr, expected_count=None):

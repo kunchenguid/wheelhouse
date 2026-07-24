@@ -21,6 +21,8 @@ Target actions and action locks stay separate. Displayed criteria and related wo
 - compact compliance, test, and informational rows from the same `check_status()` reduction that produces aggregate compliance and tests;
 - a digest of the complete immutable changed-path set plus bounded path facts.
 
+The bulk reducer obtains those paths with one bounded immutable `base...head` comparison per observed PR, independently of the bounded DecisionContext candidate set. The GraphQL `changedFiles` count proves the comparison rows complete. A truncated response, malformed row, count mismatch, invalid revision, or failed read leaves changed paths incomplete. The auto-merge evaluator delegates to the same comparison helper, so G2 and ReviewObservation cannot drift onto different immutable path-read semantics.
+
 Incomplete or internally contradictory evidence is not current. `card_projection.py` renders explicit unknown values rather than reusing raw green or approval-needed facts.
 
 A concrete `wheelhouse.target-observation/v1` persisted record remains readable only in `scripts/target_observation.py`. Migration marks configured checks and changed paths incomplete. Remove this compatibility reader only after normal telemetry proves that no trusted open or reusable card contains v1.
