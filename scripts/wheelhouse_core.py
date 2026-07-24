@@ -61,6 +61,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlparse
 
 import target_observation as target_contracts
+import decision_context as decision_context_contracts
 
 try:
     import yaml
@@ -94,6 +95,9 @@ PR_LABELS_PAGE_SIZE = 20
 CLOSING_REFS_PAGE_SIZE = 20
 STATUS_CONTEXTS_PAGE_SIZE = 100
 ACTION_REQUIRED_RUN_LIMIT = 30
+# DecisionContext compares at most this many open PRs in one repository snapshot.
+# Exceeding the cap is advisory truncation, never an acting gate.
+REVIEW_CONTEXT_PR_CAP = 100
 # Event-aware compliance enrichment is opt-in per repository. Actions run pages
 # are bounded so a pathological same-head history degrades to unknown rather
 # than turning a fleet scan into an unbounded API crawl.
@@ -127,7 +131,7 @@ _COMPLIANCE_RUN_TITLE_RE = re.compile(
 )
 
 _PR_NODE_FIELDS = """
-        number title isDraft updatedAt changedFiles isCrossRepository mergeable
+        number title body isDraft updatedAt changedFiles isCrossRepository mergeable
         author { login __typename }
         headRefName headRefOid baseRefName baseRefOid
         headRepository { name owner { login } }
@@ -254,7 +258,7 @@ query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
       state
-      number title isDraft updatedAt isCrossRepository mergeable
+      number title body changedFiles isDraft updatedAt isCrossRepository mergeable
       author { login __typename }
       headRefName headRefOid baseRefName baseRefOid
       headRepository { name owner { login } }
@@ -1714,8 +1718,12 @@ def _rollup_failure_only_ignorable_cancels(contexts):
     return saw_ignorable_cancel
 
 
-def check_status(pr, cfg):
-    """Return (compliance, tests, ci_present, names).
+def check_status(pr, cfg, return_rows=False):
+    """Return aggregate check facts, optionally with compact configured rows.
+
+    The optional fifth value is produced from the exact same equivalent-name
+    groups and worst-wins reducer as ``comp`` and ``tests``. ReviewObservation
+    therefore never interprets raw conclusions a second way.
 
     compliance in pass/fail/pending/missing/n/a/none; tests in green/fail/pending/none.
 
@@ -1737,7 +1745,24 @@ def check_status(pr, cfg):
     commits = pr["commits"]["nodes"]
     rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
     if not rollup or not rollup["contexts"]["nodes"]:
-        return (event_compliance or "none", "none", False, [])
+        result = (event_compliance or "none", "none", False, [])
+        if not return_rows:
+            return result
+        rows = []
+        comp_name = cfg.get("compliance_check")
+        if event_compliance is not None and comp_name:
+            rows.append(
+                {
+                    "name": comp_name,
+                    "role": "compliance",
+                    "outcome": (
+                        "pass"
+                        if event_compliance == "pass"
+                        else ("fail" if event_compliance == "fail" else "pending")
+                    ),
+                }
+            )
+        return result + (rows,)
     comp_name = cfg.get("compliance_check")
     patterns = cfg.get("test_check_patterns", []) or []
     # Group by exact check name / status context so only truly equivalent
@@ -1745,6 +1770,7 @@ def check_status(pr, cfg):
     # matrix legs (e.g. ubuntu vs macos) keep distinct names and stay independent.
     comp_by_name = {}
     test_by_name = {}
+    informational_by_name = {}
     names = []
     for c in rollup["contexts"]["nodes"]:
         if c["__typename"] == "CheckRun":
@@ -1755,6 +1781,8 @@ def check_status(pr, cfg):
                 comp_by_name.setdefault(name, []).append(outcome)
             elif any(p in name for p in patterns):
                 test_by_name.setdefault(name, []).append(outcome)
+            elif name:
+                informational_by_name.setdefault(name, []).append(outcome)
         else:  # StatusContext
             ctx = c.get("context") or ""
             names.append(ctx)
@@ -1763,6 +1791,8 @@ def check_status(pr, cfg):
                 comp_by_name.setdefault(ctx, []).append(outcome)
             elif any(p in ctx for p in patterns):
                 test_by_name.setdefault(ctx, []).append(outcome)
+            elif ctx:
+                informational_by_name.setdefault(ctx, []).append(outcome)
     # Reduce each equivalent-name group, then worst-wins across groups.
     # Scalar last-write-wins would silently pick API order (card #392).
     if event_compliance is not None:
@@ -1811,7 +1841,49 @@ def check_status(pr, cfg):
             )
         if not accounted:
             compliance = "fail"
-    return (compliance, tstate, True, names)
+    result = (compliance, tstate, True, names)
+    if not return_rows:
+        return result
+    rows = []
+    if event_compliance is not None and comp_name:
+        rows.append(
+            {
+                "name": comp_name,
+                "role": "compliance",
+                "outcome": (
+                    "pass"
+                    if event_compliance == "pass"
+                    else ("fail" if event_compliance == "fail" else "pending")
+                ),
+            }
+        )
+    else:
+        rows.extend(
+            {
+                "name": name,
+                "role": "compliance",
+                "outcome": _reduce_check_outcomes(outcomes),
+            }
+            for name, outcomes in comp_by_name.items()
+        )
+    rows.extend(
+        {
+            "name": name,
+            "role": "test",
+            "outcome": _reduce_check_outcomes(outcomes),
+        }
+        for name, outcomes in test_by_name.items()
+    )
+    rows.extend(
+        {
+            "name": name,
+            "role": "informational",
+            "outcome": _reduce_check_outcomes(outcomes),
+        }
+        for name, outcomes in informational_by_name.items()
+    )
+    rows.sort(key=lambda row: (row["role"], row["name"]))
+    return result + (rows,)
 
 
 def _repo_identity(repo):
@@ -2124,9 +2196,11 @@ def _pr_observation_contract(
     source,
     expected_head_sha="",
     target_complete=True,
+    configured_checks=None,
+    changed_paths=None,
     error="",
 ):
-    """Normalize scanner/exact facts into target-observation/v1."""
+    """Normalize scanner/exact facts into ReviewObservation v2."""
     head_sha = str(pr.get("headRefOid") or "")
     base_sha = str(pr.get("baseRefOid") or "")
     head_ref = str(pr.get("headRefName") or "")
@@ -2152,12 +2226,25 @@ def _pr_observation_contract(
         mergeability = "unknown"
     else:
         mergeability = "not-required"
+    configured_checks = target_contracts.normalize_check_rows(
+        configured_checks or []
+    )
+    configured_checks_complete = bool(
+        checks_complete and configured_checks is not None
+    )
+    if configured_checks is None:
+        configured_checks = []
+    changed_paths = changed_paths or target_contracts.changed_path_facts()
+    changed_paths_complete = bool(changed_paths.get("complete"))
     complete = bool(
         target_complete
         and checks_complete
+        and configured_checks_complete
+        and changed_paths_complete
         and action_required_complete
         and expected_match
         and classification_complete
+        and mergeability != "unknown"
     )
     approval_phase = (
         "approval-required" if pending_ci_approval else "not-required"
@@ -2179,6 +2266,8 @@ def _pr_observation_contract(
             "complete": complete,
             "target": target_complete,
             "checks": checks_complete,
+            "configured_checks": configured_checks_complete,
+            "changed_paths": changed_paths_complete,
             "action_required_runs": bool(action_required_complete),
             "head_matches_expected": expected_match,
             "check_contexts_seen": contexts_seen,
@@ -2200,7 +2289,9 @@ def _pr_observation_contract(
             "bucket": str(bucket or "ci-state-unknown")[:100],
             "approval_phase": approval_phase,
             "check_phase": check_phase,
+            "configured_checks": configured_checks,
         },
+        changed_paths=changed_paths,
         error=error,
     )
 
@@ -2221,7 +2312,17 @@ def observe_exact_pr(owner, repo_cfg, number, expected_head_sha=""):
         if int(pr.get("number") or 0) != int(number):
             raise RuntimeError("exact PR response identity mismatch")
         enrich_compliance_evidence(owner, name, pr, repo_cfg, number=number)
-        comp, tests, ci, _ = check_status(pr, repo_cfg)
+        comp, tests, ci, _, configured_checks = check_status(
+            pr, repo_cfg, return_rows=True
+        )
+        files, files_ok, files_complete = _list_pr_files(
+            "%s/%s" % (owner, name), number, pr.get("changedFiles")
+        )
+        changed_paths = target_contracts.changed_path_facts(
+            files if files_ok and files_complete else [],
+            complete=bool(files_ok and files_complete),
+            count=(pr.get("changedFiles") if files_ok and files_complete else None),
+        )
         cross_repo = _pr_is_cross_repo(pr)
         pending_ci_approval = False
         action_required_complete = True
@@ -2276,6 +2377,8 @@ def observe_exact_pr(owner, repo_cfg, number, expected_head_sha=""):
             observed_at=observed_at,
             source="exact-reread",
             expected_head_sha=expected_head_sha,
+            configured_checks=configured_checks,
+            changed_paths=changed_paths,
             error=pending_error,
         )
     except Exception as error:
@@ -4127,7 +4230,9 @@ def build_repo(
                 ),
                 file=sys.stderr,
             )
-        comp, tests, ci, names = check_status(pr, repo_cfg)
+        comp, tests, ci, names, configured_checks = check_status(
+            pr, repo_cfg, return_rows=True
+        )
         all_names.update(names)
         cross_repo = _pr_is_cross_repo(pr)
         pending_ci_approval = False
@@ -4151,7 +4256,16 @@ def build_repo(
         if pending_ci_approval:
             bucket = "needs-ci-approval"
         pr_contexts.append(
-            (pr, author, comp, tests, ci, cross_repo, pending_ci_approval)
+            (
+                pr,
+                author,
+                comp,
+                tests,
+                ci,
+                cross_repo,
+                pending_ci_approval,
+                configured_checks,
+            )
         )
         if bucket in ("merge-ready", "review-needed") and _mergeable_is_unknown(
             pr.get("mergeable")
@@ -4199,7 +4313,40 @@ def build_repo(
             settlement_failure,
             [],
         )
-    for pr, author, comp, tests, ci, cross_repo, pending_ci_approval in pr_contexts:
+    context_paths_enabled = len(pr_contexts) <= REVIEW_CONTEXT_PR_CAP
+    for (
+        pr,
+        author,
+        comp,
+        tests,
+        ci,
+        cross_repo,
+        pending_ci_approval,
+        configured_checks,
+    ) in pr_contexts:
+        if context_paths_enabled:
+            paths, paths_ok, paths_complete = _list_pr_files(
+                slug, pr["number"], pr.get("changedFiles")
+            )
+        else:
+            paths, paths_ok, paths_complete = [], False, False
+        try:
+            changed_paths = target_contracts.changed_path_facts(
+                paths if paths_ok and paths_complete else [],
+                complete=bool(paths_ok and paths_complete),
+                count=(
+                    pr.get("changedFiles")
+                    if paths_ok and paths_complete
+                    else None
+                ),
+            )
+        except ValueError:
+            # A path outside the compact contract is observation-incomplete,
+            # not a reason to darken unrelated repository maintenance.
+            changed_paths = target_contracts.changed_path_facts()
+        explicit_refs, explicit_refs_complete = _explicit_pr_references(
+            pr.get("body")
+        )
         bucket = (
             "needs-ci-approval"
             if pending_ci_approval
@@ -4258,6 +4405,9 @@ def build_repo(
                 # Bulk GraphQL mergeable - used only by the ci-approval noop
                 # conflict-nudge path (needs-rebase already resolved via bucket).
                 "mergeable": pr.get("mergeable"),
+                "changed_paths": changed_paths,
+                "explicit_references": explicit_refs,
+                "explicit_references_complete": explicit_refs_complete,
             }
         )
         enriched[-1]["target_observation"] = _pr_observation_contract(
@@ -4273,6 +4423,8 @@ def build_repo(
             observed_at=bulk_observed_at,
             source="bulk-scan",
             target_complete=not pr_truncated,
+            configured_checks=configured_checks,
+            changed_paths=changed_paths,
         )
         if bucket == "needs-rebase" and not author_excluded:
             _maybe_nudge_rebase(
@@ -4357,6 +4509,8 @@ def build_repo(
             pr.get("target_observation")
         )
         if initial_observation:
+            if kind == "pr-review":
+                item["target_observation"] = initial_observation
             item["projection_ref"] = target_contracts.make_projection_ref(
                 initial_observation,
                 "current"
@@ -4601,6 +4755,79 @@ def build_repo(
         # the matching receipt from each refresh item; this list is retained for
         # scan observability and future stage separation.
         "target_action_receipts": action_receipts,
+        # Neutral bounded inputs for DecisionContext. These records never feed
+        # classification or auto-merge; context truncation cannot freeze normal
+        # card maintenance.
+        "decision_context_candidates": [
+            {
+                "owner": owner,
+                "repo": name,
+                "number": p["number"],
+                "head_sha": p["head_sha"],
+                "paths_complete": bool(
+                    p["changed_paths"].get("complete")
+                    and not p["changed_paths"].get("paths_truncated")
+                ),
+                "paths": list(p["changed_paths"].get("paths") or []),
+                "closing_complete": bool(closing_scan_complete),
+                "closing_issues": sorted(set(p.get("closes") or [])),
+                "references_complete": bool(
+                    p.get("explicit_references_complete")
+                ),
+                "references": list(p.get("explicit_references") or []),
+                "card_issue": 0,
+                "url": "https://github.com/%s/pull/%s" % (slug, p["number"]),
+                "card_url": "",
+            }
+            for p in enriched[:REVIEW_CONTEXT_PR_CAP]
+        ],
+        "decision_context_truncated": len(enriched) > REVIEW_CONTEXT_PR_CAP,
+        "decision_context_candidate_count": len(enriched),
+        # Open issues are indexed only as exact-reference destinations. They do
+        # not enter the default PR comparison set and cannot crowd out shared-
+        # path PR candidates. GitHub issue/PR numbers share one namespace.
+        "decision_reference_candidates": [
+            {
+                "owner": owner,
+                "repo": name,
+                "number": issue["number"],
+                "head_sha": "issue:%s" % str(issue.get("updatedAt") or "unknown"),
+                "paths_complete": True,
+                "paths": [],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 0,
+                "url": "https://github.com/%s/%s/issues/%s"
+                % (owner, name, issue["number"]),
+                "card_url": "",
+            }
+            for issue in issues
+        ],
+        "worklist_absence_reasons": {
+            str(p["number"]): (
+                "waiting in target state `%s`" % p.get("bucket")
+                if p.get("bucket")
+                else "no longer classified for a maintainer decision"
+            )
+            for p in enriched
+            if not any(
+                candidate.get("repo") == name
+                and candidate.get("number") == p["number"]
+                for candidate in items
+            )
+        },
+        "worklist_absence_observations": {
+            str(p["number"]): p["target_observation"]
+            for p in enriched
+            if p.get("target_observation")
+            and not any(
+                candidate.get("repo") == name
+                and candidate.get("number") == p["number"]
+                for candidate in items
+            )
+        },
         "truncated": pr_truncated or issue_truncated or not closing_scan_complete,
         "warning": warning,
     }
@@ -4946,6 +5173,38 @@ def _list_pr_files(slug, pr, expected_count=None):
     files = [f.strip() for f in out.stdout.splitlines() if f.strip()]
     count = _changed_file_count(expected_count)
     return (files, True, count is not None and len(files) >= count)
+
+
+_EXPLICIT_TARGET_URL_RE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:pull|issues)/([1-9][0-9]*)"
+)
+_EXPLICIT_TARGET_SLUG_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([1-9][0-9]*)(?![A-Za-z0-9])"
+)
+
+
+def _explicit_pr_references(body):
+    """Extract bounded explicit PR or issue references from target metadata.
+
+    Contributor text remains untrusted data. This deterministic extraction only
+    creates neutral advisory relations and never authorizes an action.
+    """
+    if not isinstance(body, str) or len(body.encode("utf-8")) > 100_000:
+        return ([], False)
+    refs = {
+        (owner, repo, int(number))
+        for pattern in (_EXPLICIT_TARGET_URL_RE, _EXPLICIT_TARGET_SLUG_RE)
+        for owner, repo, number in pattern.findall(body)
+    }
+    if len(refs) > 100:
+        return ([], False)
+    return (
+        [
+            {"owner": owner, "repo": repo, "number": number}
+            for owner, repo, number in sorted(refs)
+        ],
+        True,
+    )
 
 
 def _risky_ci_files(files):
@@ -6815,6 +7074,22 @@ def cmd_scan_health(scan_path):
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
+def _load_cards_file(path):
+    if not path:
+        return []
+    try:
+        with open(path) as f:
+            cards = json.load(f)
+    except (OSError, ValueError) as error:
+        print(
+            "::warning::wheelhouse could not load card snapshot %s: %s"
+            % (path, str(error)[:160]),
+            file=sys.stderr,
+        )
+        return []
+    return cards if isinstance(cards, list) else []
+
+
 def _load_ci_security_summary_cache(path):
     if not path:
         return {}
@@ -6844,7 +7119,8 @@ def cmd_scan(only_repo=None, cards_path=None):
     else:
         names = list(repos)
 
-    summary_cache = _load_ci_security_summary_cache(cards_path)
+    cards_snapshot = _load_cards_file(cards_path)
+    summary_cache = ci_security_summary_cache(cards_snapshot)
     out_repos = {}
     items = []
     for name in names:
@@ -6875,9 +7151,122 @@ def cmd_scan(only_repo=None, cards_path=None):
             else:
                 print("::warning::%s: %s" % (name, warning), file=sys.stderr)
 
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Build bounded neutral DecisionContext only after every repository snapshot
+    # is available. Optional context incompleteness is rendered but never marks
+    # a repository scan unhealthy and never feeds an acting condition.
+    cards_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    card_index = {}
+    for card in cards_snapshot:
+        state = parse_state_block((card or {}).get("body", "")) or {}
+        labels = set(_label_names_from_issue(card or {}))
+        key = (state.get("repo"), state.get("number"))
+        author = ((card or {}).get("user") or (card or {}).get("author") or {})
+        login = author.get("login", "") if isinstance(author, dict) else ""
+        if (
+            state.get("kind") in {"pr-review", "issue-triage"}
+            and key[0]
+            and isinstance(key[1], int)
+            and login in {"github-actions[bot]", "app/github-actions"}
+            and {"repo:%s" % key[0], "target:%s-%s" % key}.issubset(labels)
+        ):
+            card_index[key] = int(card.get("number") or 0)
+
+    candidates_by_repo = {}
+    candidate_lookup = {}
+    for repo_name, result in out_repos.items():
+        rows = list((result or {}).get("decision_context_candidates") or [])
+        reference_rows = list(
+            (result or {}).get("decision_reference_candidates") or []
+        )
+        for row in rows + reference_rows:
+            issue = card_index.get((row.get("repo"), row.get("number")), 0)
+            row["card_issue"] = issue
+            if issue and cards_repo:
+                row["card_url"] = "https://github.com/%s/issues/%s" % (
+                    cards_repo,
+                    issue,
+                )
+            candidate_lookup[(row.get("owner"), row.get("repo"), row.get("number"))] = row
+        candidates_by_repo[repo_name] = rows
+
+    for item in items:
+        if item.get("kind") != "pr-review":
+            continue
+        rows = list(candidates_by_repo.get(item.get("repo"), []))
+        referenced = []
+        target_row = candidate_lookup.get((owner, item.get("repo"), item.get("number")))
+        for ref in (target_row or {}).get("references") or []:
+            candidate = candidate_lookup.get(
+                (ref.get("owner"), ref.get("repo"), ref.get("number"))
+            )
+            if candidate and candidate not in rows:
+                referenced.append(candidate)
+        rows.extend(sorted(referenced, key=lambda row: (row["owner"], row["repo"], row["number"])))
+        target_result = out_repos.get(item.get("repo")) or {}
+        snapshot = decision_context_contracts.repository_snapshot(
+            rows,
+            generated_at,
+            complete=not bool(target_result.get("decision_context_truncated")),
+            reason=(
+                "repository-candidate-bound"
+                if target_result.get("decision_context_truncated")
+                else ""
+            ),
+            candidate_count=max(
+                len(rows),
+                int(target_result.get("decision_context_candidate_count") or 0)
+                + len(referenced),
+            ),
+        )
+        observation = item.get("target_observation")
+        normalized_observation = target_contracts.normalize_review_observation(
+            observation
+        )
+        if normalized_observation:
+            print(
+                "::notice::wheelhouse observation %s %s#%s observation=%s "
+                "head=%s checks=%s paths=%s"
+                % (
+                    (
+                        "produced"
+                        if normalized_observation["completeness"]["complete"]
+                        else "incomplete"
+                    ),
+                    item.get("repo"),
+                    item.get("number"),
+                    normalized_observation["observation_id"][:24],
+                    normalized_observation["revision"]["head_sha"][:12],
+                    len(normalized_observation["facts"]["configured_checks"]),
+                    normalized_observation["changed_paths"]["count"],
+                ),
+                file=sys.stderr,
+            )
+        if snapshot is None:
+            context = decision_context_contracts.unavailable_context(
+                observation, "snapshot.unavailable"
+            )
+        else:
+            context = decision_context_contracts.build_decision_context(
+                observation, snapshot
+            )
+        item["decision_context"] = context
+        print(
+            "::notice::wheelhouse context %s %s#%s context=%s candidates=%s reason=%s"
+            % (
+                context["status"],
+                item.get("repo"),
+                item.get("number"),
+                context["context_id"][:24],
+                len(context["candidates"]),
+                context.get("reason") or "none",
+            ),
+            file=sys.stderr,
+        )
+
     payload = {
         "owner": owner,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "card_issues": cfg["card_issues"],
         "auto_approve_ci": cfg["auto_approve_ci"],
         "auto_merge": cfg["auto_merge"],

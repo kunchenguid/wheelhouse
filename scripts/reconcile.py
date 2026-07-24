@@ -53,6 +53,8 @@ import wheelhouse_core as core  # noqa: E402
 import render_card  # noqa: E402
 import target_observation as target_contracts  # noqa: E402
 import target_reconcile  # noqa: E402
+import scheduled_epoch  # noqa: E402
+import assessment_record  # noqa: E402
 
 PR_KINDS = {"pr-review", "ci-approval"}
 
@@ -135,13 +137,18 @@ def _matches_snapshot(current, snapshot):
 
 
 def _matches_expected_write(current, before, expected_body):
-    """Verify our state-only write landed and no owner/handler label raced it."""
+    """Verify one lifecycle projection and reject an owner/handler race."""
+    expected_labels = _label_names(before.get("labels"))
+    if render_card.LIFECYCLE_START in expected_body:
+        expected_labels.add(render_card.LIFECYCLE_CONFIRM_LABEL)
+    else:
+        expected_labels.discard(render_card.LIFECYCLE_CONFIRM_LABEL)
     return bool(
         current
         and before
         and int(current.get("number") or 0) == int(before.get("number") or 0)
         and current.get("body", "") == expected_body
-        and _label_names(current.get("labels")) == _label_names(before.get("labels"))
+        and _label_names(current.get("labels")) == expected_labels
         and _comment_count(current.get("comments"))
         == _comment_count(before.get("comments"))
     )
@@ -157,11 +164,19 @@ def _soft_close_timestamp():
 
 
 def _reconcile_run_number():
+    """Return the qualifying scheduled-observation epoch.
+
+    GitHub production always supplies GITHUB_RUN_ID and advances the dedicated
+    ledger. The run-number fallback exists only for old offline fixtures that
+    predate the ledger; manual runs still return zero and never reset/advance.
+    """
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
         or os.environ.get("GITHUB_EVENT_NAME") != "schedule"
     ):
         return 0
+    if os.environ.get("GITHUB_RUN_ID"):
+        return scheduled_epoch.advance()
     value = os.environ.get("GITHUB_RUN_NUMBER", "")
     if not value.isdigit():
         return 0
@@ -234,6 +249,81 @@ def _final_ci_wait_projection(owner, item, repo_cfg):
         )
     )
     return projection
+
+
+def recover_pending_assessment_projection(item, row, owner=""):
+    """Project one durable current result without another model reservation."""
+    if not row or item.get("kind") != "pr-review":
+        return False
+    state = row.get("state") or {}
+    revision = render_card.triage_revision(item)
+    if (
+        state.get(render_card.PROJECTION_OWNER_FIELD)
+        != render_card.PROJECTION_OWNER
+    ):
+        return False
+    try:
+        record = assessment_record.find(
+            row["number"], revision=revision, projected=False
+        )
+    except Exception as error:
+        print(
+            "::error::wheelhouse result-to-projection record unreadable card #%s: %s"
+            % (row.get("number"), str(error)[:180])
+        )
+        return False
+    if not record:
+        return False
+    result = record["result"]
+    target = result["target"]
+    if (
+        target.get("repo") != item.get("repo")
+        or target.get("number") != item.get("number")
+        or target.get("revision") != revision
+    ):
+        print(
+            "::error::wheelhouse result-to-projection malformed acting inputs "
+            "card #%s" % row.get("number")
+        )
+        return False
+    if (
+        state.get(render_card.ASSESSMENT_RESULT_FIELD) == result["result_id"]
+        and state.get("triaged_sha") == revision
+        and state.get("triage_status") in {"succeeded", "error"}
+    ):
+        finalized = assessment_record.mark_projected(
+            row["number"], result["result_id"]
+        )
+        if finalized:
+            print(
+                "::notice::wheelhouse result-to-projection finalized card #%s "
+                "revision=%s repeat_model_spend=0"
+                % (row["number"], revision[:32])
+            )
+        return finalized
+    if not render_card.triage_queued_for_head(state, revision):
+        return False
+    applied = render_card.update_card_triage(
+        row["number"],
+        revision,
+        triage=result.get("triage"),
+        error=result.get("error") or None,
+        owner=owner,
+        vision_sha=state.get("triaged_vision_sha", ""),
+        base_sha=state.get("triaged_base_sha", ""),
+        automerge_behavior_available=bool(
+            isinstance(result.get("triage"), dict)
+            and result["triage"].get("automerge")
+        ),
+        require_queued=True,
+    )
+    if applied:
+        print(
+            "::notice::wheelhouse result-to-projection recovered card #%s "
+            "revision=%s repeat_model_spend=0"
+            % (row["number"], revision[:32])
+        )
+    return applied
 
 
 def maybe_queue_auto_triage(
@@ -312,7 +402,14 @@ def main():
         sys.exit("usage: reconcile.py scan.json cards.json [automerge.json]")
     scan = load(sys.argv[1])
     cards = load(sys.argv[2])
-    reconcile_run_number = _reconcile_run_number()
+    try:
+        reconcile_run_number = _reconcile_run_number()
+    except Exception as error:
+        reconcile_run_number = 0
+        print(
+            "::error::wheelhouse soft-close scheduled epoch unavailable: %s; "
+            "closure delayed" % str(error)[:180]
+        )
     criteria_payload = load_optional_object(sys.argv[3]) if len(sys.argv) == 4 else {}
 
     repos = scan.get("repos", {})
@@ -376,6 +473,34 @@ def main():
         existing[key] = row
         cards_with_state.append(row)
 
+    # Auto-merge release mutates only action locks before this step. Replace the
+    # stale scan-start row with an exact post-release snapshot so denied/held
+    # candidates can still receive their current projection in this run.
+    release_issues = {
+        int(entry.get("card_issue") or 0)
+        for entry in (criteria_payload.get("releases") or [])
+        if isinstance(entry, dict) and int(entry.get("card_issue") or 0) > 0
+    }
+    release_keys = set()
+    if release_issues:
+        for key, row in list(existing.items()):
+            if row["number"] not in release_issues:
+                continue
+            current = current_card(row)
+            if current is None:
+                continue
+            existing[key] = current
+            for index, listed in enumerate(cards_with_state):
+                if listed["number"] == row["number"]:
+                    cards_with_state[index] = current
+                    break
+            release_keys.add(key)
+
+    items = [
+        ({**item, "_projection_cause": "automerge-release"}
+         if (item["repo"], int(item["number"])) in release_keys else item)
+        for item in items
+    ]
     worklist_keys = {(item["repo"], int(item["number"])) for item in items}
 
     # 1) For each scanned worklist item, reuse a trusted machine-soft-closed
@@ -390,6 +515,7 @@ def main():
     refreshed = 0
     activity_reflected = 0
     triage_queued = 0
+    result_projections_recovered = 0
     admission_rollbacks = 0
     admission_deferred = 0
     has_triage_token = auto_triage_has_token()
@@ -441,6 +567,19 @@ def main():
                 item, current_for_triage, has_triage_token, owner=owner
             ):
                 triage_queued += 1
+            continue
+        if render_card.reconcile_absence_needs_clear(ex.get("body", "")):
+            item = {**item, "_projection_cause": "lifecycle-transition"}
+        if render_card.triage_projection_migration_needed(
+            item, ex["state"], ex["labels"], has_triage_token
+        ):
+            item = {**item, "_force_projection_migration": True}
+        if recover_pending_assessment_projection(item, ex, owner=owner):
+            result_projections_recovered += 1
+            refreshed += 1
+            latest = current_card(ex)
+            if latest is not None:
+                existing[key] = latest
             continue
         # Card exists: refresh only a pure needs-decision card whose target
         # materially changed, whose stored render_version is behind current,
@@ -713,8 +852,22 @@ def main():
                 continue
             if not render_card.is_refreshable(current["labels"]):
                 continue
+            absence_reason = (
+                (r.get("worklist_absence_reasons") or {}).get(str(number))
+                or "target is outside the current maintainer worklist"
+            )
+            absence_observation = target_contracts.normalize_review_observation(
+                (r.get("worklist_absence_observations") or {}).get(str(number))
+            )
+            if kind in PR_KINDS and (
+                absence_observation is None
+                or not absence_observation["completeness"]["complete"]
+            ):
+                # Lifecycle truth requires one complete current observation.
+                # Optional DecisionContext is deliberately not involved.
+                continue
             count = render_card.reconcile_absence_count(current.get("body", ""))
-            absence_run_number = render_card.reconcile_absence_run_number(
+            absence_run_number = render_card.reconcile_absence_epoch(
                 current.get("body", "")
             )
             if not reconcile_run_number:
@@ -727,6 +880,8 @@ def main():
                         current.get("body", ""),
                         1,
                         run_number=reconcile_run_number,
+                        reason=absence_reason,
+                        observation=absence_observation,
                     )
                 except Exception as e:
                     print(
@@ -741,6 +896,8 @@ def main():
                         current.get("body", ""),
                         1,
                         run_number=reconcile_run_number,
+                        reason=absence_reason,
+                        observation=absence_observation,
                     )
                 except Exception as e:
                     print(
@@ -750,11 +907,18 @@ def main():
                 continue
             if count == 1:
                 closed_at = _soft_close_timestamp()
-                expected_body = render_card.body_with_reconcile_absence(
-                    current.get("body", ""),
+                absence_projection = render_card.plan_reconcile_absence_projection(
+                    current,
                     render_card.RECONCILE_ABSENCE_THRESHOLD,
                     run_number=reconcile_run_number,
                     closed_at=closed_at,
+                    reason=absence_reason,
+                    observation=absence_observation,
+                )
+                expected_body = (
+                    absence_projection.get("body", "")
+                    if absence_projection
+                    else current.get("body", "")
                 )
                 if expected_body == current.get("body", ""):
                     continue
@@ -765,6 +929,8 @@ def main():
                         render_card.RECONCILE_ABSENCE_THRESHOLD,
                         run_number=reconcile_run_number,
                         closed_at=closed_at,
+                        reason=absence_reason,
+                        observation=absence_observation,
                     ):
                         continue
                 except Exception as e:
@@ -787,6 +953,8 @@ def main():
                         current.get("body", ""),
                         1,
                         run_number=reconcile_run_number,
+                        reason=absence_reason,
+                        observation=absence_observation,
                     )
                 except Exception as e:
                     print(
@@ -796,11 +964,18 @@ def main():
                 continue
             elif absence_run_number == reconcile_run_number - 1:
                 closed_at = _soft_close_timestamp()
-                expected_body = render_card.body_with_reconcile_absence(
-                    current.get("body", ""),
+                absence_projection = render_card.plan_reconcile_absence_projection(
+                    current,
                     render_card.RECONCILE_ABSENCE_THRESHOLD,
                     run_number=reconcile_run_number,
                     closed_at=closed_at,
+                    reason=absence_reason,
+                    observation=absence_observation,
+                )
+                expected_body = (
+                    absence_projection.get("body", "")
+                    if absence_projection
+                    else current.get("body", "")
                 )
                 if expected_body == current.get("body", ""):
                     continue
@@ -811,6 +986,8 @@ def main():
                         render_card.RECONCILE_ABSENCE_THRESHOLD,
                         run_number=reconcile_run_number,
                         closed_at=closed_at,
+                        reason=absence_reason,
+                        observation=absence_observation,
                     ):
                         continue
                 except Exception as e:
@@ -907,16 +1084,85 @@ def main():
                 "::warning::failed to close card #%s: %s" % (card_number, str(e)[:160])
             )
 
+    observation_rows = []
+    context_rows = []
+    for item in items:
+        observation = target_contracts.normalize_review_observation(
+            item.get("target_observation") or item.get("review_observation")
+        )
+        if observation:
+            observation_rows.append(observation)
+        context = render_card.context_contracts.normalize_decision_context(
+            item.get(render_card.DECISION_CONTEXT_FIELD)
+        )
+        if context:
+            context_rows.append(context)
+    assessment_rejected = 0
+    stuck_held = 0
+    for row in cards_with_state:
+        assessment = render_card.assessment_admission.normalize_assessment(
+            row["state"].get(render_card.ASSESSMENT_FIELD)
+        )
+        if assessment and assessment["admission"]["status"] in {
+            "rejected", "stale", "unavailable"
+        }:
+            assessment_rejected += 1
+        if row["state"].get("held") and row["state"].get("triage_status") in {
+            "succeeded", "error"
+        }:
+            stuck_held += 1
+    try:
+        import projection_writer
+
+        writer_stats = projection_writer.run_stats()
+    except Exception:
+        writer_stats = {
+            "planned": 0,
+            "noop": 0,
+            "deferred": 0,
+            "committed": 0,
+            "verification_failed": 0,
+            "committed_by_cause": {},
+        }
+    print(
+        "wheelhouse run-summary "
+        + json.dumps(
+            {
+                "schema": "wheelhouse.scan-summary/v1",
+                "projection_writes": writer_stats["committed"],
+                "projection_noops": writer_stats["noop"],
+                "projection_writes_by_cause": writer_stats["committed_by_cause"],
+                "activity_reflections": activity_reflected,
+                "owner_race_deferrals": writer_stats["deferred"],
+                "projection_verification_failures": writer_stats["verification_failed"],
+                "observations_incomplete": sum(
+                    1
+                    for observation in observation_rows
+                    if not observation["completeness"]["complete"]
+                ),
+                "contexts_incomplete": sum(
+                    1 for context in context_rows if context["status"] != "complete"
+                ),
+                "assessment_not_admitted": assessment_rejected,
+                "result_projection_recovered": result_projections_recovered,
+                "stuck_held_cards": stuck_held,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
     print(
         "reconcile: %d card(s) created, %d refreshed, %d anti-masquerade "
-        "refreshed, %d activity reflected, %d auto-triage queued, %d card(s) closed, "
-        "%d admission rollback(s), %d admission deferred"
+        "refreshed, %d activity reflected, %d auto-triage queued, %d durable "
+        "result projection(s) recovered, %d card(s) closed, %d admission "
+        "rollback(s), %d admission deferred"
         % (
             created,
             refreshed,
             antimasq_refreshed,
             activity_reflected,
             triage_queued,
+            result_projections_recovered,
             closed,
             admission_rollbacks,
             admission_deferred,

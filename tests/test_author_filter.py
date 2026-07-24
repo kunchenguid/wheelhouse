@@ -162,6 +162,7 @@ def run_build_repo(
         core.approve_ci,
         core.ci_security_summary,
         core._list_action_required_runs,
+        core._list_pr_files,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -187,6 +188,11 @@ def run_build_repo(
     )
     core.approve_ci = fake_approve
     core._list_action_required_runs = lambda slug, head_ref, head_sha: ([], "")
+    core._list_pr_files = lambda _slug, _number, expected: (
+        ["src/file-%d.py" % index for index in range(int(expected or 0))],
+        True,
+        True,
+    )
     os.environ["OWNER"] = "owner"
     os.environ["GITHUB_REPOSITORY_OWNER"] = "owner"
     err = io.StringIO()
@@ -204,6 +210,7 @@ def run_build_repo(
             core.approve_ci,
             core.ci_security_summary,
             core._list_action_required_runs,
+            core._list_pr_files,
             old_owner,
             old_repo_owner,
         ) = save

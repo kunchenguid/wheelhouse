@@ -1470,7 +1470,7 @@ def test_plan_label_update_noop_when_identical():
 
 
 # --------------------------------------------------------------------------- #
-# reconcile soft-close hysteresis is hidden, bounded, and non-material
+# reconcile soft-close hysteresis is visible, inert, bounded, and non-material
 # --------------------------------------------------------------------------- #
 def test_reconcile_absence_schema_is_bounded_and_non_material():
     it = item()
@@ -1481,7 +1481,13 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
         "absence: exact first-pass record round-trips",
         rc.reconcile_absence_count(first) == 1
         and first_state.get(rc.RECONCILE_ABSENCE_FIELD)
-        == {"version": 2, "threshold": 2, "count": 1, "run_number": 41},
+        == {"version": 3, "threshold": 2, "count": 1, "scheduled_epoch": 41},
+    )
+    check(
+        "absence: first pass is visible and inert",
+        "### Target state changed" in first
+        and "Confirmation: `1/2` scheduled observations" in first
+        and "<!-- opt:" not in first,
     )
     check(
         "absence: field is outside material semantics",
@@ -1536,7 +1542,9 @@ def test_required_present_writes_fold_absence_reset():
         "absence: activity write folds reset",
         reflected != body
         and reflected_state.get("activity_reflected_at") == it["updated_at"]
-        and rc.RECONCILE_ABSENCE_FIELD not in reflected_state,
+        and rc.RECONCILE_ABSENCE_FIELD not in reflected_state
+        and "### Target state changed" not in reflected
+        and "<!-- opt:" in reflected,
     )
 
     queued_source = rc.body_with_reconcile_absence(
@@ -1548,7 +1556,9 @@ def test_required_present_writes_fold_absence_reset():
         "absence: triage queued write folds reset",
         queued != queued_source
         and queued_state.get("triage_status") == "queued"
-        and rc.RECONCILE_ABSENCE_FIELD not in queued_state,
+        and rc.RECONCILE_ABSENCE_FIELD not in queued_state
+        and "### Target state changed" not in queued
+        and "<!-- opt:" in queued,
     )
     check(
         "absence: fresh full render never inherits lifecycle state",

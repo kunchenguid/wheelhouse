@@ -100,6 +100,15 @@ jobs:
           INPUT_OPTIONS: ${{ github.event.inputs.options }}
         run: python scripts/build_item.py item.json
 
+      # A dispatch is only an invalidation/identity hint. PR-review facts are
+      # replaced by an exact ReviewObservation from the same reducer used by the
+      # scheduled scan before any card projection.
+      - name: Observe the exact PR revision
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: python scripts/projection_writer.py observe-item item.json
+
       - id: upsert
         name: Create, reuse, or refresh the decision card
         env:

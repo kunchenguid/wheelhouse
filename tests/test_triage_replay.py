@@ -2569,6 +2569,7 @@ def test_workflow_exact_selector_replay_only_posture_matrix():
     ordinary_steps = {
         "List open cards",
         "Scan the fleet",
+        "Evaluate auto-merge candidates before claim",
         "Claim auto-merge decision cards",
         "Validate auto-merge decision cards",
         "Auto-merge eligible PRs",
@@ -2695,6 +2696,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "!" in list_step["if"]
     write_capable_steps = {
         "Scan the fleet",
+        "Evaluate auto-merge candidates before claim",
         "Claim auto-merge decision cards",
         "Validate auto-merge decision cards",
         "Auto-merge eligible PRs",

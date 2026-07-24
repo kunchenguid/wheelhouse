@@ -931,6 +931,24 @@ def _bound_output_schema(
     if not is_pr_triage:
         return schema
     bound = deepcopy(schema)
+    if action == "triage.schema-repair":
+        # The direct no-tool Claude profile deliberately accepts only its
+        # minimal native structured-output subset. Trust-sensitive optional PR
+        # fields are not model-repaired: a valid recommendation basis is
+        # restored from the original candidate by trusted consumer code, while
+        # source/VISION/behavior claims fail closed and require normal review.
+        for field in (
+            "recommendation_basis",
+            "source_provenance",
+            "vision_evidence",
+            "automerge",
+        ):
+            bound["properties"].pop(field, None)
+        bound["required"] = [
+            field for field in bound["required"] if field in bound["properties"]
+        ]
+        bound.pop("$defs", None)
+        return bound
     if not allow_automerge_behavior:
         bound["properties"].pop("automerge", None)
         bound["properties"].pop("vision_evidence", None)

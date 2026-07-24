@@ -277,24 +277,18 @@ def test_consuming_actions_unchanged_by_investigate_routing():
     )
 
 
-def test_reconcile_absence_state_does_not_affect_decision_parse():
-    baseline = run_parse(_tick([], ["merge"]))
+def test_reconcile_absence_state_makes_decision_inert():
     with_absence = _tick([], ["merge"])
     with_absence["ISSUE_BODY"] = INV_CARD.replace(
         '"options"',
-        '"reconcile_absence":{"version":1,"threshold":2,"count":1},"options"',
+        '"reconcile_absence":{"version":3,"threshold":2,"count":1,'
+        '"scheduled_epoch":41},"options"',
     )
     actual = run_parse(with_absence)
     check(
-        "decision: reconcile absence state is ignored",
-        {
-            key: actual.get(key, "")
-            for key in ("decision", "target_repo", "target_number", "kind", "head_sha")
-        }
-        == {
-            key: baseline.get(key, "")
-            for key in ("decision", "target_repo", "target_number", "kind", "head_sha")
-        },
+        "decision: visible first absence is inert",
+        actual.get("decision", "") == ""
+        and actual.get("investigate", "") == "",
     )
 
 
@@ -422,6 +416,93 @@ def test_text_required_label_parse_is_ignored():
     )
 
 
+def admitted_pr_assessment(action, reason):
+    rows = [
+        {"name": "Gate", "role": "compliance", "outcome": "pass"},
+        {"name": "tests", "role": "test", "outcome": "pass"},
+    ]
+    observation = ad.target_observation.make_observation(
+        "acme",
+        "lavish-axi",
+        42,
+        head_sha="abc",
+        base_sha="base",
+        expected_head_sha="abc",
+        observed_at="2024-01-01T00:00:00Z",
+        source="exact-reread",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": "Ready PR",
+            "author": "contributor",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "feature",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "merge-ready",
+            "approval_phase": "complete",
+            "check_phase": "terminal",
+            "configured_checks": rows,
+        },
+        changed_paths=ad.target_observation.changed_path_facts(
+            ["src/example.py"], complete=True
+        ),
+    )
+    snapshot = ad.decision_context.repository_snapshot(
+        [
+            {
+                "owner": "acme",
+                "repo": "lavish-axi",
+                "number": 42,
+                "head_sha": "abc",
+                "paths_complete": True,
+                "paths": ["src/example.py"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 0,
+                "url": "https://github.com/acme/lavish-axi/pull/42",
+                "card_url": "",
+            }
+        ],
+        "2024-01-01T00:00:00Z",
+    )
+    context = ad.decision_context.build_decision_context(observation, snapshot)
+    assessment = ad.assessment_admission.admit_assessment(
+        {
+            "summary": "Ready",
+            "product_implications": "No product risk found.",
+            "recommended_action": action,
+            "recommended_reason": reason,
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": observation["observation_id"],
+                "context_id": context["context_id"],
+                "check_names": [],
+            },
+        },
+        observation,
+        context,
+    )
+    return observation, context, assessment
+
+
 def accept_card(
     kind="issue-triage",
     action="decline",
@@ -441,6 +522,15 @@ def accept_card(
         "triage_status": "succeeded",
         "triage_recommendation": {"action": action, "reason": reason},
     }
+    if kind == "pr-review":
+        observation, context, assessment = admitted_pr_assessment(action, reason)
+        state.update(
+            {
+                "review_observation": observation,
+                "decision_context": context,
+                "triage_assessment": assessment,
+            }
+        )
     if extra_state:
         state.update(extra_state)
     return "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
@@ -3273,7 +3363,7 @@ def main():
     test_checkbox_diff()
     test_investigate_is_non_consuming()
     test_consuming_actions_unchanged_by_investigate_routing()
-    test_reconcile_absence_state_does_not_affect_decision_parse()
+    test_reconcile_absence_state_makes_decision_inert()
     test_investigate_allow_set_and_nl_exclusion()
     test_request_changes_allow_set_and_nl_selectable()
     test_slash_only_actions_are_not_checkbox_decisions()

@@ -19,15 +19,18 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ## How it works
 
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
-- **Labels carry state:** `needs-decision` (in the queue), `pending-triage` (first auto-triage attempt is still publishing), `processing` (a handler is acting), `resolved` (a successful resolving action consumed the card), `blocked` (a manual hold or non-retryable action error needs follow-up), `wheelhouse:manual-merge-required` (scan-time auto-merge proved the current head needs a manual workflow-aware merge), plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
+- **Labels carry state:** `needs-decision` (in the queue), `pending-triage` (first auto-triage attempt is still publishing), `processing` (a handler is acting), `resolved` (a successful resolving action consumed the card), `blocked` (a manual hold or non-retryable action error needs follow-up), `wheelhouse:manual-merge-required` (scan-time auto-merge proved the current head needs a manual workflow-aware merge), `wheelhouse:confirming-target-state` (a visible inert first-absence confirmation), plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
 - **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
   A scan-created contributor CI-approval card that holds for changed workflow/action files also includes a deterministic, read-only *Security review (advisory)* section to inform the same manual approval decision.
   A PR-review card whose final auto-merge gate proves a history-only workflow touch includes a head-scoped *Manual merge required* section with bounded evidence.
   When successful auto triage returns a fresh structured recommendation, the card shows an *Accept recommendation* checkbox and hides the older top-level recommended-action text so there is one primary recommendation surface.
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
-  A hidden HTML comment holds the machine-readable state.
+  PR-review Situation, configured checks, related work, admitted triage, criteria, controls, and hidden state are one observation-bound projection for the same target revision. Related work is bounded deterministic advisory context and never an overlap acting gate. A rejected or stale assessment cannot create Accept recommendation or G6 eligibility.
+  When a complete scheduled scan first finds an open target outside the worklist, the card visibly says that confirmation is pending and removes all decision controls. Only the next adjacent qualifying scheduled observation soft-closes it; manual runs do not advance that lifecycle.
+  A hidden HTML comment holds the machine-readable state. See [Observation-bound card projection](docs/OPTION_B_CARD_PROJECTION.md) for fact, admission, writer, migration, and rollback contracts.
   The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
 - **GitHub Actions are the handlers:** they create cards, refresh pending cards when tracked target state or the rendered card title changes, reflect target activity for recently-updated sorting, execute your decisions, and reconcile the queue against live repo state.
+  For PR-review cards, one reducer-owned `ReviewObservation`, one pure complete planner, and one verified projection writer own current title/body/managed-label updates. Auto-merge runs read-only G0-G6 before any action-lock claim, reruns gates under claim, then retains G7 and the final merge guard immediately before action.
   The hourly scan retries transient GitHub query failures and records repeated unreadable-repo failures in a closed health-ledger issue, so a persistently-dark fleet repo eventually fails the run loudly instead of remaining invisible.
 
 ```
@@ -404,20 +407,21 @@ If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards ope
 After a base-branch push, GitHub can temporarily report a PR's mergeability as `UNKNOWN` while it recalculates it.
 Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive value before changing its worklist membership.
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
-If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled workflow run and is soft-closed only when the immediately following workflow run also observes a qualifying absence.
-The first absence is hidden card state bound to the trusted workflow run number, and a worklist return clears it while keeping the same card.
+If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled observation and is soft-closed only when the next adjacent qualifying scheduled observation confirms the absence.
+The first absence is a visible, inert card projection bound to a dedicated trusted scheduled-observation epoch: it shows the current observation and reason, removes decision controls, and carries `wheelhouse:confirming-target-state`.
+A manual run neither advances nor resets that epoch; a worklist return clears the confirmation while keeping the same card.
 If that still-open target returns after the soft close, Wheelhouse reuses an existing closed issue only when it has the exact target identity, trusted automation authorship and close actor, and valid current-schema reconcile soft-close provenance.
 If the card was touched after close, reuse also requires a bounded complete timeline proving every post-close event came from trusted Wheelhouse automation and fully explains the issue's `updatedAt`.
 If several trusted candidates share the same exact identity, Wheelhouse deterministically reuses the highest issue number and leaves the lower closed candidates unchanged.
 The current body and managed labels are prepared while the issue remains closed, then the issue is reopened and uniqueness is verified before triage or any decision can proceed.
 Legacy, owner-resolved, blocked, hard-closed, audit-protected, malformed, untrusted, identity-conflicting, or human-touched closed cards are never reopened; an incomplete or ambiguous lookup fails closed instead of creating another card.
-The scan, ingest, and decision workflows share one queued card-lifecycle concurrency group so create, reopen, close, and owner decisions cannot race each other.
-Any intervening present, manually dispatched, failed, truncated, unresolved-mergeability, or fork-CI-wait run breaks the streak without closing, even when that run cannot safely edit the stored absence record.
+The scan, ingest, triage, and decision workflows share one queued card-lifecycle concurrency group so projections, create, reopen, close, and owner decisions cannot race each other.
+Any intervening nonqualifying scheduled observation - present, failed, truncated, unresolved-mergeability, or fork-CI-wait - breaks the epoch adjacency without closing, even when that run cannot safely edit the stored absence record.
 An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a non-retryable action error stays visible.
 If that target is genuinely merged or closed, the scheduled backstop still hard-closes the `blocked` card.
-That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after two adjacent complete, conclusive workflow runs.
+That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after two adjacent complete, conclusive scheduled observations.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
-Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card after the two-adjacent-run soft-close threshold.
+Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card after the two-adjacent-observation soft-close threshold.
 There is one fork-CI exception: when safe automatic CI approval verifies that no run is awaiting approval and the contributor PR's mergeability conclusively settles to `CONFLICTING`, Wheelhouse keeps its `needs-ci-approval` classification and emits no card, but posts that same rebase nudge before consuming the PR from the worklist.
 An actual CI approval is unchanged and does not post a conflict nudge.
 An `UNKNOWN` mergeability value is settled before this exception can nudge, and a missing or still-indeterminate value does not nudge.
@@ -639,15 +643,21 @@ wheelhouse.config.yml          the one file you edit
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           resilient GraphQL scan/classify and exact-target adapters, mergeability settlement, scan-health ledger, author filtering, dedup/overlap, target cleanup, CI safety, auto-approval, read-only CI security summaries, ref qualification, and scan logs
-  target_observation.py        pure versioned target-observation, approval-receipt, and card-projection-reference contracts
+  target_observation.py        strict ReviewObservation v2, concrete v1 compatibility, approval-receipt, and projection-reference contracts
+  decision_context.py          bounded neutral same-issue/reference/exact-shared-path advisory context
+  assessment_admission.py      typed observation/context-bound PR assessment admission
+  assessment_record.py         durable exact-revision triage result and projection-retry record
+  card_projection.py           pure complete byte-deterministic PR-review projection planner
+  projection_writer.py         verified PR-review title/body/managed-label projection writer
+  scheduled_epoch.py           trusted schedule-only soft-close epoch ledger
   target_reconcile.py          pure exact observation + action receipt -> CI-wait card projection planner
-  render_card.py               build decision cards, including held pending-triage placeholders, observation freshness, auto-merge criteria, history-only workflow holds, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
+  render_card.py               build decision cards, including held and first-absence inert states, observation freshness, related context, admitted assessments, auto-merge criteria, history-only workflow holds, and advisory CI security reviews; create/reuse/refresh/activity-reflect/close cards; queue/update auto triage; label automated status lines
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
-  auto_merge.py                evaluate criteria, claim, validate, merge, persist final-gate manual-merge holds, and audit strictly eligible scan-time PR auto-merges
+  auto_merge.py                read-only preclaim G0-G6, claim passers, reevaluate under claim, run G7/merge, persist final-gate manual-merge holds, and audit strictly eligible scan-time PR auto-merges
   automerge_criteria.py        stable schema for authoritative auto-merge criterion rows
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
-  reconcile.py                 backstop: open new cards, refresh stale pending cards, reflect target activity, close consumed ones
+  reconcile.py                 backstop: open new cards, refresh stale pending cards, recover durable result projections without spend, reflect target activity, and close consumed ones
   triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
@@ -659,6 +669,7 @@ tests/test_merge_conflict.py   offline unit test for mergeability routing, rebas
 tests/test_pending_contributor_cleanup.py offline unit test for deterministic pending-contributor reminders, closing, keep-open, legacy and ci-noop rebase-nudge proof, review-timestamp recovery, and fail-open target-activity proof
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, head-bound receipts, duplicate-run approval, and logging
 tests/test_target_observation.py offline unit test for versioned observation/receipt contracts and pure pending/current/unknown projection planning
+tests/test_option_b_architecture.py complete Option B contract, golden, E2E-01 through E2E-07, workflow/token, migration, and rollback acceptance
 tests/test_target_reconcile_transaction.py production-composed timed regression for approval, same-scan completion, pending checks, incomplete reads, force pushes, and card projection
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling

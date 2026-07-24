@@ -19,6 +19,9 @@ import apply_decision  # noqa: E402
 import auto_merge as am  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
 import reconcile  # noqa: E402
+import target_observation  # noqa: E402
+import decision_context  # noqa: E402
+import assessment_admission  # noqa: E402
 
 _failures = []
 
@@ -52,7 +55,94 @@ def eligible_verdict():
     }
 
 
+def review_inputs(head):
+    observation = target_observation.make_observation(
+        "owner",
+        "fmt",
+        5,
+        head_sha=head,
+        base_sha=BASE_SHA,
+        expected_head_sha=head,
+        observed_at="2026-07-23T12:00:00Z",
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": "history-only workflow touch",
+            "author": "alice",
+            "updated_at": "2026-07-13T00:00:00Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "fixture",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "merge-ready",
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "compliance", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=target_observation.changed_path_facts(
+            ["README.md"], complete=True
+        ),
+    )
+    snapshot = decision_context.repository_snapshot(
+        [
+            {
+                "owner": "owner",
+                "repo": "fmt",
+                "number": 5,
+                "head_sha": head,
+                "paths_complete": True,
+                "paths": ["README.md"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 101,
+                "url": "https://github.com/owner/fmt/pull/5",
+                "card_url": "https://github.com/owner/wheelhouse/issues/101",
+            }
+        ],
+        "2026-07-23T12:00:00Z",
+    )
+    context = decision_context.build_decision_context(observation, snapshot)
+    assessment = assessment_admission.admit_assessment(
+        {
+            "summary": "Exact review.",
+            "product_implications": "Routine.",
+            "recommended_action": "merge",
+            "recommended_reason": "All gates are clear.",
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": observation["observation_id"],
+                "context_id": context["context_id"],
+                "check_names": [],
+            },
+        },
+        observation,
+        context,
+    )
+    return observation, context, assessment
+
+
 def item_for(head, kind="pr-review"):
+    observation, context, _ = review_inputs(head)
     return {
         "repo": "fmt",
         "number": 5,
@@ -70,6 +160,8 @@ def item_for(head, kind="pr-review"):
         "recommendation": "Merge - compliance and tests are green.",
         "url": "https://github.com/owner/fmt/pull/5",
         "same_closing_issue_overlap": "",
+        "target_observation": observation,
+        "decision_context": context,
     }
 
 
@@ -87,14 +179,38 @@ def scan_for(item, open_target=True):
     }
 
 
+_original_claim_cards = am.claim_cards
+
+
+def claim_cards_after_readonly_preclaim(scan, cards):
+    card_token = os.environ.get("GH_TOKEN")
+    os.environ["GH_TOKEN"] = "fleet-token"
+    try:
+        preclaims = am.preclaim_candidates(scan, cards)
+    finally:
+        if card_token is None:
+            os.environ.pop("GH_TOKEN", None)
+        else:
+            os.environ["GH_TOKEN"] = card_token
+    return _original_claim_cards(scan, cards, preclaims)
+
+
+am.claim_cards = claim_cards_after_readonly_preclaim
+
+
 def state_with_fresh_verdict(body, head):
     state = core.parse_state_block(body)
+    observation, context, assessment = review_inputs(head)
     state.update(
         {
             "triaged_sha": head,
             "triage_status": "succeeded",
             "triage_recommendation": {"action": "merge", "reason": ""},
             "automerge_verdict": eligible_verdict(),
+            render_card.PROJECTION_OWNER_FIELD: render_card.PROJECTION_OWNER,
+            render_card.REVIEW_OBSERVATION_FIELD: observation,
+            render_card.DECISION_CONTEXT_FIELD: context,
+            render_card.ASSESSMENT_FIELD: assessment,
         }
     )
     return render_card._replace_state_block(body, state)
@@ -182,17 +298,26 @@ class LifecycleWorld:
     def gh(self, args, check=True, input_text=None):
         token = os.environ.get("GH_TOKEN")
         if args[:3] == ["api", "--method", "PATCH"]:
-            fields = [
-                args[index + 1]
-                for index, value in enumerate(args)
-                if value == "--raw-field"
-            ]
-            body = next(value[5:] for value in fields if value.startswith("body="))
-            labels = [
-                value[len("labels[]=") :]
-                for value in fields
-                if value.startswith("labels[]=")
-            ]
+            if "--input" in args:
+                with open(args[args.index("--input") + 1], encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                body = payload["body"]
+                labels = list(payload["labels"])
+                self.card["title"] = payload["title"]
+            else:
+                fields = [
+                    args[index + 1]
+                    for index, value in enumerate(args)
+                    if value == "--raw-field"
+                ]
+                body = next(
+                    value[5:] for value in fields if value.startswith("body=")
+                )
+                labels = [
+                    value[len("labels[]=") :]
+                    for value in fields
+                    if value.startswith("labels[]=")
+                ]
             before = core.parse_state_block(self.card["body"]) or {}
             after = core.parse_state_block(body) or {}
             adding_hold = (
@@ -721,7 +846,10 @@ def test_net_diff_and_unproven_history_never_create_specialized_hold():
         try:
             claims, _, payload, _ = world.run_hour(reconcile_after=False)
             state = core.parse_state_block(world.card["body"])
-            check("%s: card can enter ordinary evaluation" % mode, len(claims) == 1)
+            check(
+                "%s: card can enter ordinary evaluation" % mode,
+                len(claims) == (0 if mode == "net" else 1),
+            )
             check(
                 "%s: no specialized hold is persisted" % mode,
                 render_card.AUTOMERGE_WORKFLOW_HOLD_FIELD not in state,
@@ -1046,9 +1174,11 @@ def test_hold_persistence_rejects_split_write_window_races():
                     am._workflow_hold_handoff(result, hold), card_token="card-token"
                 )
             except RuntimeError as error:
-                failed_closed = "changed before persistence" in str(
-                    error
-                ) or "could not confirm persisted" in str(error)
+                failed_closed = (
+                    "changed before persistence" in str(error)
+                    or "could not confirm persisted" in str(error)
+                    or "complete card projection did not verify" in str(error)
+                )
             raced_state = core.parse_state_block(world.card["body"])
             raced_labels = {label["name"] for label in world.card["labels"]}
             check("%s: persistence fails closed" % race_name, failed_closed)

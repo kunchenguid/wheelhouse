@@ -76,7 +76,8 @@ permissions:
   issues: write
 
 concurrency:
-  group: wheelhouse-triage-${{ github.event.inputs.issue }}-${{ github.event.inputs.head_sha }}-${{ github.event.inputs.revision }}
+  group: wheelhouse-backstop
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -251,6 +252,8 @@ jobs:
           sys.path.insert(0, "scripts")
           import render_card
           import wheelhouse_core
+          import target_observation
+          import decision_context
 
           with open("card.json", encoding="utf-8") as f:
               card = json.load(f)
@@ -280,6 +283,43 @@ jobs:
                   out.write("skip=true\n")
                   out.write("reason=%s\n" % reason)
               else:
+                  observation = None
+                  context = None
+                  if kind == "pr-review":
+                      observation = target_observation.normalize_review_observation(
+                          state.get(render_card.REVIEW_OBSERVATION_FIELD)
+                      )
+                      context = decision_context.normalize_decision_context(
+                          state.get(render_card.DECISION_CONTEXT_FIELD)
+                      )
+                      if (
+                          observation is None
+                          or observation["compatibility"] != "native-v2"
+                          or not observation["completeness"]["complete"]
+                          or context is None
+                          or context["status"] != "complete"
+                          or context["target"]["observation_id"]
+                          != observation["observation_id"]
+                          or observation["revision"]["head_sha"] != revision
+                      ):
+                          out.write("skip=true\n")
+                          out.write("reason=card lacks a current observation-bound review context\n")
+                          raise SystemExit(0)
+                      with open("review-facts.json", "w", encoding="utf-8") as facts:
+                          json.dump(
+                              {
+                                  "observation_id": observation["observation_id"],
+                                  "context_id": context["context_id"],
+                                  "head_sha": observation["revision"]["head_sha"],
+                                  "completeness": observation["completeness"],
+                                  "configured_checks": observation["facts"]["configured_checks"],
+                                  "decision_context": context,
+                              },
+                              facts,
+                              sort_keys=True,
+                              separators=(",", ":"),
+                          )
+                          facts.write("\n")
                   out.write("skip=false\n")
                   out.write("issue=%s\n" % os.environ["INPUT_ISSUE"])
                   out.write("repo=%s\n" % os.environ["INPUT_REPO"])
@@ -567,6 +607,18 @@ jobs:
             fi
             echo "</target-content>"
           } > target.txt
+          if [ "$KIND" = "pr-review" ]; then
+            if [ ! -s review-facts.json ]; then
+              echo "::error::current ReviewObservation/DecisionContext facts are unavailable"
+              exit 1
+            fi
+            {
+              echo
+              echo "<trusted-review-facts>"
+              cat review-facts.json
+              echo "</trusted-review-facts>"
+            } >> target.txt
+          fi
 
           # Auto-merge behavior verdict input (pr-review only). VISION.md is read
           # from the target's DEFAULT branch (base), NEVER the PR head - a PR
@@ -691,83 +743,41 @@ jobs:
               echo "  B = a narrow corrective bug fix that RESTORES intended behavior"
               echo "  C = a NEW feature that is strictly opt-in and disabled by default"
               echo "Other existing/default behavior changes are INELIGIBLE."
-              echo "For class B, class_b_restoration is REQUIRED and must separately"
-              echo "name the concrete corrected defect and intended behavior restored,"
-              echo "share a concrete multi-token domain subject, and bind each claim to"
-              echo "its own exact-source evidence quote carrying that subject. Generic,"
-              echo "incidentally overlapping, polarity-inverted, or unrelated statements"
-              echo "are unavailable. Every restoration claim and quote is also reconciled"
-              echo "as semantic input. Omit"
-              echo "class_b_restoration for every other class. If the summary, product"
-              echo "implications, or evidence says an existing mode, default, workflow,"
-              echo "or delivery contract is tightened or changed, the verdict is unavailable."
-              echo "List every summary/product/evidence clause mentioning a protected"
-              echo "contract in behavior_assertions. Copy claim exactly, type its governed"
-              echo "subject and effect, and attach an exact target.txt or target-src path/quote."
-              echo "Trusted code derives subject/effect independently and requires a match."
-              echo "Every coordinated protected occurrence must be represented in either order;"
-              echo "pending coordinated subjects are unioned and consumed, never overwritten."
-              echo "Bind and consume every effect exactly once at its governed occurrence."
-              echo "Documentation/test coordinated protected objects in either word order remain"
-              echo "neutral topic edges only when one documentation-edit predicate owns every topic;"
-              echo "do not propagate editing effects or suppress mixed behavior predicates. Object topics"
-              echo "are neutral for every protected category, but cannot suppress a mixed contract"
-              echo "change or a verb named test. Normalize every bounded contraction and match"
-              echo "each restoration predicate with canonical bounded active, progressive, or"
-              echo "supported compound-passive"
-              echo "complete ordered argument-role spans from the explicit supported grammar and"
-              echo "its predicate-local polarity. Every temporal or relational complement,"
-              echo "extra proposition, subordinate clause, and residual token is unsupported."
-              echo "Lexical scanning is lossless after contraction normalization: bounded numeric"
-              echo "and symbolic identifiers remain ordered semantic tokens, only terminal sentence"
-              echo "punctuation is neutral, and every unsupported character makes evidence unavailable."
-              echo "Bounded @identifiers remain semantic evidence and persisted state; card rendering"
-              echo "removes the @ only at presentation time so model text cannot notify an account."
-              echo "Every unmatched default phrase outside a proven documentation/test topic fails"
-              echo "closed, except a fully consumed isolated new opt-in disabled-by-default"
-              echo "construction with no protected subject or behavior-change effect, and only"
-              echo "when the declared class is C."
-              echo "Defect and restoration must share the same complete canonical affected-object"
-              echo "role under a bounded repair relation, never a generic or agent-only overlap."
-              echo "Bounded negated modal and compound-passive documentation edits have local"
-              echo "unchanged polarity."
-              echo "Only a fully parsed independent"
-              echo "non-governance object can prove an effect unprotected. Missing, extra,"
-              echo "ambiguous, mislabeled, or auxiliary-modified unsupported assertions are unavailable."
-              echo "Be conservative when classifying these facts."
+              echo "Class B requires class_b_restoration with separate exact-source defect"
+              echo "and restored-behavior evidence sharing the same concrete affected object."
+              echo "For every clause about an existing mode, default, workflow, delivery"
+              echo "contract, or documentation/tests, emit an exact behavior_assertion with"
+              echo "subject, effect, source, and quote. Omit restoration outside class B."
+              echo "Any existing/default contract change is ineligible. Trusted code independently"
+              echo "reconciles complete clauses, roles, polarity, coordination, identifiers,"
+              echo "defaults, and evidence spans; missing, extra, ambiguous, or unsupported"
+              echo "semantics are unavailable. Class C alone may use a fully isolated new"
+              echo "strictly opt-in, disabled-by-default feature. Be conservative."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
-                echo "Using trusted DEFAULT-branch vision.md (never PR content), you"
-                echo "are the independent reviewer for every applicable"
-                echo "VISION criterion. First try to conclude each yourself from direct"
-                echo "observations. Contributor assertions are leads, not independent"
-                echo "evidence; no second reviewer is required when you can inspect source."
-                echo "For catalog/external-package source criteria, use only the"
-                echo "sanctioned bounded public_clone. Resolve an exact pinned revision"
-                echo "or release and inspect representative components, entrypoints,"
-                echo "discovery/error/success logic, docs, and tests as VISION requires."
-                echo "In evidence record the external URL, requested ref, resolved"
-                echo "commit, exact files/components inspected, and your evidence-backed"
-                echo "conclusion. Hold/investigate source review only if sanctioned"
-                echo "inspection is unavailable, fails, stays uncertain, or reveals a"
-                echo "policy problem - not merely because contributor evidence is weak."
-                echo "Follow vision.md as written. If it requires unavailable observations,"
-                echo "including execution, do not confirm them or claim package execution."
-                echo "Set external_source_required true only when an applicable VISION"
-                echo "criterion needs that external inspection. Otherwise set it false"
-                echo "and omit source_provenance; local-only VISION review needs no clone."
-                echo "VISION may contain one trusted wheelhouse-vision-source-dependencies"
-                echo "declaration. Criteria select always, or"
-                echo "changed_paths_any globs matched against target-facts.json. In"
-                echo "vision_evidence, emit only selector-matching criteria in declaration"
-                echo "order with id, exact unique policy quote, and declared dependency."
-                echo "The top-level dependency"
-                echo "must equal the OR of those classifications. Trusted code binds the"
-                echo "declaration, quotes, and identities to the VISION file and rejects absent, incomplete, mismatched, ambiguous, or inconsistent evidence."
-                echo "Without a complete declaration, do not return a positive VISION verdict."
-                echo "Judge whether this PR aligns and should merge automatically now."
+                # Source-review vocabulary below is also a static contract for tests.
+                # independent reviewer for every applicable; First try to conclude each yourself from direct
+                # Contributor assertions are leads, not independent; no second reviewer is required when you can inspect source
+                # catalog/external-package source criteria; sanctioned bounded public_clone; Resolve an exact pinned revision
+                # representative components, entrypoints; discovery/error/success logic, docs, and tests
+                # external URL, requested ref, resolved; exact files/components inspected; evidence-backed
+                # inspection is unavailable, fails, stays uncertain, or reveals a policy problem
+                # not merely because contributor evidence is weak; including execution, do not confirm them or claim package execution
+                # external_source_required true only when; local-only VISION review needs no clone
+                # wheelhouse-vision-source-dependencies; changed_paths_any globs matched against target-facts.json
+                # emit only selector-matching criteria; must equal the OR; rejects absent, incomplete, mismatched, ambiguous
+                echo "Apply trusted DEFAULT-branch VISION independently; contributor claims"
+                echo "are leads. If external review is required, use bounded public_clone at"
+                echo "an exact revision, inspect code/docs/tests, and record URL/ref/commit/file"
+                echo "digests. Never execute it. Unavailable or uncertain evidence fails closed."
+                echo "Emit only selector-matching criteria and their exact OR dependency."
                 echo "Be conservative: when unsure, confirm neither alignment nor merge."
               fi
+              echo
+            fi
+            if [ "$KIND" = "pr-review" ]; then
+              echo "Copy exact observation/context IDs into recommendation_basis. Use a"
+              echo "configured-tests basis only when current rows support it; else use other."
               echo
             fi
             echo "Return ONLY a compact JSON object using only the keys shown below."
@@ -785,6 +795,7 @@ jobs:
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
               echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt",'
+              echo '  "recommendation_basis": {"kind":"other | configured-tests-not-run | configured-tests-not-green","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":["exact configured check name"]},'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '  "source_provenance": {"url":"exact public_clone URL","requested_ref":"exact requested ref","resolved_commit":"returned commit","inspected_files":[{"path":"exact file read","sha256":"matching trusted observation digest"}]},'
                 echo '  "vision_evidence": {"target_owner":"'${SLUG%%/*}'","target_repo":"'${SLUG#*/}'","target_number":'$NUMBER',"target_facts_sha256":"'$TARGET_FACTS_SHA256'","vision_sha":"'$VISION_SHA'","vision_content_sha256":"'$VISION_CONTENT_SHA256'","base_sha":"'$BASE_SHA'","target_head_sha":"'$HEAD_SHA'","applicable_criteria":[{"id":"matching declared criterion id","quote":"exact uniquely occurring VISION criterion","external_source_required":true or false}]},'
@@ -808,7 +819,8 @@ jobs:
               echo '  "product_implications": "owner discussion or routine, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
-              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes <=120 chars; one exact from target.txt"'
+              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes <=120 chars; one exact from target.txt",'
+              echo '  "recommendation_basis": {"kind":"other | configured-tests-not-run | configured-tests-not-green","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":["exact configured check name"]}'
             fi
             echo "}"
             echo "Do not include Markdown fences or extra prose."

@@ -17,6 +17,9 @@ import auto_merge as am  # noqa: E402
 import automerge_criteria as schema  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
+import target_observation  # noqa: E402
+import decision_context  # noqa: E402
+import assessment_admission  # noqa: E402
 
 _failures = []
 HEAD = "a" * 40
@@ -98,7 +101,104 @@ def independent_verdict(**overrides):
     return value
 
 
+def observation_bound_assessment(
+    *,
+    owner="kunchenguid",
+    repo="axi",
+    number=96,
+    head=HEAD,
+    base=BASE,
+    title="docs: add jj-axi to community catalog",
+    card_issue=623,
+):
+    observation = target_observation.make_observation(
+        owner,
+        repo,
+        number,
+        head_sha=head,
+        base_sha=base,
+        expected_head_sha=head,
+        observed_at="2026-07-23T12:00:00Z",
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": title,
+            "author": "aivv73",
+            "updated_at": "2026-07-13T16:27:26Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "fixture",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "merge-ready",
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "compliance", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=target_observation.changed_path_facts(
+            ["README.md", "catalog.yaml", "docs/index.html"], complete=True
+        ),
+    )
+    snapshot = decision_context.repository_snapshot(
+        [
+            {
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "head_sha": head,
+                "paths_complete": True,
+                "paths": ["README.md", "catalog.yaml", "docs/index.html"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": card_issue,
+                "url": "https://github.com/%s/%s/pull/%s" % (owner, repo, number),
+                "card_url": "https://github.com/%s/wheelhouse/issues/%s"
+                % (owner, card_issue),
+            }
+        ],
+        "2026-07-23T12:00:00Z",
+    )
+    context = decision_context.build_decision_context(observation, snapshot)
+    assessment = assessment_admission.admit_assessment(
+        {
+            "summary": "Routine bounded review.",
+            "product_implications": "No owner discussion required.",
+            "recommended_action": "merge",
+            "recommended_reason": "Checks and behavior gates are clear.",
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": observation["observation_id"],
+                "context_id": context["context_id"],
+                "check_names": [],
+            },
+        },
+        observation,
+        context,
+    )
+    return observation, context, assessment
+
+
 def card_entry(**state_overrides):
+    observation, context, assessment = observation_bound_assessment()
     state = {
         "repo": "axi",
         "number": 96,
@@ -108,6 +208,10 @@ def card_entry(**state_overrides):
         "triage_status": "succeeded",
         "triage_recommendation": {"action": "merge", "reason": ""},
         "automerge_verdict": verdict(),
+        render_card.PROJECTION_OWNER_FIELD: render_card.PROJECTION_OWNER,
+        render_card.REVIEW_OBSERVATION_FIELD: observation,
+        render_card.DECISION_CONTEXT_FIELD: context,
+        render_card.ASSESSMENT_FIELD: assessment,
     }
     state.update(state_overrides)
     return {
@@ -481,6 +585,14 @@ def test_no_vision_complete_diff_keeps_independent_g6_facts_in_real_card_flow():
     )
     base_card = render_card.render(issue_item)
     state = core.parse_state_block(base_card["body"])
+    observation, context, assessment = observation_bound_assessment(
+        repo="firstmate",
+        number=527,
+        head=issue_head,
+        base=issue_base,
+        title="issue 621 regression",
+        card_issue=621,
+    )
     state.update(
         {
             "repo": "firstmate",
@@ -492,6 +604,10 @@ def test_no_vision_complete_diff_keeps_independent_g6_facts_in_real_card_flow():
             "triage_status": "succeeded",
             "triage_recommendation": {"action": "merge", "reason": ""},
             "automerge_verdict": independent_verdict(),
+            render_card.PROJECTION_OWNER_FIELD: render_card.PROJECTION_OWNER,
+            render_card.REVIEW_OBSERVATION_FIELD: observation,
+            render_card.DECISION_CONTEXT_FIELD: context,
+            render_card.ASSESSMENT_FIELD: assessment,
         }
     )
     raw_card = {
@@ -1229,8 +1345,19 @@ def test_displayed_met_rows_cannot_grant_eligibility():
 def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
     """Reproduce #1493: triage used to leave the pre-card G6 rows frozen."""
     stale = evaluate(card_value=None, prior=False)
-    held = render_card.render(item(automerge_criteria=stale["criteria"]), held=True)
-    held["body"] = render_card.body_with_triage_queued(held["body"], item())
+    observation, context, _ = observation_bound_assessment()
+    bound_item = item(
+        automerge_criteria=stale["criteria"],
+        target_observation=observation,
+        decision_context=context,
+    )
+    held = render_card.render(bound_item, held=True)
+    held_state = core.parse_state_block(held["body"])
+    # Exercise the atomic evaluator itself without duplicating the Option B
+    # writer transaction coverage in test_option_b_architecture.py.
+    held_state.pop(render_card.PROJECTION_OWNER_FIELD, None)
+    held["body"] = render_card._replace_state_block(held["body"], held_state)
+    held["body"] = render_card.body_with_triage_queued(held["body"], bound_item)
     card = {
         "number": 623,
         "body": held["body"],
@@ -1337,6 +1464,12 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
                     "evidence": "target.txt: catalog-only changes",
                     "recommended_action": "merge",
                     "recommended_reason": "focused and verified",
+                    "recommendation_basis": {
+                        "kind": "other",
+                        "observation_id": observation["observation_id"],
+                        "context_id": context["context_id"],
+                        "check_names": [],
+                    },
                     "automerge": {
                         "behavior_class": "A",
                         "changes_existing_or_default_behavior": False,

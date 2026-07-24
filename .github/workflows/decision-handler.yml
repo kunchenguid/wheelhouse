@@ -55,6 +55,9 @@ jobs:
       nl_event_key: ${{ steps.nl-claim.outputs.event_key }}
       nl_claim_id: ${{ steps.nl-claim.outputs.comment_id }}
       nl_claim_marker: ${{ steps.nl-claim.outputs.marker }}
+      decision_label_recovery_required: ${{ steps.decision-label-recovery.outputs.required }}
+      decision_label_recovery_admitted: ${{ steps.decision-label-recovery.outputs.admitted }}
+      decision_label_recovery_event_key: ${{ steps.decision-label-recovery.outputs.event_key }}
       nl_pre_model_fresh: ${{ steps.nl-pre-model-freshness.outputs.fresh }}
       nl_prompt_built: ${{ steps.nl-prompt.outcome == 'success' }}
       claude_ready: ${{ steps.nl-claude-model.outcome == 'success' }}
@@ -168,6 +171,22 @@ jobs:
           CHECKBOXES_NEW: ${{ steps.checkboxes-new.outputs.json }}
           CHECKBOXES_OLD: ${{ steps.checkboxes-old.outputs.json }}
         run: python scripts/apply_decision.py parse
+
+      - id: decision-label-recovery
+        if: ${{ steps.gate.outputs.authorized == 'true' && github.event_name == 'issues' && github.event.action == 'labeled' && (steps.decide.outputs.decision != '' || steps.decide.outputs.investigate != '') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHORIZED: ${{ steps.gate.outputs.authorized }}
+        run: |
+          python scripts/decision_label_recovery.py claim \
+            --event-file "$GITHUB_EVENT_PATH" \
+            --repo-slug "$REPO_SLUG" \
+            --issue "$ISSUE" \
+            --sender "$SENDER" \
+            --authorized "$AUTHORIZED"
 
       # --- Natural-language path (opt-in) ------------------------------------
       # An owner/maintainer comment that is NOT a slash-command and not on a held
@@ -753,6 +772,8 @@ jobs:
           TRIGGER_LABELS: ${{ toJSON(github.event.issue.labels) }}
           TRIGGER_COMMENTS: ${{ github.event.issue.comments }}
           ROUTE_MODE: ${{ steps.route.outputs.mode }}
+          LABEL_RECOVERY: ${{ steps.decision-label-recovery.outputs.admitted }}
+          RECOVERY_LABEL: ${{ steps.decision-label-recovery.outputs.label }}
         run: |
           set -euo pipefail
           gh issue view "$ISSUE" --json state,labels,body,updatedAt,comments > current-card.json
@@ -778,21 +799,43 @@ jobs:
             echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          projection_recovery=false
+          if [ -n "$TRIGGER_UPDATED_AT" ]; then
+            projection_recovery="$(
+              TRIGGER_BODY="$TRIGGER_BODY" \
+                python scripts/render_card.py owner-race-recoverable \
+                  --current-card-file current-card.json
+            )"
+          fi
           if [ -n "$TRIGGER_UPDATED_AT" ] && jq -e \
             --arg trigger_body "$TRIGGER_BODY" \
             --arg trigger_updated_at "$TRIGGER_UPDATED_AT" \
             --argjson trigger_labels "$TRIGGER_LABELS" \
-            --argjson trigger_comments "${TRIGGER_COMMENTS:-0}" '
+            --argjson trigger_comments "${TRIGGER_COMMENTS:-0}" \
+            --arg projection_recovery "$projection_recovery" \
+            --arg label_recovery "$LABEL_RECOVERY" \
+            --arg recovery_label "$RECOVERY_LABEL" '
             ([.labels[].name] | sort | unique) as $labels
             | ($trigger_labels | map(.name) | sort | unique) as $trigger_labels
             | ["processing", "wheelhouse:auto-merge-claim"] as $claim_labels
             | ($labels - $claim_labels) as $stable_labels
             | ($trigger_labels - $claim_labels) as $stable_trigger_labels
-            | (.body // "") == $trigger_body
-            and ([.comments[]?] | length) == $trigger_comments
-            and $stable_labels == $stable_trigger_labels
+            | ((.body // "") == $trigger_body or $projection_recovery == "true")
+            and ([.comments[]?] | length) == (
+              $trigger_comments + (if $label_recovery == "true" then 1 else 0 end)
+            )
+            and (
+              $stable_labels == $stable_trigger_labels
+              or (
+                $label_recovery == "true"
+                and $projection_recovery == "true"
+                and ($stable_trigger_labels - [$recovery_label]) == $stable_labels
+                and ($stable_labels - $stable_trigger_labels) == []
+              )
+            )
             and (
               ($labels == $trigger_labels and (.updatedAt // "") == $trigger_updated_at)
+              or $projection_recovery == "true"
               or (
                 ($trigger_labels | index("processing") != null)
                 and ($trigger_labels | index("wheelhouse:auto-merge-claim") != null)
@@ -821,10 +864,29 @@ jobs:
           github_token: ${{ github.token }}
           labels: processing
 
+      - id: decision-label-revalidate
+        if: ${{ steps.decision-label-recovery.outputs.admitted == 'true' && steps.current-card.outputs.allowed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHORIZED: ${{ steps.gate.outputs.authorized }}
+          EVENT_KEY: ${{ steps.decision-label-recovery.outputs.event_key }}
+        run: |
+          python scripts/decision_label_recovery.py revalidate \
+            --event-file "$GITHUB_EVENT_PATH" \
+            --repo-slug "$REPO_SLUG" \
+            --issue "$ISSUE" \
+            --sender "$SENDER" \
+            --authorized "$AUTHORIZED" \
+            --event-key "$EVENT_KEY" \
+            --processing required
+
       # Execute writes to the TARGET repo under FLEET_TOKEN. The NL fetch above
       # may also use FLEET_TOKEN, but only for read-only target context.
       - id: execute
-        if: ${{ (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' }}
+        if: ${{ (steps.decide.outputs.decision != '' || steps.route.outputs.mode == 'action') && steps.current-card.outputs.allowed == 'true' && (steps.decision-label-recovery.outputs.admitted != 'true' || steps.decision-label-revalidate.outputs.allowed == 'true') }}
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
@@ -1619,7 +1681,7 @@ jobs:
 
   investigate-dispatch:
     needs: handle
-    if: ${{ needs.handle.outputs.authorized == 'true' && needs.handle.outputs.investigate != '' }}
+    if: ${{ needs.handle.outputs.authorized == 'true' && needs.handle.outputs.investigate != '' && (needs.handle.outputs.decision_label_recovery_required != 'true' || needs.handle.outputs.decision_label_recovery_admitted == 'true') }}
     permissions:
       contents: read
       issues: write
@@ -1644,8 +1706,27 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: echo "authorized=$(python scripts/wheelhouse_core.py authorized)" >> "$GITHUB_OUTPUT"
 
+      - id: decision-label-revalidate
+        if: ${{ needs.handle.outputs.decision_label_recovery_admitted == 'true' && steps.triggering-actor-gate.outputs.authorized == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHORIZED: ${{ steps.triggering-actor-gate.outputs.authorized }}
+          EVENT_KEY: ${{ needs.handle.outputs.decision_label_recovery_event_key }}
+        run: |
+          python scripts/decision_label_recovery.py revalidate \
+            --event-file "$GITHUB_EVENT_PATH" \
+            --repo-slug "$REPO_SLUG" \
+            --issue "$ISSUE" \
+            --sender "$SENDER" \
+            --authorized "$AUTHORIZED" \
+            --event-key "$EVENT_KEY" \
+            --processing forbidden
+
       - name: Investigate (trigger deep review, leave card open)
-        if: ${{ needs.handle.outputs.authorized == 'true' && steps.triggering-actor-gate.outputs.authorized == 'true' }}
+        if: ${{ needs.handle.outputs.authorized == 'true' && steps.triggering-actor-gate.outputs.authorized == 'true' && (needs.handle.outputs.decision_label_recovery_admitted != 'true' || steps.decision-label-revalidate.outputs.allowed == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}

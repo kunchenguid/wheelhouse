@@ -35,6 +35,7 @@ def _base_item(item, observation):
     out.update(
         {
             "kind": "pr-review",
+            "target_observation": observation,
             "head_sha": revision.get("head_sha") or item.get("head_sha", ""),
             "base_sha": revision.get("base_sha") or item.get("base_sha", ""),
             "updated_at": facts.get("updated_at") or item.get("updated_at", ""),

@@ -319,6 +319,23 @@ def test_decide_routing():
             "route: repaired reason is the ORIGINAL structural failure",
             "recommended_action" in dec["reason"],
         )
+        bound_original = dict(VALID)
+        bound_original.pop("recommended_action")
+        bound_original["recommendation_basis"] = {
+            "kind": "other",
+            "observation_id": "sha256:" + "0" * 64,
+            "context_id": "sha256:" + "1" * 64,
+            "check_names": [],
+        }
+        bound_repair = rc.decide_triage_apply(
+            json.dumps(bound_original), valid, tf
+        )
+        check(
+            "route: trusted consumer restores only an already-valid original basis",
+            bound_repair["outcome"] == "repaired"
+            and bound_repair["triage"].get("recommendation_basis")
+            == bound_original["recommendation_basis"],
+        )
 
         # repair-failure cap (clause 6): invalid original + still-invalid repair.
         dec2 = rc.decide_triage_apply(invalid, invalid, tf)

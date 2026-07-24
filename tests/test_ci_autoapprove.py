@@ -502,11 +502,17 @@ def run_build_repo(
         core.approve_ci,
         core.ci_security_summary,
         core._list_action_required_runs,
+        core._list_pr_files,
     )
     core.gh_graphql, core.repo_pr_target_posture = fake_graphql, fake_posture
     core.ci_safety, core.approve_ci = fake_ci_safety, fake_approve
     core.ci_security_summary = fake_summary
     core._list_action_required_runs = fake_pending_runs
+    core._list_pr_files = lambda _slug, _number, expected: (
+        ["src/file-%d.py" % index for index in range(int(expected or 0))],
+        True,
+        True,
+    )
     err = io.StringIO()
     try:
         with redirect_stderr(err):
@@ -525,6 +531,7 @@ def run_build_repo(
             core.approve_ci,
             core.ci_security_summary,
             core._list_action_required_runs,
+            core._list_pr_files,
         ) = save
     calls["stderr"] = err.getvalue()  # so logging-path tests can assert the per-PR line
     return result, items, calls
