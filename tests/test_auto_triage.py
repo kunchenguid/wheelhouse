@@ -535,8 +535,8 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
     )
     valid_body = rc.render(valid)["body"]
     check(
-        "accept conditional: pr merge rec renders accept",
-        "<!-- opt:accept-recommendation -->" in valid_body,
+        "accept conditional: legacy PR result without typed admission is withheld",
+        "<!-- opt:accept-recommendation -->" not in valid_body,
     )
 
     legacy = item(
@@ -1147,7 +1147,10 @@ def test_body_helpers_queue_and_apply_result():
     check(
         "queue: hidden status is queued", queued_state.get("triage_status") == "queued"
     )
-    check("queue: no visible triage section yet", "### Triage" not in queued)
+    check(
+        "queue: visible agent status explains the queue event",
+        "Automatic triage queued for this exact revision" in queued,
+    )
 
     updated = rc.body_with_triage_result(
         queued,
@@ -1181,20 +1184,18 @@ def test_body_helpers_queue_and_apply_result():
     )
     structured_state = core.parse_state_block(structured)
     check(
-        "result: structured recommendation persisted into state",
-        structured_state.get("triage_recommendation")
-        == {
-            "action": "request-changes",
-            "reason": "Please add a regression test for acme/wheelhouse#7.",
-        },
+        "result: unbound structured recommendation is advisory-only",
+        structured_state.get("triage_recommendation") is None
+        and structured_state.get("assessment_admission", {}).get("status")
+        == "unavailable",
     )
     check(
-        "result: accept checkbox appears after structured triage succeeds",
-        "<!-- opt:accept-recommendation -->" in structured,
+        "result: unbound structured triage renders no accept shortcut",
+        "<!-- opt:accept-recommendation -->" not in structured,
     )
     check(
-        "result: deterministic recommendation suppressed after structured triage",
-        "### Recommended action" not in structured,
+        "result: deterministic controls/recommendation remain available",
+        "### Recommended action" in structured,
     )
 
     parsed_structured = rc.parse_triage_json(
@@ -1216,16 +1217,12 @@ def test_body_helpers_queue_and_apply_result():
     )
     from_parsed_state = core.parse_state_block(from_parsed)
     check(
-        "result: parsed structured Claude output still renders accept",
-        "<!-- opt:accept-recommendation -->" in from_parsed,
+        "result: parsed legacy output still has no unbound accept shortcut",
+        "<!-- opt:accept-recommendation -->" not in from_parsed,
     )
     check(
-        "result: parsed structured Claude output persists recommendation",
-        from_parsed_state.get("triage_recommendation")
-        == {
-            "action": "request-changes",
-            "reason": "Please add a regression test for acme/wheelhouse#8.",
-        },
+        "result: parsed legacy recommendation is not admitted",
+        from_parsed_state.get("triage_recommendation") is None,
     )
 
 
@@ -2006,7 +2003,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         "queue(issue): hidden status is queued",
         queued_state.get("triage_status") == "queued",
     )
-    check("queue(issue): no visible triage section yet", "### Triage" not in queued)
+    check(
+        "queue(issue): visible agent status explains the queue event",
+        "Automatic triage queued for this exact revision" in queued,
+    )
 
     old = item_issue(updated_at="2024-01-01T00:00:00Z")
     old_body = rc.body_with_triage_queued(rc.render(old)["body"], old)

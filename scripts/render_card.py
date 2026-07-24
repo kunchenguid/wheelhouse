@@ -56,6 +56,8 @@ import wheelhouse_core as core  # noqa: E402
 from wheelhouse_core import parse_state_block, qualify_issue_refs  # noqa: E402
 import automerge_criteria as criteria_schema  # noqa: E402
 import target_observation as target_contracts  # noqa: E402
+import decision_context as context_contracts  # noqa: E402
+import assessment_admission  # noqa: E402
 from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
 from agent_runtime.output_validation import (  # noqa: E402
     evidence_anchor_ok as _shared_evidence_anchor_ok,
@@ -189,7 +191,17 @@ AUTOMERGE_WORKFLOW_HOLD_MAX_PATHS = 5
 AUTOMERGE_WORKFLOW_HOLD_MAX_PATH_LENGTH = 240
 AUTOMERGE_WORKFLOW_HOLD_START = "<!-- wheelhouse-automerge-workflow-hold:start -->"
 AUTOMERGE_WORKFLOW_HOLD_END = "<!-- wheelhouse-automerge-workflow-hold:end -->"
-SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL, AUTOMERGE_WORKFLOW_HOLD_LABEL})
+LIFECYCLE_CONFIRM_LABEL = "wheelhouse:confirming-target-state"
+LIFECYCLE_START = "<!-- wheelhouse-lifecycle:start -->"
+LIFECYCLE_END = "<!-- wheelhouse-lifecycle:end -->"
+_LIFECYCLE_SECTION_RE = re.compile(
+    r"\n?<!--\s*wheelhouse-lifecycle:start\s*-->.*?"
+    r"<!--\s*wheelhouse-lifecycle:end\s*-->\n?",
+    re.S,
+)
+SYNCED_EXACT_LABELS = frozenset(
+    {HOLD_LABEL, AUTOMERGE_WORKFLOW_HOLD_LABEL, LIFECYCLE_CONFIRM_LABEL}
+)
 
 # The fields whose change makes a card materially stale and worth re-rendering.
 # ``bucket`` and the semantic projection-reference dimensions are material so a
@@ -209,6 +221,12 @@ MATERIAL_FIELDS = (
     "projection_complete",
 )
 PROJECTION_REF_FIELD = "projection_ref"
+REVIEW_OBSERVATION_FIELD = "review_observation"
+DECISION_CONTEXT_FIELD = "decision_context"
+ASSESSMENT_FIELD = "triage_assessment"
+ASSESSMENT_RESULT_FIELD = "assessment_result_id"
+PROJECTION_OWNER_FIELD = "projection_owner"
+PROJECTION_OWNER = "pr-review-projection-writer/v2"
 
 # Non-material hidden timestamp used only to mirror target GitHub activity onto
 # the card issue's own updatedAt for `sort:updated-desc`.
@@ -226,7 +244,8 @@ AUTOMERGE_CRITERIA_VERSION_FIELD = "automerge_criteria_version"
 # bounded schema also carries machine soft-close provenance for prospective
 # closed-card reuse; legacy or malformed records always read as count zero.
 RECONCILE_ABSENCE_FIELD = "reconcile_absence"
-RECONCILE_ABSENCE_VERSION = 2
+RECONCILE_ABSENCE_VERSION = 3
+RECONCILE_ABSENCE_LEGACY_VERSION = 2
 RECONCILE_ABSENCE_THRESHOLD = 2
 RECONCILE_SOFT_CLOSE_ACTOR = "wheelhouse-reconcile"
 RECONCILE_SOFT_CLOSE_REASON = "open-target-worklist-absence"
@@ -512,7 +531,7 @@ def marker_label(item):
     return "target:%s-%s" % (item["repo"], item["number"])
 
 
-def card_labels(item, held=False, workflow_hold=False):
+def card_labels(item, held=False, workflow_hold=False, lifecycle_confirming=False):
     labels = [
         "needs-decision",
         "repo:%s" % item["repo"],
@@ -524,6 +543,8 @@ def card_labels(item, held=False, workflow_hold=False):
         labels.append(HOLD_LABEL)
     if workflow_hold:
         labels.append(AUTOMERGE_WORKFLOW_HOLD_LABEL)
+    if lifecycle_confirming:
+        labels.append(LIFECYCLE_CONFIRM_LABEL)
     return labels
 
 
@@ -580,7 +601,7 @@ def normalized_material_options(options):
     )
 
 
-def projection_ref_for_item(item):
+def projection_ref_for_item(item, owner=None):
     """Return a valid projection ref that is bound to this exact item."""
     ref = target_contracts.normalize_projection_ref(
         (item or {}).get(PROJECTION_REF_FIELD)
@@ -588,7 +609,11 @@ def projection_ref_for_item(item):
     if ref is None:
         return None
     target = ref["target"]
-    expected_owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    expected_owner = (
+        os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        if owner is None
+        else str(owner).strip()
+    )
     if (
         (expected_owner and target.get("owner") != expected_owner)
         or target.get("repo") != item.get("repo")
@@ -600,10 +625,10 @@ def projection_ref_for_item(item):
     return ref
 
 
-def material_signature(item):
+def material_signature(item, owner=None):
     """The semantic material signature used for refresh decisions."""
     kind = item.get("kind", "pr-review")
-    projection = projection_ref_for_item(item)
+    projection = projection_ref_for_item(item, owner=owner)
     return {
         "head_sha": item.get("head_sha", "") or "",
         "comp": item.get("comp", "n/a"),
@@ -728,6 +753,43 @@ def automerge_criteria_stale(item, state):
     ) != expected
 
 
+def option_b_projection_stale(item, state):
+    """Detect v2 semantic drift without mass-rewriting legacy cards.
+
+    A card written before the cutover migrates only on a normal material/current
+    trigger. Once ``projection_owner`` is v2, configured rows, changed-path
+    digest, and DecisionContext identity become display refresh triggers.
+    Observation time/ID alone never causes churn.
+    """
+    if item.get("kind") != "pr-review":
+        return False
+    if (
+        item.get("_projection_cause") == "lifecycle-transition"
+        and RECONCILE_ABSENCE_FIELD in (state or {})
+    ):
+        return True
+    if (state or {}).get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+        return bool(item.get("_force_projection_migration"))
+    observation = target_contracts.normalize_review_observation(
+        item.get("review_observation") or item.get("target_observation")
+    )
+    context = context_contracts.normalize_decision_context(
+        item.get(DECISION_CONTEXT_FIELD)
+    )
+    if observation is None:
+        return True
+    if (state or {}).get("configured_checks") != observation["facts"][
+        "configured_checks"
+    ]:
+        return True
+    if (state or {}).get("changed_path_digest") != observation["changed_paths"][
+        "digest"
+    ]:
+        return True
+    expected_context = context["context_id"] if context else ""
+    return (state or {}).get("decision_context_id", "") != expected_context
+
+
 def issue_updated_at_stale(item, state):
     """Whether an issue source has a valid strictly newer tracked revision."""
     if item.get("kind") != "issue-triage":
@@ -746,12 +808,17 @@ def refresh_needed(item, state, has_token=False, labels=None, card_title=None):
         issue_revision_refresh = False
     return (
         material_changed(item, state)
+        or (
+            item.get("_projection_cause") == "lifecycle-transition"
+            and RECONCILE_ABSENCE_FIELD in (state or {})
+        )
         or title_stale(item, card_title)
         or issue_revision_refresh
         or render_stale(state)
         or held_publish_needed(item, state, has_token)
         or security_summary_stale(item, state)
         or automerge_criteria_stale(item, state)
+        or option_b_projection_stale(item, state)
         or workflow_hold_maintenance_needed(item, state, labels)
     )
 
@@ -996,6 +1063,33 @@ def triage_attempts_exhausted(item, state, cap=None):
     return triage_attempt_count(state, kind, revision, effective_cap) >= effective_cap
 
 
+def review_inputs_complete(item):
+    """Whether PR advisory spend can bind to current complete trusted inputs."""
+    if (item or {}).get("kind", "pr-review") != "pr-review":
+        return True
+    raw_observation = (item or {}).get("target_observation") or (item or {}).get(
+        REVIEW_OBSERVATION_FIELD
+    )
+    raw_context = (item or {}).get(DECISION_CONTEXT_FIELD)
+    # Concrete pre-cutover callers without either v2 field retain their legacy
+    # path until a normal scan/ingest trigger supplies current inputs. Once one
+    # v2 input is present, partial or unavailable binding must deny spend.
+    if raw_observation is None and raw_context is None:
+        return True
+    observation = target_contracts.normalize_review_observation(raw_observation)
+    context = context_contracts.normalize_decision_context(raw_context)
+    return bool(
+        observation
+        and observation["compatibility"] == "native-v2"
+        and observation["completeness"]["complete"]
+        and context
+        and context["status"] == "complete"
+        and context["target"]["observation_id"] == observation["observation_id"]
+        and observation["revision"]["head_sha"]
+        == str((item or {}).get("head_sha") or "")
+    )
+
+
 def should_hold(item, has_token):
     """Whether a BRAND-NEW card for this item should be created HELD - a
     placeholder body with no decision checkboxes, pending its first auto-
@@ -1014,7 +1108,56 @@ def should_hold(item, has_token):
         return False
     if item.get(flag, True) is False:
         return False
+    if kind == "pr-review" and not review_inputs_complete(item):
+        return False
     return bool(triage_revision(item))
+
+
+def review_card_inputs_current(item, state):
+    """Whether a v2 PR card stores the exact inputs supplied by its item."""
+    if (item or {}).get("kind", "pr-review") != "pr-review":
+        return True
+    raw_observation = (item or {}).get("target_observation") or (item or {}).get(
+        REVIEW_OBSERVATION_FIELD
+    )
+    if raw_observation is None:
+        return True
+    incoming = target_contracts.normalize_review_observation(raw_observation)
+    stored = target_contracts.normalize_review_observation(
+        (state or {}).get(REVIEW_OBSERVATION_FIELD)
+    )
+    incoming_context = context_contracts.normalize_decision_context(
+        (item or {}).get(DECISION_CONTEXT_FIELD)
+    )
+    stored_context = context_contracts.normalize_decision_context(
+        (state or {}).get(DECISION_CONTEXT_FIELD)
+    )
+    return bool(
+        (state or {}).get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER
+        and incoming
+        and stored
+        and incoming_context
+        and stored_context
+        and stored["observation_id"] == incoming["observation_id"]
+        and stored_context["context_id"] == incoming_context["context_id"]
+    )
+
+
+def triage_projection_migration_needed(item, state, labels, has_token=True):
+    """Targeted v2 migration required before an otherwise-eligible first spend."""
+    return bool(
+        (item or {}).get("kind", "pr-review") == "pr-review"
+        and (
+            (item or {}).get("target_observation") is not None
+            or (item or {}).get(REVIEW_OBSERVATION_FIELD) is not None
+            or (item or {}).get(DECISION_CONTEXT_FIELD) is not None
+        )
+        and (state or {}).get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER
+        and should_hold(item, has_token)
+        and is_refreshable(labels)
+        and not triage_fresh(item, state)
+        and not triage_attempts_exhausted(item, state)
+    )
 
 
 def should_auto_triage(item, state, labels, has_token=True):
@@ -1025,6 +1168,8 @@ def should_auto_triage(item, state, labels, has_token=True):
     if not should_hold(item, has_token):
         return False
     if not is_refreshable(labels):
+        return False
+    if not review_card_inputs_current(item, state):
         return False
     kind = item.get("kind", "pr-review")
     revision = triage_revision(item)
@@ -1208,6 +1353,9 @@ def _normalize_triage_with_reason(data):
     evidence = _flatten_evidence(data.get(EVIDENCE_FIELD))
     if evidence is None:
         return None, "field %r is missing or empty" % EVIDENCE_FIELD
+    basis = assessment_admission.normalize_basis(data.get("recommendation_basis"))
+    if basis:
+        triage["recommendation_basis"] = basis
     action = normalize_recommendation_action(data.get("recommended_action"))
     reason = ""
     if isinstance(data.get("recommended_reason"), str):
@@ -3339,7 +3487,16 @@ def _behavior_admission_record(
         return None
     evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
     verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
-    if not isinstance(verified_refs, tuple):
+    # Trusted durable assessment records round-trip JSON tuples as lists.
+    # The refs are still revalidated by the semantic evidence normalizers; raw
+    # model output cannot bypass this because trusted binding overwrites the
+    # private field before persistence.
+    if isinstance(verified_refs, list):
+        verified_refs = tuple(
+            tuple(ref) if isinstance(ref, list) and len(ref) == 2 else ref
+            for ref in verified_refs
+        )
+    elif not isinstance(verified_refs, tuple):
         verified_refs = ()
     semantic_text = [
         triage_data.get("summary", ""),
@@ -3584,11 +3741,38 @@ def recommendation_for_state(triage, kind, owner="", repo=""):
     return {"action": action, "reason": reason}
 
 
+def assessment_current_admitted(state):
+    state = state if isinstance(state, dict) else {}
+    if state.get("kind") != "pr-review":
+        return True
+    assessment = assessment_admission.normalize_assessment(
+        state.get(ASSESSMENT_FIELD)
+    )
+    observation = target_contracts.normalize_review_observation(
+        state.get(REVIEW_OBSERVATION_FIELD)
+    )
+    context = context_contracts.normalize_decision_context(
+        state.get(DECISION_CONTEXT_FIELD)
+    )
+    return bool(
+        assessment
+        and observation
+        and context
+        and assessment_admission.admitted(assessment)
+        and assessment["target"]["head_sha"] == state.get("head_sha")
+        and assessment["target"]["observation_id"]
+        == observation["observation_id"]
+        and assessment["target"]["context_id"] == context["context_id"]
+    )
+
+
 def accept_recommendation_available(state):
     kind = (state or {}).get("kind")
     if kind not in ACCEPT_ALLOWED_BY_KIND:
         return False
     if (state or {}).get("triage_status") != "succeeded":
+        return False
+    if kind == "pr-review" and not assessment_current_admitted(state):
         return False
     revision = state_revision(state, kind)
     if not revision or (state or {}).get("triaged_sha") != revision:
@@ -3608,6 +3792,65 @@ def options_for_state(kind, options, state):
         cleaned = [o for o in cleaned if o != ACCEPT_RECOMMENDATION_OPTION]
         return [ACCEPT_RECOMMENDATION_OPTION] + cleaned
     return [o for o in cleaned if o != ACCEPT_RECOMMENDATION_OPTION]
+
+
+def _related_work_section(context):
+    context = context_contracts.normalize_decision_context(context)
+    if context is None:
+        return ["### Related work", "", "_Related-work context is unavailable._"]
+    lines = ["### Related work", ""]
+    if context["status"] != "complete":
+        lines.extend(
+            [
+                "> [!NOTE]",
+                "> Related-work context is **%s** (`%s`). This is advisory; "
+                "it does not block or authorize any action."
+                % (context["status"], context.get("reason") or "incomplete"),
+                "",
+            ]
+        )
+    if not context["candidates"]:
+        lines.append(
+            "_No deterministic related candidate is asserted._"
+            if context["status"] == "complete"
+            else "_Wheelhouse cannot claim that no related work exists._"
+        )
+        return lines
+    for candidate in context["candidates"]:
+        target = candidate["target"]
+        label = "%s/%s#%s" % (
+            target["owner"], target["repo"], target["number"]
+        )
+        link = "[%s](%s)" % (label, candidate["url"]) if candidate["url"] else label
+        if candidate.get("card_url"):
+            link += " ([card #%s](%s))" % (
+                candidate["card_issue"], candidate["card_url"]
+            )
+        reasons = []
+        for relation in candidate["relations"]:
+            if relation["kind"] == "same-closing-issue":
+                reasons.append(
+                    "same closing issue %s"
+                    % ", ".join("#%s" % value for value in relation["issues"])
+                )
+            elif relation["kind"] == "explicit-reference":
+                reasons.append("explicit dependency/reference")
+            else:
+                paths = ", ".join(
+                    "`%s`" % core._safe_inline(path) for path in relation["paths"]
+                )
+                reasons.append("exact shared path%s: %s" % (
+                    "s" if len(relation["paths"]) != 1 else "", paths
+                ))
+        lines.append("- %s - %s" % (link, "; ".join(reasons)))
+    lines.extend(
+        [
+            "",
+            "_Advisory context only. Shared paths and references are not an "
+            "auto-merge overlap gate._",
+        ]
+    )
+    return lines
 
 
 def triage_section(triage=None, error=None, owner="", repo=""):
@@ -3758,19 +4001,27 @@ def _normalized_reconcile_absence(body):
     count = record.get("count")
     if isinstance(count, bool) or not isinstance(count, int):
         return None
-    run_number = record.get("run_number")
+    version = record.get("version")
+    epoch_field = (
+        "scheduled_epoch"
+        if version == RECONCILE_ABSENCE_VERSION
+        else "run_number"
+    )
+    epoch = record.get(epoch_field)
     if (
-        isinstance(run_number, bool)
-        or not isinstance(run_number, int)
-        or run_number < 1
-        or run_number > 9_007_199_254_740_991
+        isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 1
+        or epoch > 9_007_199_254_740_991
+        or version
+        not in {RECONCILE_ABSENCE_VERSION, RECONCILE_ABSENCE_LEGACY_VERSION}
     ):
         return None
     base = {
-        "version": RECONCILE_ABSENCE_VERSION,
+        "version": version,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
-        "run_number": run_number,
+        epoch_field: epoch,
     }
     if count == 1:
         return base if record == base else None
@@ -3798,9 +4049,19 @@ def reconcile_absence_count(body):
     return record["count"] if record else 0
 
 
-def reconcile_absence_run_number(body):
+def reconcile_absence_epoch(body):
     record = _normalized_reconcile_absence(body)
-    return record["run_number"] if record else 0
+    if not record or record.get("version") != RECONCILE_ABSENCE_VERSION:
+        return 0
+    return record["scheduled_epoch"]
+
+
+def reconcile_absence_run_number(body):
+    """Concrete v2 compatibility reader; new lifecycle code uses epoch."""
+    record = _normalized_reconcile_absence(body)
+    if not record:
+        return 0
+    return record.get("scheduled_epoch") or record.get("run_number") or 0
 
 
 def reconcile_soft_close_provenance(body):
@@ -3817,24 +4078,32 @@ def reconcile_absence_needs_clear(body):
     return state is not None and RECONCILE_ABSENCE_FIELD in state
 
 
-def body_with_reconcile_absence(body, count, run_number=0, closed_at=""):
-    """Set one exact bounded absence/provenance record in the hidden state."""
+def body_with_reconcile_absence(
+    body,
+    count,
+    run_number=0,
+    closed_at="",
+    scheduled_epoch=None,
+    reason="",
+):
+    """Render one visible inert scheduled-observation confirmation state."""
     state = _unique_state_block(body)
+    epoch = run_number if scheduled_epoch is None else scheduled_epoch
     if (
         state is None
         or isinstance(count, bool)
         or count not in (1, 2)
-        or isinstance(run_number, bool)
-        or not isinstance(run_number, int)
-        or run_number < 1
-        or run_number > 9_007_199_254_740_991
+        or isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 1
+        or epoch > 9_007_199_254_740_991
     ):
         return body
     record = {
         "version": RECONCILE_ABSENCE_VERSION,
         "threshold": RECONCILE_ABSENCE_THRESHOLD,
         "count": count,
-        "run_number": run_number,
+        "scheduled_epoch": epoch,
     }
     if count == RECONCILE_ABSENCE_THRESHOLD:
         if not _valid_reconcile_close_timestamp(closed_at):
@@ -3846,7 +4115,44 @@ def body_with_reconcile_absence(body, count, run_number=0, closed_at=""):
         }
     new_state = dict(state)
     new_state[RECONCILE_ABSENCE_FIELD] = record
-    return _replace_state_block(body, new_state)
+    new_state["lifecycle_state"] = "awaiting-scheduled-confirmation"
+    lifecycle = "\n".join(
+        [
+            LIFECYCLE_START,
+            "### Target state changed",
+            "",
+            "> [!IMPORTANT]",
+            "> Wheelhouse no longer sees this open target in the maintainer "
+            "worklist. The card is intentionally inert while the next "
+            "qualifying scheduled observation confirms the change.",
+            "",
+            "- Current reason: %s"
+            % (_clean_triage_text(reason, limit=220, default="target is outside the current worklist")),
+            "- Confirmation: `%s/%s` scheduled observations"
+            % (count, RECONCILE_ABSENCE_THRESHOLD),
+            "- Queue effect: `lifecycle-transition`",
+            LIFECYCLE_END,
+        ]
+    )
+    clean = _LIFECYCLE_SECTION_RE.sub("\n", body or "").strip()
+    decision = _decision_section(
+        new_state.get("kind", "pr-review"), new_state.get("options", []), held=True
+    ).replace(
+        "_Automatic triage is still running for this card. A decision to make "
+        "will appear here once it finishes - triage succeeding or failing both "
+        "unlock this card, so this is never a permanent wait._",
+        "_Decision controls are disabled until the scheduled confirmation completes._",
+    )
+    clean = _DECISION_SECTION_RE.sub(decision.replace("\\", "\\\\"), clean, count=1)
+    marker = "\n### Recommended action"
+    index = clean.find(marker)
+    if index < 0:
+        index = clean.rfind("<!-- wheelhouse-state:")
+    if index >= 0:
+        clean = clean[:index].rstrip() + "\n\n" + lifecycle + "\n\n" + clean[index:]
+    else:
+        clean = clean.rstrip() + "\n\n" + lifecycle
+    return _replace_state_block(clean, new_state)
 
 
 def body_without_reconcile_absence(body):
@@ -3856,7 +4162,14 @@ def body_without_reconcile_absence(body):
         return body
     new_state = dict(state)
     new_state.pop(RECONCILE_ABSENCE_FIELD, None)
-    return _replace_state_block(body, new_state)
+    new_state.pop("lifecycle_state", None)
+    clean = _LIFECYCLE_SECTION_RE.sub("\n", body or "").strip()
+    clean = _publish_decision_section(
+        clean,
+        new_state.get("kind", "pr-review"),
+        new_state.get("options", []),
+    )
+    return _replace_state_block(clean, new_state)
 
 
 def _body_preserving_reconcile_absence(body, existing_body):
@@ -3892,12 +4205,14 @@ def body_with_activity_reflected(body, item, card_updated_at=""):
     state = parse_state_block(body)
     if not state:
         return body
+    if RECONCILE_ABSENCE_FIELD in state:
+        body = body_without_reconcile_absence(body)
+        state = parse_state_block(body)
+        if not state:
+            return body
     new_state = _state_with_activity_reflected(
         state, item, card_updated_at=card_updated_at
     )
-    # A conclusive worklist item resets soft-close hysteresis. Fold the reset
-    # into this already-required activity write when possible.
-    new_state.pop(RECONCILE_ABSENCE_FIELD, None)
     if new_state == state:
         return body
     return _replace_state_block(body, new_state)
@@ -3943,6 +4258,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_repair_reason",
         "triage_repair_candidate",
         "automerge_verdict",
+        ASSESSMENT_FIELD,
+        ASSESSMENT_RESULT_FIELD,
+        "assessment_admission",
         TRIAGE_ATTEMPTS_FIELD,
         "triage_replay",
     ):
@@ -4021,6 +4339,11 @@ def _state_with_triage(
         new_state["automerge_verdict"] = automerge_verdict
     else:
         new_state.pop("automerge_verdict", None)
+    if status != "succeeded":
+        new_state.pop(ASSESSMENT_FIELD, None)
+        new_state.pop("assessment_admission", None)
+    if status == "queued":
+        new_state.pop(ASSESSMENT_RESULT_FIELD, None)
     return new_state
 
 
@@ -4056,7 +4379,16 @@ def body_with_triage_queued(body, item, attempt_cap=None):
         state["updated_at"] = revision
     elif state_revision(state, kind) != revision:
         return body
+    if RECONCILE_ABSENCE_FIELD in state:
+        body = body_without_reconcile_absence(body)
+        state = _unique_state_block(body)
+        if state is None:
+            return body
     clean = remove_triage_section(body)
+    clean = _insert_triage_section(
+        clean,
+        triage_section(error="Automatic triage queued for this exact revision."),
+    )
     new_state = _state_with_triage(
         state,
         revision,
@@ -4105,6 +4437,22 @@ def body_with_triage_result(
     ):
         return body
     normalized = normalize_triage(triage)
+    assessment = None
+    assessment_reason = ""
+    if normalized and kind == "pr-review":
+        observation = target_contracts.normalize_review_observation(
+            state.get(REVIEW_OBSERVATION_FIELD)
+        )
+        context = context_contracts.normalize_decision_context(
+            state.get(DECISION_CONTEXT_FIELD)
+        )
+        assessment = assessment_admission.admit_assessment(
+            triage, observation, context
+        )
+        if assessment is None:
+            assessment_reason = "basis.missing_or_invalid"
+        elif not assessment_admission.admitted(assessment):
+            assessment_reason = assessment["admission"]["reason"]
     status = "succeeded" if normalized else "error"
     section = triage_section(
         normalized, error or TRIAGE_UNAVAILABLE, owner=owner, repo=state.get("repo", "")
@@ -4115,6 +4463,7 @@ def body_with_triage_result(
             normalized, kind, owner=owner, repo=state.get("repo", "")
         )
         if normalized
+        and (kind != "pr-review" or (assessment and assessment_admission.admitted(assessment)))
         else None
     )
     automerge_verdict = (
@@ -4160,6 +4509,34 @@ def body_with_triage_result(
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
     )
+    if kind == "pr-review":
+        if assessment:
+            new_state[ASSESSMENT_FIELD] = assessment
+        else:
+            new_state.pop(ASSESSMENT_FIELD, None)
+        if assessment_reason:
+            new_state["assessment_admission"] = {
+                "status": (
+                    assessment["admission"]["status"]
+                    if assessment
+                    else "unavailable"
+                ),
+                "reason": assessment_reason,
+            }
+            warning = "\n".join(
+                [
+                    "> [!WARNING]",
+                    "> The advisory assessment was not admitted (`%s`). It "
+                    "cannot create **Accept recommendation** or satisfy G6."
+                    % assessment_reason,
+                ]
+            )
+            updated = _insert_triage_section(
+                remove_triage_section(updated),
+                section + "\n\n" + warning,
+            )
+        else:
+            new_state.pop("assessment_admission", None)
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])
     updated = _set_recommendation_section_visible(updated, visible=not recommendation)
@@ -4218,6 +4595,11 @@ def body_with_triage_budget_deferred(body, item, message=TRIAGE_BUDGET_DEFERRED)
         state["updated_at"] = revision
     elif state_revision(state, kind) != revision:
         return body
+    if RECONCILE_ABSENCE_FIELD in state:
+        body = body_without_reconcile_absence(body)
+        state = _unique_state_block(body)
+        if state is None:
+            return body
     clean = remove_triage_section(body)
     clean = _insert_triage_section(clean, triage_section(error=message))
     new_state = dict(state)
@@ -4526,7 +4908,7 @@ def _security_review_section(summary):
     ]
 
 
-def render(item, held=False, workflow_hold=None):
+def render(item, held=False, workflow_hold=None, owner=None):
     """item -> {title, body, labels, marker}. Tolerates missing optional fields.
 
     `held=True` renders the placeholder "Held cards" form (see the module-
@@ -4540,8 +4922,41 @@ def render(item, held=False, workflow_hold=None):
     number = int(item["number"])
     title = (item.get("title") or "").strip() or "(no title)"
     base_options = card_options(item)
-    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-    projection_ref = projection_ref_for_item(item)
+    owner = (
+        os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        if owner is None
+        else str(owner).strip()
+    )
+    projection_ref = projection_ref_for_item(item, owner=owner)
+    review_observation = target_contracts.normalize_review_observation(
+        item.get("review_observation") or item.get("target_observation")
+    )
+    if review_observation and (
+        review_observation["target"].get("repo") != repo
+        or review_observation["target"].get("number") != number
+        or review_observation["revision"].get("head_sha")
+        != str(item.get("head_sha") or "")
+    ):
+        review_observation = None
+    decision_context = context_contracts.normalize_decision_context(
+        item.get(DECISION_CONTEXT_FIELD)
+    )
+    if decision_context and (
+        not review_observation
+        or decision_context["target"].get("observation_id")
+        != review_observation.get("observation_id")
+    ):
+        decision_context = None
+    assessment = assessment_admission.normalize_assessment(item.get("assessment"))
+    if assessment and (
+        not review_observation
+        or not decision_context
+        or assessment["target"].get("observation_id")
+        != review_observation.get("observation_id")
+        or assessment["target"].get("context_id")
+        != decision_context.get("context_id")
+    ):
+        assessment = None
     triage = (
         normalize_triage(item.get("triage"))
         if kind in AUTO_TRIAGE_FLAG_BY_KIND
@@ -4568,9 +4983,31 @@ def render(item, held=False, workflow_hold=None):
         ACTIVITY_REFLECTED_FIELD: target_activity_timestamp(item),
         "options": base_options,
     }
-    state.update({k: v for k, v in material_signature(item).items() if k != "options"})
+    state.update(
+        {
+            k: v
+            for k, v in material_signature(item, owner=owner).items()
+            if k != "options"
+        }
+    )
     if projection_ref:
         state[PROJECTION_REF_FIELD] = projection_ref
+    if kind == "pr-review":
+        if review_observation and decision_context:
+            state[PROJECTION_OWNER_FIELD] = PROJECTION_OWNER
+        if review_observation:
+            state[REVIEW_OBSERVATION_FIELD] = review_observation
+            state["configured_checks"] = review_observation["facts"][
+                "configured_checks"
+            ]
+            state["changed_path_digest"] = review_observation["changed_paths"][
+                "digest"
+            ]
+        if decision_context:
+            state[DECISION_CONTEXT_FIELD] = decision_context
+            state["decision_context_id"] = decision_context["context_id"]
+        if assessment:
+            state[ASSESSMENT_FIELD] = assessment
     state["render_version"] = CARD_RENDER_VERSION
     if kind == "ci-approval" and CI_SECURITY_SUMMARY_VERSION_FIELD in item:
         state[CI_SECURITY_SUMMARY_HEAD_FIELD] = (
@@ -4597,7 +5034,12 @@ def render(item, held=False, workflow_hold=None):
     if triage:
         state["triaged_sha"] = item.get("triaged_sha") or triage_revision(item)
         state["triage_status"] = "succeeded"
-        recommendation = recommendation_for_state(triage, kind, owner=owner, repo=repo)
+        assessment_admitted = not assessment or assessment_admission.admitted(assessment)
+        recommendation = (
+            recommendation_for_state(triage, kind, owner=owner, repo=repo)
+            if assessment_admitted
+            else None
+        )
         if recommendation:
             state["triage_recommendation"] = recommendation
     options = options_for_state(kind, base_options, state)
@@ -4622,6 +5064,26 @@ def render(item, held=False, workflow_hold=None):
     lines.append("### Situation")
     lines.append("- Compliance: `%s`" % item.get("comp", "n/a"))
     lines.append("- Tests: `%s`" % item.get("tests", "n/a"))
+    if review_observation:
+        checks = review_observation["facts"]["configured_checks"]
+        if review_observation["completeness"]["configured_checks"]:
+            if checks:
+                lines.append(
+                    "- Configured checks: %s"
+                    % ", ".join(
+                        "`%s` (%s: %s)"
+                        % (
+                            core._safe_inline(row["name"]),
+                            row["role"],
+                            row["outcome"],
+                        )
+                        for row in checks
+                    )
+                )
+            else:
+                lines.append("- Configured checks: complete; none configured")
+        else:
+            lines.append("- Configured checks: **unavailable/incomplete**")
     if projection_ref:
         freshness = projection_ref["freshness"]
         observed_at = projection_ref["observed_at"]
@@ -4644,6 +5106,9 @@ def render(item, held=False, workflow_hold=None):
     if item.get("summary"):
         lines.append("- Notes: %s" % item["summary"])
     lines.append("")
+    if kind == "pr-review":
+        lines.extend(_related_work_section(decision_context))
+        lines.append("")
     if workflow_hold:
         lines.extend(_automerge_workflow_hold_section(workflow_hold))
         lines.append("")
@@ -4666,6 +5131,16 @@ def render(item, held=False, workflow_hold=None):
     if triage:
         lines.append(triage_section(triage, owner=owner, repo=repo))
         lines.append("")
+        if assessment and not assessment_admission.admitted(assessment):
+            lines.extend(
+                [
+                    "> [!WARNING]",
+                    "> The advisory assessment was not admitted (`%s`). It cannot "
+                    "create **Accept recommendation** or satisfy G6."
+                    % assessment["admission"]["reason"],
+                    "",
+                ]
+            )
     if not accept_recommendation_available(state):
         lines.append("### Recommended action")
         lines.append(item.get("recommendation", "Needs your call."))
@@ -4678,7 +5153,12 @@ def render(item, held=False, workflow_hold=None):
     return {
         "title": issue_title,
         "body": body,
-        "labels": card_labels(item, held, workflow_hold=bool(workflow_hold)),
+        "labels": card_labels(
+            item,
+            held,
+            workflow_hold=bool(workflow_hold),
+            lifecycle_confirming=bool(item.get("lifecycle_confirming")),
+        ),
         "marker": marker_label(item),
     }
 
@@ -5158,16 +5638,37 @@ def _reused_card_render(item, candidate, has_token):
                 "closed card #%s has untrusted same-revision manual-merge hold state"
                 % candidate.get("number")
             )
-    card = render(item, held=held, workflow_hold=workflow_hold)
-    if same_revision:
-        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-        card["body"] = _preserve_same_revision_triage(
-            card["body"],
-            candidate.get("body", ""),
+    observation = target_contracts.normalize_review_observation(
+        item.get("target_observation") or item.get(REVIEW_OBSERVATION_FIELD)
+    )
+    if item.get("kind", "pr-review") == "pr-review" and observation:
+        import card_projection
+
+        projection = card_projection.plan_card_projection(
             item,
-            old_state,
-            owner=owner,
+            prior=candidate,
+            cause="projection-current",
+            held=held,
+            workflow_hold=workflow_hold,
+            preserve_same_revision=same_revision,
         )
+        card = {
+            "title": projection["title"],
+            "body": projection["body"],
+            "labels": projection["managed_labels"],
+            "marker": marker_label(item),
+        }
+    else:
+        card = render(item, held=held, workflow_hold=workflow_hold)
+        if same_revision:
+            owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+            card["body"] = _preserve_same_revision_triage(
+                card["body"],
+                candidate.get("body", ""),
+                item,
+                old_state,
+                owner=owner,
+            )
     return card, old_state
 
 
@@ -6143,13 +6644,188 @@ def triage_budget_remaining(ceiling, today=None):
         return 0
 
 
-def update_reconcile_absence(number, body, count, run_number=0, closed_at=""):
+def _projection_managed_labels(labels, *, add=(), remove=()):
+    names = _label_names(labels)
+    managed = {
+        name
+        for name in names
+        if name.startswith(MANAGED_LABEL_PREFIXES)
+        or name in SYNCED_EXACT_LABELS
+        or name == "needs-decision"
+    }
+    managed.update(add)
+    managed.difference_update(remove)
+    return sorted(managed)
+
+
+def plan_reconcile_absence_projection(
+    card,
+    count,
+    *,
+    run_number=0,
+    closed_at="",
+    reason="",
+    observation=None,
+):
+    """Plan one complete first/second absence projection from a live card."""
+    if not isinstance(card, dict):
+        return None
+    body = card.get("body", "")
+    state = parse_state_block(body) or {}
+    normalized_observation = target_contracts.normalize_review_observation(
+        observation
+    )
+    if normalized_observation and (
+        normalized_observation["target"].get("repo") != state.get("repo")
+        or normalized_observation["target"].get("number") != state.get("number")
+    ):
+        normalized_observation = None
+    if state.get("kind", "pr-review") == "pr-review" and normalized_observation:
+        import card_projection
+
+        facts = normalized_observation["facts"]
+        context = context_contracts.unavailable_context(
+            normalized_observation, "lifecycle.target-outside-worklist"
+        )
+        item = {
+            "repo": state.get("repo"),
+            "number": state.get("number"),
+            "kind": "pr-review",
+            "head_sha": normalized_observation["revision"]["head_sha"],
+            "base_sha": normalized_observation["revision"]["base_sha"],
+            "updated_at": facts.get("updated_at", ""),
+            "title": facts.get("title") or "(no title)",
+            "author": facts.get("author") or "?",
+            "url": "https://github.com/%s/%s/pull/%s"
+            % (
+                normalized_observation["target"]["owner"],
+                state.get("repo"),
+                state.get("number"),
+            ),
+            "bucket": facts.get("bucket") or "ci-state-unknown",
+            "comp": facts.get("comp") or "unknown",
+            "tests": facts.get("tests") or "unknown",
+            "priority": state.get("priority", "low"),
+            "options": state.get("options") or CHECKBOX_OPTIONS["pr-review"],
+            "target_observation": normalized_observation,
+            DECISION_CONTEXT_FIELD: context,
+            "summary": "Current target state was observed outside the maintainer worklist.",
+            "recommendation": "Await the next qualifying scheduled observation.",
+        }
+        projection = card_projection.plan_card_projection(
+            item,
+            prior=card,
+            cause="lifecycle-transition",
+            preserve_same_revision=False,
+        )
+        new_body = body_with_reconcile_absence(
+            projection["body"],
+            count,
+            run_number=run_number,
+            closed_at=closed_at,
+            reason=reason,
+        )
+        if new_body == projection["body"]:
+            return None
+        return card_projection.projection_from_values(
+            title=projection["title"],
+            body=new_body,
+            labels=sorted(
+                set(projection["managed_labels"]) | {LIFECYCLE_CONFIRM_LABEL}
+            ),
+            cause="lifecycle-transition",
+            observation_id=normalized_observation["observation_id"],
+            context_id=context["context_id"],
+            prior=card,
+        )
     new_body = body_with_reconcile_absence(
-        body, count, run_number=run_number, closed_at=closed_at
+        body,
+        count,
+        run_number=run_number,
+        closed_at=closed_at,
+        reason=reason,
     )
     if new_body == body:
+        return None
+    return {
+        "title": card.get("title", ""),
+        "body": new_body,
+        "managed_labels": _projection_managed_labels(
+            card.get("labels"), add={LIFECYCLE_CONFIRM_LABEL}
+        ),
+    }
+
+
+def update_reconcile_absence(
+    number,
+    body,
+    count,
+    run_number=0,
+    closed_at="",
+    reason="",
+    observation=None,
+):
+    card = get_card(number)
+    if not card or card.get("body", "") != body:
         return False
-    _edit_issue_body(number, new_body)
+    state = parse_state_block(body) or {}
+    normalized = target_contracts.normalize_review_observation(observation)
+    projection = plan_reconcile_absence_projection(
+        card,
+        count,
+        run_number=run_number,
+        closed_at=closed_at,
+        reason=reason,
+        observation=observation,
+    )
+    if projection is None:
+        return False
+    if (
+        projection.get("schema")
+        or state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER
+    ):
+        import projection_writer
+
+        if projection.get("schema"):
+            outcome = projection_writer.commit_projection(
+                number, projection_writer.card_snapshot(card), projection
+            )
+        else:
+            outcome = projection_writer.commit_preplanned(
+                number,
+                card,
+                title=projection["title"],
+                body=projection["body"],
+                managed_labels=projection["managed_labels"],
+                cause="lifecycle-transition",
+                observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+                context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+            )
+        committed = outcome == "committed"
+        if committed:
+            print(
+                "::notice::wheelhouse soft-close card=%s epoch=%s prior_epoch=%s "
+                "count=%s completeness=%s transition=lifecycle-transition"
+                % (
+                    number,
+                    run_number,
+                    reconcile_absence_epoch(body),
+                    count,
+                    bool(
+                        normalized
+                        and normalized["completeness"]["complete"]
+                    ),
+                )
+            )
+        return committed
+    _edit_issue_body_and_labels(
+        number, projection["body"], add_labels=[LIFECYCLE_CONFIRM_LABEL]
+    )
+    print(
+        "::notice::wheelhouse soft-close card=%s epoch=%s prior_epoch=%s "
+        "count=%s completeness=%s transition=lifecycle-transition"
+        % (number, run_number, reconcile_absence_epoch(body), count, False)
+    )
     return True
 
 
@@ -6157,7 +6833,29 @@ def clear_reconcile_absence(number, body):
     new_body = body_without_reconcile_absence(body)
     if new_body == body:
         return False
-    _edit_issue_body(number, new_body)
+    card = get_card(number)
+    if not card or card.get("body", "") != body:
+        return False
+    state = parse_state_block(body) or {}
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        outcome = projection_writer.commit_preplanned(
+            number,
+            card,
+            title=card.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(
+                card.get("labels"), remove={LIFECYCLE_CONFIRM_LABEL}
+            ),
+            cause="lifecycle-transition",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        )
+        return outcome == "committed"
+    _edit_issue_body_and_labels(
+        number, new_body, remove_labels=[LIFECYCLE_CONFIRM_LABEL]
+    )
     return True
 
 
@@ -6297,7 +6995,24 @@ def mark_triage_queued(
         current,
         owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
     )
-    _edit_issue_body(number, new_body)
+    state = parse_state_block(body) or {}
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        outcome = projection_writer.commit_preplanned(
+            number,
+            current,
+            title=current.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(current.get("labels")),
+            cause="agent-status",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        )
+        if outcome != "committed":
+            return None
+    else:
+        _edit_issue_body(number, new_body)
     verified = get_card(number)
     if not _queue_card_snapshot_matches(verified, number, item, new_body):
         _defer_triage_budget(
@@ -6334,6 +7049,22 @@ def publish_triage_budget_deferral(number, item, body):
         owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
         remove_labels=remove_labels,
     )
+    state = parse_state_block(body) or {}
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        return projection_writer.commit_preplanned(
+            number,
+            current,
+            title=current.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(
+                current.get("labels"), remove=set(remove_labels)
+            ),
+            cause="agent-status",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        ) == "committed"
     _edit_issue_body(number, new_body, remove_labels=remove_labels)
     return True
 
@@ -6346,7 +7077,26 @@ def reflect_activity(number, item, body, card_updated_at=""):
     new_body = body_with_activity_reflected(body, item, card_updated_at=card_updated_at)
     if new_body == body:
         return False
-    _edit_issue_body(number, new_body)
+    state = parse_state_block(body) or {}
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        current = get_card(number)
+        if not current or current.get("body", "") != body:
+            return False
+        if projection_writer.commit_preplanned(
+            number,
+            current,
+            title=current.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(current.get("labels")),
+            cause="target-activity-reflection",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        ) != "committed":
+            return False
+    else:
+        _edit_issue_body(number, new_body)
     print("reflected target activity on card #%s for %s" % (number, marker_label(item)))
     return True
 
@@ -6374,6 +7124,20 @@ def clear_triage_queued(number, revision):
         card,
         owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
     )
+    state = parse_state_block(body) or {}
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        return projection_writer.commit_preplanned(
+            number,
+            card,
+            title=card.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(card.get("labels")),
+            cause="agent-status",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        ) == "committed"
     _edit_issue_body(number, new_body)
     return True
 
@@ -6587,6 +7351,31 @@ def update_card_triage(
     kind = state.get("kind")
     if require_queued and not triage_queued_for_head(state, revision):
         return False
+    durable_result = None
+    v2_projection = bool(
+        kind == "pr-review"
+        and state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER
+    )
+    if v2_projection:
+        import assessment_record
+
+        durable_result = assessment_record.make_record(
+            state,
+            revision,
+            triage=triage if isinstance(triage, dict) else None,
+            error=(error or TRIAGE_UNAVAILABLE) if not isinstance(triage, dict) else "",
+        )
+        assessment_record.persist(number, durable_result)
+        # The durable visible agent-status comment is itself a queue event.
+        # Reread before planning so the projection writer compares against the
+        # exact post-result snapshot instead of clobbering that event.
+        card = get_card(number)
+        if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
+            return False
+        body = card.get("body", "")
+        state = parse_state_block(body)
+        if not state or state_revision(state, kind) != revision:
+            return False
     held = bool(state.get("held"))
     remove_labels = []
     if held:
@@ -6615,9 +7404,60 @@ def update_card_triage(
     )
     if new_body == body and not held:
         return False
+    if durable_result is not None:
+        result_state = _unique_state_block(new_body)
+        if result_state is None:
+            return False
+        result_state = dict(result_state)
+        result_state[ASSESSMENT_RESULT_FIELD] = durable_result["result_id"]
+        new_body = _replace_state_block(new_body, result_state)
+    projected_state = parse_state_block(new_body) or {}
+    admission = projected_state.get("assessment_admission") or {}
+    if kind == "pr-review":
+        normalized_assessment = assessment_admission.normalize_assessment(
+            projected_state.get(ASSESSMENT_FIELD)
+        )
+        assessment_status = (
+            normalized_assessment["admission"]["status"]
+            if normalized_assessment
+            else admission.get("status", "unavailable")
+        )
+        assessment_reason = (
+            normalized_assessment["admission"]["reason"]
+            if normalized_assessment
+            else admission.get("reason", "assessment.unavailable")
+        )
+        print(
+            "::notice::wheelhouse assessment %s card=%s revision=%s reason=%s"
+            % (assessment_status, number, str(revision)[:32], assessment_reason)
+        )
     new_body = _atomic_automerge_card_body(
         new_body, card, owner, remove_labels=remove_labels
     )
+    if v2_projection:
+        import projection_writer
+
+        outcome = projection_writer.commit_preplanned(
+            number,
+            card,
+            title=card.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(
+                card.get("labels"), remove=set(remove_labels)
+            ),
+            cause="assessment-result",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        )
+        committed = outcome == "committed"
+        if committed and durable_result is not None:
+            import assessment_record
+
+            if not assessment_record.mark_projected(
+                number, durable_result["result_id"]
+            ):
+                raise RuntimeError("durable assessment result projection did not finalize")
+        return committed
     _edit_issue_body(number, new_body, remove_labels=remove_labels)
     return True
 
@@ -6791,7 +7631,26 @@ def upsert_card(
             raise
 
     if not existing:
-        card = render(item, held=should_hold(item, has_token))
+        v2_observation = target_contracts.normalize_review_observation(
+            item.get("review_observation") or item.get("target_observation")
+        )
+        if item.get("kind", "pr-review") == "pr-review" and v2_observation:
+            import card_projection
+
+            projection = card_projection.plan_card_projection(
+                item,
+                prior={},
+                cause="projection-current",
+                held=should_hold(item, has_token),
+            )
+            card = {
+                "title": projection["title"],
+                "body": projection["body"],
+                "labels": projection["managed_labels"],
+                "marker": marker,
+            }
+        else:
+            card = render(item, held=should_hold(item, has_token))
         try:
             return _create_and_verify_card(item, card)
         except CardAdmissionError as error:
@@ -6857,6 +7716,64 @@ def upsert_card(
         print("skip card #%s for %s: no material change" % (number, marker))
         return None if expected_existing is not None else number
     held = bool((old_state or {}).get("held")) and not publish_held
+    v2_observation = target_contracts.normalize_review_observation(
+        item.get("review_observation") or item.get("target_observation")
+    )
+    if item.get("kind", "pr-review") == "pr-review" and v2_observation:
+        import card_projection
+        import projection_writer
+
+        projection = card_projection.plan_card_projection(
+            item,
+            prior=existing,
+            cause=(
+                item.get("_projection_cause")
+                if item.get("_projection_cause") in {
+                    "automerge-release", "context-current", "assessment-result",
+                    "lifecycle-transition",
+                }
+                else (
+                    "target-revision"
+                    if str((old_state or {}).get("head_sha") or "")
+                    != str(item.get("head_sha") or "")
+                    else (
+                        "migration-current"
+                        if (old_state or {}).get(PROJECTION_OWNER_FIELD)
+                        != PROJECTION_OWNER
+                        else "projection-current"
+                    )
+                )
+            ),
+            held=held,
+            workflow_hold=(workflow_hold if hold_status == "matching" else None),
+            preserve_same_revision=not publish_held,
+        )
+        if preserve_reconcile_absence:
+            preserved_body = _body_preserving_reconcile_absence(
+                projection["body"], existing.get("body", "")
+            )
+            if preserved_body is None:
+                return None if expected_existing is not None else number
+            projection = card_projection.projection_from_values(
+                title=projection["title"],
+                body=preserved_body,
+                labels=projection["managed_labels"],
+                cause=projection["cause"],
+                observation_id=projection["observation_id"],
+                context_id=projection["context_id"],
+                prior=existing,
+            )
+        ensure_labels(projection["managed_labels"])
+        expected = projection_writer.card_snapshot(existing)
+        outcome = projection_writer.commit_projection(
+            number, expected, projection
+        )
+        if outcome != "committed":
+            return None if expected_existing is not None else number
+        print("refreshed card #%s for %s via %s" % (
+            number, marker, PROJECTION_OWNER
+        ))
+        return number
     card = render(
         item,
         held=held,
@@ -7036,6 +7953,7 @@ _KNOWN_TRIAGE_KEYS = TRIAGE_FIELDS + (
     EVIDENCE_FIELD,
     "vision_evidence",
     "source_provenance",
+    "recommendation_basis",
     "recommended_action",
     "recommended_reason",
     "recommended_next_step",
@@ -7092,13 +8010,9 @@ def _repair_schema_lines(kind):
     ]
     if kind != "issue-triage":
         lines += [
-            'If (and ONLY if) your candidate already contained an "automerge"',
-            "object, include it unchanged as an additional key. Do not add one",
-            "that was not already there.",
-            'If the candidate contained "source_provenance", include that object',
-            "unchanged too. Never invent or alter source provenance.",
-            'If the candidate contained "vision_evidence", include that object',
-            "unchanged too. Never invent or alter VISION evidence.",
+            "Do not emit recommendation_basis, source_provenance, vision_evidence,",
+            "or automerge. Trusted code restores an already-valid exact basis; the",
+            "other acting claims fail closed rather than being repaired without tools.",
         ]
     return lines
 
@@ -7238,6 +8152,20 @@ def decide_triage_apply(
     )
     candidate = redacted_candidate_shape(result_text)
     if repaired_text:
+        original_data, _ = _extract_json_object(result_text)
+        repaired_data, _ = _extract_json_object(repaired_text)
+        original_basis = assessment_admission.normalize_basis(
+            (original_data or {}).get("recommendation_basis")
+        )
+        if (
+            isinstance(repaired_data, dict)
+            and original_basis is not None
+            and "recommendation_basis" not in repaired_data
+        ):
+            repaired_data["recommendation_basis"] = original_basis
+            repaired_text = json.dumps(
+                repaired_data, sort_keys=True, separators=(",", ":")
+            )
         repaired = parse_triage_json(repaired_text)
         if repaired is not None:
             if _triage_evidence_verified(repaired, target_file):

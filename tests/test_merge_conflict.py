@@ -49,7 +49,14 @@ def check_run(name, conclusion="SUCCESS", status="COMPLETED"):
 
 
 def rollup(contexts):
-    return {"state": "SUCCESS", "contexts": {"nodes": contexts}}
+    return {
+        "state": "SUCCESS",
+        "contexts": {
+            "totalCount": len(contexts),
+            "pageInfo": {"hasNextPage": False},
+            "nodes": contexts,
+        },
+    }
 
 
 def green_rollup():
@@ -85,10 +92,15 @@ def pr_node(
         "headRefName": "feature-%d" % number,
         "headRefOid": "sha%d" % number,
         "baseRefName": "main",
+        "baseRefOid": "base-main",
         "headRepository": {"name": "demo-fork", "owner": {"login": "forker"}},
         "baseRepository": {"name": "demo", "owner": {"login": "owner"}},
         "labels": {"nodes": []},
-        "closingIssuesReferences": {"nodes": []},
+        "closingIssuesReferences": {
+            "totalCount": 0,
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [],
+        },
         "commits": {"nodes": [{"commit": {"statusCheckRollup": status_rollup}}]},
     }
     if cross_repo is False:
@@ -249,6 +261,7 @@ def run_build_repo(
         core._settle_mergeables,
         core.ci_security_summary,
         core._list_action_required_runs,
+        core._list_pr_files,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -264,6 +277,11 @@ def run_build_repo(
     core.approve_ci = fake_approve
     core._settle_mergeables = fake_settle_many
     core._list_action_required_runs = lambda slug, head_ref, head_sha: ([], "")
+    core._list_pr_files = lambda _slug, _number, expected: (
+        ["src/file-%d.py" % index for index in range(int(expected or 0))],
+        True,
+        True,
+    )
     # Keep offline: the advisory summarizer would otherwise read the target repo.
     core.ci_security_summary = lambda slug, pr, head_sha, changed_files=None: "SEC"
     os.environ["OWNER"] = "owner"
@@ -296,6 +314,7 @@ def run_build_repo(
             core._settle_mergeables,
             core.ci_security_summary,
             core._list_action_required_runs,
+            core._list_pr_files,
             old_owner,
             old_repo_owner,
         ) = save
@@ -373,10 +392,24 @@ def run_reconcile(scan, cards, current_cards=None, run_number=100):
     def fake_get_card(number):
         return current_by_number.get(int(number))
 
-    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
-        new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, run_number=run_number, closed_at=closed_at
+    def fake_update_absence(
+        number,
+        body,
+        count,
+        run_number=0,
+        closed_at="",
+        reason="",
+        observation=None,
+    ):
+        planned = reconcile.render_card.plan_reconcile_absence_projection(
+            current_by_number[int(number)],
+            count,
+            run_number=run_number,
+            closed_at=closed_at,
+            reason=reason,
+            observation=observation,
         )
+        new_body = planned.get("body", body) if planned else body
         calls["state"].append({"count": count, "body_after": new_body})
         if new_body == body:
             return False
@@ -854,16 +887,10 @@ def test_issue_triage_unaffected():
 
 
 def test_reconcile_consumes_conflicted_card_that_left_worklist():
-    scan = {
-        "repos": {
-            "demo": {
-                "ok": True,
-                "open_pr_numbers": [42],
-                "open_issue_numbers": [],
-            }
-        },
-        "items": [],
-    }
+    result, items, _calls = run_build_repo(
+        [pr_node(42, status_rollup="green", mergeable="CONFLICTING")]
+    )
+    scan = {"repos": {"demo": result}, "items": items}
     pending = card(number=91, target=42)
     first = run_reconcile(scan, [pending], run_number=100)
     check(
@@ -878,6 +905,14 @@ def test_reconcile_consumes_conflicted_card_that_left_worklist():
     )
 
     pending["body"] = first["state"][0]["body_after"]
+    pending["labels"] = labels(
+        "needs-decision",
+        "repo:demo",
+        "kind:pr-review",
+        "priority:med",
+        "target:demo-42",
+        reconcile.render_card.LIFECYCLE_CONFIRM_LABEL,
+    )
     second = run_reconcile(scan, [pending], run_number=101)
     check(
         "reconcile: second conflicted-target absence closes stale card",

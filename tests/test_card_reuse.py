@@ -82,6 +82,54 @@ def item(head="a" * 40, kind="pr-review", **overrides):
     return base
 
 
+def absence_observation(number=42, head="h" * 40):
+    return reconcile.target_contracts.make_observation(
+        "kunchenguid",
+        "wheelhouse",
+        number,
+        head_sha=head,
+        base_sha="b" * 40,
+        expected_head_sha=head,
+        observed_at="2026-07-13T12:00:00Z",
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": "Ready PR",
+            "author": "contributor",
+            "updated_at": "2026-07-13T12:00:00Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "feature",
+            "mergeable": "CONFLICTING",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "needs-rebase",
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "Gate", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=reconcile.target_contracts.changed_path_facts(
+            ["src/example.py"], complete=True
+        ),
+    )
+
+
 def scan_payload(items, open_target=True):
     pr_numbers = []
     issue_numbers = []
@@ -106,6 +154,10 @@ def scan_payload(items, open_target=True):
                 "indeterminate_pr_numbers": [],
                 "ci_wait_pr_numbers": [],
                 "ci_wait_refresh_items": [],
+                "worklist_absence_observations": {
+                    str(number): absence_observation(number)
+                    for number in pr_numbers
+                },
             }
         },
         "items": items,
@@ -115,7 +167,7 @@ def scan_payload(items, open_target=True):
 def valid_triage():
     return {
         "summary": "The change is narrow and grounded.",
-        "product_implications": "Default behavior stays stable.",
+        "product_implications": "Documentation and tests stay focused.",
         "evidence": 'target.txt: "The change is narrow and grounded"',
         "recommended_action": "merge",
         "recommended_reason": "Checks and behavior are safe.",
@@ -359,6 +411,17 @@ class LifecycleGitHub:
         if args[:3] == ["api", "--method", "PATCH"]:
             number = int(args[3].rsplit("/", 1)[-1])
             issue = self.issues[number]
+            if "--input" in args:
+                path = args[args.index("--input") + 1]
+                with open(path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                issue["title"] = payload["title"]
+                issue["body"] = payload["body"]
+                issue["labels"] = label_objects(payload["labels"])
+                self._touch(issue)
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(self._rest(issue)), stderr=""
+                )
             names = {
                 value.removeprefix("labels[]=")
                 for value in args
@@ -604,10 +667,25 @@ class LifecycleGitHub:
 
 def add_triage_and_verdict(issue, current_item):
     queued = rc.body_with_triage_queued(issue["body"], current_item)
+    triage = valid_triage()
+    state = core.parse_state_block(queued) or {}
+    observation = rc.target_contracts.normalize_review_observation(
+        state.get(rc.REVIEW_OBSERVATION_FIELD)
+    )
+    context = rc.context_contracts.normalize_decision_context(
+        state.get(rc.DECISION_CONTEXT_FIELD)
+    )
+    if observation and context:
+        triage["recommendation_basis"] = {
+            "kind": "other",
+            "observation_id": observation["observation_id"],
+            "context_id": context["context_id"],
+            "check_names": [],
+        }
     issue["body"] = rc.body_with_triage_result(
         queued,
         current_item["head_sha"],
-        triage=valid_triage(),
+        triage=triage,
         base_sha=current_item["base_sha"],
         vision_sha=current_item["automerge_vision_sha"],
         automerge_behavior_available=True,
@@ -628,9 +706,8 @@ def test_same_head_reopens_same_issue():
         and github.create_calls == 0,
     )
     check(
-        "same-head: normal refresh semantics preserve current triage/verdict",
-        state.get("triaged_sha") == current["head_sha"]
-        and state.get("automerge_verdict") is not None,
+        "same-head: lifecycle context invalidation drops stale triage/verdict",
+        "triaged_sha" not in state and "automerge_verdict" not in state,
     )
     check(
         "same-head: soft-close state is cleared on reuse",

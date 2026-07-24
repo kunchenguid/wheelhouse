@@ -53,6 +53,9 @@ import render_card  # noqa: E402
 import apply_decision  # noqa: E402
 import auto_merge as am  # noqa: E402
 import automerge_criteria as schema  # noqa: E402
+import target_observation  # noqa: E402
+import decision_context  # noqa: E402
+import assessment_admission  # noqa: E402
 
 _failures = []
 
@@ -131,6 +134,95 @@ def make_pr(
     }
 
 
+def admitted_assessment_state(repo, number, head, action="merge"):
+    observation = target_observation.make_observation(
+        "owner",
+        repo,
+        number,
+        head_sha=head,
+        base_sha="b1" * 20,
+        expected_head_sha=head,
+        observed_at="2026-07-10T00:00:00Z",
+        source="exact-reread",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": "Target",
+            "author": "alice",
+            "updated_at": "2026-07-10T00:00:00Z",
+            "draft": False,
+            "cross_repo": True,
+            "head_ref": "topic",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "merge-ready",
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "gate", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=target_observation.changed_path_facts(
+            ["src/main.py"], complete=True, count=1
+        ),
+    )
+    snapshot = decision_context.repository_snapshot(
+        [
+            {
+                "owner": "owner",
+                "repo": repo,
+                "number": number,
+                "head_sha": head,
+                "paths_complete": True,
+                "paths": ["src/main.py"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 0,
+                "url": "https://github.com/owner/%s/pull/%s" % (repo, number),
+                "card_url": "",
+            }
+        ],
+        "2026-07-10T00:00:00Z",
+    )
+    context = decision_context.build_decision_context(observation, snapshot)
+    assessment = assessment_admission.admit_assessment(
+        {
+            "summary": "Current PR assessment.",
+            "product_implications": "Routine bounded change.",
+            "recommended_action": action,
+            "recommended_reason": "Review the current exact revision.",
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": observation["observation_id"],
+                "context_id": context["context_id"],
+                "check_names": [],
+            },
+        },
+        observation,
+        context,
+    )
+    return {
+        render_card.PROJECTION_OWNER_FIELD: render_card.PROJECTION_OWNER,
+        render_card.REVIEW_OBSERVATION_FIELD: observation,
+        render_card.DECISION_CONTEXT_FIELD: context,
+        render_card.ASSESSMENT_FIELD: assessment,
+    }
+
+
 def make_card(
     card_issue,
     repo,
@@ -152,6 +244,12 @@ def make_card(
         "triaged_sha": head,
         "triage_status": triage_status,
     }
+    if triage_status == "succeeded":
+        state.update(
+            admitted_assessment_state(
+                repo, number, head, action=triage_recommendation or "hold"
+            )
+        )
     if held:
         state["held"] = True
     if automerge_verdict is not None:
@@ -182,6 +280,25 @@ def make_card(
         "updatedAt": "2026-07-10T00:00:00Z",
         "comments": [],
     }
+
+
+def preclaim_records(items, cards):
+    index = am._card_index(cards)
+    records = []
+    for item in items:
+        key = (item["repo"], str(item["number"]))
+        entry = index[key]
+        value = {
+            "repo": key[0],
+            "number": key[1],
+            "head_sha": item["head_sha"],
+            "card_issue": entry["issue"],
+            "card_updated_at": entry["updated_at"],
+            "card_body_sha256": am._preclaim_id(entry["body"]),
+        }
+        value["preclaim_id"] = am._preclaim_id(value)
+        records.append(value)
+    return records
 
 
 def make_item(repo, number, head, comp="pass", tests="green", bucket="merge-ready"):
@@ -3191,7 +3308,7 @@ def test_claim_rechecks_and_locks_current_card():
     render_card._gh = claim
     scan = {"items": items}
     try:
-        claims = am.claim_cards(scan, [initial])
+        claims = am.claim_cards(scan, [initial], preclaim_records(items, [initial]))
         check(
             "claim: current card is re-read and locked",
             len(claims) == 1
@@ -3250,7 +3367,9 @@ def test_claim_vetoes_owner_comment_since_scan_snapshot():
     render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         check(
             "claim: owner comment since scan snapshot vetoes the claim",
             claims == [] and calls == [],
@@ -3314,7 +3433,9 @@ def test_claim_vetoes_existing_trusted_hold_or_close_comment():
             )
         )
         natural_veto, _ = am._card_has_pending_owner_action(current)
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         check(
             "claim: existing trusted slash and natural-language actions veto the claim",
             slash_veto and natural_veto and claims == [] and calls == [],
@@ -3360,7 +3481,9 @@ def test_claim_rejects_changed_decision_card():
     render_card.get_card = lambda number: current
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         check("claim: changed decision card is not claimed", claims == [])
     finally:
         render_card.get_card = saved["get"]
@@ -3423,7 +3546,9 @@ def test_claim_rechecks_owner_selection_after_locking():
     render_card._gh = edit
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         labels = am._card_label_names(current)
         check(
             "claim: post-lock owner selection cancels the claim",
@@ -3494,7 +3619,9 @@ def test_claim_rechecks_owner_comment_activity_after_locking():
     render_card._gh = edit
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         labels = am._card_label_names(current)
         check(
             "claim: post-lock owner comment cancels the claim",
@@ -3547,7 +3674,9 @@ def test_claim_requires_fresh_verdict_before_locking_card():
     render_card._gh = lambda *args, **kwargs: calls.append(("edit", args))
     os.environ["WHEELHOUSE_AUTOMERGE_HAS_TOKEN"] = "true"
     try:
-        claims = am.claim_cards({"items": items}, [initial])
+        claims = am.claim_cards(
+            {"items": items}, [initial], preclaim_records(items, [initial])
+        )
         check(
             "claim: a successful triage without a verdict leaves no claim churn",
             claims == [] and calls == [],
@@ -5239,7 +5368,7 @@ def test_atomic_claim_handoffs_release_claims_and_fail_loudly():
     }
     card = {"number": 101}
     released = []
-    am.claim_cards = lambda scan, cards: [card]
+    am.claim_cards = lambda scan, cards, preclaims: [card]
     am.validate_claimed_cards = lambda cards: [card]
     am._write_json_atomically = lambda path, data: (_ for _ in ()).throw(
         OSError("disk full")
@@ -5253,11 +5382,16 @@ def test_atomic_claim_handoffs_release_claims_and_fail_loudly():
                 json.dump({}, f)
             with open(cards_path, "w", encoding="utf-8") as f:
                 json.dump([], f)
+            preclaims_path = os.path.join(directory, "preclaims.json")
+            with open(preclaims_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
             for label, env_key, command in (
                 (
                     "claims",
                     "WHEELHOUSE_AUTOMERGE_CLAIMS",
-                    lambda: am.cmd_claim(scan_path, cards_path),
+                    lambda: am.cmd_claim(
+                        scan_path, cards_path, preclaims_path
+                    ),
                 ),
                 (
                     "validated claims",

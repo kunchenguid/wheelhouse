@@ -251,19 +251,30 @@ def behavior_verdict_facts(verdict):
         else "existing/default behavior change not ruled out",
         "verdict does not rule out an ineligible existing/default behavior change",
     )
-    class_c_ok = cls != "C" or verdict.get("optin_default_off") is True
-    fact(
-        "g6_class_c_mode",
-        class_c_ok,
-        "not applicable to class %s" % cls
-        if cls and cls != "C"
-        else (
-            "strictly opt-in and default-off"
-            if class_c_ok
-            else "class C opt-in/default-off not confirmed"
-        ),
-        "class C but verdict does not confirm strictly opt-in and default off",
-    )
+    if not cls:
+        facts["g6_class_c_mode"] = {
+            "status": criteria_schema.STATUS_UNAVAILABLE,
+            "evidence": "not evaluated because behavior class is invalid",
+            "reason": "eligible behavior class is required before class-C mode",
+        }
+    elif cls != "C":
+        fact(
+            "g6_class_c_mode",
+            True,
+            "not applicable to class %s" % cls,
+        )
+    else:
+        class_c_ok = verdict.get("optin_default_off") is True
+        fact(
+            "g6_class_c_mode",
+            class_c_ok,
+            (
+                "strictly opt-in and default-off"
+                if class_c_ok
+                else "class C opt-in/default-off not confirmed"
+            ),
+            "class C but verdict does not confirm strictly opt-in and default off",
+        )
     vision_fields_present = any(
         field in verdict for field in ("aligns_with_vision", "recommend_merge")
     )
@@ -728,14 +739,21 @@ def fresh_verdict_facts(state, head_sha):
         }
 
     current_head_ok = bool(head_sha)
-    triage_ok = current_head_ok and state.get("triage_status") == "succeeded"
+    admission_ok = current_head_ok and render_card.assessment_current_admitted(state)
+    triage_ok = (
+        admission_ok and state.get("triage_status") == "succeeded"
+    )
     revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
     card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
     triage_reason = (
         "current head SHA is unavailable"
         if not current_head_ok
         else (
-            "no successful auto-triage verdict on the card"
+            (
+                "current assessment is not admitted for its observation/context"
+                if not admission_ok
+                else "no successful auto-triage verdict on the card"
+            )
             if not triage_ok
             else (
                 "behavior verdict is stale (not for the current head SHA)"
@@ -1521,6 +1539,11 @@ def _release_card_claim(number):
             "could not release auto-merge claim: %s"
             % str(getattr(result, "stderr", "") or "gh error").strip()
         )
+    print(
+        "::notice::wheelhouse automerge released card=%s card_writes=1"
+        % number,
+        file=sys.stderr,
+    )
 
 
 def _pending_audit_record(state, card_issue=None):
@@ -1692,33 +1715,36 @@ def _workflow_hold_snapshot_matches(expected, current):
 
 
 def _update_workflow_hold_card(number, body, labels):
-    repository = str(os.environ.get("GITHUB_REPOSITORY") or "").strip()
-    if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
-        raise RuntimeError("card repository identity is unavailable")
-    args = [
-        "api",
-        "--method",
-        "PATCH",
-        "repos/%s/issues/%s" % (repository, number),
-        "--raw-field",
-        "body=%s" % body,
-    ]
-    for label in sorted(labels):
-        args.extend(["--raw-field", "labels[]=%s" % label])
-    result = render_card._gh(args)
-    try:
-        updated = json.loads(result.stdout or "{}")
-    except (TypeError, ValueError) as error:
-        raise RuntimeError("manual-merge hold update response is unreadable") from error
+    import projection_writer
+
+    current = render_card.get_card(number)
+    if not current or not render_card.issue_is_open(current):
+        raise RuntimeError("manual-merge hold card is unavailable")
+    state = core.parse_state_block(current.get("body") or "") or {}
+    managed = render_card._projection_managed_labels(
+        current.get("labels"), add={render_card.AUTOMERGE_WORKFLOW_HOLD_LABEL}
+    )
+    outcome = projection_writer.commit_preplanned(
+        number,
+        current,
+        title=current.get("title", ""),
+        body=body,
+        managed_labels=managed,
+        cause="decision-or-action",
+        observation_id=((state.get(render_card.REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+        context_id=((state.get(render_card.DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+    )
+    if outcome != "committed":
+        raise RuntimeError("manual-merge hold projection was deferred")
+    updated = render_card.get_card(number)
     updated_at = str(render_card.card_updated_at(updated) or "")
     if (
-        int(updated.get("number") or 0) != int(number)
-        or not render_card.issue_is_open(updated)
+        not updated
         or updated.get("body") != body
         or _card_label_names(updated) != set(labels)
         or not updated_at
     ):
-        raise RuntimeError("manual-merge hold update response is untrusted")
+        raise RuntimeError("manual-merge hold update did not verify")
     return updated_at
 
 
@@ -1947,12 +1973,111 @@ def _workflow_hold_denies_claim(state, head_sha, repo, number):
     return True
 
 
-def claim_cards(scan, cards):
+def _preclaim_id(value):
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def preclaim_candidates(scan, cards):
+    """Run complete read-only G0-G6 before any action-lock mutation."""
+    owner = core.get_owner()
+    cfg = core.load_config()
+    global_auto_merge = cfg["auto_merge"]
+    maintainers = {login.casefold() for login in core.maintainers()}
+    index = _card_index(cards)
+    admitted = []
+    for item in (scan or {}).get("items") or []:
+        if item.get("kind") != "pr-review" or item.get("bucket") != "merge-ready":
+            continue
+        repo = str(item.get("repo") or "")
+        number = str(item.get("number") or "")
+        repo_ok, repo_reason = _repo_result_ok(scan, repo)
+        indeterminate = item.get("number") in set(
+            (((scan.get("repos") or {}).get(repo) or {}).get("indeterminate_pr_numbers") or [])
+        )
+        if not repo_ok or indeterminate:
+            reason = repo_reason if not repo_ok else "mergeability indeterminate"
+            print(
+                "::warning::wheelhouse automerge preclaim_denied %s#%s "
+                "criterion=scan_complete card_writes=0 reason=%s"
+                % (repo, number, core._workflow_command_text(reason)),
+                file=sys.stderr,
+            )
+            continue
+        card_entry = index.get((repo, number))
+        try:
+            result = evaluate_candidate(
+                owner,
+                item,
+                card_entry,
+                (cfg.get("repos") or {}).get(repo, {}),
+                global_auto_merge,
+                maintainers,
+                full_evaluation=False,
+                require_claim=False,
+            )
+        except Exception as error:
+            result = {"eligible": False, "hold_reason": "evaluation raised: %s" % str(error)[:160], "criteria": []}
+        if not result.get("eligible"):
+            first = next(
+                (
+                    row.get("id")
+                    for row in result.get("criteria") or []
+                    if row.get("status") != criteria_schema.STATUS_MET
+                    and row.get("id") != "g1_card_claim"
+                ),
+                "unavailable",
+            )
+            print(
+                "::warning::wheelhouse automerge preclaim_denied %s#%s "
+                "criterion=%s card_writes=0 reason=%s"
+                % (
+                    repo,
+                    number,
+                    first,
+                    core._workflow_command_text(result.get("hold_reason") or "unavailable"),
+                ),
+                file=sys.stderr,
+            )
+            continue
+        entry = {
+            "repo": repo,
+            "number": number,
+            "head_sha": str(item.get("head_sha") or ""),
+            "card_issue": card_entry.get("issue") if card_entry else 0,
+            "card_updated_at": card_entry.get("updated_at") if card_entry else "",
+            "card_body_sha256": _preclaim_id(card_entry.get("body", "")) if card_entry else "",
+        }
+        entry["preclaim_id"] = _preclaim_id(entry)
+        admitted.append(entry)
+        print(
+            "::notice::wheelhouse automerge preclaim_passed %s#%s preclaim=%s card_writes=0"
+            % (repo, number, entry["preclaim_id"][:24]),
+            file=sys.stderr,
+        )
+    return admitted
+
+
+def claim_cards(scan, cards, preclaims=None):
     cfg = core.load_config()
     global_auto_merge = cfg["auto_merge"]
     index = _card_index(cards)
     claimed = []
     recover_stale_card_claims(cards)
+    preclaim_index = {}
+    for value in preclaims or []:
+        if not isinstance(value, dict) or set(value) != {
+            "repo", "number", "head_sha", "card_issue", "card_updated_at",
+            "card_body_sha256", "preclaim_id"
+        }:
+            continue
+        without = dict(value)
+        claimed_id = without.pop("preclaim_id", None)
+        if claimed_id != _preclaim_id(without):
+            continue
+        preclaim_index[(value["repo"], value["number"])] = value
     for (repo, number), expected in index.items():
         if not _card_is_claimed(
             expected.get("labels") or set()
@@ -1979,11 +2104,23 @@ def claim_cards(scan, cards):
             continue
         repo = item.get("repo")
         number = str(item.get("number") or "")
+        preclaim = preclaim_index.get((repo, number))
+        if (
+            not preclaim
+            or preclaim.get("head_sha") != str(item.get("head_sha") or "")
+        ):
+            continue
         repo_cfg = (cfg["repos"] or {}).get(repo, {})
         if not core._auto_merge_enabled(repo_cfg, global_auto_merge):
             continue
         expected = index.get((repo, number))
-        if not expected:
+        if (
+            not expected
+            or preclaim.get("card_issue") != expected.get("issue")
+            or preclaim.get("card_updated_at") != expected.get("updated_at")
+            or preclaim.get("card_body_sha256")
+            != _preclaim_id(expected.get("body", ""))
+        ):
             continue
         if _workflow_hold_denies_claim(
             expected.get("state"), item.get("head_sha"), repo, number
@@ -2044,6 +2181,12 @@ def claim_cards(scan, cards):
                 _release_card_claim(expected["issue"])
                 continue
             claimed.append(claimed_card)
+            print(
+                "::notice::wheelhouse automerge claimed %s#%s card=%s "
+                "card_writes=1"
+                % (repo, number, expected["issue"]),
+                file=sys.stderr,
+            )
         except Exception as e:
             print(
                 "::warning::wheelhouse auto-merge could not claim %s#%s: %s"
@@ -2053,12 +2196,28 @@ def claim_cards(scan, cards):
     return claimed
 
 
-def cmd_claim(scan_path, cards_path):
+def cmd_preclaim(scan_path, cards_path):
     scan = _load_json(scan_path, {})
     cards = _load_json(cards_path, [])
     if not isinstance(cards, list):
         cards = []
-    claimed = claim_cards(scan, cards)
+    admitted = preclaim_candidates(scan, cards)
+    out_path = os.environ.get(
+        "WHEELHOUSE_AUTOMERGE_PRECLAIMS", "automerge-preclaims.json"
+    )
+    _write_json_atomically(out_path, admitted)
+    print("wheelhouse auto-merge: %d read-only preclaim passer(s)" % len(admitted))
+
+
+def cmd_claim(scan_path, cards_path, preclaims_path):
+    scan = _load_json(scan_path, {})
+    cards = _load_json(cards_path, [])
+    preclaims = _load_json(preclaims_path, [])
+    if not isinstance(cards, list):
+        cards = []
+    if not isinstance(preclaims, list):
+        preclaims = []
+    claimed = claim_cards(scan, cards, preclaims)
     out_path = os.environ.get("WHEELHOUSE_AUTOMERGE_CLAIMS", "automerge-claims.json")
     _write_claim_handoff(out_path, claimed, "claims")
     print("wheelhouse auto-merge: %d card claim(s)" % len(claimed))
@@ -3371,8 +3530,10 @@ def _load_json(path, default):
 
 
 def main():
-    if len(sys.argv) >= 4 and sys.argv[1] == "claim":
-        cmd_claim(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 4 and sys.argv[1] == "preclaim":
+        cmd_preclaim(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 5 and sys.argv[1] == "claim":
+        cmd_claim(sys.argv[2], sys.argv[3], sys.argv[4])
     elif len(sys.argv) == 3 and sys.argv[1] == "validate":
         cmd_validate(sys.argv[2])
     elif len(sys.argv) in (4, 5) and sys.argv[1] == "act":

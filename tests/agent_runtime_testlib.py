@@ -59,13 +59,21 @@ def default_final(action: str) -> Any:
         return {"text": "HOLD\n\n- Reviewed `target.txt`."}
     if action.startswith("nl-decision"):
         return {"mode": "answer", "answer": "This remains safe to inspect."}
-    return {
+    result = {
         "summary": "A bounded fixture request.",
         "product_implications": "Routine and low risk.",
         "recommended_action": "hold",
         "recommended_reason": "Review the fixture.",
         "evidence": 'target.txt: "fixture evidence anchor text for runtime tests"',
     }
+    if action.startswith("triage.pr"):
+        result["recommendation_basis"] = {
+            "kind": "other",
+            "observation_id": "sha256:" + "0" * 64,
+            "context_id": "sha256:" + "1" * 64,
+            "check_names": [],
+        }
+    return result
 
 
 def make_task(root: Path, action: str, final: Any | None = None, script: dict[str, Any] | None = None, event_key: str = "a" * 64) -> tuple[dict[str, Any], Path, Path]:

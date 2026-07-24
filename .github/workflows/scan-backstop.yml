@@ -102,13 +102,26 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python scripts/wheelhouse_core.py scan --cards cards.json > scan.json
 
+      # Complete read-only G0-G6 runs under the fleet read token before any
+      # action-lock label can reorder a card. Denied or unavailable candidates
+      # produce content-free telemetry with card_writes=0.
+      - name: Evaluate auto-merge candidates before claim
+        if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.replay_exact_cards != '' || inputs.replay_wave == 'card-1585-anchor-fix-r3-final')) && !(github.event_name == 'workflow_dispatch' && inputs.replay_wave != '' && inputs.replay_dry_run) }}
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: python scripts/auto_merge.py preclaim scan.json cards.json
+
+      # Action locks stay card-local and use only the default token. This step
+      # can claim only an exact read-only preclaim passer.
       - name: Claim auto-merge decision cards
         if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.replay_exact_cards != '' || inputs.replay_wave == 'card-1585-anchor-fix-r3-final')) && !(github.event_name == 'workflow_dispatch' && inputs.replay_wave != '' && inputs.replay_dry_run) }}
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           WHEELHOUSE_AUTOMERGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-        run: python scripts/auto_merge.py claim scan.json cards.json
+        run: python scripts/auto_merge.py claim scan.json cards.json automerge-preclaims.json
 
       - name: Validate auto-merge decision cards
         if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.replay_exact_cards != '' || inputs.replay_wave == 'card-1585-anchor-fix-r3-final')) && !(github.event_name == 'workflow_dispatch' && inputs.replay_wave != '' && inputs.replay_dry_run) }}

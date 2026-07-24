@@ -48,7 +48,7 @@ def observation(
             "target": True,
             "checks": complete,
             "action_required_runs": complete,
-            "head_matches_expected": head == expected_head,
+            "head_matches_expected": not expected_head or head == expected_head,
             "check_contexts_seen": 2 if complete else 1,
             "check_contexts_total": 2,
             "mergeability": "conclusive",
@@ -70,7 +70,46 @@ def observation(
                 "approval-required" if pending_approval else "not-required"
             ),
             "check_phase": check_phase,
+            "configured_checks": (
+                (
+                    []
+                    if comp in {"none", "n/a", "missing"}
+                    else [
+                        {
+                            "name": "gate",
+                            "role": "compliance",
+                            "outcome": (
+                                "pass"
+                                if comp == "pass"
+                                else ("fail" if comp == "fail" else "pending")
+                            ),
+                        }
+                    ]
+                )
+                + (
+                    []
+                    if tests == "none"
+                    else [
+                        {
+                            "name": "tests",
+                            "role": "test",
+                            "outcome": (
+                                "pass"
+                                if tests == "green"
+                                else ("fail" if tests == "fail" else "pending")
+                            ),
+                        }
+                    ]
+                )
+                if complete
+                else []
+            ),
         },
+        changed_paths=contracts.changed_path_facts(
+            ["src/demo.py"] if complete else [],
+            complete=complete,
+            count=1 if complete else None,
+        ),
         error=error,
     )
 

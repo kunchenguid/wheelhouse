@@ -160,9 +160,21 @@ def run_reconcile(
         current_by_number[int(number)]["body"] = new_body
         return True
 
-    def fake_update_absence(number, body, count, run_number=0, closed_at=""):
+    def fake_update_absence(
+        number,
+        body,
+        count,
+        run_number=0,
+        closed_at="",
+        reason="",
+        observation=None,
+    ):
         new_body = reconcile.render_card.body_with_reconcile_absence(
-            body, count, run_number=run_number, closed_at=closed_at
+            body,
+            count,
+            run_number=run_number,
+            closed_at=closed_at,
+            reason=reason,
         )
         calls["state"].append(
             {
@@ -178,6 +190,9 @@ def run_reconcile(
         if new_body == body:
             return False
         current_by_number[int(number)]["body"] = new_body
+        names = reconcile._label_names(current_by_number[int(number)]["labels"])
+        names.add(reconcile.render_card.LIFECYCLE_CONFIRM_LABEL)
+        current_by_number[int(number)]["labels"] = labels(*sorted(names))
         return True
 
     def fake_clear_absence(number, body):
@@ -193,6 +208,9 @@ def run_reconcile(
         if new_body == body:
             return False
         current_by_number[int(number)]["body"] = new_body
+        names = reconcile._label_names(current_by_number[int(number)]["labels"])
+        names.discard(reconcile.render_card.LIFECYCLE_CONFIRM_LABEL)
+        current_by_number[int(number)]["labels"] = labels(*sorted(names))
         return True
 
     old_argv = sys.argv[:]
@@ -266,6 +284,54 @@ def run_reconcile(
     return calls
 
 
+def complete_absence_observation(number, head_sha="oldsha"):
+    return reconcile.target_contracts.make_observation(
+        "owner",
+        "wheelhouse",
+        number,
+        head_sha=head_sha,
+        base_sha="base",
+        expected_head_sha=head_sha,
+        observed_at="2024-01-03T00:00:00Z",
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": "Waiting PR",
+            "author": "contributor",
+            "updated_at": "2024-01-03T00:00:00Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "feature",
+            "mergeable": "CONFLICTING",
+            "ci": True,
+            "comp": "pass",
+            "tests": "green",
+            "bucket": "needs-rebase",
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "Gate", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=reconcile.target_contracts.changed_path_facts(
+            ["src/example.py"], complete=True
+        ),
+    )
+
+
 def scan_payload(
     items=None,
     open_pr_numbers=None,
@@ -276,11 +342,12 @@ def scan_payload(
     ci_wait_pr_numbers=None,
     ci_wait_refresh_items=None,
 ):
+    prs = [42] if open_pr_numbers is None else open_pr_numbers
     return {
         "repos": {
             "wheelhouse": {
                 "ok": ok,
-                "open_pr_numbers": [42] if open_pr_numbers is None else open_pr_numbers,
+                "open_pr_numbers": prs,
                 "open_issue_numbers": []
                 if open_issue_numbers is None
                 else open_issue_numbers,
@@ -293,6 +360,10 @@ def scan_payload(
                 "ci_wait_refresh_items": []
                 if ci_wait_refresh_items is None
                 else ci_wait_refresh_items,
+                "worklist_absence_observations": {
+                    str(number): complete_absence_observation(number)
+                    for number in prs
+                },
                 "truncated": truncated,
             }
         },
@@ -375,6 +446,31 @@ class ReconcileLifecycle:
         ]
 
     def _gh(self, args, check=True):
+        if args[:3] == ["api", "--method", "PATCH"] and "--input" in args:
+            self.body_write_attempts += 1
+            if self.body_write_attempts in self.fail_body_write_attempts:
+                raise RuntimeError("simulated body write failure")
+            path = args[args.index("--input") + 1]
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.issue["title"] = payload["title"]
+            self.issue["body"] = payload["body"]
+            self.issue["labels"] = labels(*payload["labels"])
+            self.body_writes += 1
+            self._tick()
+            response = {
+                "number": self.issue["number"],
+                "body": self.issue["body"],
+                "labels": copy.deepcopy(self.issue["labels"]),
+                "title": self.issue["title"],
+                "state": "open",
+                "updated_at": self.issue["updatedAt"],
+                "user": {"login": "github-actions[bot]"},
+                "comments": len(self.issue["comments"]),
+            }
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(response), stderr=""
+            )
         if args[:3] == ["api", "--method", "PATCH"]:
             if self.close_attempts in self.fail_close_attempts:
                 raise RuntimeError("simulated close failure")
@@ -479,7 +575,8 @@ class ReconcileLifecycle:
 
         reconcile.render_card.close_card = guarded_close
         os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = "false"
-        self.run_number += 1
+        if event_name == "schedule":
+            self.run_number += 1
         os.environ["GITHUB_ACTIONS"] = "true"
         os.environ["GITHUB_EVENT_NAME"] = event_name
         os.environ["GITHUB_RUN_NUMBER"] = str(self.run_number)
@@ -1513,7 +1610,9 @@ def test_failed_present_reset_cannot_authorize_later_close():
     lifecycle = ReconcileLifecycle(item)
     absent = scan_payload(items=[])
     lifecycle.run(absent)
-    lifecycle.fail_body_write_attempts = {2}
+    # The present run can attempt a full projection and then a dedicated
+    # lifecycle clear. Fail both writes to preserve the stale first epoch.
+    lifecycle.fail_body_write_attempts = {2, 3}
     lifecycle.run(scan_payload(items=[item]))
     check(
         "reset failure: stale first absence remains tied to its old run",
@@ -1737,7 +1836,6 @@ def test_intervening_runs_break_absence_adjacency():
             "schedule",
         ),
         ("CI-wait", scan_payload(items=[], ci_wait_pr_numbers=[42]), "schedule"),
-        ("manual", scan_payload(items=[]), "workflow_dispatch"),
     ]
     for name, intervening, event_name in cases:
         lifecycle = ReconcileLifecycle(work_item())
@@ -1771,6 +1869,19 @@ def test_intervening_runs_break_absence_adjacency():
             and lifecycle.issue["state"] == "CLOSED"
             and len(lifecycle.close_calls) == 1,
         )
+
+    manual = ReconcileLifecycle(work_item())
+    manual.run(scan_payload(items=[]))
+    first_body = manual.issue["body"]
+    manual.run(scan_payload(items=[]), event_name="workflow_dispatch")
+    unchanged = manual.issue["body"] == first_body and manual.close_calls == []
+    manual.run(scan_payload(items=[]))
+    check(
+        "freeze lifecycle: manual run neither resets nor advances scheduled epochs",
+        unchanged
+        and manual.issue["state"] == "CLOSED"
+        and len(manual.close_calls) == 1,
+    )
 
 
 def test_ci_wait_antimasquerade_refresh_preserves_absence():

@@ -49,7 +49,7 @@ def fails(call, exception=Exception):
     return False
 
 
-def direct_task(root: Path):
+def direct_task(root: Path, action: str = "triage.schema-repair"):
     root.mkdir(parents=True)
     prompt = root / "prompt.txt"
     prompt.write_text(
@@ -58,7 +58,7 @@ def direct_task(root: Path):
     )
     bundle = root / "bundle"
     task = build_task(
-        action="triage.schema-repair",
+        action=action,
         selection={
             "mode": "claude",
             "profileName": "claude-cli-pinned",
@@ -153,15 +153,14 @@ def main():
         schema, schema_text = validate_schema_subset(
             schema_bytes, task["spec"]["output"]["schemaSha256"]
         )
-        action_schemas = sorted(
-            Path("agent_runtime/schemas/actions").glob("*.schema.json")
+        _, nl_schema_bytes = direct_task(
+            root / "nl-task", action="nl-decision.schema-repair"
         )
         check(
-            "schema: every current action schema is in the pinned subset",
+            "schema: every deployed direct repair schema is in the pinned subset",
             all(
-                validate_schema_subset(path.read_bytes(), file_sha256(path))[0]["type"]
-                == "object"
-                for path in action_schemas
+                validate_schema_subset(value, "")[0]["type"] == "object"
+                for value in (schema_bytes, nl_schema_bytes)
             ),
         )
         check(

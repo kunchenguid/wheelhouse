@@ -90,6 +90,9 @@ sys.path.insert(0, SCRIPT_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 import wheelhouse_core as core  # noqa: E402
 import nl_readonly_search as readonly_search  # noqa: E402
+import assessment_admission  # noqa: E402
+import target_observation  # noqa: E402
+import decision_context  # noqa: E402
 
 # nl_readonly_search places scripts/ first for its standalone CLI imports.
 # Restore the repository root before importing the agent_runtime package so the
@@ -377,6 +380,27 @@ def _accept_recommendation(state):
     )
     if not revision or (state or {}).get("triaged_sha") != revision:
         return (None, "")
+    if kind == "pr-review":
+        assessment = assessment_admission.normalize_assessment(
+            (state or {}).get("triage_assessment")
+        )
+        observation = target_observation.normalize_review_observation(
+            (state or {}).get("review_observation")
+        )
+        context = decision_context.normalize_decision_context(
+            (state or {}).get("decision_context")
+        )
+        if not (
+            assessment
+            and observation
+            and context
+            and assessment_admission.admitted(assessment)
+            and assessment["target"]["head_sha"] == revision
+            and assessment["target"]["observation_id"]
+            == observation["observation_id"]
+            and assessment["target"]["context_id"] == context["context_id"]
+        ):
+            return (None, "")
     action = _normalize_recommendation_action(rec.get("action"))
     if action not in ACCEPT_ALLOWED_BY_KIND.get(kind, set()):
         return (None, "")
@@ -400,8 +424,8 @@ def cmd_parse():
     if not state:
         set_output("decision", "")  # not a decision card
         return
-    if state.get("held"):
-        # HELD card (see render_card.py "Held cards"): its placeholder body
+    if state.get("held") or state.get("lifecycle_state") == "awaiting-scheduled-confirmation" or "reconcile_absence" in state:
+        # HELD or scheduled-confirmation card (see render_card.py "Held cards"): its placeholder body
         # has no checkboxes to tick, but this is defense in depth against a
         # slash-command or a hand-crafted checkbox line reaching a card that
         # has not yet published its first auto-triage result. Inert until
@@ -1287,7 +1311,12 @@ def cmd_nl_eligible():
     body = os.environ.get("ISSUE_BODY", "")
     comment = os.environ.get("COMMENT_BODY", "")
     state = core.parse_state_block(body)
-    is_card = state is not None and not state.get("held")
+    is_card = (
+        state is not None
+        and not state.get("held")
+        and state.get("lifecycle_state") != "awaiting-scheduled-confirmation"
+        and "reconcile_absence" not in state
+    )
     eligible = is_card and bool(comment.strip()) and not is_slash_comment(comment)
     print("true" if eligible else "false")
 

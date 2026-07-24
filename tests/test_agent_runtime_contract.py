@@ -186,6 +186,12 @@ def main():
             },
         }
         pr_valid = dict(valid, recommended_action="merge")
+        pr_valid["recommendation_basis"] = {
+            "kind": "other",
+            "observation_id": "sha256:" + "0" * 64,
+            "context_id": "sha256:" + "1" * 64,
+            "check_names": [],
+        }
         pr_valid["automerge"] = {
             "behavior_class": "B",
             "behavior_assertions": [],
