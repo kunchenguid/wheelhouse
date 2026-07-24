@@ -149,6 +149,11 @@ def test_bounded_immutable_read_success_and_failure():
         core.gh_rest = lambda _path: (_ for _ in ()).throw(RuntimeError("offline"))
         check("exact read: transport failure remains unavailable",
               core.immutable_compare_files("owner/repo", "b" * 40, "c" * 40, 1) == ([], False, False))
+        core.gh_rest = lambda _path: (_ for _ in ()).throw(
+            json.JSONDecodeError("truncated", "{", 1)
+        )
+        check("exact read: malformed response remains unavailable",
+              core.immutable_compare_files("owner/repo", "b" * 40, "c" * 40, 1) == ([], False, False))
     finally:
         core.gh_rest = saved
 

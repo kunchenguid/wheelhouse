@@ -5176,7 +5176,7 @@ def immutable_compare_files(slug, base_sha, head_sha, expected_count):
         comparison = gh_rest(
             "/repos/%s/compare/%s...%s" % (slug, base_sha, head_sha)
         )
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         return ([], False, False)
     if not isinstance(comparison, dict) or not isinstance(comparison.get("files"), list):
         return ([], False, False)

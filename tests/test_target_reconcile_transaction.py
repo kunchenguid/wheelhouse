@@ -158,7 +158,7 @@ class ProductionTransition:
             "gh_graphql",
             "gh_graphql_pr",
             "_list_action_required_runs",
-            "_list_pr_files",
+            "immutable_compare_files",
             "repo_pr_target_posture",
             "ci_safety",
             "approve_ci",
