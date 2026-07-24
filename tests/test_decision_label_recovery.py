@@ -123,13 +123,7 @@ def test_pure_admission_matrix():
         and recovery.parse_marker(recovery.marker(record)) == record,
     )
     supported = []
-    for label in (
-        "decision:merge",
-        "decision:close",
-        "decision:decline",
-        "decision:hold",
-        "decision:investigate",
-    ):
+    for label in sorted(recovery.RECOVERABLE_DECISION_LABELS):
         variant_event = copy.deepcopy(event)
         variant_events = copy.deepcopy(events)
         variant_event["label"]["name"] = label
@@ -206,11 +200,31 @@ def test_pure_admission_matrix():
     )
     duplicate_label = copy.deepcopy(event)
     duplicate_label["issue"]["labels"].append({"name": "decision:close"})
+    conflicting_removed = copy.deepcopy(events)
+    conflicting_removed[0].extend(
+        [
+            {
+                "id": 106,
+                "event": "labeled",
+                "created_at": T3,
+                "actor": {"login": "owner"},
+                "label": {"name": "decision:close"},
+            },
+            {
+                "id": 107,
+                "event": "unlabeled",
+                "created_at": T3,
+                "actor": {"login": "owner"},
+                "label": {"name": "decision:close"},
+            },
+        ]
+    )
     check(
-        "denied: explicit removal, ambiguous history, intentional removal, label ambiguity",
+        "denied: removed, ambiguous, conflicting, or live multi-label history",
         admit(event, current, owner_removed)[0] is None
         and admit(event, current, ambiguous)[0] is None
         and admit(event, current, intentionally_removed)[0] is None
+        and admit(event, current, conflicting_removed)[0] is None
         and admit(duplicate_label, current, events)[0] is None,
     )
 
@@ -499,6 +513,68 @@ def test_body_digest_races():
     )
 
 
+def test_cross_label_supersession():
+    event, current, events = fixture()
+    fake = FakeGitHub(event, current, events)
+    with tempfile.TemporaryDirectory() as temp:
+        event_path = Path(temp) / "event.json"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        claim_output = Path(temp) / "claim.out"
+        claim_output.write_text("", encoding="utf-8")
+        _, claimed = run_claim(fake, str(event_path), str(claim_output))
+        fake.current["labels"].append({"name": "processing"})
+        fake.events[0].extend(
+            [
+                {
+                    "id": 106,
+                    "event": "labeled",
+                    "created_at": T3,
+                    "actor": {"login": "owner"},
+                    "label": {"name": "decision:close"},
+                },
+                {
+                    "id": 107,
+                    "event": "unlabeled",
+                    "created_at": T3,
+                    "actor": {"login": "owner"},
+                    "label": {"name": "decision:close"},
+                },
+            ]
+        )
+        revalidate_output = Path(temp) / "revalidate.out"
+        revalidate_output.write_text("", encoding="utf-8")
+        saved_gh = recovery._gh_json
+        old_output = os.environ.get("GITHUB_OUTPUT")
+        recovery._gh_json = fake.call
+        os.environ["GITHUB_OUTPUT"] = str(revalidate_output)
+        try:
+            recovery.revalidate(
+                SimpleNamespace(
+                    event_file=str(event_path),
+                    repo_slug="owner/wheelhouse",
+                    issue=77,
+                    sender="owner",
+                    authorized="true",
+                    event_key=claimed["event_key"],
+                    processing="required",
+                )
+            )
+        finally:
+            recovery._gh_json = saved_gh
+            if old_output is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = old_output
+        revalidated = read_outputs(revalidate_output)
+    check(
+        "revalidate: newer removed decision supersedes old action",
+        revalidated.get("allowed") == "false"
+        and fake.current["body"] == current["body"]
+        and {row["name"] for row in fake.current["labels"]}
+        == {row["name"] for row in current["labels"]} | {"processing"},
+    )
+
+
 def test_bounded_complete_history():
     event, current, events = fixture()
     complete = FakeGitHub(event, current, events)
@@ -596,6 +672,7 @@ def main():
     test_pure_admission_matrix()
     test_durable_claim_and_revalidation()
     test_body_digest_races()
+    test_cross_label_supersession()
     test_bounded_complete_history()
     test_workflow_composition()
     if FAILURES:

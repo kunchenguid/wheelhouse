@@ -15,7 +15,6 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import apply_decision  # noqa: E402
 import render_card  # noqa: E402
 
 VERSION = 2
@@ -23,6 +22,15 @@ PREFIX = "<!-- wheelhouse-decision-label-recovery:"
 MAX_COMMENT_BYTES = 16_384
 HISTORY_PAGE_SIZE = 100
 MAX_HISTORY_PAGES = 10
+RECOVERABLE_DECISION_LABELS = frozenset(
+    {
+        "decision:merge",
+        "decision:close",
+        "decision:decline",
+        "decision:hold",
+        "decision:investigate",
+    }
+)
 TRUSTED_AUTOMATION = frozenset({"github-actions[bot]", "app/github-actions"})
 LOCK_LABELS = frozenset(
     {
@@ -116,7 +124,7 @@ def _state_identity(body):
     }
 
 
-def _relevant_label_events(events, label):
+def _recoverable_label_events(events):
     rows = []
     for event in events:
         if not isinstance(event, dict):
@@ -124,7 +132,10 @@ def _relevant_label_events(events, label):
         if event.get("event") not in {"labeled", "unlabeled"}:
             continue
         event_label = event.get("label")
-        if not isinstance(event_label, dict) or event_label.get("name") != label:
+        if (
+            not isinstance(event_label, dict)
+            or event_label.get("name") not in RECOVERABLE_DECISION_LABELS
+        ):
             continue
         event_id = event.get("id")
         created_at = _event_time(event.get("created_at"))
@@ -143,6 +154,7 @@ def _relevant_label_events(events, label):
                 "event": event["event"],
                 "created_at": created_at,
                 "actor": actor,
+                "label": event_label["name"],
             }
         )
     rows.sort(key=lambda row: (row["created_at"], row["id"]))
@@ -309,10 +321,7 @@ def admission_record(
         )
     ):
         return None, "projection.binding"
-    decision = apply_decision.parse_label(
-        label, apply_decision.ALLOWED.get("pr-review", set())
-    )
-    if decision is None:
+    if label not in RECOVERABLE_DECISION_LABELS:
         return None, "label.unsupported"
     trigger_labels = _labels(trigger_issue.get("labels"))
     current_labels = _labels(current.get("labels"))
@@ -339,7 +348,7 @@ def admission_record(
     ):
         return None, "label.delta"
     events = _flatten_pages(event_pages)
-    relevant = _relevant_label_events(events, label) if events is not None else None
+    relevant = _recoverable_label_events(events) if events is not None else None
     trigger_time = _event_time(trigger_issue.get("updated_at"))
     if relevant is None or trigger_time is None:
         return None, "timeline.unavailable"
@@ -347,6 +356,7 @@ def admission_record(
         row
         for row in relevant
         if row["event"] == "labeled"
+        and row["label"] == label
         and row["created_at"] == trigger_time
         and row["actor"] == sender
     ]
@@ -363,6 +373,7 @@ def admission_record(
         len(tail) != 2
         or tail[0] != labeled
         or tail[1]["event"] != "unlabeled"
+        or tail[1]["label"] != label
         or tail[1]["actor"] not in TRUSTED_AUTOMATION
     ):
         return None, "timeline.not_projection_erasure"
