@@ -24,6 +24,7 @@ MAX_SHARED_PATHS = 3
 MAX_SHARED_ISSUES = 3
 MAX_CANDIDATE_TITLE = 100
 MAX_GITHUB_URL = 250
+LEGACY_MAX_GITHUB_URL = 500
 
 
 def _canonical(value):
@@ -82,8 +83,8 @@ def _normalized_title(value):
     return title[:MAX_CANDIDATE_TITLE]
 
 
-def _safe_url(value):
-    return isinstance(value, str) and len(value) <= MAX_GITHUB_URL and (
+def _safe_url(value, max_length=MAX_GITHUB_URL):
+    return isinstance(value, str) and len(value) <= max_length and (
         not value or value.startswith("https://github.com/")
     )
 
@@ -505,12 +506,17 @@ def normalize_decision_context(value):
         title = candidate.get("title") if schema == CONTEXT_SCHEMA else None
         if schema == CONTEXT_SCHEMA and _normalized_title(title) != title:
             return None
+        url_limit = (
+            LEGACY_MAX_GITHUB_URL
+            if schema == CONTEXT_SCHEMA_V1
+            else MAX_GITHUB_URL
+        )
         if (
-            not _safe_url(candidate.get("url"))
+            not _safe_url(candidate.get("url"), url_limit)
             or (schema == CONTEXT_SCHEMA and not candidate.get("url"))
             or (
                 schema == CONTEXT_SCHEMA_V1
-                and not _safe_url(candidate.get("card_url"))
+                and not _safe_url(candidate.get("card_url"), url_limit)
             )
         ):
             return None

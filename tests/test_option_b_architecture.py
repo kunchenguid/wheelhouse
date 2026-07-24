@@ -338,6 +338,28 @@ def test_decision_context_contract():
         decision_context.normalize_decision_context(legacy_context) == legacy_context
         and decision_context.compact_model_context(legacy_context) is None,
     )
+    for field in ("url", "card_url"):
+        legacy_long_url = copy.deepcopy(legacy_context)
+        prefix = "https://github.com/"
+        legacy_long_url["candidates"][0][field] = prefix + "x" * (
+            decision_context.LEGACY_MAX_GITHUB_URL - len(prefix)
+        )
+        legacy_long_url["context_id"] = decision_context._context_identity(
+            legacy_long_url
+        )
+        check(
+            f"contract: persisted v1 {field} retains its legacy URL bound",
+            decision_context.normalize_decision_context(legacy_long_url)
+            == legacy_long_url,
+        )
+        legacy_long_url["candidates"][0][field] += "x"
+        legacy_long_url["context_id"] = decision_context._context_identity(
+            legacy_long_url
+        )
+        check(
+            f"contract: persisted v1 {field} rejects URLs beyond its legacy bound",
+            decision_context.normalize_decision_context(legacy_long_url) is None,
+        )
     later_observation = observation(
         901,
         "head-901",
