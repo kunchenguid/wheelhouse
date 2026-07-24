@@ -18,7 +18,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import apply_decision  # noqa: E402
 import render_card  # noqa: E402
 
-VERSION = 1
+VERSION = 2
 PREFIX = "<!-- wheelhouse-decision-label-recovery:"
 MAX_COMMENT_BYTES = 16_384
 HISTORY_PAGE_SIZE = 100
@@ -153,6 +153,12 @@ def _record_key(record):
     return hashlib.sha256(_canonical(record).encode("utf-8")).hexdigest()
 
 
+def _body_digest(body):
+    if not isinstance(body, str):
+        return None
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 def marker(record):
     return "%s %s -->" % (PREFIX, _canonical(record))
 
@@ -198,6 +204,7 @@ def parse_marker(body):
         "head_sha",
         "observation_id",
         "context_id",
+        "body_sha256",
     }:
         return None
     integer_fields = (
@@ -211,6 +218,7 @@ def parse_marker(body):
         isinstance(record.get("version"), bool)
         or record.get("version") != VERSION
         or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("event_key") or ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("body_sha256") or ""))
         or any(
             isinstance(record.get(field), bool)
             or not isinstance(record.get(field), int)
@@ -372,6 +380,7 @@ def admission_record(
         "head_sha": current_identity["head_sha"],
         "observation_id": current_identity["observation_id"],
         "context_id": current_identity["context_id"],
+        "body_sha256": _body_digest(current_body),
     }
     return {**unsigned, "event_key": _record_key(unsigned)}, "admission.ok"
 

@@ -105,6 +105,13 @@ def changed_state_body(body, **changes):
     return render_card._replace_state_block(body, state)
 
 
+def tick_checkbox(body):
+    changed = body.replace("- [ ]", "- [x]", 1)
+    if changed == body:
+        raise AssertionError("fixture had no unchecked checkbox")
+    return changed
+
+
 def test_pure_admission_matrix():
     event, current, events = fixture()
     record, reason = admit(event, current, events)
@@ -112,6 +119,7 @@ def test_pure_admission_matrix():
         "accepted: exact authorized projection-erased decision label",
         record is not None
         and reason == "admission.ok"
+        and record["body_sha256"] == recovery._body_digest(current["body"])
         and recovery.parse_marker(recovery.marker(record)) == record,
     )
     supported = []
@@ -215,6 +223,7 @@ class FakeGitHub:
         self.comments = []
         self.next_comment = 501
         self.posts = 0
+        self.body_after_claim = None
 
     def pages(self, rows):
         return [copy.deepcopy(rows)]
@@ -250,6 +259,8 @@ class FakeGitHub:
             self.posts += 1
             self.comments.append(comment)
             self.current["updated_at"] = T3
+            if self.body_after_claim is not None:
+                self.current["body"] = self.body_after_claim
             return copy.deepcopy(comment)
         if args[0] == "api" and "/issues/comments/" in endpoint:
             comment_id = int(endpoint.rsplit("/", 1)[1])
@@ -414,6 +425,80 @@ def test_durable_claim_and_revalidation():
     )
 
 
+def test_body_digest_races():
+    event, current, events = fixture()
+    edited = copy.deepcopy(current)
+    edited["body"] = tick_checkbox(edited["body"])
+    original_record, _ = admit(event, current, events)
+    edited_record, _ = admit(event, edited, events)
+    check(
+        "binding: same projection identity produces an exact-body-specific claim",
+        original_record is not None
+        and edited_record is not None
+        and original_record["body_sha256"] != edited_record["body_sha256"]
+        and original_record["event_key"] != edited_record["event_key"],
+    )
+
+    post_claim = FakeGitHub(event, current, events)
+    post_claim.body_after_claim = tick_checkbox(current["body"])
+    with tempfile.TemporaryDirectory() as temp:
+        event_path = Path(temp) / "event.json"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        output_path = Path(temp) / "post-claim.out"
+        output_path.write_text("", encoding="utf-8")
+        code, values = run_claim(
+            post_claim, str(event_path), str(output_path)
+        )
+    check(
+        "claim: owner checkbox edit before verification supersedes older label",
+        code == 0
+        and values.get("required") == "true"
+        and values.get("admitted") == "false"
+        and post_claim.posts == 1,
+    )
+
+    pre_action = FakeGitHub(event, current, events)
+    with tempfile.TemporaryDirectory() as temp:
+        event_path = Path(temp) / "event.json"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        claim_output = Path(temp) / "claim.out"
+        claim_output.write_text("", encoding="utf-8")
+        _, claimed = run_claim(
+            pre_action, str(event_path), str(claim_output)
+        )
+        pre_action.current["labels"].append({"name": "processing"})
+        pre_action.current["body"] = pre_action.current["body"] + "\nOwner edit.\n"
+        revalidate_output = Path(temp) / "revalidate.out"
+        revalidate_output.write_text("", encoding="utf-8")
+        saved_gh = recovery._gh_json
+        old_output = os.environ.get("GITHUB_OUTPUT")
+        recovery._gh_json = pre_action.call
+        os.environ["GITHUB_OUTPUT"] = str(revalidate_output)
+        try:
+            recovery.revalidate(
+                SimpleNamespace(
+                    event_file=str(event_path),
+                    repo_slug="owner/wheelhouse",
+                    issue=77,
+                    sender="owner",
+                    authorized="true",
+                    event_key=claimed["event_key"],
+                    processing="required",
+                )
+            )
+        finally:
+            recovery._gh_json = saved_gh
+            if old_output is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = old_output
+        revalidated = read_outputs(revalidate_output)
+    check(
+        "revalidate: owner body edit before action supersedes older label",
+        revalidated.get("allowed") == "false",
+    )
+
+
 def test_bounded_complete_history():
     event, current, events = fixture()
     complete = FakeGitHub(event, current, events)
@@ -510,6 +595,7 @@ def test_workflow_composition():
 def main():
     test_pure_admission_matrix()
     test_durable_claim_and_revalidation()
+    test_body_digest_races()
     test_bounded_complete_history()
     test_workflow_composition()
     if FAILURES:
