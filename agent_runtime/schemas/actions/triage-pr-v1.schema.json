@@ -3,7 +3,7 @@
   "$id": "wheelhouse/triage-pr/v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "product_implications", "recommended_action", "recommended_reason", "evidence"],
+  "required": ["summary", "product_implications", "recommended_action", "recommended_reason", "evidence", "recommendation_basis"],
   "properties": {
     "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
     "product_implications": {"type": "string", "minLength": 1, "maxLength": 4000},

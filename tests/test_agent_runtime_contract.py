@@ -201,6 +201,14 @@ def main():
         }
         validate_schema(pr_valid, pr_schema)
         check("action schema: bounded class B restoration evidence accepted", True)
+        missing_basis = copy.deepcopy(pr_valid)
+        missing_basis.pop("recommendation_basis")
+        try:
+            validate_schema(missing_basis, pr_schema)
+        except ContractError:
+            check("action schema: PR recommendation basis required", True)
+        else:
+            check("action schema: PR recommendation basis required", False)
         for label, bad_restoration in (
             (
                 "short",
