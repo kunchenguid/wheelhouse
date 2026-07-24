@@ -407,20 +407,21 @@ If a repo scan is unreadable or incomplete, Wheelhouse leaves existing cards ope
 After a base-branch push, GitHub can temporarily report a PR's mergeability as `UNKNOWN` while it recalculates it.
 Wheelhouse polls an otherwise merge-ready or review-needed PR for a conclusive value before changing its worklist membership.
 If it does not settle within the bounded poll, Wheelhouse emits no new item and freezes any existing card unchanged until a later scan can decide it safely.
-If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled workflow run and is soft-closed only when the immediately following workflow run also observes a qualifying absence.
-The first absence is hidden card state bound to the trusted workflow run number, and a worklist return clears it while keeping the same card.
+If an open target no longer needs a maintainer decision, its pure pending card stays open after the first complete, conclusive scheduled observation and is soft-closed only when the next adjacent qualifying scheduled observation confirms the absence.
+The first absence is a visible, inert card projection bound to a dedicated trusted scheduled-observation epoch: it shows the current observation and reason, removes decision controls, and carries `wheelhouse:confirming-target-state`.
+A manual run neither advances nor resets that epoch; a worklist return clears the confirmation while keeping the same card.
 If that still-open target returns after the soft close, Wheelhouse reuses an existing closed issue only when it has the exact target identity, trusted automation authorship and close actor, and valid current-schema reconcile soft-close provenance.
 If the card was touched after close, reuse also requires a bounded complete timeline proving every post-close event came from trusted Wheelhouse automation and fully explains the issue's `updatedAt`.
 If several trusted candidates share the same exact identity, Wheelhouse deterministically reuses the highest issue number and leaves the lower closed candidates unchanged.
 The current body and managed labels are prepared while the issue remains closed, then the issue is reopened and uniqueness is verified before triage or any decision can proceed.
 Legacy, owner-resolved, blocked, hard-closed, audit-protected, malformed, untrusted, identity-conflicting, or human-touched closed cards are never reopened; an incomplete or ambiguous lookup fails closed instead of creating another card.
-The scan, ingest, and decision workflows share one queued card-lifecycle concurrency group so create, reopen, close, and owner decisions cannot race each other.
-Any intervening present, manually dispatched, failed, truncated, unresolved-mergeability, or fork-CI-wait run breaks the streak without closing, even when that run cannot safely edit the stored absence record.
+The scan, ingest, triage, and decision workflows share one queued card-lifecycle concurrency group so projections, create, reopen, close, and owner decisions cannot race each other.
+Any intervening nonqualifying scheduled observation - present, failed, truncated, unresolved-mergeability, or fork-CI-wait - breaks the epoch adjacency without closing, even when that run cannot safely edit the stored absence record.
 An open `blocked` card is not soft-closed merely because its target leaves the worklist, so a non-retryable action error stays visible.
 If that target is genuinely merged or closed, the scheduled backstop still hard-closes the `blocked` card.
-That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after two adjacent complete, conclusive workflow runs.
+That includes scan-built targets authored by the repo owner, the configured maintainer, or bots: they remain in the open target set but leave the worklist, so reconcile consumes any old pure pending card for them after two adjacent complete, conclusive scheduled observations.
 It also includes PR-review candidates whose GraphQL `mergeable` value is `CONFLICTING`.
-Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card after the two-adjacent-run soft-close threshold.
+Those leave the maintainer worklist as `needs-rebase`; contributor-authored PRs get at most one rebase nudge per head SHA, and the backstop consumes any stale pure pending card after the two-adjacent-observation soft-close threshold.
 There is one fork-CI exception: when safe automatic CI approval verifies that no run is awaiting approval and the contributor PR's mergeability conclusively settles to `CONFLICTING`, Wheelhouse keeps its `needs-ci-approval` classification and emits no card, but posts that same rebase nudge before consuming the PR from the worklist.
 An actual CI approval is unchanged and does not post a conflict nudge.
 An `UNKNOWN` mergeability value is settled before this exception can nudge, and a missing or still-indeterminate value does not nudge.
