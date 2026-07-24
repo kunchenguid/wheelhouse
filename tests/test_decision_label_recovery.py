@@ -224,11 +224,21 @@ class FakeGitHub:
             (arg for arg in args if isinstance(arg, str) and arg.startswith("repos/")),
             "",
         )
-        if args[:3] == ("api", "--paginate", "--slurp"):
-            if endpoint.endswith("/events?per_page=100"):
-                return copy.deepcopy(self.events)
-            if endpoint.endswith("/comments?per_page=100"):
-                return self.pages(self.comments)
+        event_prefix = (
+            "/events?per_page=%s&page=" % recovery.HISTORY_PAGE_SIZE
+        )
+        comment_prefix = (
+            "/comments?per_page=%s&page=" % recovery.HISTORY_PAGE_SIZE
+        )
+        if args[0] == "api" and event_prefix in endpoint:
+            page = int(endpoint.rsplit("=", 1)[1])
+            rows = self.events[page - 1] if page <= len(self.events) else []
+            return copy.deepcopy(rows)
+        if args[0] == "api" and comment_prefix in endpoint:
+            page = int(endpoint.rsplit("=", 1)[1])
+            start = (page - 1) * recovery.HISTORY_PAGE_SIZE
+            end = start + recovery.HISTORY_PAGE_SIZE
+            return copy.deepcopy(self.comments[start:end])
         if args[:3] == ("api", "--method", "POST"):
             body = next(arg[5:] for arg in args if arg.startswith("body="))
             comment = {
@@ -404,6 +414,75 @@ def test_durable_claim_and_revalidation():
     )
 
 
+def test_bounded_complete_history():
+    event, current, events = fixture()
+    complete = FakeGitHub(event, current, events)
+    complete.events = [
+        [{} for _ in range(recovery.HISTORY_PAGE_SIZE)],
+        [{}],
+    ]
+    complete.comments = [
+        {} for _ in range(recovery.HISTORY_PAGE_SIZE + 1)
+    ]
+    saved_gh = recovery._gh_json
+    recovery._gh_json = complete.call
+    try:
+        _, event_pages, comment_pages = recovery._read_world(
+            "owner/wheelhouse", 77
+        )
+    finally:
+        recovery._gh_json = saved_gh
+    check(
+        "history: short terminal pages prove bounded completeness",
+        [len(page) for page in event_pages]
+        == [recovery.HISTORY_PAGE_SIZE, 1]
+        and [len(page) for page in comment_pages]
+        == [recovery.HISTORY_PAGE_SIZE, 1],
+    )
+
+    denied = []
+    for resource in ("events", "comments"):
+        bounded = FakeGitHub(event, current, events)
+        if resource == "events":
+            bounded.events = [
+                [{} for _ in range(recovery.HISTORY_PAGE_SIZE)]
+                for _ in range(recovery.MAX_HISTORY_PAGES)
+            ]
+        else:
+            bounded.comments = [
+                {}
+                for _ in range(
+                    recovery.HISTORY_PAGE_SIZE * recovery.MAX_HISTORY_PAGES
+                )
+            ]
+        recovery._gh_json = bounded.call
+        try:
+            recovery._read_world("owner/wheelhouse", 77)
+        except recovery.RecoveryError:
+            denied.append(True)
+        else:
+            denied.append(False)
+        finally:
+            recovery._gh_json = saved_gh
+    oversized = FakeGitHub(event, current, events)
+    oversized.events = [
+        [{} for _ in range(recovery.HISTORY_PAGE_SIZE + 1)]
+    ]
+    recovery._gh_json = oversized.call
+    try:
+        recovery._read_world("owner/wheelhouse", 77)
+    except recovery.RecoveryError:
+        denied.append(True)
+    else:
+        denied.append(False)
+    finally:
+        recovery._gh_json = saved_gh
+    check(
+        "history: page caps and malformed oversized pages fail closed",
+        all(denied),
+    )
+
+
 def test_workflow_composition():
     workflow = (
         ROOT / ".github" / "workflows" / "decision-handler.yml"
@@ -431,6 +510,7 @@ def test_workflow_composition():
 def main():
     test_pure_admission_matrix()
     test_durable_claim_and_revalidation()
+    test_bounded_complete_history()
     test_workflow_composition()
     if FAILURES:
         raise SystemExit(

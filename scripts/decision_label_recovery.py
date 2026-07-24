@@ -21,6 +21,8 @@ import render_card  # noqa: E402
 VERSION = 1
 PREFIX = "<!-- wheelhouse-decision-label-recovery:"
 MAX_COMMENT_BYTES = 16_384
+HISTORY_PAGE_SIZE = 100
+MAX_HISTORY_PAGES = 10
 TRUSTED_AUTOMATION = frozenset({"github-actions[bot]", "app/github-actions"})
 LOCK_LABELS = frozenset(
     {
@@ -398,21 +400,31 @@ def _read_event(path):
 
 def _read_world(repo_slug, issue):
     current = _gh_json("api", "repos/%s/issues/%s" % (repo_slug, issue))
-    events = _gh_json(
-        "api",
-        "--paginate",
-        "--slurp",
-        "repos/%s/issues/%s/events?per_page=100" % (repo_slug, issue),
-    )
-    comments = _gh_json(
-        "api",
-        "--paginate",
-        "--slurp",
-        "repos/%s/issues/%s/comments?per_page=100" % (repo_slug, issue),
-    )
-    if _flatten_pages(comments) is None:
-        raise RecoveryError("claim comments were unavailable")
+    events = _read_complete_history(repo_slug, issue, "events")
+    comments = _read_complete_history(repo_slug, issue, "comments")
     return current, events, comments
+
+
+def _read_complete_history(repo_slug, issue, resource):
+    pages = []
+    for page_number in range(1, MAX_HISTORY_PAGES + 1):
+        page = _gh_json(
+            "api",
+            "repos/%s/issues/%s/%s?per_page=%s&page=%s"
+            % (
+                repo_slug,
+                issue,
+                resource,
+                HISTORY_PAGE_SIZE,
+                page_number,
+            ),
+        )
+        if not isinstance(page, list) or len(page) > HISTORY_PAGE_SIZE:
+            raise RecoveryError("%s history was unavailable" % resource)
+        pages.append(page)
+        if len(page) < HISTORY_PAGE_SIZE:
+            return pages
+    raise RecoveryError("%s history exceeded the recovery bound" % resource)
 
 
 def _trusted_claims(comment_pages, event_key):
