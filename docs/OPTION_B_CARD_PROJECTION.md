@@ -59,7 +59,9 @@ PR 1631's source-bound class-B restoration evidence and contract-change contradi
 
 The owner comes from ReviewObservation, not process environment. Identical normalized inputs produce byte-identical output. The golden fixture is `tests/fixtures/option_b_card_projection.json`.
 
-The writer verifies the card by number before mutation, including identity, trusted author, open state, body, title, labels, `updatedAt`, and comment activity. It sends one issue-resource PATCH for title, body, and the complete final label set, then rereads and verifies the result. Human labels are preserved. Any owner or handler race defers the write.
+Observation, repository-snapshot, and context identities are semantic and revision-bound: collection timestamps remain visible provenance but do not change an identity when the target facts and related-work facts are unchanged. Same-closing-issue relations are repository-qualified.
+
+The writer verifies the card by number before mutation, including identity, trusted author, lifecycle state, body, title, labels, `updatedAt`, and comment activity. It sends one issue-resource PATCH for title, body, and the complete final label set, then rereads and verifies the result. Human labels are preserved. PR-review direct body writers fail closed, including legacy paths without current observation evidence. Triage shares the `wheelhouse-backstop` concurrency group with scan, ingest, and the decision handler, while the handler consumes the immutable owner webhook body and its prior body. Handler mutations cannot interleave a projection, and an owner edit during a projection is still processed from its queued webhook snapshot.
 
 New-card creation still uses one complete Issue creation followed by direct-number admission verification. Stable legacy cards are not mass-rewritten. A real material/current, context, assessment, or lifecycle trigger migrates an open pure card through the v2 planner. Processing, blocked, and resolved cards retain the existing no-refresh rule.
 
@@ -132,7 +134,7 @@ The production contract is encoded in `tests/test_option_b_architecture.py` and 
 - E2E-06: 901/905 reciprocal shared paths plus 901/21 dependency, with no acting gate;
 - E2E-07: durable result recovery without spend and owner-race writer deferral.
 
-The same test also covers strict v2/v1 contracts, context bounds, assessment binding, projection golden bytes, writer verification, migration ownership, workflow order, and token separation. Full validation remains the command list in `CONTRIBUTING.md`.
+The same test also covers strict v2/v1 contracts, timestamp-stable semantic identities, repository-qualified context relations, assessment binding, projection golden bytes, writer verification, migration ownership, workflow serialization, and token separation. Full validation remains the command list in `CONTRIBUTING.md`.
 
 ## Observability
 

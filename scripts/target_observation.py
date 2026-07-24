@@ -57,6 +57,13 @@ def _identity(prefix, value):
     return "%s%s" % (prefix, digest)
 
 
+def _review_identity(value):
+    semantic = dict(value)
+    semantic.pop("observation_id", None)
+    semantic.pop("observed_at", None)
+    return _identity("sha256:", semantic)
+
+
 def _bounded_text(value, maximum=300):
     if not isinstance(value, str):
         return None
@@ -283,7 +290,7 @@ def make_observation(
     }
     if error:
         payload["error"] = str(error)[:300]
-    payload["observation_id"] = _identity("sha256:", payload)
+    payload["observation_id"] = _review_identity(payload)
     normalized = normalize_observation(payload)
     if normalized is None:
         raise ValueError("invalid review observation")
@@ -466,9 +473,16 @@ def _normalize_common(value, *, v2):
             or facts["bucket"] in {"ci-state-unknown", "mergeability-pending"}
         ):
             return None
-    without_id = dict(value)
-    claimed_id = without_id.pop("observation_id", None)
-    if claimed_id != _identity("sha256:", without_id):
+    claimed_id = value.get("observation_id")
+    expected_id = (
+        _review_identity(value)
+        if v2
+        else _identity(
+            "sha256:",
+            {key: field for key, field in value.items() if key != "observation_id"},
+        )
+    )
+    if claimed_id != expected_id:
         return None
     return json.loads(_canonical(value))
 
@@ -507,7 +521,7 @@ def normalize_review_observation(value):
         "changed_paths": changed_path_facts(),
         "error": "persisted v1 observation lacks configured checks and changed paths",
     }
-    payload["observation_id"] = _identity("sha256:", payload)
+    payload["observation_id"] = _review_identity(payload)
     return _normalize_common(payload, v2=True)
 
 

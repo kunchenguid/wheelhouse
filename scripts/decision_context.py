@@ -30,6 +30,22 @@ def _identity(prefix, value):
     return prefix + hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _snapshot_identity(value):
+    semantic = dict(value)
+    semantic.pop("snapshot_id", None)
+    semantic.pop("observed_at", None)
+    return _identity("sha256:", semantic)
+
+
+def _context_identity(value):
+    semantic = json.loads(_canonical(value))
+    semantic.pop("context_id", None)
+    snapshot = semantic.get("repository_snapshot")
+    if isinstance(snapshot, dict):
+        snapshot.pop("observed_at", None)
+    return _identity("sha256:", semantic)
+
+
 def _target_key(value):
     if not isinstance(value, dict):
         return None
@@ -154,7 +170,7 @@ def repository_snapshot(
         "candidates": normalized,
     }
     return {
-        "snapshot_id": _identity("sha256:", payload),
+        "snapshot_id": _snapshot_identity(payload),
         **payload,
     }
 
@@ -226,7 +242,12 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
         if key == target_key:
             continue
         relations = []
-        if target["closing_complete"] and candidate["closing_complete"]:
+        if (
+            target["owner"] == candidate["owner"]
+            and target["repo"] == candidate["repo"]
+            and target["closing_complete"]
+            and candidate["closing_complete"]
+        ):
             common_issues = sorted(
                 set(target["closing_issues"]).intersection(candidate["closing_issues"])
             )
@@ -234,7 +255,10 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
                 if len(common_issues) > MAX_SHARED_ISSUES:
                     relation_truncated = True
                 relations.append(_relation("same-closing-issue", issues=common_issues))
-        else:
+        elif (
+            target["owner"] == candidate["owner"]
+            and target["repo"] == candidate["repo"]
+        ):
             comparison_incomplete = True
         if target["references_complete"]:
             if {
@@ -317,7 +341,7 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
         "reason": reason,
         "candidates": related,
     }
-    payload["context_id"] = _identity("sha256:", payload)
+    payload["context_id"] = _context_identity(payload)
     normalized = normalize_decision_context(payload)
     if normalized is None:
         raise ValueError("decision context construction produced invalid output")
@@ -331,8 +355,8 @@ def unavailable_context(observation, reason, snapshot=None):
     }
     revision = (normalized or {}).get("revision") or {"head_sha": "unknown"}
     observed_at = ((snapshot or {}).get("observed_at") or (normalized or {}).get("observed_at") or "1970-01-01T00:00:00Z")
-    snapshot_id = (snapshot or {}).get("snapshot_id") or _identity(
-        "sha256:", {"unavailable": reason, "observed_at": observed_at}
+    snapshot_id = (snapshot or {}).get("snapshot_id") or _snapshot_identity(
+        {"unavailable": reason, "observed_at": observed_at}
     )
     payload = {
         "schema": CONTEXT_SCHEMA,
@@ -354,7 +378,7 @@ def unavailable_context(observation, reason, snapshot=None):
         "reason": str(reason or "context.unavailable")[:120],
         "candidates": [],
     }
-    payload["context_id"] = _identity("sha256:", payload)
+    payload["context_id"] = _context_identity(payload)
     return normalize_decision_context(payload)
 
 
@@ -455,8 +479,7 @@ def normalize_decision_context(value):
     normalized_candidates.sort(key=lambda row: (row["target"]["owner"], row["target"]["repo"], row["target"]["number"]))
     if candidates != normalized_candidates:
         return None
-    without_id = dict(value)
-    claimed = without_id.pop("context_id", None)
-    if claimed != _identity("sha256:", without_id):
+    claimed = value.get("context_id")
+    if claimed != _context_identity(value):
         return None
     return json.loads(_canonical(value))

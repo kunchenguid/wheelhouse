@@ -1143,6 +1143,44 @@ def review_card_inputs_current(item, state):
     )
 
 
+def owner_projection_race_recoverable(trigger_body, current_body):
+    trigger = _unique_state_block(trigger_body)
+    current = _unique_state_block(current_body)
+    if not trigger or not current:
+        return False
+    if (
+        trigger.get("kind") != "pr-review"
+        or current.get("kind") != "pr-review"
+        or trigger.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER
+        or current.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER
+    ):
+        return False
+    identity_fields = ("repo", "number", "kind", "head_sha")
+    if any(trigger.get(field) != current.get(field) for field in identity_fields):
+        return False
+    trigger_observation = target_contracts.normalize_review_observation(
+        trigger.get(REVIEW_OBSERVATION_FIELD)
+    )
+    current_observation = target_contracts.normalize_review_observation(
+        current.get(REVIEW_OBSERVATION_FIELD)
+    )
+    trigger_context = context_contracts.normalize_decision_context(
+        trigger.get(DECISION_CONTEXT_FIELD)
+    )
+    current_context = context_contracts.normalize_decision_context(
+        current.get(DECISION_CONTEXT_FIELD)
+    )
+    return bool(
+        trigger_observation
+        and current_observation
+        and trigger_context
+        and current_context
+        and trigger_observation["observation_id"]
+        == current_observation["observation_id"]
+        and trigger_context["context_id"] == current_context["context_id"]
+    )
+
+
 def triage_projection_migration_needed(item, state, labels, has_token=True):
     """Targeted v2 migration required before an otherwise-eligible first spend."""
     return bool(
@@ -5607,6 +5645,9 @@ def lookup_card_lifecycle(item):
 def _edit_issue_body_and_labels(
     number, body, title=None, add_labels=None, remove_labels=None
 ):
+    state = _unique_state_block(body)
+    if state and state.get("kind") == "pr-review":
+        raise RuntimeError("pr-review projection bypassed the authoritative writer")
     body_path = _write_body(body)
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
@@ -5951,13 +5992,44 @@ def reuse_closed_card(item, candidate, has_token=False):
     ] + ["resolved"]
     to_add, to_remove = plan_label_update(inert_labels, current.get("labels"))
     expected_inert_labels = (current_names | set(to_add)) - set(to_remove)
-    _edit_issue_body_and_labels(
-        current["number"],
-        card["body"],
-        title=card["title"],
-        add_labels=to_add,
-        remove_labels=to_remove,
-    )
+    rendered_state = _unique_state_block(card["body"]) or {}
+    if rendered_state.get("kind") == "pr-review":
+        if rendered_state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+            raise CardLifecycleError(
+                "closed PR-review card reuse requires a current observation projection"
+            )
+        import projection_writer
+
+        outcome = projection_writer.commit_preplanned(
+            current["number"],
+            current,
+            title=card["title"],
+            body=card["body"],
+            managed_labels=sorted(expected_inert_labels),
+            cause="migration-current",
+            observation_id=(
+                (rendered_state.get(REVIEW_OBSERVATION_FIELD) or {}).get(
+                    "observation_id", ""
+                )
+            ),
+            context_id=(
+                (rendered_state.get(DECISION_CONTEXT_FIELD) or {}).get(
+                    "context_id", ""
+                )
+            ),
+        )
+        if outcome != "committed":
+            raise CardLifecycleError(
+                "closed PR-review card changed before authoritative preparation"
+            )
+    else:
+        _edit_issue_body_and_labels(
+            current["number"],
+            card["body"],
+            title=card["title"],
+            add_labels=to_add,
+            remove_labels=to_remove,
+        )
 
     prepared = _get_lifecycle_issue(current["number"])
     if not _prepared_lifecycle_matches(
@@ -6213,6 +6285,9 @@ def _write_body(body):
 
 
 def _edit_issue_body(number, body, remove_labels=None):
+    state = _unique_state_block(body)
+    if state and state.get("kind") == "pr-review":
+        raise RuntimeError("pr-review projection bypassed the authoritative writer")
     body_path = _write_body(body)
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
@@ -6818,6 +6893,8 @@ def update_reconcile_absence(
                 )
             )
         return committed
+    if state.get("kind") == "pr-review":
+        return False
     _edit_issue_body_and_labels(
         number, projection["body"], add_labels=[LIFECYCLE_CONFIRM_LABEL]
     )
@@ -6853,6 +6930,8 @@ def clear_reconcile_absence(number, body):
             context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
         )
         return outcome == "committed"
+    if state.get("kind") == "pr-review":
+        return False
     _edit_issue_body_and_labels(
         number, new_body, remove_labels=[LIFECYCLE_CONFIRM_LABEL]
     )
@@ -6971,6 +7050,20 @@ def mark_triage_queued(
             ceiling=ceiling,
         )
         return None
+    queued_state = _unique_state_block(body) or {}
+    if (
+        item.get("kind", "pr-review") == "pr-review"
+        and queued_state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER
+    ):
+        _defer_triage_budget(
+            number,
+            item,
+            "projection-migration-required",
+            "PR-review queueing deferred until an authoritative projection exists",
+            error=True,
+            ceiling=ceiling,
+        )
+        return None
     if not reserve_triage_budget(number, item, ceiling):
         if not publish_budget_deferral:
             return None
@@ -6996,9 +7089,11 @@ def mark_triage_queued(
         owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
     )
     state = parse_state_block(body) or {}
-    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+    if item.get("kind", "pr-review") == "pr-review":
         import projection_writer
 
+        if state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+            return None
         outcome = projection_writer.commit_preplanned(
             number,
             current,
@@ -7050,9 +7145,11 @@ def publish_triage_budget_deferral(number, item, body):
         remove_labels=remove_labels,
     )
     state = parse_state_block(body) or {}
-    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+    if state.get("kind") == "pr-review":
         import projection_writer
 
+        if state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+            return False
         return projection_writer.commit_preplanned(
             number,
             current,
@@ -7078,9 +7175,11 @@ def reflect_activity(number, item, body, card_updated_at=""):
     if new_body == body:
         return False
     state = parse_state_block(body) or {}
-    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+    if state.get("kind") == "pr-review":
         import projection_writer
 
+        if state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+            return False
         current = get_card(number)
         if not current or current.get("body", "") != body:
             return False
@@ -7125,9 +7224,11 @@ def clear_triage_queued(number, revision):
         owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
     )
     state = parse_state_block(body) or {}
-    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+    if state.get("kind") == "pr-review":
         import projection_writer
 
+        if state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+            return False
         return projection_writer.commit_preplanned(
             number,
             card,
@@ -7349,6 +7450,8 @@ def update_card_triage(
     if not state:
         return False
     kind = state.get("kind")
+    if kind == "pr-review" and state.get(PROJECTION_OWNER_FIELD) != PROJECTION_OWNER:
+        return False
     if require_queued and not triage_queued_for_head(state, revision):
         return False
     durable_result = None
@@ -7634,7 +7737,13 @@ def upsert_card(
         v2_observation = target_contracts.normalize_review_observation(
             item.get("review_observation") or item.get("target_observation")
         )
-        if item.get("kind", "pr-review") == "pr-review" and v2_observation:
+        if item.get("kind", "pr-review") == "pr-review":
+            if not v2_observation:
+                print(
+                    "::warning::defer card creation for %s: current PR observation "
+                    "is unavailable" % marker
+                )
+                return None
             import card_projection
 
             projection = card_projection.plan_card_projection(
@@ -7719,7 +7828,13 @@ def upsert_card(
     v2_observation = target_contracts.normalize_review_observation(
         item.get("review_observation") or item.get("target_observation")
     )
-    if item.get("kind", "pr-review") == "pr-review" and v2_observation:
+    if item.get("kind", "pr-review") == "pr-review":
+        if not v2_observation:
+            print(
+                "::warning::defer card refresh for %s: current PR observation "
+                "is unavailable" % marker
+            )
+            return None if expected_existing is not None else number
         import card_projection
         import projection_writer
 
@@ -8347,9 +8462,26 @@ def main():
         "racy find_card label listing.",
     )
 
+    rr = sub.add_parser("owner-race-recoverable")
+    rr.add_argument("--current-card-file", required=True)
+
     args = ap.parse_args()
 
-    if args.cmd == "triage-target-facts":
+    if args.cmd == "owner-race-recoverable":
+        try:
+            with open(args.current_card_file, encoding="utf-8") as handle:
+                current_card = json.load(handle)
+        except (OSError, UnicodeError, ValueError):
+            current_card = {}
+        trigger_body = os.environ.get("TRIGGER_BODY", "")
+        print(
+            "true"
+            if owner_projection_race_recoverable(
+                trigger_body, current_card.get("body", "")
+            )
+            else "false"
+        )
+    elif args.cmd == "triage-target-facts":
         values = []
         for path in (args.before_file, args.compare_file, args.after_file):
             if os.path.islink(path) or not os.path.isfile(path):

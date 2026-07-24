@@ -76,7 +76,8 @@ permissions:
   issues: write
 
 concurrency:
-  group: wheelhouse-triage-${{ github.event.inputs.issue }}-${{ github.event.inputs.head_sha }}-${{ github.event.inputs.revision }}
+  group: wheelhouse-backstop
+  queue: max
   cancel-in-progress: false
 
 jobs:

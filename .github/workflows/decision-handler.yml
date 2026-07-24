@@ -778,21 +778,31 @@ jobs:
             echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          projection_recovery=false
+          if [ -n "$TRIGGER_UPDATED_AT" ]; then
+            projection_recovery="$(
+              TRIGGER_BODY="$TRIGGER_BODY" \
+                python scripts/render_card.py owner-race-recoverable \
+                  --current-card-file current-card.json
+            )"
+          fi
           if [ -n "$TRIGGER_UPDATED_AT" ] && jq -e \
             --arg trigger_body "$TRIGGER_BODY" \
             --arg trigger_updated_at "$TRIGGER_UPDATED_AT" \
             --argjson trigger_labels "$TRIGGER_LABELS" \
-            --argjson trigger_comments "${TRIGGER_COMMENTS:-0}" '
+            --argjson trigger_comments "${TRIGGER_COMMENTS:-0}" \
+            --arg projection_recovery "$projection_recovery" '
             ([.labels[].name] | sort | unique) as $labels
             | ($trigger_labels | map(.name) | sort | unique) as $trigger_labels
             | ["processing", "wheelhouse:auto-merge-claim"] as $claim_labels
             | ($labels - $claim_labels) as $stable_labels
             | ($trigger_labels - $claim_labels) as $stable_trigger_labels
-            | (.body // "") == $trigger_body
+            | ((.body // "") == $trigger_body or $projection_recovery == "true")
             and ([.comments[]?] | length) == $trigger_comments
             and $stable_labels == $stable_trigger_labels
             and (
               ($labels == $trigger_labels and (.updatedAt // "") == $trigger_updated_at)
+              or $projection_recovery == "true"
               or (
                 ($trigger_labels | index("processing") != null)
                 and ($trigger_labels | index("wheelhouse:auto-merge-claim") != null)

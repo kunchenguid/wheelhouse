@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The authoritative verified PR-review card projection writer.
 
-This module owns complete pending-card title/body/managed-label updates. Action
-locks and target actions remain separate. Every commit rereads by card number,
-defers on owner/handler races, performs one REST issue update, and verifies the
-complete result by number.
+This module owns complete PR-review card title/body/managed-label updates,
+including closed-card preparation before trusted reuse. Action locks and target
+actions remain separate. Every commit rereads by card number, defers on
+owner/handler races, performs one REST issue update, and verifies the complete
+result by number.
 """
 
 import hashlib
@@ -206,12 +207,12 @@ def commit_projection(number, expected, projection):
             queue_effect="none",
         )
         return "deferred"
-    if not current["open"] or current["target"].get("kind") != "pr-review":
+    if current["target"].get("kind") != "pr-review":
         _event(
             "deferred",
             card=int(number),
             cause=projection["cause"],
-            reason="card_not_open_pr_review",
+            reason="card_not_pr_review",
             queue_effect="none",
         )
         return "deferred"
@@ -240,7 +241,7 @@ def commit_projection(number, expected, projection):
         or verified["labels"] != final_labels
         or verified["comments"]["count"] != current["comments"]["count"]
         or verified["author"] != current["author"]
-        or not verified["open"]
+        or verified["open"] != current["open"]
     ):
         _event(
             "verification_failed",

@@ -52,6 +52,7 @@ def observation(
     bucket="merge-ready",
     complete=True,
     source="bulk-scan",
+    observed_at="2026-07-23T12:00:00Z",
 ):
     checks = checks if checks is not None else [
         {"name": "PR must be raised via no-mistakes", "role": "compliance", "outcome": "pass"},
@@ -79,7 +80,7 @@ def observation(
         head_sha=head,
         base_sha="base-main",
         expected_head_sha=head,
-        observed_at="2026-07-23T12:00:00Z",
+        observed_at=observed_at,
         source=source,
         completeness={
             "complete": complete,
@@ -117,7 +118,16 @@ def observation(
     )
 
 
-def candidate(number, head, paths, *, references=None, card_issue=0, repo="firstmate"):
+def candidate(
+    number,
+    head,
+    paths,
+    *,
+    references=None,
+    closing_issues=None,
+    card_issue=0,
+    repo="firstmate",
+):
     return {
         "owner": "owner",
         "repo": repo,
@@ -126,7 +136,7 @@ def candidate(number, head, paths, *, references=None, card_issue=0, repo="first
         "paths_complete": True,
         "paths": sorted(paths),
         "closing_complete": True,
-        "closing_issues": [],
+        "closing_issues": sorted(closing_issues or []),
         "references_complete": True,
         "references": references or [],
         "card_issue": card_issue,
@@ -229,9 +239,9 @@ def test_review_observation_contract_and_v1_compatibility():
     )
     contradictory = copy.deepcopy(obs)
     contradictory["facts"]["tests"] = "none"
-    without_id = dict(contradictory)
-    without_id.pop("observation_id")
-    contradictory["observation_id"] = target_observation._identity("sha256:", without_id)
+    contradictory["observation_id"] = target_observation._review_identity(
+        contradictory
+    )
     check(
         "contract: recomputed identity cannot hide aggregate/check-row contradiction",
         target_observation.normalize_review_observation(contradictory) is None,
@@ -263,6 +273,12 @@ def test_review_observation_contract_and_v1_compatibility():
         and migrated["completeness"]["complete"] is False
         and migrated["completeness"]["configured_checks"] is False
         and migrated["completeness"]["changed_paths"] is False,
+    )
+    later = observation(observed_at="2026-07-23T13:00:00Z")
+    check(
+        "contract: observation identity is semantic across collection times",
+        later["observation_id"] == obs["observation_id"]
+        and later["observed_at"] != obs["observed_at"],
     )
 
 
@@ -308,6 +324,62 @@ def test_decision_context_contract():
         "contract: deterministic sort and context identity round-trip",
         decision_context.normalize_decision_context(context) == context
         and [entry["target"]["number"] for entry in context["candidates"]] == [905, 21],
+    )
+    later_observation = observation(
+        901,
+        "head-901",
+        paths=["src/central.py", "src/queue.py"],
+        observed_at="2026-07-23T13:00:00Z",
+    )
+    later_snapshot = decision_context.repository_snapshot(
+        rows, "2026-07-23T13:00:00Z"
+    )
+    later_context = decision_context.build_decision_context(
+        later_observation, later_snapshot
+    )
+    admitted = assessment_for(obs901, context)
+    readmitted = admission.admit_assessment(
+        {
+            "summary": admitted["summary"],
+            "product_implications": admitted["product_implications"],
+            "recommended_action": admitted["recommendation"]["action"],
+            "recommended_reason": admitted["recommendation"]["reason"],
+            "recommendation_basis": admitted["recommendation"]["basis"],
+        },
+        later_observation,
+        later_context,
+    )
+    check(
+        "contract: collection time alone preserves context and assessment admission",
+        later_snapshot["snapshot_id"]
+        == context["repository_snapshot"]["snapshot_id"]
+        and later_context["context_id"] == context["context_id"]
+        and admission.admitted(readmitted),
+    )
+    cross_repo_rows = [
+        candidate(
+            901,
+            "head-901",
+            ["src/central.py"],
+            references=[{"owner": "owner", "repo": "tasks-axi", "number": 21}],
+            closing_issues=[10],
+        ),
+        candidate(
+            21,
+            "head-21",
+            ["packages/tasks.py"],
+            closing_issues=[10],
+            repo="tasks-axi",
+        ),
+    ]
+    cross_repo = context_for(obs901, cross_repo_rows)
+    cross_repo_relations = {
+        relation["kind"]
+        for relation in cross_repo["candidates"][0]["relations"]
+    }
+    check(
+        "contract: same-closing-issue identity is repository-qualified",
+        cross_repo_relations == {"explicit-reference"},
     )
     truncated = context_for(
         obs901,
@@ -995,6 +1067,62 @@ def test_e2e_07_result_recovery_and_owner_race():
         "E2E-07: owner comment after planning defers every body/label mutation",
         outcome == "deferred" and writes == [],
     )
+    trigger_body = initial["body"].replace(
+        "- [ ] Merge it <!-- opt:merge -->",
+        "- [x] Merge it <!-- opt:merge -->",
+    )
+    current_body = render_card.body_with_activity_reflected(
+        initial["body"],
+        dict(item, updated_at="2026-07-23T13:00:00Z"),
+        card_updated_at="2026-07-23T12:00:00Z",
+    )
+    stale_state = core.parse_state_block(current_body)
+    stale_state["head_sha"] = "new-head"
+    stale_body = render_card._replace_state_block(current_body, stale_state)
+    check(
+        "E2E-07: queued owner checkbox event survives a same-revision projection",
+        render_card.owner_projection_race_recoverable(
+            trigger_body, current_body
+        )
+        and not render_card.owner_projection_race_recoverable(
+            trigger_body, stale_body
+        ),
+    )
+
+
+def test_legacy_pr_mutations_defer_to_authoritative_writer():
+    obs = observation()
+    item = item_for(obs)
+    projection = card_projection.plan_card_projection(item, prior={})
+    state = core.parse_state_block(projection["body"])
+    state.pop(render_card.PROJECTION_OWNER_FIELD)
+    state.pop(render_card.REVIEW_OBSERVATION_FIELD)
+    state.pop(render_card.DECISION_CONTEXT_FIELD)
+    state.pop("decision_context_id")
+    legacy_body = render_card._replace_state_block(projection["body"], state)
+    later_item = dict(item, updated_at="2026-07-23T13:00:00Z")
+    writes = []
+    saved_gh = render_card._gh
+    render_card._gh = lambda *args, **kwargs: writes.append((args, kwargs))
+    try:
+        reflected = render_card.reflect_activity(
+            77,
+            later_item,
+            legacy_body,
+            card_updated_at="2026-07-23T12:00:00Z",
+        )
+        try:
+            render_card._edit_issue_body(77, legacy_body)
+        except RuntimeError:
+            direct_rejected = True
+        else:
+            direct_rejected = False
+    finally:
+        render_card._gh = saved_gh
+    check(
+        "migration: legacy PR mutation defers and direct writer fails closed",
+        reflected is False and direct_rejected and writes == [],
+    )
 
 
 def test_static_workflow_token_and_single_writer_contract():
@@ -1002,6 +1130,9 @@ def test_static_workflow_token_and_single_writer_contract():
         encoding="utf-8"
     )
     triage = (ROOT / ".github" / "workflows" / "triage.yml").read_text(
+        encoding="utf-8"
+    )
+    handler = (ROOT / ".github" / "workflows" / "decision-handler.yml").read_text(
         encoding="utf-8"
     )
     check(
@@ -1018,6 +1149,24 @@ def test_static_workflow_token_and_single_writer_contract():
         and 'observation["compatibility"] != "native-v2"' in triage
         and 'not observation["completeness"]["complete"]' in triage
         and 'context["status"] != "complete"' in triage,
+    )
+    check(
+        "static: triage and handler serialize while owner webhook state is retained",
+        "group: wheelhouse-backstop" in triage
+        and "queue: max" in triage
+        and "group: wheelhouse-backstop" in handler
+        and "body: ${{ github.event.issue.body }}" in handler
+        and "body: ${{ github.event.changes.body.from }}" in handler
+        and "owner-race-recoverable" in handler
+        and '$projection_recovery == "true"' in handler,
+    )
+    render_source = (ROOT / "scripts" / "render_card.py").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "static: PR-review direct mutations have a fail-closed ownership guard",
+        "pr-review projection bypassed the authoritative writer" in render_source
+        and 'cause="migration-current"' in render_source,
     )
     check(
         "static: compatibility reader has one owner and an explicit removal condition",
@@ -1061,6 +1210,7 @@ def main():
         test_e2e_05_card_1620_fixture_is_retained,
         test_e2e_06_competing_work_visible_and_advisory,
         test_e2e_07_result_recovery_and_owner_race,
+        test_legacy_pr_mutations_defer_to_authoritative_writer,
         test_static_workflow_token_and_single_writer_contract,
     ]
     for test in tests:
