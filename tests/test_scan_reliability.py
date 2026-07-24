@@ -1014,7 +1014,7 @@ def _run_build_repo(
         core.gh_rest,
         core.load_config,
         core._sleep,
-        core._list_pr_files,
+        core.immutable_compare_files,
         os.environ.get("OWNER"),
         os.environ.get("GITHUB_REPOSITORY_OWNER"),
     )
@@ -1023,7 +1023,7 @@ def _run_build_repo(
     core.gh_graphql_pr_mergeable = fake_mergeable
     core.gh_rest = fake_rest
     core.load_config = lambda: {"repos": {"demo": repo_cfg}, "maintainer": ""}
-    core._list_pr_files = lambda _slug, _number, expected: (
+    core.immutable_compare_files = lambda _slug, _base, _head, expected: (
         ["src/file-%d.py" % index for index in range(int(expected or 0))],
         True,
         True,
@@ -1046,7 +1046,7 @@ def _run_build_repo(
             core.gh_rest,
             core.load_config,
             core._sleep,
-            core._list_pr_files,
+            core.immutable_compare_files,
             old_owner,
             old_repo_owner,
         ) = saves

@@ -158,7 +158,7 @@ class ProductionTransition:
             "gh_graphql",
             "gh_graphql_pr",
             "_list_action_required_runs",
-            "_list_pr_files",
+            "immutable_compare_files",
             "repo_pr_target_posture",
             "ci_safety",
             "approve_ci",
@@ -170,7 +170,7 @@ class ProductionTransition:
         # path reconcile never calls it, which is what makes the regression fail.
         core.gh_graphql_pr = self.world.graphql_pr
         core._list_action_required_runs = self.world.pending_runs
-        core._list_pr_files = lambda _slug, _number, expected: (
+        core.immutable_compare_files = lambda _slug, _base, _head, expected: (
             ["src/file-%d.py" % index for index in range(int(expected or 0))],
             True,
             True,

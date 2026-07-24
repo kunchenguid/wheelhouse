@@ -544,46 +544,8 @@ def mergeable_clean(pr):
 
 
 def immutable_compare_files(slug, base_sha, head_sha, expected_count):
-    base_sha = str(base_sha or "").strip()
-    head_sha = str(head_sha or "").strip()
-    if not _GIT_OBJECT_ID_RE.fullmatch(base_sha) or not _GIT_OBJECT_ID_RE.fullmatch(
-        head_sha
-    ):
-        return ([], False, False)
-    try:
-        comparison = core.gh_rest(
-            "/repos/%s/compare/%s...%s" % (slug, base_sha, head_sha)
-        )
-    except RuntimeError:
-        return ([], False, False)
-    if not isinstance(comparison, dict) or not isinstance(
-        comparison.get("files"), list
-    ):
-        return ([], False, False)
-    files = []
-    entry_count = 0
-    for changed in comparison["files"]:
-        if not isinstance(changed, dict):
-            return ([], False, False)
-        filename = str(changed.get("filename") or "").strip()
-        if not filename:
-            return ([], False, False)
-        files.append(filename)
-        entry_count += 1
-        if "previous_filename" in changed:
-            previous_filename = changed.get("previous_filename")
-            if not isinstance(previous_filename, str):
-                return ([], False, False)
-            previous_filename = previous_filename.strip()
-            if not previous_filename:
-                return ([], False, False)
-            files.append(previous_filename)
-    try:
-        count = int(expected_count)
-    except (TypeError, ValueError):
-        return ([], False, False)
-    complete = count >= 0 and entry_count == count
-    return (files, True, complete)
+    """Share the observation reducer's exact immutable changed-path read."""
+    return core.immutable_compare_files(slug, base_sha, head_sha, expected_count)
 
 
 # --------------------------------------------------------------------------- #

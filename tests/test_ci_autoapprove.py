@@ -430,6 +430,7 @@ def run_build_repo(
     summary_cache=None,
     pending_heads=(),
     pending_error_heads=(),
+    observation_compare=None,
 ):
     """Drive build_repo with the network-touching dependencies stubbed."""
     calls = {
@@ -502,16 +503,18 @@ def run_build_repo(
         core.approve_ci,
         core.ci_security_summary,
         core._list_action_required_runs,
-        core._list_pr_files,
+        core.immutable_compare_files,
     )
     core.gh_graphql, core.repo_pr_target_posture = fake_graphql, fake_posture
     core.ci_safety, core.approve_ci = fake_ci_safety, fake_approve
     core.ci_security_summary = fake_summary
     core._list_action_required_runs = fake_pending_runs
-    core._list_pr_files = lambda _slug, _number, expected: (
-        ["src/file-%d.py" % index for index in range(int(expected or 0))],
-        True,
-        True,
+    core.immutable_compare_files = observation_compare or (
+        lambda _slug, _base, _head, expected: (
+            ["src/file-%d.py" % index for index in range(int(expected or 0))],
+            True,
+            True,
+        )
     )
     err = io.StringIO()
     try:
@@ -531,7 +534,7 @@ def run_build_repo(
             core.approve_ci,
             core.ci_security_summary,
             core._list_action_required_runs,
-            core._list_pr_files,
+            core.immutable_compare_files,
         ) = save
     calls["stderr"] = err.getvalue()  # so logging-path tests can assert the per-PR line
     return result, items, calls
@@ -839,11 +842,15 @@ def test_truncated_pr_file_list_routes_to_card():
         core.repo_pr_target_posture,
         core.approve_ci,
         core.subprocess.run,
+        core.immutable_compare_files,
     )
     core.gh_graphql = fake_graphql
     core.repo_pr_target_posture = lambda slug: CLEAN_POSTURE
     core.approve_ci = fake_approve
     core.subprocess.run = fake_run
+    core.immutable_compare_files = lambda _slug, _base, _head, _count: (
+        [], False, False
+    )
     try:
         with redirect_stderr(io.StringIO()):
             result, items = core.build_repo(
@@ -862,6 +869,7 @@ def test_truncated_pr_file_list_routes_to_card():
             core.repo_pr_target_posture,
             core.approve_ci,
             core.subprocess.run,
+            core.immutable_compare_files,
         ) = save
 
     check("route: truncated PR file list raises a card", len(items) == 1)
