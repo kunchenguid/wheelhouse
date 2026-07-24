@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,6 +133,7 @@ def candidate(
         "repo": repo,
         "number": number,
         "head_sha": head,
+        "title": "Related fixture %s" % number,
         "paths_complete": True,
         "paths": sorted(paths),
         "closing_complete": True,
@@ -324,6 +325,18 @@ def test_decision_context_contract():
         "contract: deterministic sort and context identity round-trip",
         decision_context.normalize_decision_context(context) == context
         and [entry["target"]["number"] for entry in context["candidates"]] == [905, 21],
+    )
+    legacy_context = copy.deepcopy(context)
+    legacy_context["schema"] = decision_context.CONTEXT_SCHEMA_V1
+    legacy_context.pop("related_candidate_count")
+    for entry in legacy_context["candidates"]:
+        entry.pop("title")
+        entry["card_url"] = ""
+    legacy_context["context_id"] = decision_context._context_identity(legacy_context)
+    check(
+        "contract: persisted v1 context stays readable but cannot feed the v2 model handoff",
+        decision_context.normalize_decision_context(legacy_context) == legacy_context
+        and decision_context.compact_model_context(legacy_context) is None,
     )
     later_observation = observation(
         901,
@@ -564,21 +577,30 @@ def test_scheduled_epoch_contract():
     check("contract: manual run cannot advance the epoch ledger", manual == 0)
 
 
-def test_incomplete_v2_context_denies_spend_without_freezing_card():
+def test_incomplete_v2_context_allows_advisory_spend_without_authority():
     obs = observation()
     context = decision_context.unavailable_context(obs, "snapshot.unavailable")
     item = item_for(obs, context)
     labels = [{"name": "needs-decision"}]
     check(
-        "contract: unavailable v2 context denies hold/triage spend",
-        render_card.should_hold(item, True) is False
-        and render_card.should_auto_triage(item, {}, labels, True) is False,
+        "contract: bound unavailable context permits bounded advisory triage",
+        render_card.should_hold(item, True) is True,
     )
-    projection = card_projection.plan_card_projection(item, prior={})
+    projection = card_projection.plan_card_projection(
+        item, prior={}, held=True, has_token=True
+    )
+    state = core.parse_state_block(projection["body"])
     check(
-        "contract: unavailable advisory context still produces normal maintenance controls",
+        "contract: unavailable advisory context creates a held card eligible once",
         "Related-work context is **unavailable**" in projection["body"]
-        and "- [ ] Merge it" in projection["body"],
+        and "- [ ] Merge it" not in projection["body"]
+        and render_card.should_auto_triage(item, state, labels, True),
+    )
+    unavailable_assessment = assessment_for(obs, context)
+    check(
+        "contract: unavailable context still cannot grant assessment authority",
+        unavailable_assessment["admission"]["status"] == "unavailable"
+        and not admission.admitted(unavailable_assessment),
     )
 
     complete_context = context_for(obs)
@@ -617,6 +639,230 @@ def test_incomplete_v2_context_denies_spend_without_freezing_card():
     )
 
 
+def test_triage_suppression_is_visible_and_fail_closed():
+    obs = observation()
+    context = context_for(obs)
+    disabled = item_for(obs, context)
+    disabled["auto_triage"] = False
+    disabled_projection = card_projection.plan_card_projection(
+        disabled, prior={}, has_token=True
+    )
+    missing_context = item_for(obs, context)
+    missing_context.pop("decision_context")
+    missing_projection = card_projection.plan_card_projection(
+        missing_context, prior={}, has_token=True
+    )
+    issue_body = render_card.render(
+        {
+            "repo": "firstmate",
+            "number": 77,
+            "kind": "issue-triage",
+            "head_sha": "",
+            "updated_at": "2026-07-23T12:00:00Z",
+            "title": "Issue fixture",
+            "auto_triage_issues": True,
+        },
+        has_token=False,
+    )["body"]
+    check(
+        "triage suppression: policy and missing binding are captain-visible",
+        "repository policy disables it" in disabled_projection["body"]
+        and "related-work context is missing, malformed" in missing_projection["body"]
+        and not render_card.should_hold(missing_context, True),
+    )
+    check(
+        "triage suppression: token absence is visible for issue triage too",
+        "model credential is not configured" in issue_body,
+    )
+
+
+def _triage_payload(obs, context, *, context_id=None):
+    return {
+        "summary": "Bounded advisory review is visible.",
+        "product_implications": "Action authority remains independently admitted.",
+        "recommended_action": "merge",
+        "recommended_reason": "Review the exact current revision.",
+        "evidence": "target.txt: 'fixture evidence'",
+        "recommendation_basis": {
+            "kind": "other",
+            "observation_id": obs["observation_id"],
+            "context_id": context_id or context["context_id"],
+            "check_names": [],
+        },
+    }
+
+
+def _scan_context_from_observed(obs, rows):
+    result = {
+        "name": "firstmate",
+        "ok": True,
+        "open_pr_numbers": [row["number"] for row in rows],
+        "open_issue_numbers": [],
+        "decision_context_candidates": copy.deepcopy(rows),
+        "decision_reference_candidates": [],
+        "truncated": False,
+        "warning": "",
+    }
+    item = item_for(obs, context_for(obs))
+    item.pop("decision_context", None)
+    saved_owner = core.get_owner
+    saved_config = core.load_config
+    saved_build = core.build_repo
+    core.get_owner = lambda: "owner"
+    core.load_config = lambda: {
+        "repos": {"firstmate": {"name": "firstmate"}},
+        "card_issues": False,
+        "auto_approve_ci": True,
+        "auto_merge": False,
+        "auto_triage": True,
+        "auto_triage_issues": True,
+        "triage_attempt_cap_per_revision": 2,
+        "triage_daily_ceiling": 1200,
+        "pending_contributor_cleanup": False,
+        "pending_contributor_cleanup_days": 14,
+        "pending_contributor_reminder_days": 10,
+        "pending_contributor_cleanup_targets": ["pr"],
+    }
+    core.build_repo = lambda *_args, **_kwargs: (copy.deepcopy(result), [copy.deepcopy(item)])
+    stdout = io.StringIO()
+    try:
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            core.cmd_scan()
+    finally:
+        core.get_owner = saved_owner
+        core.load_config = saved_config
+        core.build_repo = saved_build
+    return json.loads(stdout.getvalue())["items"][0]
+
+
+def test_card_1663_high_volume_context_queues_once():
+    obs = observation(200, "head-200", paths=["src/shared.py"])
+    enriched = [
+        {
+            "number": number,
+            "head_sha": "head-%s" % number,
+            "title": "Related fixture %s" % number,
+            "changed_paths": {
+                "complete": True,
+                "paths_truncated": False,
+                "paths": (
+                    ["src/shared.py"]
+                    if number in {200, 220, 221, 222}
+                    else ["src/other-%s.py" % number]
+                ),
+            },
+            "closes": [],
+            "explicit_references_complete": True,
+            "explicit_references": [],
+        }
+        for number in range(1, 238)
+    ]
+    rows = core._decision_context_candidate_rows(
+        "owner", "firstmate", enriched, True
+    )
+    item = _scan_context_from_observed(obs, rows)
+    # The fixture uses a human-readable base marker rather than a production
+    # hex SHA; omit it from the queue freshness probe so only head caching is
+    # under test here.
+    item["base_sha"] = ""
+    context = item["decision_context"]
+    compact = decision_context.compact_model_context(context)
+    held = card_projection.plan_card_projection(
+        item, prior={}, held=render_card.should_hold(item, True), has_token=True
+    )
+    state = core.parse_state_block(held["body"])
+    labels = [{"name": label} for label in held["managed_labels"]]
+    eligible_once = render_card.should_auto_triage(item, state, labels, True)
+    queued_body = render_card.body_with_triage_queued(held["body"], item)
+    queued_state = core.parse_state_block(queued_body)
+    queued_again = render_card.should_auto_triage(item, queued_state, labels, True)
+    stale_result = _triage_payload(
+        obs, context, context_id="sha256:" + "0" * 64
+    )
+    visible = render_card.body_with_triage_result(
+        queued_body, obs["revision"]["head_sha"], triage=stale_result
+    )
+    visible_state = core.parse_state_block(visible)
+    check(
+        "card-1663: 237 observed PRs yield all three deterministic relations",
+        context["repository_snapshot"]["candidate_count"] == 237
+        and context["status"] == "complete"
+        and [row["target"]["number"] for row in context["candidates"]]
+        == [220, 221, 222],
+    )
+    check(
+        "card-1663: one compact title/URL owner feeds model-visible related work",
+        compact["total_matches"] == 3
+        and compact["shown_matches"] == 3
+        and all(set(row) == {"title", "url"} for row in compact["items"])
+        and all(row["url"].startswith("https://github.com/") for row in compact["items"]),
+    )
+    check(
+        "card-1663: held lifecycle queues exactly once for the current head",
+        state.get("held") is True
+        and eligible_once
+        and queued_state["triage_attempts"]["count"] == 1
+        and not queued_again,
+    )
+    check(
+        "card-1663: visible advisory result cannot bypass independent binding admission",
+        "### Triage" in visible
+        and visible_state["triage_assessment"]["admission"]["status"] == "stale"
+        and "<!-- opt:accept-recommendation -->" not in visible,
+    )
+
+
+def test_related_result_top_ten_stays_advisory():
+    obs = observation(1, "head-1", paths=["src/shared.py"])
+    rows = [
+        candidate(number, "head-%s" % number, ["src/shared.py"])
+        for number in range(1, 14)
+    ]
+    context = context_for(obs, rows)
+    item = item_for(obs, context)
+    compact = decision_context.compact_model_context(context)
+    held = card_projection.plan_card_projection(
+        item, prior={}, held=True, has_token=True
+    )
+    queued = render_card.body_with_triage_queued(held["body"], item)
+    visible = render_card.body_with_triage_result(
+        queued,
+        obs["revision"]["head_sha"],
+        triage=_triage_payload(obs, context),
+    )
+    state = core.parse_state_block(visible)
+    facts, _behavior_class = auto_merge.fresh_verdict_facts(
+        state, obs["revision"]["head_sha"]
+    )
+    check(
+        "related cap: deterministic top 10 and honest total are rendered",
+        context["status"] == "truncated"
+        and context["reason"] == "related-candidate-bound"
+        and context["related_candidate_count"] == 12
+        and [row["target"]["number"] for row in context["candidates"]]
+        == list(range(2, 12))
+        and "Showing **10 of 12**" in visible,
+    )
+    check(
+        "related cap: compact model context contains no identities, paths, bodies, or diffs",
+        compact["total_matches"] == 12
+        and compact["shown_matches"] == 10
+        and all(set(row) == {"title", "url"} for row in compact["items"]),
+    )
+    check(
+        "related cap: visible triage remains unable to create Accept or satisfy G6",
+        "### Triage" in visible
+        and state["triage_assessment"]["admission"]
+        == {
+            "schema": admission.ADMISSION_SCHEMA,
+            "status": "unavailable",
+            "reason": "context.truncated",
+        }
+        and "<!-- opt:accept-recommendation -->" not in visible
+        and facts["g6_triage_success"]["status"] == criteria.STATUS_UNMET,
+    )
+
+
 def test_projection_contract_maxima_fit_one_issue_update():
     checks = [
         {
@@ -632,15 +878,16 @@ def test_projection_contract_maxima_fit_one_issue_update():
     ]
     obs = observation(checks=checks, paths=paths)
     rows = [candidate(901, "head-901", paths, card_issue=1901)]
-    for index in range(7):
+    for index in range(decision_context.MAX_CONTEXT_CANDIDATES):
         row = candidate(
             910 + index,
             "head-%s" % (910 + index),
             paths[:3],
             card_issue=1910 + index,
         )
-        row["url"] = "https://github.com/" + "u" * 470
-        row["card_url"] = "https://github.com/" + "c" * 470
+        row["title"] = "t" * decision_context.MAX_CANDIDATE_TITLE
+        row["url"] = "https://github.com/" + "u" * 230
+        row["card_url"] = "https://github.com/" + "c" * 230
         rows.append(row)
     context = context_for(obs, rows)
     assessment = admission.admit_assessment(
@@ -931,8 +1178,8 @@ def test_e2e_06_competing_work_visible_and_advisory():
         "owner/firstmate#905" in body901
         and "owner/firstmate#901" in body905
         and "owner/tasks-axi#21" in body901
-        and "[card #1905]" in body901
-        and "[card #1901]" in body905,
+        and "(card #1905)" in body901
+        and "(card #1901)" in body905,
     )
     acting_source = inspect.getsource(auto_merge.evaluate_candidate)
     final_guard_source = inspect.getsource(auto_merge.final_auto_merge_guard)
@@ -1146,9 +1393,9 @@ def test_static_workflow_token_and_single_writer_contract():
         "FLEET_TOKEN" not in (ROOT / "scripts" / "projection_writer.py").read_text(encoding="utf-8")
         and "assessment_record.persist" in (ROOT / "scripts" / "render_card.py").read_text(encoding="utf-8")
         and "recommendation_basis" in triage
-        and 'observation["compatibility"] != "native-v2"' in triage
-        and 'not observation["completeness"]["complete"]' in triage
-        and 'context["status"] != "complete"' in triage,
+        and "render_card.review_inputs_complete(review_item)" in triage
+        and "decision_context.compact_model_context(context)" in triage
+        and triage.count('"decision_context": context') == 1,
     )
     check(
         "static: triage and handler serialize while owner webhook state is retained",
@@ -1200,7 +1447,10 @@ def main():
         test_decision_context_contract,
         test_assessment_admission_and_class_tristate,
         test_scheduled_epoch_contract,
-        test_incomplete_v2_context_denies_spend_without_freezing_card,
+        test_incomplete_v2_context_allows_advisory_spend_without_authority,
+        test_triage_suppression_is_visible_and_fail_closed,
+        test_card_1663_high_volume_context_queues_once,
+        test_related_result_top_ten_stays_advisory,
         test_projection_contract_maxima_fit_one_issue_update,
         test_projection_golden_and_purity,
         test_e2e_01_denied_preclaim_then_refresh_once,

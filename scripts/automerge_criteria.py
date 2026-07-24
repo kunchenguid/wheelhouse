@@ -34,7 +34,7 @@ CRITERIA_SPECS = (
     ("g4_clean", "G4 - merge state clean"),
     ("g5_file_limit", "G5 - changed-file limit"),
     ("g5_line_limit", "G5 - changed-line limit"),
-    ("g6_triage_available", "G6 - automatic triage available"),
+    ("g6_triage_available", "G6 - automatic triage credential configured"),
     ("g6_triage_success", "G6 - successful triage for current head"),
     ("g6_merge_recommendation", "G6 - top-level recommendation is merge"),
     ("g6_behavior_class", "G6 - eligible behavior class"),

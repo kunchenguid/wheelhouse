@@ -1606,14 +1606,20 @@ def test_lifecycle_present_absent_present_reuses_and_clears():
 
 
 def test_failed_present_reset_cannot_authorize_later_close():
-    item = work_item()
+    item = work_item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a",
+        url="https://github.com/kunchenguid/wheelhouse/issues/42",
+    )
     lifecycle = ReconcileLifecycle(item)
-    absent = scan_payload(items=[])
+    absent = scan_payload(items=[], open_pr_numbers=[], open_issue_numbers=[42])
     lifecycle.run(absent)
     # The present run can attempt a full projection and then a dedicated
     # lifecycle clear. Fail both writes to preserve the stale first epoch.
     lifecycle.fail_body_write_attempts = {2, 3}
-    lifecycle.run(scan_payload(items=[item]))
+    lifecycle.run(
+        scan_payload(items=[item], open_pr_numbers=[], open_issue_numbers=[42])
+    )
     check(
         "reset failure: stale first absence remains tied to its old run",
         reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1
@@ -1804,17 +1810,23 @@ def test_lifecycle_kind_transition_reuses_and_resets():
         "transition: old kind has one absence",
         reconcile.render_card.reconcile_absence_count(lifecycle.issue["body"]) == 1,
     )
-    returned = work_item(kind="pr-review", bucket="review-needed")
+    returned = work_item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a",
+        url="https://github.com/kunchenguid/wheelhouse/issues/42",
+    )
     writes_before_return = lifecycle.body_writes
-    lifecycle.run(scan_payload(items=[returned]))
+    lifecycle.run(
+        scan_payload(items=[returned], open_pr_numbers=[], open_issue_numbers=[42])
+    )
     state = reconcile.core.parse_state_block(lifecycle.issue["body"])
     label_names = reconcile._label_names(lifecycle.issue["labels"])
     check(
         "transition: same card refreshes to new kind",
         lifecycle.issue["number"] == 7
         and lifecycle.issue["state"] == "OPEN"
-        and state.get("kind") == "pr-review"
-        and "kind:pr-review" in label_names
+        and state.get("kind") == "issue-triage"
+        and "kind:issue-triage" in label_names
         and "kind:ci-approval" not in label_names,
     )
     check(

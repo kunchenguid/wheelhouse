@@ -11,15 +11,19 @@ import re
 
 import target_observation as observations
 
-CONTEXT_SCHEMA = "wheelhouse.decision-context/v1"
+CONTEXT_SCHEMA_V1 = "wheelhouse.decision-context/v1"
+CONTEXT_SCHEMA = "wheelhouse.decision-context/v2"
 CONTEXT_STATUSES = frozenset({"complete", "truncated", "unavailable"})
 RELATION_KINDS = frozenset(
     {"same-closing-issue", "explicit-reference", "exact-shared-path"}
 )
-MAX_CONTEXT_CANDIDATES = 8
+MAX_CONTEXT_CANDIDATES = 10
+LEGACY_MAX_CONTEXT_CANDIDATES = 8
 MAX_RELATIONS_PER_CANDIDATE = 3
 MAX_SHARED_PATHS = 3
 MAX_SHARED_ISSUES = 3
+MAX_CANDIDATE_TITLE = 100
+MAX_GITHUB_URL = 250
 
 
 def _canonical(value):
@@ -69,15 +73,25 @@ def _safe_head(value):
     return isinstance(value, str) and 1 <= len(value) <= 100
 
 
+def _normalized_title(value):
+    if not isinstance(value, str):
+        return None
+    title = re.sub(r"\s+", " ", value).strip()
+    if not title:
+        return None
+    return title[:MAX_CANDIDATE_TITLE]
+
+
 def _safe_url(value):
-    return isinstance(value, str) and len(value) <= 500 and (
+    return isinstance(value, str) and len(value) <= MAX_GITHUB_URL and (
         not value or value.startswith("https://github.com/")
     )
 
 
 def _candidate_source(value):
     key = _target_key(value)
-    if key is None or not _safe_head(value.get("head_sha")):
+    title = _normalized_title(value.get("title") if isinstance(value, dict) else None)
+    if key is None or not _safe_head(value.get("head_sha")) or title is None:
         return None
     paths = value.get("paths")
     closing = value.get("closing_issues")
@@ -109,13 +123,14 @@ def _candidate_source(value):
         return None
     url = value.get("url", "")
     card_url = value.get("card_url", "")
-    if not _safe_url(url) or not _safe_url(card_url):
+    if not _safe_url(url) or not url or not _safe_url(card_url):
         return None
     return {
         "owner": key[0],
         "repo": key[1],
         "number": key[2],
         "head_sha": value["head_sha"],
+        "title": title,
         "paths_complete": value["paths_complete"],
         "paths": list(paths),
         "closing_complete": value["closing_complete"],
@@ -185,7 +200,7 @@ def _relation(kind, *, paths=None, issues=None, source=""):
 
 
 def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTEXT_CANDIDATES):
-    """Build one deterministic context from a complete repository snapshot."""
+    """Match the full observed repository snapshot, then bound related results."""
     observation = observations.normalize_review_observation(target_observation)
     if observation is None:
         return unavailable_context(target_observation, "observation.invalid")
@@ -210,7 +225,12 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
     )
     if rebuilt is None or rebuilt["snapshot_id"] != snapshot["snapshot_id"]:
         return unavailable_context(observation, "snapshot.identity_mismatch")
-    if isinstance(candidate_cap, bool) or not isinstance(candidate_cap, int) or candidate_cap < 1 or candidate_cap > 100:
+    if (
+        isinstance(candidate_cap, bool)
+        or not isinstance(candidate_cap, int)
+        or candidate_cap < 1
+        or candidate_cap > MAX_CONTEXT_CANDIDATES
+    ):
         return unavailable_context(observation, "context.bound_invalid")
 
     target_key = (
@@ -229,15 +249,13 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
     if target is None or target["head_sha"] != observation["revision"]["head_sha"]:
         return unavailable_context(observation, "target.snapshot_mismatch", rebuilt)
 
-    bounded = rebuilt["candidates"][:candidate_cap]
-    truncated = (
-        not rebuilt["complete"]
-        or len(rebuilt["candidates"]) > candidate_cap
-    )
     related = []
     comparison_incomplete = False
     relation_truncated = False
-    for candidate in bounded:
+    # The repository scan already paid to observe these rows. Match every row
+    # before applying the small display/model-result cap so repository volume
+    # cannot crowd out a deterministic relation.
+    for candidate in rebuilt["candidates"]:
         key = (candidate["owner"], candidate["repo"], candidate["number"])
         if key == target_key:
             continue
@@ -255,10 +273,7 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
                 if len(common_issues) > MAX_SHARED_ISSUES:
                     relation_truncated = True
                 relations.append(_relation("same-closing-issue", issues=common_issues))
-        elif (
-            target["owner"] == candidate["owner"]
-            and target["repo"] == candidate["repo"]
-        ):
+        elif target["owner"] == candidate["owner"] and target["repo"] == candidate["repo"]:
             comparison_incomplete = True
         if target["references_complete"]:
             if {
@@ -267,10 +282,7 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
                 "number": candidate["number"],
             } in target["references"]:
                 relations.append(
-                    _relation(
-                        "explicit-reference",
-                        source="target-metadata",
-                    )
+                    _relation("explicit-reference", source="target-metadata")
                 )
         else:
             comparison_incomplete = True
@@ -292,9 +304,9 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
                         "number": candidate["number"],
                         "head_sha": candidate["head_sha"],
                     },
+                    "title": candidate["title"],
                     "url": candidate["url"],
                     "card_issue": candidate["card_issue"],
-                    "card_url": candidate["card_url"],
                     "relations": relations[:MAX_RELATIONS_PER_CANDIDATE],
                 }
             )
@@ -303,17 +315,22 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
             row["target"]["owner"], row["target"]["repo"], row["target"]["number"]
         )
     )
+    related_candidate_count = len(related)
+    result_truncated = related_candidate_count > candidate_cap
     status = (
         "truncated"
-        if truncated or comparison_incomplete or relation_truncated
+        if not rebuilt["complete"]
+        or result_truncated
+        or comparison_incomplete
+        or relation_truncated
         else "complete"
     )
     reason = (
         rebuilt["reason"]
         if not rebuilt["complete"]
         else (
-            "candidate_bound"
-            if len(rebuilt["candidates"]) > candidate_cap
+            "related-candidate-bound"
+            if result_truncated
             else (
                 "comparison_incomplete"
                 if comparison_incomplete
@@ -339,7 +356,8 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
         },
         "status": status,
         "reason": reason,
-        "candidates": related,
+        "related_candidate_count": related_candidate_count,
+        "candidates": related[:candidate_cap],
     }
     payload["context_id"] = _context_identity(payload)
     normalized = normalize_decision_context(payload)
@@ -376,6 +394,7 @@ def unavailable_context(observation, reason, snapshot=None):
         },
         "status": "unavailable",
         "reason": str(reason or "context.unavailable")[:120],
+        "related_candidate_count": 0,
         "candidates": [],
     }
     payload["context_id"] = _context_identity(payload)
@@ -383,21 +402,51 @@ def unavailable_context(observation, reason, snapshot=None):
 
 
 def normalize_decision_context(value):
-    if not isinstance(value, dict) or set(value) != {
-        "schema", "context_id", "target", "repository_snapshot", "status", "reason", "candidates"
-    }:
+    if not isinstance(value, dict):
         return None
-    if value.get("schema") != CONTEXT_SCHEMA or value.get("status") not in CONTEXT_STATUSES:
+    schema = value.get("schema")
+    if schema == CONTEXT_SCHEMA:
+        expected_fields = {
+            "schema", "context_id", "target", "repository_snapshot", "status",
+            "reason", "related_candidate_count", "candidates",
+        }
+        candidate_fields = {
+            "target", "title", "url", "card_issue", "relations"
+        }
+        candidate_limit = MAX_CONTEXT_CANDIDATES
+    elif schema == CONTEXT_SCHEMA_V1:
+        # Persisted v1 cards remain readable until normal maintenance projects
+        # v2. V1 is never a source for the compact title/URL model handoff.
+        expected_fields = {
+            "schema", "context_id", "target", "repository_snapshot", "status",
+            "reason", "candidates",
+        }
+        candidate_fields = {
+            "target", "url", "card_issue", "card_url", "relations"
+        }
+        candidate_limit = LEGACY_MAX_CONTEXT_CANDIDATES
+    else:
+        return None
+    if set(value) != expected_fields or value.get("status") not in CONTEXT_STATUSES:
         return None
     target = value.get("target")
-    if _target_key(target) is None or not _safe_head(target.get("head_sha")) or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(target.get("observation_id") or "")):
+    if (
+        _target_key(target) is None
+        or not _safe_head(target.get("head_sha"))
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(target.get("observation_id") or "")
+        )
+    ):
         return None
     snapshot = value.get("repository_snapshot")
     count = snapshot.get("candidate_count") if isinstance(snapshot, dict) else None
     if (
         not isinstance(snapshot, dict)
-        or set(snapshot) != {"snapshot_id", "observed_at", "candidate_count", "complete", "reason"}
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(snapshot.get("snapshot_id") or ""))
+        or set(snapshot)
+        != {"snapshot_id", "observed_at", "candidate_count", "complete", "reason"}
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(snapshot.get("snapshot_id") or "")
+        )
         or observations._timestamp(snapshot.get("observed_at")) is None
         or not isinstance(snapshot.get("complete"), bool)
         or not isinstance(snapshot.get("reason"), str)
@@ -411,39 +460,76 @@ def normalize_decision_context(value):
         return None
     candidates = value.get("candidates")
     status = value["status"]
+    related_count = (
+        value.get("related_candidate_count")
+        if schema == CONTEXT_SCHEMA
+        else len(candidates) if isinstance(candidates, list) else None
+    )
     if (
         not isinstance(candidates, list)
-        or len(candidates) > MAX_CONTEXT_CANDIDATES
-        or count < len(candidates)
-        or (status == "complete" and (not snapshot["complete"] or value["reason"]))
+        or len(candidates) > candidate_limit
+        or isinstance(related_count, bool)
+        or not isinstance(related_count, int)
+        or related_count < len(candidates)
+        or count < related_count
+        or (
+            status == "complete"
+            and (
+                not snapshot["complete"]
+                or value["reason"]
+                or related_count != len(candidates)
+            )
+        )
         or (status == "truncated" and not value["reason"])
         or (
             status == "unavailable"
-            and (snapshot["complete"] or not value["reason"] or candidates)
+            and (
+                snapshot["complete"]
+                or not value["reason"]
+                or candidates
+                or related_count
+            )
         )
     ):
         return None
     normalized_candidates = []
     seen = set()
     for candidate in candidates:
-        if not isinstance(candidate, dict) or set(candidate) != {"target", "url", "card_issue", "card_url", "relations"}:
+        if not isinstance(candidate, dict) or set(candidate) != candidate_fields:
             return None
         ctarget = candidate.get("target")
         key = _target_key(ctarget)
         if key is None or key in seen or not _safe_head(ctarget.get("head_sha")):
             return None
         seen.add(key)
-        if not _safe_url(candidate.get("url")) or not _safe_url(candidate.get("card_url")):
+        title = candidate.get("title") if schema == CONTEXT_SCHEMA else None
+        if schema == CONTEXT_SCHEMA and _normalized_title(title) != title:
+            return None
+        if (
+            not _safe_url(candidate.get("url"))
+            or (schema == CONTEXT_SCHEMA and not candidate.get("url"))
+            or (
+                schema == CONTEXT_SCHEMA_V1
+                and not _safe_url(candidate.get("card_url"))
+            )
+        ):
             return None
         card_issue = candidate.get("card_issue")
         if isinstance(card_issue, bool) or not isinstance(card_issue, int) or card_issue < 0:
             return None
         relations = candidate.get("relations")
-        if not isinstance(relations, list) or not relations or len(relations) > MAX_RELATIONS_PER_CANDIDATE:
+        if (
+            not isinstance(relations, list)
+            or not relations
+            or len(relations) > MAX_RELATIONS_PER_CANDIDATE
+        ):
             return None
         normalized_relations = []
         for relation in relations:
-            if not isinstance(relation, dict) or set(relation) != {"kind", "paths", "issues", "source"}:
+            if (
+                not isinstance(relation, dict)
+                or set(relation) != {"kind", "paths", "issues", "source"}
+            ):
                 return None
             kind = relation.get("kind")
             paths = relation.get("paths")
@@ -458,7 +544,12 @@ def normalize_decision_context(value):
                 or not isinstance(issues, list)
                 or len(issues) > MAX_SHARED_ISSUES
                 or issues != sorted(set(issues))
-                or any(isinstance(number, bool) or not isinstance(number, int) or number < 1 for number in issues)
+                or any(
+                    isinstance(number, bool)
+                    or not isinstance(number, int)
+                    or number < 1
+                    for number in issues
+                )
                 or not isinstance(source, str)
                 or len(source) > 120
                 or (kind == "exact-shared-path" and (not paths or issues or source))
@@ -476,10 +567,38 @@ def normalize_decision_context(value):
         if relations != normalized_relations:
             return None
         normalized_candidates.append({**candidate, "relations": normalized_relations})
-    normalized_candidates.sort(key=lambda row: (row["target"]["owner"], row["target"]["repo"], row["target"]["number"]))
+    normalized_candidates.sort(
+        key=lambda row: (
+            row["target"]["owner"],
+            row["target"]["repo"],
+            row["target"]["number"],
+        )
+    )
     if candidates != normalized_candidates:
         return None
     claimed = value.get("context_id")
     if claimed != _context_identity(value):
         return None
     return json.loads(_canonical(value))
+
+
+def compact_model_context(value):
+    """Return the sole model-visible related-work projection.
+
+    Immutable identities and relation evidence remain in DecisionContext for
+    deterministic binding and card rendering. The model receives only each
+    bounded related title and full URL, plus honest status/count metadata.
+    """
+    context = normalize_decision_context(value)
+    if context is None or context.get("schema") != CONTEXT_SCHEMA:
+        return None
+    return {
+        "status": context["status"],
+        "reason": context["reason"],
+        "total_matches": context["related_candidate_count"],
+        "shown_matches": len(context["candidates"]),
+        "items": [
+            {"title": candidate["title"], "url": candidate["url"]}
+            for candidate in context["candidates"]
+        ],
+    }

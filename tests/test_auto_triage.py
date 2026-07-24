@@ -23,6 +23,7 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import build_item  # noqa: E402
+import card_projection  # noqa: E402
 import reconcile  # noqa: E402
 import render_card as rc  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
@@ -103,6 +104,84 @@ def item(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def option_b_item(**overrides):
+    value = item(**overrides)
+    head = value["head_sha"]
+    base_sha = str(value.get("base_sha") or "b" * 40)
+    value["base_sha"] = base_sha
+    observation = rc.target_contracts.make_observation(
+        "o",
+        value["repo"],
+        int(value["number"]),
+        head_sha=head,
+        base_sha=base_sha,
+        expected_head_sha=head,
+        observed_at="2026-07-23T12:00:00Z",
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": value["title"],
+            "author": value["author"],
+            "updated_at": "2026-07-23T11:59:59Z",
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "fixture",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": value["comp"],
+            "tests": value["tests"],
+            "bucket": value["bucket"],
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "compliance", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=rc.target_contracts.changed_path_facts(
+            ["src/example.py"], complete=True
+        ),
+    )
+    snapshot = rc.context_contracts.repository_snapshot(
+        [
+            {
+                "owner": "o",
+                "repo": value["repo"],
+                "number": int(value["number"]),
+                "head_sha": head,
+                "title": value["title"],
+                "paths_complete": True,
+                "paths": ["src/example.py"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 0,
+                "url": value["url"],
+                "card_url": "",
+            }
+        ],
+        "2026-07-23T12:00:00Z",
+    )
+    value["target_observation"] = observation
+    value["decision_context"] = rc.context_contracts.build_decision_context(
+        observation, snapshot
+    )
+    return value
 
 
 def item_issue(**overrides):
@@ -1656,7 +1735,7 @@ def test_queue_triage_command_warns_on_dispatch_failure():
     with no visible trace: the CLI now fails the card open immediately (via
     `update_card_triage`, same as a HELD card's fail-open publish) instead of
     only logging a warning - see AGENTS.md "Held cards"."""
-    it = item(auto_triage=True)
+    it = item_issue(auto_triage_issues=True)
     current = card_row(it)
 
     def fake_find(marker):
@@ -1750,7 +1829,7 @@ def test_queue_triage_command_warns_on_dispatch_failure():
 
 
 def test_queue_triage_command_clears_cache_when_publish_fails():
-    it = item(auto_triage=True)
+    it = item_issue(auto_triage_issues=True)
     current = card_row(it)
 
     def fake_find(marker):
@@ -1847,7 +1926,7 @@ def test_queue_triage_command_clears_cache_when_publish_fails():
 
 
 def test_reconcile_dispatch_failure_publish_failure_clears_cache():
-    it = item(auto_triage=True)
+    it = item_issue(auto_triage_issues=True)
     row = card_row(it)
     row["state"] = core.parse_state_block(row["body"])
 
@@ -2338,9 +2417,9 @@ def test_triage_workflow_issue_path_isolation():
         inputs.get("revision", {}).get("required") is False,
     )
     check(
-        "workflow: concurrency key includes both head_sha and revision",
-        "github.event.inputs.head_sha" in doc["concurrency"]["group"]
-        and "github.event.inputs.revision" in doc["concurrency"]["group"],
+        "workflow: triage shares the serialized Wheelhouse maintenance group",
+        doc["concurrency"]["group"] == "wheelhouse-backstop"
+        and doc["concurrency"].get("queue") == "max",
     )
 
     check("workflow: resolve gate exists", resolve is not None)
@@ -3016,7 +3095,7 @@ print(render_card.HOLD_LABEL)
 
 
 def test_triage_recover_cli_publishes_a_stuck_held_card():
-    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+    for kind, it in (("issue-triage", item_issue()),):
         revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
         held_card = rc.render(it, held=True)
         held_card["body"] = rc.body_with_triage_queued(held_card["body"], it)
@@ -3086,8 +3165,8 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
 
 
 def test_triage_recover_cli_is_noop_when_not_stuck():
-    it = item()
-    revision = it["head_sha"]
+    it = item_issue()
+    revision = it["updated_at"]
 
     # Case 1: card was never held (already published) -> no-op.
     published = rc.render(it)
@@ -3152,8 +3231,9 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
     )
 
     # Case 3: held, queued, but for a DIFFERENT (superseded) revision -> no-op.
-    held_stale = rc.render(item(head_sha="newer-revision"), held=True)
-    held_stale["body"] = rc.body_with_triage_queued(held_stale["body"], it)
+    newer = item_issue(updated_at="2024-06-01T00:00:00Z")
+    held_stale = rc.render(newer, held=True)
+    held_stale["body"] = rc.body_with_triage_queued(held_stale["body"], newer)
     stale_revision = {
         "number": 7,
         "body": held_stale["body"],
@@ -3181,7 +3261,7 @@ def test_triage_recover_cli_is_noop_when_not_stuck():
                 "--issue",
                 "7",
                 "--kind",
-                "pr-review",
+                "issue-triage",
                 "--revision",
                 revision,
             ]
@@ -3333,11 +3413,21 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
     )
     rc.lookup_card_lifecycle = lambda item_: {"open": None, "reusable": None}
     scenarios = [
-        ("pr-review token+config on -> held", item(auto_triage=True), True, True),
-        ("pr-review no token -> unheld", item(auto_triage=True), False, False),
+        (
+            "pr-review token+config on -> held",
+            option_b_item(auto_triage=True),
+            True,
+            True,
+        ),
+        (
+            "pr-review no token -> unheld",
+            option_b_item(auto_triage=True),
+            False,
+            False,
+        ),
         (
             "pr-review config off -> unheld",
-            item(auto_triage=False),
+            option_b_item(auto_triage=False),
             True,
             False,
         ),
@@ -3377,12 +3467,28 @@ def test_upsert_card_creates_held_only_when_triage_would_be_queued():
 
 
 def test_upsert_card_refresh_preserves_held_when_still_eligible():
+    pr_base = option_b_item(auto_triage=True, head_sha="oldsha")
+    pr_changed = option_b_item(auto_triage=True, head_sha="newsha999")
+    pr_held = card_projection.plan_card_projection(
+        pr_base, prior={}, held=True, has_token=True
+    )
+    pr_refreshed = card_projection.plan_card_projection(
+        pr_changed,
+        prior={
+            "title": pr_held["title"],
+            "body": pr_held["body"],
+            "labels": pr_held["managed_labels"],
+        },
+        held=True,
+        has_token=True,
+    )
+    check(
+        "refresh(pr-review): held card stays held across a target revision",
+        rc.HOLD_LABEL in pr_refreshed["managed_labels"]
+        and "<!-- opt:" not in pr_refreshed["body"],
+    )
+
     for kind, base, changed in (
-        (
-            "pr-review",
-            item(auto_triage=True, head_sha="oldsha"),
-            item(auto_triage=True, head_sha="newsha999"),
-        ),
         (
             "issue-triage",
             item_issue(auto_triage_issues=True, priority="low"),
@@ -3564,33 +3670,58 @@ def _run_reconcile_real_upsert_refresh(
 
 
 def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
+    pr_base = option_b_item(auto_triage=True, head_sha="oldsha")
+    pr_held = card_projection.plan_card_projection(
+        pr_base, prior={}, held=True, has_token=True
+    )
+    prior = {
+        "title": pr_held["title"],
+        "body": pr_held["body"],
+        "labels": pr_held["managed_labels"],
+    }
+    for label, changed_item, has_token, reason in (
+        (
+            "pr auto-triage config disabled",
+            option_b_item(auto_triage=False, head_sha="oldsha"),
+            True,
+            "repository policy disables it",
+        ),
+        (
+            "token absent",
+            option_b_item(auto_triage=True, head_sha="oldsha"),
+            False,
+            "model credential is not configured",
+        ),
+    ):
+        projection = card_projection.plan_card_projection(
+            changed_item, prior=prior, held=False, has_token=has_token
+        )
+        state = core.parse_state_block(projection["body"])
+        check(
+            "refresh publish(%s): Option B card is actionable with a reason" % label,
+            "held" not in state
+            and "<!-- opt:" in projection["body"]
+            and reason in projection["body"]
+            and rc.HOLD_LABEL not in projection["managed_labels"],
+        )
+
     scenarios = [
         (
             "kind changed to ci-approval",
             item(auto_triage=True, head_sha="oldsha"),
             item(kind="ci-approval", auto_triage=True, head_sha="newsha999"),
             True,
-        ),
-        (
-            "pr auto-triage config disabled",
-            item(auto_triage=True, head_sha="oldsha"),
-            item(auto_triage=False, head_sha="oldsha"),
-            True,
+            False,
         ),
         (
             "issue auto-triage config disabled",
             item_issue(auto_triage_issues=True, priority="low"),
             item_issue(auto_triage_issues=False, priority="low"),
             True,
-        ),
-        (
-            "token absent",
-            item(auto_triage=True, head_sha="oldsha"),
-            item(auto_triage=True, head_sha="oldsha"),
-            False,
+            True,
         ),
     ]
-    for label, base_item, changed_item, has_token in scenarios:
+    for label, base_item, changed_item, has_token, expect_reason in scenarios:
         calls = _capture_upsert_refresh(base_item, changed_item, has_token, queued=True)
         body = calls.get("body", "")
         state = core.parse_state_block(body)
@@ -3602,8 +3733,8 @@ def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
             "<!-- opt:" in body,
         )
         check(
-            "refresh publish(%s): no triage section added" % label,
-            rc.TRIAGE_START not in body,
+            "refresh publish(%s): triage suppression visibility is exact" % label,
+            ("repository policy disables it" in body) == expect_reason,
         )
         check(
             "refresh publish(%s): pending label removed" % label,
@@ -3634,8 +3765,8 @@ def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
 
 
 def test_reconcile_refresh_preserves_held_when_still_eligible():
-    old = item(head_sha="oldsha", auto_triage=True)
-    new = item(head_sha="newsha999", auto_triage=True)
+    old = item_issue(priority="low", auto_triage_issues=True)
+    new = item_issue(priority="high", auto_triage_issues=True)
     calls = _run_reconcile_real_upsert_refresh(old, new, token="true")
     body = calls["card"]["body"]
     state = core.parse_state_block(body)
@@ -3652,14 +3783,14 @@ def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
     scenarios = [
         (
             "config disabled",
-            item(head_sha="oldsha", auto_triage=True),
-            item(head_sha="oldsha", auto_triage=False),
+            item_issue(auto_triage_issues=True),
+            item_issue(auto_triage_issues=False),
             "true",
         ),
         (
             "token absent",
-            item(head_sha="oldsha", auto_triage=True),
-            item(head_sha="oldsha", auto_triage=True),
+            item_issue(auto_triage_issues=True),
+            item_issue(auto_triage_issues=True),
             "",
         ),
     ]
@@ -3681,8 +3812,12 @@ def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
             rc.HOLD_LABEL not in label_names,
         )
         check(
-            "reconcile(%s): ineligible held card has no triage section" % label,
-            rc.TRIAGE_START not in body,
+            "reconcile(%s): ineligible held card explains triage suppression" % label,
+            rc.TRIAGE_START in body
+            and (
+                "repository policy disables it" in body
+                or "model credential is not configured" in body
+            ),
         )
         check(
             "reconcile(%s): ineligible held card clears queued cache" % label,
@@ -3722,7 +3857,7 @@ def _mock_edit(calls):
 
 
 def test_update_card_triage_publishes_held_card_on_success():
-    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+    for kind, it in (("issue-triage", item_issue()),):
         revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
         held_card = rc.render(it, held=True)
         existing = {
@@ -3781,7 +3916,7 @@ def test_update_card_triage_publishes_held_card_on_success():
 
 
 def test_update_card_triage_publishes_held_card_on_failure_fail_open():
-    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+    for kind, it in (("issue-triage", item_issue()),):
         revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
         held_card = rc.render(it, held=True)
         existing = {
@@ -3839,7 +3974,7 @@ def test_update_card_triage_publishes_held_card_on_failure_fail_open():
 
 
 def test_update_card_triage_stale_revision_is_noop_for_held_card():
-    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+    for kind, it in (("issue-triage", item_issue()),):
         held_card = rc.render(it, held=True)
         existing = {
             "number": 7,
@@ -3872,7 +4007,7 @@ def test_update_card_triage_unheld_card_behavior_unchanged():
     """A regression check: for a card that was never held, `update_card_triage`
     behaves exactly as before this feature - attach the triage section, no
     label churn, no touching the (already-present) checkboxes."""
-    it = item()
+    it = item_issue()
     card = rc.render(it)
     existing = {
         "number": 7,
@@ -3893,7 +4028,7 @@ def test_update_card_triage_unheld_card_behavior_unchanged():
     try:
         ok = rc.update_card_triage(
             7,
-            it["head_sha"],
+            it["updated_at"],
             triage={
                 "summary": "does X",
                 "product_implications": "low risk",
@@ -3914,7 +4049,7 @@ def test_update_card_triage_unheld_card_behavior_unchanged():
     check("unheld: no held key ever appears", "held" not in new_state)
     check(
         "unheld: checkboxes were already present and remain",
-        "<!-- opt:merge -->" in calls["body"],
+        "<!-- opt:close -->" in calls["body"],
     )
     check(
         "unheld: never touches the hold label (card was never held)",

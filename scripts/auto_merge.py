@@ -938,12 +938,15 @@ def evaluate_candidate(
 
     triage_available = auto_merge_triage_available()
     if triage_available:
-        met("g6_triage_available", "CLAUDE_CODE_OAUTH_TOKEN is configured")
+        met(
+            "g6_triage_available",
+            "model credential is configured; card triage eligibility is evaluated separately",
+        )
     else:
         stopped = fail(
             "g6_triage_available",
-            "CLAUDE_CODE_OAUTH_TOKEN is unavailable",
-            "G6 CLAUDE_CODE_OAUTH_TOKEN is unavailable",
+            "model credential is unavailable",
+            "G6 model credential is unavailable",
             unavailable=True,
         )
         if stopped:

@@ -286,10 +286,17 @@ def test_issue_updated_at_trigger_is_strict_and_kind_scoped():
 
 
 def test_title_only_refresh_preserves_advisory_without_spend_or_comment():
-    old = item()
+    old = item(
+        kind="issue-triage",
+        head_sha="",
+        bucket="issue-triage",
+        comp="n/a",
+        tests="n/a",
+        url="https://github.com/o/lavish-axi/issues/42",
+    )
     triaged = rc.body_with_triage_result(
         rc.body_with_triage_queued(rc.render(old)["body"], old),
-        old["head_sha"],
+        old["updated_at"],
         triage={
             "summary": "Trusted current advisory.",
             "product_implications": "No product risk.",
@@ -297,7 +304,7 @@ def test_title_only_refresh_preserves_advisory_without_spend_or_comment():
             "recommended_next_step": "merge - still current.",
         },
     )
-    current = item(title="Withdrawn by author")
+    current = dict(old, title="Withdrawn by author")
     existing = {
         "number": 7,
         "title": rc.render(old)["title"],
@@ -344,7 +351,7 @@ def test_title_only_refresh_preserves_advisory_without_spend_or_comment():
     check(
         "F3: title-only refresh preserves every current advisory cache",
         "Trusted current advisory." in calls["body"]
-        and state.get("triaged_sha") == old["head_sha"]
+        and state.get("triaged_sha") == old["updated_at"]
         and state.get("triage_status") == "succeeded"
         and state.get(rc.TRIAGE_ATTEMPTS_FIELD)
         == core.parse_state_block(triaged).get(rc.TRIAGE_ATTEMPTS_FIELD),
@@ -572,7 +579,14 @@ def test_upsert_refreshes_once_on_render_version_alone():
     unchanged material state refreshes exactly once, then no-ops (self-
     terminating), and does NOT emit the 'Target updated' comment since
     head_sha is unchanged."""
-    it = item()
+    it = item(
+        kind="issue-triage",
+        head_sha="",
+        bucket="issue-triage",
+        comp="n/a",
+        tests="n/a",
+        url="https://github.com/o/lavish-axi/issues/42",
+    )
     fresh_body = rc.render(it)["body"]
     stale_state = core.parse_state_block(fresh_body)
     stale_state["render_version"] = 0
@@ -658,10 +672,13 @@ def test_render_version_refresh_preserves_triage_section():
     """A render-version-only refresh is a same-head_sha cosmetic refresh, so it
     must preserve an existing ### Triage section and its triaged_sha/status
     cache exactly like a material same-head refresh does."""
-    it = item()
+    it = item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a", url="https://github.com/o/lavish-axi/issues/42"
+    )
     triaged = rc.body_with_triage_result(
         rc.body_with_triage_queued(rc.render(it)["body"], it),
-        it["head_sha"],
+        it["updated_at"],
         triage={
             "summary": "Still useful context.",
             "product_implications": "No product risk.",
@@ -720,7 +737,7 @@ def test_render_version_refresh_preserves_triage_section():
     )
     check(
         "render-version refresh: triaged_sha preserved",
-        new_state is not None and new_state.get("triaged_sha") == it["head_sha"],
+        new_state is not None and new_state.get("triaged_sha") == it["updated_at"],
     )
     check(
         "render-version refresh: no 'Target updated' comment", calls["comments"] == []
@@ -728,10 +745,13 @@ def test_render_version_refresh_preserves_triage_section():
 
 
 def test_render_version_refresh_labels_preserved_triage_status_lines():
-    it = item()
+    it = item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a", url="https://github.com/o/lavish-axi/issues/42"
+    )
     triaged = rc.body_with_triage_result(
         rc.body_with_triage_queued(rc.render(it)["body"], it),
-        it["head_sha"],
+        it["updated_at"],
         triage={
             "summary": "Waited for background terminal 60s.",
             "product_implications": "No product risk.",
@@ -812,10 +832,13 @@ def test_render_version_refresh_qualifies_stale_triage_refs():
     refresh must re-qualify its bare `#N` refs and stamp the current
     render_version, both from GITHUB_REPOSITORY_OWNER + the card's own
     deterministic state repo - never from the model text."""
-    it = item()
+    it = item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a", url="https://github.com/o/lavish-axi/issues/42"
+    )
     triaged = rc.body_with_triage_result(
         rc.body_with_triage_queued(rc.render(it)["body"], it),
-        it["head_sha"],
+        it["updated_at"],
         triage={
             "summary": "Landed in #127 already.",
             "product_implications": "No product risk.",
@@ -890,7 +913,7 @@ def test_render_version_refresh_qualifies_stale_triage_refs():
     )
     check(
         "render-version refresh: triaged_sha still preserved",
-        new_state is not None and new_state.get("triaged_sha") == it["head_sha"],
+        new_state is not None and new_state.get("triaged_sha") == it["updated_at"],
     )
 
 
@@ -1180,9 +1203,14 @@ def test_upsert_refetches_known_card_before_refresh():
 
 def test_upsert_parses_state_block_after_refetch():
     calls = {"refresh": 0, "old_state": None, "card_state": None}
+    old_item = item(
+        kind="issue-triage", head_sha="", bucket="issue-triage",
+        comp="n/a", tests="n/a", url="https://github.com/o/lavish-axi/issues/42"
+    )
+    changed_item = dict(old_item, priority="high")
     existing = {
         "number": 7,
-        "body": rc.render(item())["body"],
+        "body": rc.render(old_item)["body"],
         "labels": labels(
             "needs-decision",
             "repo:lavish-axi",
@@ -1219,7 +1247,7 @@ def test_upsert_parses_state_block_after_refetch():
     rc._refresh_card = fake_refresh
     rc.ensure_labels = lambda labels_: None
     try:
-        result = rc.upsert_card(item(priority="high"), existing=existing)
+        result = rc.upsert_card(changed_item, existing=existing)
     finally:
         rc.get_card = old_get_card
         rc._refresh_card = old_refresh
@@ -1237,7 +1265,7 @@ def test_upsert_parses_state_block_after_refetch():
     check(
         "upsert: material refresh carries activity_reflected_at",
         calls["card_state"].get("activity_reflected_at")
-        == item(priority="high")["updated_at"],
+        == changed_item["updated_at"],
     )
 
 

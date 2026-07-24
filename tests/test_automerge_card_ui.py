@@ -20,6 +20,8 @@ import wheelhouse_core as core  # noqa: E402
 import target_observation  # noqa: E402
 import decision_context  # noqa: E402
 import assessment_admission  # noqa: E402
+import assessment_record  # noqa: E402
+import projection_writer  # noqa: E402
 
 _failures = []
 HEAD = "a" * 40
@@ -163,6 +165,7 @@ def observation_bound_assessment(
                 "repo": repo,
                 "number": number,
                 "head_sha": head,
+                "title": "Fixture PR %s" % number,
                 "paths_complete": True,
                 "paths": ["README.md", "catalog.yaml", "docs/index.html"],
                 "closing_complete": True,
@@ -1352,11 +1355,9 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
         decision_context=context,
     )
     held = render_card.render(bound_item, held=True)
-    held_state = core.parse_state_block(held["body"])
-    # Exercise the atomic evaluator itself without duplicating the Option B
-    # writer transaction coverage in test_option_b_architecture.py.
-    held_state.pop(render_card.PROJECTION_OWNER_FIELD, None)
-    held["body"] = render_card._replace_state_block(held["body"], held_state)
+    # Exercise the atomic evaluator through the v2 result path while replacing
+    # durable-comment and projection I/O with in-memory boundaries. Writer
+    # transaction details remain covered in test_option_b_architecture.py.
     held["body"] = render_card.body_with_triage_queued(held["body"], bound_item)
     card = {
         "number": 623,
@@ -1411,11 +1412,18 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
                 patch.object(render_card, "get_card", return_value=card)
             )
             stack.enter_context(
+                patch.object(assessment_record, "persist", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(assessment_record, "mark_projected", return_value=True)
+            )
+            stack.enter_context(
                 patch.object(
-                    render_card,
-                    "_edit_issue_body",
-                    side_effect=lambda number, body, remove_labels=None: writes.append(
-                        (number, body, remove_labels)
+                    projection_writer,
+                    "commit_preplanned",
+                    side_effect=lambda number, _card, **kwargs: (
+                        writes.append((number, kwargs["body"], kwargs.get("managed_labels")))
+                        or "committed"
                     ),
                 )
             )

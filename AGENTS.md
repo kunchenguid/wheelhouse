@@ -158,7 +158,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   (rewrites a bare GitHub-autolink `#N` in model text to `owner/repo#N` - see
   "Cross-repo reference qualification" in Sharp edges)),
   `target_observation.py` (strict revision-bound ReviewObservation v2, concrete persisted-v1 compatibility reader, head-bound approval receipt, and compact projection-reference contracts),
-  `decision_context.py` (bounded neutral same-closing-issue, explicit-reference, and exact-shared-path context), `assessment_admission.py` (typed observation/context-bound advisory admission), `assessment_record.py` (durable exact-revision agent result), `card_projection.py` (pure complete byte-deterministic PR-review projection), `projection_writer.py` (the sole verified v2 PR-review body/title/managed-label writer), `decision_label_recovery.py` (the narrow authorized, pinned-revision, timeline-proven, durably claimed recovery for a supported decision label erased by that writer), `scheduled_epoch.py` (trusted schedule-only lifecycle epoch),
+  `decision_context.py` (neutral same-closing-issue, explicit-reference, and exact-shared-path context; match the full already-observed PR set before the deterministic 10-result cap; `compact_model_context` alone owns title+URL model input), `assessment_admission.py` (typed observation/context-bound advisory admission), `assessment_record.py` (durable exact-revision agent result), `card_projection.py` (pure complete byte-deterministic PR-review projection), `projection_writer.py` (the sole verified v2 PR-review body/title/managed-label writer), `decision_label_recovery.py` (the narrow authorized, pinned-revision, timeline-proven, durably claimed recovery for a supported decision label erased by that writer), `scheduled_epoch.py` (trusted schedule-only lifecycle epoch),
   `target_reconcile.py` (pure CI-wait observation + receipt -> current/pending/
   unknown projection planner; no GitHub calls or Markdown),
   `render_card.py` (render + card CRUD, including the shared strict closed-card
@@ -312,8 +312,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `8`: the
-  7 -> 8 bump groups auto-merge criteria by gate family and separates G6's complete-diff behavior facts from its VISION.md-dependent subtree;
+  it is not a material field). `CARD_RENDER_VERSION` is currently `9`: the
+  8 -> 9 bump publishes deterministic triage-suppression reasons and makes G6 credential wording distinct from card triage eligibility; the 7 -> 8 bump groups auto-merge criteria by gate family and separates G6's complete-diff behavior facts from its VISION.md-dependent subtree;
   6 -> 7 bump publishes the non-authoritative read-only `### Auto-merge criteria`
   section on already-open PR-review cards; the 5 -> 6 bump publishes the
   advisory read-only `### Security review` section on
@@ -1229,7 +1229,7 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   pr-review is opt-out through `auto_triage`; issue-triage is opt-out through the INDEPENDENT `auto_triage_issues` - both global default true, per-repo override allowed, and both inert unless `CLAUDE_CODE_OAUTH_TOKEN` is present. Neither flag affects the other.
   For a pr-review card it checks out the target PR head read-only with `FLEET_TOKEN`, `persist-credentials: false`, and verifies the head did not move since queueing.
   For an issue-triage card it checks out the repo's DEFAULT branch read-only the same way (same substrate `deep-review.yml` uses for an issue card) - there is no head to verify.
-  Both paths then run Claude with lower `--max-turns` than deep-review to produce structured `{summary, product_implications, recommended_action, recommended_reason, evidence}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff), the pr-review prompt the PR title/body/diff, each with its own action set.
+  Both paths then run Claude with lower `--max-turns` than deep-review to produce structured `{summary, product_implications, recommended_action, recommended_reason, evidence}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff), the pr-review prompt the PR title/body/diff, each with its own action set. PR triage still requires a complete native ReviewObservation and exact context binding, but a well-formed bound `truncated` or `unavailable` related-work context may run as visible advisory prose. `assessment_admission.py` remains strict, so incomplete context cannot create Accept, satisfy G6, or authorize action. The model sees related candidates only through `decision_context.compact_model_context`: deterministic status/counts plus at most 10 concise titles and full URLs, never relation records, bodies, diffs, paths, heads, or card metadata.
   **Pass-by-reference prompt (do not reinline).**
   The runner writes verified target content to bounded `target.txt`, checks out code at `target-src/`, and names those files in a small, target-size-independent prompt for Read/Grep/Glob; target content and `vision.md` must never be copied into the action `prompt:` input.
   `DIFF_COMPLETE` means the whole non-binary/LFS/submodule diff is present within the 1,500,000-byte on-disk cap; truncation fails closed with no auto-merge verdict.

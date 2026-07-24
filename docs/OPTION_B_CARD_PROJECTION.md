@@ -29,13 +29,15 @@ A concrete `wheelhouse.target-observation/v1` persisted record remains readable 
 
 ### DecisionContext
 
-`wheelhouse.decision-context/v1` is bounded advisory context. It carries the ReviewObservation identity, repository snapshot identity and completeness, current candidate identities/heads/card links, and only these neutral relations:
+`wheelhouse.decision-context/v2` is bounded advisory context. It carries the ReviewObservation identity, repository snapshot identity and completeness, current candidate titles/identities/heads/card issue identities, the total deterministic match count, and only these neutral relations:
 
 - same closing issue;
 - explicit target metadata reference;
 - exact shared path from complete immutable lists.
 
-Candidate and path bounds are fixed in `scripts/decision_context.py`. Truncation or incomplete comparison renders as incomplete, never as "no related work." DecisionContext is absent from auto-merge evaluation and final action guards.
+The builder matches relations across the full already-observed open-PR snapshot before applying the fixed 10-result display/model cap. More than 10 matches render a deterministic top 10 plus the honest total. Relation-detail bounds remain fixed in `scripts/decision_context.py`; truncation or incomplete comparison renders as incomplete, never as "no related work." The sole model-visible projection is `decision_context.compact_model_context()`, which exposes only status/count metadata and each bounded candidate's concise title plus full URL. Immutable identities, card issue identities, and relation/path evidence remain internal to binding and card rendering. Persisted v1 contexts remain readable but cannot feed this v2 model handoff. DecisionContext is absent from auto-merge evaluation and final action guards.
+
+A complete native ReviewObservation and exact observation/context binding remain mandatory for PR triage. Once those hold, a well-formed `truncated` or `unavailable` DecisionContext may run and render bounded advisory triage. Assessment admission remains stricter: non-complete context cannot create Accept, satisfy G6, or authorize an action. A card whose policy, credential, target evidence, or context binding truly prevents triage renders a deterministic `### Triage` reason instead of silently omitting the lifecycle. G6's credential row reports credential availability only; it does not claim that the card is triage-eligible.
 
 ### Assessment admission
 

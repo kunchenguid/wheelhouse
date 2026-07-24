@@ -302,9 +302,10 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
-# Bumped 7 -> 8 to group criteria by gate family and split G6's complete-diff
-# behavior facts from its VISION.md-dependent subtree.
-CARD_RENDER_VERSION = 8
+# Bumped 8 -> 9 to publish deterministic triage-suppression reasons and the
+# credential-vs-eligibility G6 wording. The 7 -> 8 grouping remains documented
+# in AGENTS.md.
+CARD_RENDER_VERSION = 9
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -1063,31 +1064,92 @@ def triage_attempts_exhausted(item, state, cap=None):
     return triage_attempt_count(state, kind, revision, effective_cap) >= effective_cap
 
 
-def review_inputs_complete(item):
-    """Whether PR advisory spend can bind to current complete trusted inputs."""
-    if (item or {}).get("kind", "pr-review") != "pr-review":
-        return True
+def _review_triage_input_problem(item):
+    """Return the content-free reason PR advisory triage cannot bind."""
     raw_observation = (item or {}).get("target_observation") or (item or {}).get(
         REVIEW_OBSERVATION_FIELD
     )
     raw_context = (item or {}).get(DECISION_CONTEXT_FIELD)
-    # Concrete pre-cutover callers without either v2 field retain their legacy
-    # path until a normal scan/ingest trigger supplies current inputs. Once one
-    # v2 input is present, partial or unavailable binding must deny spend.
+    # Concrete pre-cutover callers that have neither v2 field retain the legacy
+    # compatibility lane. Once either field is present, target evidence and
+    # binding are required and malformed or missing counterparts fail closed.
     if raw_observation is None and raw_context is None:
-        return True
+        return ""
     observation = target_contracts.normalize_review_observation(raw_observation)
-    context = context_contracts.normalize_decision_context(raw_context)
-    return bool(
-        observation
-        and observation["compatibility"] == "native-v2"
-        and observation["completeness"]["complete"]
-        and context
-        and context["status"] == "complete"
-        and context["target"]["observation_id"] == observation["observation_id"]
-        and observation["revision"]["head_sha"]
-        == str((item or {}).get("head_sha") or "")
+    if (
+        observation is None
+        or observation["compatibility"] != "native-v2"
+        or not observation["completeness"]["complete"]
+    ):
+        return "target-observation-incomplete"
+    item_number = (item or {}).get("number")
+    if isinstance(item_number, bool) or not isinstance(item_number, int):
+        return "target-observation-mismatch"
+    item_target = (
+        str((item or {}).get("repo") or ""),
+        item_number,
+        str((item or {}).get("head_sha") or ""),
     )
+    observation_target = (
+        observation["target"]["repo"],
+        observation["target"]["number"],
+        observation["revision"]["head_sha"],
+    )
+    if item_target != observation_target:
+        return "target-observation-mismatch"
+    context = context_contracts.normalize_decision_context(raw_context)
+    if context is None or context.get("schema") != context_contracts.CONTEXT_SCHEMA:
+        return "related-context-unavailable"
+    context_target = context["target"]
+    if (
+        context_target["owner"] != observation["target"]["owner"]
+        or context_target["repo"] != observation["target"]["repo"]
+        or context_target["number"] != observation["target"]["number"]
+        or context_target["head_sha"] != observation["revision"]["head_sha"]
+        or context_target["observation_id"] != observation["observation_id"]
+    ):
+        return "related-context-mismatch"
+    # Context status is deliberately not an advisory-spend gate. A well-formed,
+    # observation-bound truncated or unavailable context can inform prose, while
+    # assessment_admission independently prevents Accept/G6/action authority.
+    return ""
+
+
+def review_inputs_complete(item):
+    """Whether PR triage has a complete target and bound v2 context."""
+    if (item or {}).get("kind", "pr-review") != "pr-review":
+        return True
+    return not _review_triage_input_problem(item)
+
+
+def triage_suppression_reason(item, has_token):
+    """Captain-visible reason automatic triage is intentionally not started."""
+    kind = (item or {}).get("kind", "pr-review")
+    flag = AUTO_TRIAGE_FLAG_BY_KIND.get(kind)
+    if flag is None:
+        return ""
+    if (item or {}).get(flag, True) is False:
+        return "Automatic triage was not started because repository policy disables it."
+    if has_token is False:
+        return (
+            "Automatic triage was not started because the model credential is "
+            "not configured."
+        )
+    if not triage_revision(item or {}):
+        return "Automatic triage was not started because the target revision is unavailable."
+    if kind == "pr-review":
+        problem = _review_triage_input_problem(item)
+        if problem in {"target-observation-incomplete", "target-observation-mismatch"}:
+            return (
+                "Automatic triage was not started because the current target "
+                "ReviewObservation is unavailable, incomplete, or mismatched."
+            )
+        if problem:
+            return (
+                "Automatic triage was not started because related-work context "
+                "is missing, malformed, or not bound to the current observation."
+            )
+    return ""
 
 
 def should_hold(item, has_token):
@@ -3847,6 +3909,18 @@ def _related_work_section(context):
                 "",
             ]
         )
+    total_candidates = int(
+        context.get("related_candidate_count", len(context["candidates"]))
+    )
+    if total_candidates > len(context["candidates"]):
+        lines.extend(
+            [
+                "> Showing **%s of %s** deterministic related candidates; the "
+                "remaining matches are omitted by the display/model context cap."
+                % (len(context["candidates"]), total_candidates),
+                "",
+            ]
+        )
     if not context["candidates"]:
         lines.append(
             "_No deterministic related candidate is asserted._"
@@ -3864,6 +3938,8 @@ def _related_work_section(context):
             link += " ([card #%s](%s))" % (
                 candidate["card_issue"], candidate["card_url"]
             )
+        elif candidate.get("card_issue"):
+            link += " (card #%s)" % candidate["card_issue"]
         reasons = []
         for relation in candidate["relations"]:
             if relation["kind"] == "same-closing-issue":
@@ -3880,7 +3956,11 @@ def _related_work_section(context):
                 reasons.append("exact shared path%s: %s" % (
                     "s" if len(relation["paths"]) != 1 else "", paths
                 ))
-        lines.append("- %s - %s" % (link, "; ".join(reasons)))
+        title = candidate.get("title")
+        title_note = (
+            " - `%s`" % core._safe_inline(title, limit=300) if title else ""
+        )
+        lines.append("- %s%s - %s" % (link, title_note, "; ".join(reasons)))
     lines.extend(
         [
             "",
@@ -4946,7 +5026,14 @@ def _security_review_section(summary):
     ]
 
 
-def render(item, held=False, workflow_hold=None, owner=None):
+def render(
+    item,
+    held=False,
+    workflow_hold=None,
+    owner=None,
+    has_token=None,
+    triage_suppression=None,
+):
     """item -> {title, body, labels, marker}. Tolerates missing optional fields.
 
     `held=True` renders the placeholder "Held cards" form (see the module-
@@ -4999,6 +5086,15 @@ def render(item, held=False, workflow_hold=None, owner=None):
         normalize_triage(item.get("triage"))
         if kind in AUTO_TRIAGE_FLAG_BY_KIND
         else None
+    )
+    suppression_reason = (
+        (
+            str(triage_suppression or "")
+            if triage_suppression is not None
+            else triage_suppression_reason(item, has_token)
+        )
+        if has_token is not None and not triage and not held
+        else ""
     )
     workflow_hold = normalize_automerge_workflow_hold(workflow_hold)
     if workflow_hold and (
@@ -5179,6 +5275,9 @@ def render(item, held=False, workflow_hold=None, owner=None):
                     "",
                 ]
             )
+    elif suppression_reason:
+        lines.append(triage_section(error=suppression_reason))
+        lines.append("")
     if not accept_recommendation_available(state):
         lines.append("### Recommended action")
         lines.append(item.get("recommendation", "Needs your call."))
@@ -5692,6 +5791,7 @@ def _reused_card_render(item, candidate, has_token):
             held=held,
             workflow_hold=workflow_hold,
             preserve_same_revision=same_revision,
+            has_token=has_token,
         )
         card = {
             "title": projection["title"],
@@ -5700,7 +5800,9 @@ def _reused_card_render(item, candidate, has_token):
             "marker": marker_label(item),
         }
     else:
-        card = render(item, held=held, workflow_hold=workflow_hold)
+        card = render(
+            item, held=held, workflow_hold=workflow_hold, has_token=has_token
+        )
         if same_revision:
             owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
             card["body"] = _preserve_same_revision_triage(
@@ -7751,6 +7853,7 @@ def upsert_card(
                 prior={},
                 cause="projection-current",
                 held=should_hold(item, has_token),
+                has_token=has_token,
             )
             card = {
                 "title": projection["title"],
@@ -7759,7 +7862,9 @@ def upsert_card(
                 "marker": marker,
             }
         else:
-            card = render(item, held=should_hold(item, has_token))
+            card = render(
+                item, held=should_hold(item, has_token), has_token=has_token
+            )
         try:
             return _create_and_verify_card(item, card)
         except CardAdmissionError as error:
@@ -7862,6 +7967,7 @@ def upsert_card(
             held=held,
             workflow_hold=(workflow_hold if hold_status == "matching" else None),
             preserve_same_revision=not publish_held,
+            has_token=has_token,
         )
         if preserve_reconcile_absence:
             preserved_body = _body_preserving_reconcile_absence(
@@ -7893,6 +7999,7 @@ def upsert_card(
         item,
         held=held,
         workflow_hold=workflow_hold if hold_status == "matching" else None,
+        has_token=has_token,
     )
     ensure_labels(card["labels"])
     return _refresh_card(

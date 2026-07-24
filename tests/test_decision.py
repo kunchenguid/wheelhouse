@@ -470,6 +470,7 @@ def admitted_pr_assessment(action, reason):
                 "repo": "lavish-axi",
                 "number": 42,
                 "head_sha": "abc",
+                "title": "Fixture PR 42",
                 "paths_complete": True,
                 "paths": ["src/example.py"],
                 "closing_complete": True,
