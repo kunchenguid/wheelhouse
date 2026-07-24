@@ -185,6 +185,7 @@ def admitted_assessment_state(repo, number, head, action="merge"):
                 "repo": repo,
                 "number": number,
                 "head_sha": head,
+                "title": "Fixture PR %s" % number,
                 "paths_complete": True,
                 "paths": ["src/main.py"],
                 "closing_complete": True,
@@ -4473,7 +4474,7 @@ def test_G6_token_kill_switch_holds():
     payload, _ = run_act(w, items, cards, has_token=False)
     check(
         "G6: absent triage token holds persisted verdict",
-        "TOKEN" in _held_reason(payload),
+        "model credential" in _held_reason(payload),
     )
 
 

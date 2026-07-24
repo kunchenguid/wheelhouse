@@ -108,6 +108,7 @@ def review_inputs(head):
                 "repo": "fmt",
                 "number": 5,
                 "head_sha": head,
+                "title": "Fixture PR 5",
                 "paths_complete": True,
                 "paths": ["README.md"],
                 "closing_complete": True,

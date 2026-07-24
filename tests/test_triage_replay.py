@@ -2463,7 +2463,7 @@ def test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral():
 
 
 def test_admission_denial_terminalizes_only_the_exact_queued_revision():
-    cards = {42: card(status="queued")}
+    cards = {42: card(kind="issue-triage", status="queued")}
 
     def get_card(number):
         return copy.deepcopy(cards.get(number))

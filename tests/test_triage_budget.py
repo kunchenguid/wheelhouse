@@ -656,13 +656,16 @@ def test_invalid_zero_ceiling_never_reads_or_writes_a_ledger():
 
 
 def test_mark_queue_reserves_then_writes_and_verifies_one_attempt():
-    candidate = item()
+    candidate = item("issue-triage", "2026-07-16T12:00:00Z")
     body = rc.render(candidate)["body"]
     current = {
         "number": 42,
         "body": body,
         "state": "OPEN",
-        "labels": [{"name": "needs-decision"}, {"name": "kind:pr-review"}],
+        "labels": [
+            {"name": "needs-decision"},
+            {"name": "kind:issue-triage"},
+        ],
         "author": {"login": rc.GET_CARD_AUTOMATION_AUTHOR},
     }
     order = []
@@ -720,7 +723,7 @@ def test_mark_queue_reserves_then_writes_and_verifies_one_attempt():
 
 
 def test_reservation_or_card_verification_failure_never_dispatches():
-    candidate = item()
+    candidate = item("issue-triage", "2026-07-16T12:00:00Z")
     body = rc.render(candidate)["body"]
     current = {
         "number": 42,
@@ -752,7 +755,7 @@ def test_reservation_or_card_verification_failure_never_dispatches():
     assert len(edits) == 1
     deferred_state = core.parse_state_block(edits[0][1])
     assert rc.TRIAGE_BUDGET_DEFERRED in edits[0][1]
-    assert "<!-- opt:merge -->" in edits[0][1]
+    assert "<!-- opt:close -->" in edits[0][1]
     assert "triaged_sha" not in deferred_state
     assert "triage_status" not in deferred_state
     assert rc.TRIAGE_ATTEMPTS_FIELD not in deferred_state
@@ -874,7 +877,6 @@ def test_budget_denial_publishes_held_cards_without_spend_cache_and_later_retrie
 
     for label, fake_factory, scenario_config in scenarios:
         for kind, expected_checkbox in (
-            ("pr-review", "<!-- opt:merge -->"),
             ("issue-triage", "<!-- opt:close -->"),
         ):
             candidate = item(

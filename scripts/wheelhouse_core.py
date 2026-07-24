@@ -95,9 +95,6 @@ PR_LABELS_PAGE_SIZE = 20
 CLOSING_REFS_PAGE_SIZE = 20
 STATUS_CONTEXTS_PAGE_SIZE = 100
 ACTION_REQUIRED_RUN_LIMIT = 30
-# DecisionContext compares at most this many open PRs in one repository snapshot.
-# Exceeding the cap is advisory truncation, never an acting gate.
-REVIEW_CONTEXT_PR_CAP = 100
 # Event-aware compliance enrichment is opt-in per repository. Actions run pages
 # are bounded so a pathological same-head history degrades to unknown rather
 # than turning a fleet scan into an unbounded API crawl.
@@ -4067,6 +4064,33 @@ def _ci_wait_refresh_item(
     return item
 
 
+def _decision_context_candidate_rows(owner, name, enriched, closing_complete):
+    """Project every already-observed PR into neutral relation input."""
+    slug = "%s/%s" % (owner, name)
+    return [
+        {
+            "owner": owner,
+            "repo": name,
+            "number": pr["number"],
+            "head_sha": pr["head_sha"],
+            "title": pr["title"],
+            "paths_complete": bool(
+                pr["changed_paths"].get("complete")
+                and not pr["changed_paths"].get("paths_truncated")
+            ),
+            "paths": list(pr["changed_paths"].get("paths") or []),
+            "closing_complete": bool(closing_complete),
+            "closing_issues": sorted(set(pr.get("closes") or [])),
+            "references_complete": bool(pr.get("explicit_references_complete")),
+            "references": list(pr.get("explicit_references") or []),
+            "card_issue": 0,
+            "url": "https://github.com/%s/pull/%s" % (slug, pr["number"]),
+            "card_url": "",
+        }
+        for pr in enriched
+    ]
+
+
 def build_repo(
     owner,
     repo_cfg,
@@ -4761,34 +4785,13 @@ def build_repo(
         # the matching receipt from each refresh item; this list is retained for
         # scan observability and future stage separation.
         "target_action_receipts": action_receipts,
-        # Neutral bounded inputs for DecisionContext. These records never feed
-        # classification or auto-merge; context truncation cannot freeze normal
-        # card maintenance.
-        "decision_context_candidates": [
-            {
-                "owner": owner,
-                "repo": name,
-                "number": p["number"],
-                "head_sha": p["head_sha"],
-                "paths_complete": bool(
-                    p["changed_paths"].get("complete")
-                    and not p["changed_paths"].get("paths_truncated")
-                ),
-                "paths": list(p["changed_paths"].get("paths") or []),
-                "closing_complete": bool(closing_scan_complete),
-                "closing_issues": sorted(set(p.get("closes") or [])),
-                "references_complete": bool(
-                    p.get("explicit_references_complete")
-                ),
-                "references": list(p.get("explicit_references") or []),
-                "card_issue": 0,
-                "url": "https://github.com/%s/pull/%s" % (slug, p["number"]),
-                "card_url": "",
-            }
-            for p in enriched[:REVIEW_CONTEXT_PR_CAP]
-        ],
-        "decision_context_truncated": len(enriched) > REVIEW_CONTEXT_PR_CAP,
-        "decision_context_candidate_count": len(enriched),
+        # Neutral inputs for DecisionContext. Every PR was already observed by
+        # this scan, so relation matching sees the full set before
+        # decision_context.py applies its small result cap. These records never
+        # feed classification or auto-merge.
+        "decision_context_candidates": _decision_context_candidate_rows(
+            owner, name, enriched, closing_scan_complete
+        ),
         # Open issues are indexed only as exact-reference destinations. They do
         # not enter the default PR comparison set and cannot crowd out shared-
         # path PR candidates. GitHub issue/PR numbers share one namespace.
@@ -4798,6 +4801,7 @@ def build_repo(
                 "repo": name,
                 "number": issue["number"],
                 "head_sha": "issue:%s" % str(issue.get("updatedAt") or "unknown"),
+                "title": issue["title"],
                 "paths_complete": True,
                 "paths": [],
                 "closing_complete": True,
@@ -7249,21 +7253,11 @@ def cmd_scan(only_repo=None, cards_path=None):
             if candidate and candidate not in rows:
                 referenced.append(candidate)
         rows.extend(sorted(referenced, key=lambda row: (row["owner"], row["repo"], row["number"])))
-        target_result = out_repos.get(item.get("repo")) or {}
         snapshot = decision_context_contracts.repository_snapshot(
             rows,
             generated_at,
-            complete=not bool(target_result.get("decision_context_truncated")),
-            reason=(
-                "repository-candidate-bound"
-                if target_result.get("decision_context_truncated")
-                else ""
-            ),
-            candidate_count=max(
-                len(rows),
-                int(target_result.get("decision_context_candidate_count") or 0)
-                + len(referenced),
-            ),
+            complete=True,
+            candidate_count=len(rows),
         )
         observation = item.get("target_observation")
         normalized_observation = target_contracts.normalize_review_observation(

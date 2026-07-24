@@ -123,6 +123,7 @@ def plan_card_projection(
     held=False,
     workflow_hold=None,
     preserve_same_revision=True,
+    has_token=None,
 ):
     """Compose a complete PR-review card from normalized facts and advisory input.
 
@@ -133,6 +134,11 @@ def plan_card_projection(
     import render_card
 
     projected_item = dict(item)
+    suppression_reason = (
+        render_card.triage_suppression_reason(item, has_token)
+        if has_token is not None
+        else ""
+    )
     observation = target_observation.normalize_review_observation(
         item.get("target_observation") or item.get("review_observation")
     )
@@ -214,6 +220,8 @@ def plan_card_projection(
         held=held,
         workflow_hold=workflow_hold,
         owner=target["owner"],
+        has_token=has_token,
+        triage_suppression=suppression_reason,
     )
     prior = prior or {}
     if preserve_same_revision and prior.get("body") and assessment is None:
