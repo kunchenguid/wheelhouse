@@ -360,7 +360,7 @@ jobs:
           allowed_bots: github-actions[bot]
           allowed_non_write_users: ${{ github.actor }}
           prompt: ${{ steps.hydrate.outputs.prompt }}
-          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\n--max-turns 32\n--model claude-sonnet-4-6"
+          claude_args: "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search:*)\n--max-turns 32\n--model claude-sonnet-4-6"
 
       - id: triage_local
         if: ${{ steps.hydrate.outputs.adapter == 'claude-action-compat' && startsWith(steps.hydrate.outputs.action, 'triage.') && steps.hydrate.outputs.action != 'triage.schema-repair' && endsWith(steps.hydrate.outputs.action, '.local') }}

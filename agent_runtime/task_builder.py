@@ -976,7 +976,15 @@ def claude_declared_tools(action: str) -> list[str]:
     if action.startswith("nl-decision") or action.endswith(".search"):
         tools.append("Write")
     if action.endswith(".search"):
-        tools.append("Bash(wheelhouse-search)")
+        # Claude Code's exact Bash permission does not reliably admit the
+        # model's normal invocation form. The shim remains the capability
+        # boundary: it accepts only its bare argv form and rejects every
+        # argument before handling a request.
+        tools.append(
+            "Bash(wheelhouse-search:*)"
+            if action == "triage.pr.search"
+            else "Bash(wheelhouse-search)"
+        )
     return tools
 
 

@@ -100,7 +100,7 @@
               "claim": {"type": "string", "minLength": 1, "maxLength": 700},
               "subject": {"type": "string", "enum": ["existing_mode", "default_behavior", "existing_workflow", "delivery_contract", "documentation_or_tests"]},
               "effect": {"type": "string", "enum": ["unchanged", "restored", "changed", "tightened", "new_requirement"]},
-              "evidence": {"$ref": "#/$defs/evidenceRef"}
+              "evidence": {"$ref": "#/$defs/behaviorEvidenceRef"}
             }
           }
         },
@@ -130,6 +130,15 @@
       "required": ["source", "quote"],
       "properties": {
         "source": {"type": "string", "pattern": "^(target\\.txt|target-src/[A-Za-z0-9._/-]{1,900})$"},
+        "quote": {"type": "string", "minLength": 12, "maxLength": 240}
+      }
+    },
+    "behaviorEvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "quote"],
+      "properties": {
+        "source": {"type": "string", "pattern": "^(target\\.txt|vision\\.md|target-src/[A-Za-z0-9._/-]{1,900})$"},
         "quote": {"type": "string", "minLength": 12, "maxLength": 240}
       }
     }
