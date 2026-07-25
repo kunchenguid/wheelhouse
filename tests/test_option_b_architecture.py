@@ -883,6 +883,28 @@ def test_related_result_top_ten_stays_advisory():
         and "<!-- opt:accept-recommendation -->" not in visible
         and facts["g6_triage_success"]["status"] == criteria.STATUS_UNMET,
     )
+    truncated_copy = "\n".join(render_card._related_work_section(context))
+    complete = context_for(
+        obs,
+        [
+            candidate(1, "head-1", ["src/shared.py"]),
+            candidate(2, "head-2", ["src/shared.py"]),
+        ],
+    )
+    complete_copy = "\n".join(render_card._related_work_section(complete))
+    check(
+        "related copy: incomplete contexts explain advisory display and unavailable authority",
+        "never an overlap or action gate" in truncated_copy
+        and "assessment admission is unavailable" in truncated_copy
+        and "Accept and G6 remain unavailable" in truncated_copy
+        and "does not block or authorize any action" not in truncated_copy,
+    )
+    check(
+        "related copy: complete context does not claim unavailable authority",
+        complete["status"] == "complete"
+        and "assessment admission is unavailable" not in complete_copy
+        and "Shared paths and references are not an auto-merge overlap gate." in complete_copy,
+    )
 
 
 def test_projection_contract_maxima_fit_one_issue_update():

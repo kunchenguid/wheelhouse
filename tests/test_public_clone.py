@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -15,6 +16,8 @@ import apply_decision as ad  # noqa: E402
 import auto_merge as am  # noqa: E402
 import nl_readonly_search as nls  # noqa: E402
 import render_card  # noqa: E402
+from agent_runtime.claude_bridge import ContractError, validate_schema  # noqa: E402
+from agent_runtime.task_builder import claude_declared_tools  # noqa: E402
 
 _failures = []
 PUBLIC_IP = "93.184.216.34"
@@ -560,11 +563,13 @@ def test_operation_scope_documentation_and_same_turn_action():
 
     workflow = read(".github", "workflows", "claude-model.yml")
     exact = "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)\\n"
+    triage_search = "--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search:*)\\n"
     cleanup = workflow.index("- name: Remove bounded public clones")
     capture = workflow.index("- id: capture")
     check(
         "tools: exact search allowed-tools bytes remain unchanged",
-        workflow.count(exact) == 3,
+        workflow.count(exact) == 2
+        and workflow.count(triage_search) == 1,
     )
     install = workflow.index("- name: Install bounded read-only search broker")
     checkpoint = workflow.index("- name: Write conservative pre-invocation checkpoint")
@@ -621,6 +626,167 @@ def test_operation_scope_documentation_and_same_turn_action():
         "may transiently download or write more pack data" in delivery_doc
         and "complete clone root is deterministically" in delivery_doc,
     )
+
+
+def test_source_review_correction_contracts():
+    schema = json.loads(read("agent_runtime", "schemas", "actions", "triage-pr-v1.schema.json"))
+    candidate = {
+        "summary": "Adds a catalog entry.",
+        "product_implications": "Independent source review is required before admission.",
+        "recommended_action": "hold",
+        "recommended_reason": "The pinned source inspection was unavailable; remain inconclusive.",
+        "evidence": "target.txt: Added the catalog entry.",
+        "recommendation_basis": {
+            "kind": "other",
+            "observation_id": "sha256:" + "1" * 64,
+            "context_id": "sha256:" + "2" * 64,
+            "check_names": [],
+        },
+        "automerge": {
+            "behavior_class": "A",
+            "behavior_assertions": [
+                {
+                    "claim": "The source review policy requires independent inspection.",
+                    "subject": "delivery_contract",
+                    "effect": "unchanged",
+                    "evidence": {
+                        "source": "vision.md",
+                        "quote": "Every new package requires source review.",
+                    },
+                }
+            ],
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": True,
+            "aligns_with_vision": False,
+            "recommend_merge": False,
+            "external_source_required": True,
+        },
+    }
+    validate_schema(candidate, schema)
+    stub = dict(candidate)
+    stub["source_provenance"] = {
+        "url": "https://github.com/AG9898/cargo-axi.git",
+        "requested_ref": "1c0adc1de6ff6d920942055dcae2d9e95eb4dbe5",
+        "resolved_commit": "",
+        "inspected_files": [],
+    }
+    try:
+        validate_schema(stub, schema)
+    except ContractError:
+        pass
+    else:
+        check("#1676: empty unavailable provenance remains invalid", False)
+    class_b = dict(candidate)
+    class_b["automerge"] = dict(candidate["automerge"])
+    class_b["automerge"]["class_b_restoration"] = {
+        "corrected_defect": "A corrected defect with enough detail.",
+        "corrected_defect_evidence": {
+            "source": "vision.md",
+            "quote": "Every new package requires source review.",
+        },
+        "intended_behavior_restored": "The intended behavior is restored here.",
+        "intended_behavior_restored_evidence": {
+            "source": "vision.md",
+            "quote": "Every new package requires source review.",
+        },
+    }
+    try:
+        validate_schema(class_b, schema)
+    except ContractError:
+        pass
+    else:
+        check("schema: VISION evidence is restricted to behavior assertions", False)
+    arbitrary = dict(candidate)
+    arbitrary["automerge"] = dict(candidate["automerge"])
+    arbitrary["automerge"]["behavior_assertions"] = [
+        dict(candidate["automerge"]["behavior_assertions"][0], evidence={
+            "source": "README.md",
+            "quote": "Every new package requires source review.",
+        })
+    ]
+    try:
+        validate_schema(arbitrary, schema)
+    except ContractError:
+        pass
+    else:
+        check("schema: arbitrary evidence sources remain invalid", False)
+    with tempfile.TemporaryDirectory() as parent:
+        target = os.path.join(parent, "target.txt")
+        vision = os.path.join(parent, "vision.md")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("target evidence here\n")
+        with open(vision, "w", encoding="utf-8") as handle:
+            handle.write("Every new package requires source review.\n")
+        with open(vision, "rb") as handle:
+            vision_digest = hashlib.sha256(handle.read()).hexdigest()
+        bound = render_card._bind_verified_evidence_spans(
+            candidate,
+            target,
+            vision_file=vision,
+            vision_content_sha256=vision_digest,
+        )
+        check(
+            "trusted VISION: exact vision.md behavior evidence binds by content digest",
+            ("vision.md", "every new package requires source review.")
+            in bound.get("_verified_evidence_spans", ()),
+        )
+        untrusted = render_card._bind_verified_evidence_spans(
+            candidate,
+            target,
+            vision_file=vision,
+            vision_content_sha256="0" * 64,
+        )
+        check(
+            "trusted VISION: mismatched vision content cannot verify evidence",
+            ("vision.md", "every new package requires source review.")
+            not in untrusted.get("_verified_evidence_spans", ()),
+        )
+    check(
+        "invocation: triage source review uses the narrow wildcard needed by Claude",
+        claude_declared_tools("triage.pr.search")[-1] == "Bash(wheelhouse-search:*)"
+        and "Bash(wheelhouse-search *)" not in read(".github", "workflows", "claude-model.yml"),
+    )
+    triage = read(".github", "workflows", "triage.yml")
+    check(
+        "invocation: prompt requires the shim's exact bare command",
+        "run exactly wheelhouse-search with no arguments" in triage
+        and "Do not add arguments, paths, pipes, redirection, or another command." in triage,
+    )
+    with tempfile.TemporaryDirectory() as parent:
+        result = json.loads(
+            clone_request(
+                StockGit(),
+                clone_root(parent),
+                action="triage.pr.search",
+            )
+        )
+        check(
+            "invocation: sanctioned triage request reaches the bounded shim path",
+            result["op"] == "public_clone" and result["commit"] == COMMIT,
+        )
+        def bad_argv_is_denied():
+            with patch.object(sys, "argv", ["wheelhouse-search", "--request-file"]):
+                try:
+                    nls.main()
+                except SystemExit as exc:
+                    return "usage" in str(exc)
+            return False
+
+        check(
+            "invocation: nearby argument and non-sanctioned action stay denied",
+            rejected(
+                lambda: nls.handle_request(
+                    {"op": "public_clone", "url": "https://git.example/repo.git"},
+                    [],
+                    public_runner=StockGit(),
+                    resolver=public_resolver,
+                    clone_root=clone_root(parent),
+                    action="triage.pr.search.extra",
+                ),
+                "sanctioned agent actions",
+            )
+            and bad_argv_is_denied(),
+        )
 
 
 def test_initial_triage_independent_vision_source_review_contract():
@@ -1342,7 +1508,7 @@ def test_initial_triage_independent_vision_source_review_contract():
     ]
     check(
         "security: triage model receives no generic execution or acting capability",
-        '--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search)' in triage_step
+        '--allowedTools Read,Grep,Glob,Write,Bash(wheelhouse-search:*)' in triage_step
         and all(
             forbidden not in triage_step
             for forbidden in (
@@ -1427,6 +1593,7 @@ def main():
     test_post_clone_limits_and_deterministic_cleanup()
     test_stock_git_output_is_bounded()
     test_operation_scope_documentation_and_same_turn_action()
+    test_source_review_correction_contracts()
     test_initial_triage_independent_vision_source_review_contract()
     print()
     if _failures:

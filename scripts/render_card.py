@@ -302,10 +302,9 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # on already-open CI-approval HOLD cards (a display-only add; the pwn-request
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
-# Bumped 8 -> 9 to publish deterministic triage-suppression reasons and the
-# credential-vs-eligibility G6 wording. The 7 -> 8 grouping remains documented
-# in AGENTS.md.
-CARD_RENDER_VERSION = 9
+# Bumped 9 -> 10 to publish the truthful incomplete-context authority copy.
+# Earlier display-only bumps remain documented in AGENTS.md.
+CARD_RENDER_VERSION = 10
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -1738,9 +1737,30 @@ def _read_declared_evidence_source(
     target_src_dir,
     target_src_manifest="",
     target_src_revision="",
+    vision_file="",
+    vision_content_sha256="",
 ):
     if source == "target.txt":
         return _read_target_text(target_file)
+    if source == "vision.md":
+        if not vision_file:
+            return ""
+        try:
+            if (
+                os.path.islink(vision_file)
+                or not os.path.isfile(vision_file)
+                or not 0 < os.path.getsize(vision_file) <= 40000
+            ):
+                return ""
+            with open(vision_file, "rb") as source_file:
+                content = source_file.read()
+            if hashlib.sha256(content).hexdigest() != str(
+                vision_content_sha256 or ""
+            ).lower():
+                return ""
+            return content.decode("utf-8")
+        except (OSError, UnicodeError):
+            return ""
     if not source.startswith("target-src/") or not target_src_dir:
         return ""
     relative = source[len("target-src/") :]
@@ -1825,6 +1845,8 @@ def _bind_verified_evidence_spans(
     target_src_dir="",
     target_src_manifest="",
     target_src_revision="",
+    vision_file="",
+    vision_content_sha256="",
 ):
     bounded = dict(data)
     verified = []
@@ -1838,6 +1860,8 @@ def _bind_verified_evidence_spans(
             target_src_dir,
             target_src_manifest,
             target_src_revision,
+            vision_file,
+            vision_content_sha256,
         )
         needle = _normalize_evidence_text(evidence_ref["quote"])
         if needle and needle in _normalize_evidence_text(source_text):
@@ -2559,6 +2583,7 @@ def _normalize_evidence_ref(value, preserve_handles=False):
         or not isinstance(quote, str)
         or not (
             source == "target.txt"
+            or (source == "vision.md" and not preserve_handles)
             or re.fullmatch(r"target-src/[A-Za-z0-9._/-]{1,900}", source)
         )
         or ".." in source.split("/")
@@ -3903,8 +3928,11 @@ def _related_work_section(context):
         lines.extend(
             [
                 "> [!NOTE]",
-                "> Related-work context is **%s** (`%s`). This is advisory; "
-                "it does not block or authorize any action."
+                "> Related-work context is **%s** (`%s`). The candidate list, "
+                "shared paths, and references are advisory display only and "
+                "never an overlap or action gate. Because this context is not "
+                "complete, assessment admission is unavailable; Accept and G6 "
+                "remain unavailable until a complete context is observed."
                 % (context["status"], context.get("reason") or "incomplete"),
                 "",
             ]
@@ -8357,6 +8385,8 @@ def decide_triage_apply(
             target_src_dir,
             target_src_manifest,
             target_src_revision,
+            vision_file,
+            (source_provenance_expected or {}).get("vision_content_sha256", ""),
         )
         triage = enforce_triage_source_provenance(
             triage,
@@ -8397,6 +8427,8 @@ def decide_triage_apply(
                     target_src_dir,
                     target_src_manifest,
                     target_src_revision,
+                    vision_file,
+                    (source_provenance_expected or {}).get("vision_content_sha256", ""),
                 )
                 repaired = enforce_triage_source_provenance(
                     repaired,
