@@ -24,6 +24,7 @@ from .contract import (
 )
 from .events import EventWriter
 from .output_validation import extract_json_object
+from .retention import retained_tool_denials
 from .supervisor import _anchor_ok, _error, _verify_artifacts
 from .task_builder import (
     claude_capabilities,
@@ -688,6 +689,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "fallbackUsed": False,
         "fallbackReason": None,
     }
+    denial_evidence = retained_tool_denials(rows)
     result = {
         "apiVersion": API_VERSION,
         "kind": "AgentResult",
@@ -723,6 +725,8 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
         "startedAt": started_at,
         "completedAt": _now(),
     }
+    if denial_evidence is not None:
+        result["proof"]["toolDenials"] = denial_evidence
     if delivered is not None:
         result["delivered"] = delivered
     if final is not None:

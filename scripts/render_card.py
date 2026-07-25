@@ -366,6 +366,13 @@ EVIDENCE_FIELD = "evidence"
 TRIAGE_START = "<!-- wheelhouse-triage:start -->"
 TRIAGE_END = "<!-- wheelhouse-triage:end -->"
 TRIAGE_UNAVAILABLE = "Auto triage unavailable for this version."
+# These non-material fields preserve compatibility with the existing
+# triage_status=succeeded cache while making a failed trusted primary result
+# explicit when its delivered candidate was consumed for advisory prose.
+TRIAGE_PRIMARY_STATUS_FIELD = "triage_primary_status"
+TRIAGE_PRIMARY_ERROR_FIELD = "triage_primary_error_code"
+TRIAGE_CONSUMPTION_FIELD = "triage_consumption"
+TRIAGE_BOUNDED_ERROR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 TRIAGE_BUDGET_DEFERRED = (
     "Automated advisory generation was deferred because the configured budget "
     "was unavailable."
@@ -4014,7 +4021,14 @@ def _related_work_section(context):
     return lines
 
 
-def triage_section(triage=None, error=None, owner="", repo=""):
+def _triage_primary_error_code(value):
+    value = str(value or "").strip()
+    return value if TRIAGE_BOUNDED_ERROR_RE.fullmatch(value) else ""
+
+
+def triage_section(
+    triage=None, error=None, owner="", repo="", primary_error_code=""
+):
     """Render the visible `### Triage` block. `owner`+`repo` (the TARGET slug
     from deterministic card state, never from the model) qualify any bare
     `#N` cross-repo reference in the model's triage text so it does not
@@ -4051,6 +4065,17 @@ def triage_section(triage=None, error=None, owner="", repo=""):
                 )
             )
         )
+        primary_error_code = _triage_primary_error_code(primary_error_code)
+        if primary_error_code:
+            lines.extend(
+                [
+                    "",
+                    "> [!WARNING]",
+                    "> Primary model validation failed (`%s`), but the delivered candidate was consumed for advisory triage."
+                    % primary_error_code,
+                    "> This advisory result is not a primary validation success; existing authority gates still apply.",
+                ]
+            )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
         lines.append("_%s_" % _display_safe_triage_text(note))
@@ -4512,6 +4537,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         "triage_repair_status",
         "triage_repair_reason",
         "triage_repair_candidate",
+        TRIAGE_PRIMARY_STATUS_FIELD,
+        TRIAGE_PRIMARY_ERROR_FIELD,
+        TRIAGE_CONSUMPTION_FIELD,
         "automerge_verdict",
         ASSESSMENT_FIELD,
         ASSESSMENT_RESULT_FIELD,
@@ -4545,10 +4573,24 @@ def _state_with_triage(
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
+    primary_error_code="",
 ):
     new_state = dict(state or {})
     new_state["triaged_sha"] = revision
     new_state["triage_status"] = status
+    primary_error_code = _triage_primary_error_code(primary_error_code)
+    new_state.pop(TRIAGE_PRIMARY_STATUS_FIELD, None)
+    new_state.pop(TRIAGE_PRIMARY_ERROR_FIELD, None)
+    new_state.pop(TRIAGE_CONSUMPTION_FIELD, None)
+    if status == "succeeded":
+        new_state[TRIAGE_PRIMARY_STATUS_FIELD] = (
+            "failed" if primary_error_code else "succeeded"
+        )
+        if primary_error_code:
+            new_state[TRIAGE_PRIMARY_ERROR_FIELD] = primary_error_code
+            new_state[TRIAGE_CONSUMPTION_FIELD] = "advisory"
+        else:
+            new_state[TRIAGE_CONSUMPTION_FIELD] = "primary"
     # Bounded schema-repair telemetry (NON-MATERIAL, like triaged_sha): set only
     # when this attempt actually went through a repair turn - `repaired` (the
     # repair produced a valid result and the card got real triage) or
@@ -4686,6 +4728,7 @@ def body_with_triage_result(
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
+    primary_error_code="",
 ):
     state = parse_state_block(body)
     kind = (state or {}).get("kind") if state else None
@@ -4713,8 +4756,13 @@ def body_with_triage_result(
         elif not assessment_admission.admitted(assessment):
             assessment_reason = assessment["admission"]["reason"]
     status = "succeeded" if normalized else "error"
+    primary_error_code = _triage_primary_error_code(primary_error_code)
     section = triage_section(
-        normalized, error or TRIAGE_UNAVAILABLE, owner=owner, repo=state.get("repo", "")
+        normalized,
+        error or TRIAGE_UNAVAILABLE,
+        owner=owner,
+        repo=state.get("repo", ""),
+        primary_error_code=primary_error_code,
     )
     updated = _insert_triage_section(body, section)
     recommendation = (
@@ -4767,6 +4815,7 @@ def body_with_triage_result(
         repair_status=repair_status,
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
+        primary_error_code=primary_error_code,
     )
     if kind == "pr-review":
         if assessment:
@@ -7665,6 +7714,7 @@ def update_card_triage(
     repair_status=None,
     repair_reason=None,
     repair_candidate=None,
+    primary_error_code="",
     require_queued=False,
 ):
     """Attach a completed auto-triage attempt's result to its card.
@@ -7745,6 +7795,7 @@ def update_card_triage(
         repair_status=repair_status,
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
+        primary_error_code=primary_error_code,
     )
     if new_body == body and not held:
         return False
@@ -8657,6 +8708,7 @@ def main():
         "anchors) the card gets the repaired triage, else the visible "
         "triage-unavailable error now carries the validation reason.",
     )
+    ta.add_argument("--primary-error-code", default="")
     ta.add_argument(
         "--repair-claim-admitted",
         default="",
@@ -8831,6 +8883,7 @@ def main():
                 vision_sha=args.vision_sha,
                 base_sha=args.base_sha,
                 automerge_behavior_available=args.automerge_behavior_available,
+                primary_error_code=args.primary_error_code,
             )
             if applied:
                 print("updated auto triage on card #%s" % args.issue)
@@ -8852,6 +8905,7 @@ def main():
                 repair_status="repaired",
                 repair_reason=decision["reason"],
                 repair_candidate=decision.get("candidate"),
+                primary_error_code=args.primary_error_code,
             )
         elif outcome == "repair-failed":
             print(

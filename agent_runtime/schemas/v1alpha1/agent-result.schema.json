@@ -94,7 +94,41 @@
             "maxOutputTokens": {"type": "string", "enum": ["externally-enforced", "adapter-enforced", "unavailable"]}
           }
         },
-        "limitEnforcementSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "limitEnforcementSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "toolDenials": {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "denialCount", "reason", "invocations"],
+          "properties": {
+            "version": {"const": 1},
+            "denialCount": {"type": "integer", "minimum": 1, "maximum": 8},
+            "reason": {"const": "permission_denied"},
+            "invocations": {
+              "type": "array", "maxItems": 8,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["sequence", "tool", "request"],
+                "properties": {
+                  "sequence": {"type": "integer", "minimum": 1},
+                  "tool": {"type": "string", "minLength": 1, "maxLength": 96},
+                  "request": {
+                    "type": "object", "additionalProperties": false, "maxProperties": 12,
+                    "properties": {
+                      "args": {}, "cmd": {"type": "string", "maxLength": 240},
+                      "command": {"type": "string", "maxLength": 240},
+                      "file_path": {"type": "string", "maxLength": 240},
+                      "op": {"type": "string", "maxLength": 240},
+                      "path": {"type": "string", "maxLength": 240},
+                      "pattern": {"type": "string", "maxLength": 240},
+                      "query": {"type": "string", "maxLength": 240},
+                      "ref": {"type": "string", "maxLength": 240},
+                      "request": {}, "url": {"type": "string", "maxLength": 240}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "delivered": {

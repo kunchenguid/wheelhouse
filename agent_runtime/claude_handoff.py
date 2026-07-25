@@ -55,6 +55,7 @@ PACKAGED_RUNTIME_FILES = (
     "limits.py",
     "output_validation.py",
     "redaction.py",
+    "retention.py",
     "runtime.lock.json",
     "sandbox.py",
     "supervisor.py",

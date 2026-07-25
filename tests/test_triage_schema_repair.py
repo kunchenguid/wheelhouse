@@ -1089,6 +1089,7 @@ def test_triage_yml_repair_wiring():
         for s in consume_steps
         if s.get("name") == "Record the bounded triage attempt result"
     )
+    record_run = str(record.get("run", ""))
     check(
         "yaml: admitted schema repair emits event-bound terminal evidence",
         "needs.triage-repair-prepare.outputs.repair_admitted == 'true'"
@@ -1115,8 +1116,22 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: repair source drift is the recorded triage model code",
-        (record.get("env") or {}).get("MODEL_ERROR_CODE")
-        == "${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}",
+        (
+            (record.get("env") or {}).get("MODEL_ERROR_CODE")
+            == "${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}"
+        )
+        and 'code="${MODEL_ERROR_CODE:-}"' in record_run,
+    )
+    check(
+        "yaml: committed evidence preserves source revision mismatch",
+        all(
+            '[ -z "$code" ]; then code="consumer.committed"' in run
+            and 'elif [ "$code" != "source.revision_mismatch" ]; then'
+            in run
+            and 'elif [ -z "$code" ]; then' in run
+            and 'code="consumer.rejected"' in run
+            for run in (record_run, primary_run)
+        ),
     )
     check(
         "yaml: terminal evidence follows fail-open recovery",
