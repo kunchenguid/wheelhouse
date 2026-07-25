@@ -2149,9 +2149,13 @@ jobs:
           PRIMARY_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
         run: |
           set -euo pipefail
-          code="${MODEL_ERROR_CODE:-consumer.rejected}"
+          code="${MODEL_ERROR_CODE:-}"
           if { [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; } || { [ "${{ steps.card-recovery.outcome }}" = "success" ] && [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; }; then
-            if [ "$code" != "source.revision_mismatch" ] && [ -n "$code" ]; then code="consumer.committed.primary.$code"; else code="consumer.committed"; fi
+            if [ -z "$code" ]; then code="consumer.committed"
+            elif [ "$code" != "source.revision_mismatch" ]; then code="consumer.committed.primary.$code"
+            fi
+          elif [ -z "$code" ]; then
+            code="consumer.rejected"
           fi
           python scripts/agent_claim.py record \
             --issue "$ISSUE" --repo-slug "$REPO_SLUG" \
@@ -2168,10 +2172,14 @@ jobs:
           PRIMARY_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
         run: |
           set -euo pipefail
-          status="failed"; stage="consumer-rejected"; code="${PRIMARY_ERROR_CODE:-consumer.rejected}"
+          status="failed"; stage="consumer-rejected"; code="${PRIMARY_ERROR_CODE:-}"
           if [ "${{ steps.card-consumer.outputs.applied }}" = "true" ] || [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; then
             status="ok"; stage="consumer-committed"
-            if [ "$code" != "source.revision_mismatch" ] && [ -n "$code" ]; then code="consumer.committed.primary.$code"; else code="consumer.committed"; fi
+            if [ -z "$code" ]; then code="consumer.committed"
+            elif [ "$code" != "source.revision_mismatch" ]; then code="consumer.committed.primary.$code"
+            fi
+          elif [ -z "$code" ]; then
+            code="consumer.rejected"
           fi
           body="Agent triage event finished with ${code}. ${PRIMARY_MARKER}"
           gh api --method PATCH "repos/$REPO_SLUG/issues/comments/$PRIMARY_CLAIM_ID" -f "body=$body" >/dev/null
