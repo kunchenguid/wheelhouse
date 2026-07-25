@@ -192,7 +192,6 @@ def main():
             "kind": "other",
             "observation_id": "sha256:" + "0" * 64,
             "context_id": "sha256:" + "1" * 64,
-            "check_names": [],
         }
         pr_valid["automerge"] = {
             "behavior_class": "B",
@@ -277,14 +276,27 @@ def main():
             assessment_admission.normalize_basis(card_1704_basis) is None,
         )
 
-        valid_other_basis = dict(card_1704_basis, check_names=[])
+        valid_other_basis = {
+            key: value for key, value in card_1704_basis.items()
+            if key != "check_names"
+        }
         valid_other = copy.deepcopy(pr_valid)
         valid_other["recommendation_basis"] = valid_other_basis
         validate_schema(valid_other, pr_schema)
         check(
-            "action schema: kind other requires empty check_names",
-            assessment_admission.normalize_basis(valid_other_basis) is not None,
+            "action schema: kind other omits check_names",
+            assessment_admission.normalize_basis(valid_other_basis) is None,
         )
+        malformed_other = copy.deepcopy(pr_valid)
+        malformed_other["recommendation_basis"] = dict(
+            valid_other_basis, check_names=[]
+        )
+        try:
+            validate_schema(malformed_other, pr_schema)
+        except ContractError:
+            check("action schema: kind other rejects check_names", True)
+        else:
+            check("action schema: kind other rejects check_names", False)
         for basis_kind in ("configured-tests-not-run", "configured-tests-not-green"):
             configured_basis = dict(
                 card_1704_basis,

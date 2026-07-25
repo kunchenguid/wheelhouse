@@ -71,7 +71,6 @@ def default_final(action: str) -> Any:
             "kind": "other",
             "observation_id": "sha256:" + "0" * 64,
             "context_id": "sha256:" + "1" * 64,
-            "check_names": [],
         }
     return result
 
