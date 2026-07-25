@@ -1,8 +1,28 @@
 #!/usr/bin/env python3
 """Pure bounded advisory related-work context for PR-review projections.
 
-DecisionContext is neutral evidence. It can be rendered and supplied to triage,
-but no auto-merge or manual action gate may consume it.
+DecisionContext is neutral evidence. It can be rendered, supplied to triage,
+and carried in assessment/projection artifacts for provenance, refresh, and
+telemetry. It must never grant or deny action authority: no auto-merge or
+manual action gate may consume its status, content, or identity.
+
+Relatedness rules (deterministic, explainable, bounded):
+
+- A path touched by at least ``HUB_PATH_MIN_FANOUT`` open candidates AND by at
+  least half of the open candidate universe is a hub path (for example a
+  catalog README/index every addition must edit). A hub path never forms an
+  ``exact-shared-path`` relation: touching it carries no specific-relationship
+  signal. Genuine non-hub shared paths still relate.
+- Candidates sort by relation strength before the fixed display/model cap:
+  ``same-closing-issue`` outranks ``explicit-reference``, which outranks
+  ``exact-shared-path``; ties break by owner/repo/number, so the cap keeps the
+  most informative candidates, not the lowest-numbered ones.
+- The candidate cap is a deliberate display/model bound, never missing or
+  incomplete comparison evidence: a capped context stays ``complete`` and
+  honestly records ``related_candidate_count > len(candidates)``. Only a
+  genuinely incomplete comparison (unobserved candidate paths/closing/
+  references), a bounded relation detail, or an incomplete/unavailable
+  snapshot marks the context ``truncated``/``unavailable``.
 """
 
 import hashlib
@@ -25,6 +45,21 @@ MAX_SHARED_ISSUES = 3
 MAX_CANDIDATE_TITLE = 100
 MAX_GITHUB_URL = 250
 LEGACY_MAX_GITHUB_URL = 500
+
+# Candidate relation strength, strongest first. Candidate lists sort by each
+# candidate's strongest relation before the display/model cap is applied.
+RELATION_STRENGTH = {
+    "same-closing-issue": 0,
+    "explicit-reference": 1,
+    "exact-shared-path": 2,
+}
+
+# Hub-path fanout rule: a path touched by at least HUB_PATH_MIN_FANOUT open
+# candidates (the absolute floor keeps tiny repositories honest) AND by at
+# least half of the open candidate universe is a hub and never forms an
+# exact-shared-path relation.
+HUB_PATH_MIN_FANOUT = 3
+HUB_PATH_FANOUT_DENOMINATOR = 2
 
 
 def _canonical(value):
@@ -200,6 +235,41 @@ def _relation(kind, *, paths=None, issues=None, source=""):
     return relation
 
 
+def _legacy_candidate_key(row):
+    target = row["target"]
+    return (target["owner"], target["repo"], target["number"])
+
+
+def _strength_candidate_key(row):
+    strength = min(
+        RELATION_STRENGTH[relation["kind"]] for relation in row["relations"]
+    )
+    return (strength,) + _legacy_candidate_key(row)
+
+
+def _path_fanout(candidates):
+    """Count how many open candidates touch each observed path.
+
+    Candidates with incomplete path observations contribute their observed
+    subset, so fanout can only be undercounted for them - a borderline hub may
+    stay related, never the reverse. Deterministic and bounded by the already
+    observed snapshot.
+    """
+    fanout = {}
+    for candidate in candidates:
+        for path in candidate["paths"]:
+            fanout[path] = fanout.get(path, 0) + 1
+    return fanout
+
+
+def _hub_path(path, fanout, universe_size):
+    count = fanout.get(path, 0)
+    return (
+        count >= HUB_PATH_MIN_FANOUT
+        and count * HUB_PATH_FANOUT_DENOMINATOR >= universe_size
+    )
+
+
 def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTEXT_CANDIDATES):
     """Match the full observed repository snapshot, then bound related results."""
     observation = observations.normalize_review_observation(target_observation)
@@ -253,6 +323,8 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
     related = []
     comparison_incomplete = False
     relation_truncated = False
+    fanout = _path_fanout(rebuilt["candidates"])
+    universe_size = rebuilt["candidate_count"]
     # The repository scan already paid to observe these rows. Match every row
     # before applying the small display/model-result cap so repository volume
     # cannot crowd out a deterministic relation.
@@ -288,7 +360,11 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
         else:
             comparison_incomplete = True
         if target["paths_complete"] and candidate["paths_complete"]:
-            shared = sorted(set(target["paths"]).intersection(candidate["paths"]))
+            shared = sorted(
+                path
+                for path in set(target["paths"]).intersection(candidate["paths"])
+                if not _hub_path(path, fanout, universe_size)
+            )
             if shared:
                 if len(shared) > MAX_SHARED_PATHS:
                     relation_truncated = True
@@ -311,32 +387,25 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
                     "relations": relations[:MAX_RELATIONS_PER_CANDIDATE],
                 }
             )
-    related.sort(
-        key=lambda row: (
-            row["target"]["owner"], row["target"]["repo"], row["target"]["number"]
-        )
-    )
+    related.sort(key=_strength_candidate_key)
     related_candidate_count = len(related)
-    result_truncated = related_candidate_count > candidate_cap
+    # The display/model candidate cap is a deliberate bound, never missing or
+    # incomplete comparison evidence: `related_candidate_count >
+    # len(candidates)` records the omission honestly while the context stays
+    # complete. Only genuinely incomplete comparison evidence, a bounded
+    # relation detail, or an incomplete snapshot marks the context truncated.
     status = (
         "truncated"
-        if not rebuilt["complete"]
-        or result_truncated
-        or comparison_incomplete
-        or relation_truncated
+        if not rebuilt["complete"] or comparison_incomplete or relation_truncated
         else "complete"
     )
     reason = (
         rebuilt["reason"]
         if not rebuilt["complete"]
         else (
-            "related-candidate-bound"
-            if result_truncated
-            else (
-                "comparison_incomplete"
-                if comparison_incomplete
-                else ("relation_bound" if relation_truncated else "")
-            )
+            "comparison_incomplete"
+            if comparison_incomplete
+            else ("relation_bound" if relation_truncated else "")
         )
     )
     payload = {
@@ -478,7 +547,6 @@ def normalize_decision_context(value):
             and (
                 not snapshot["complete"]
                 or value["reason"]
-                or related_count != len(candidates)
             )
         )
         or (status == "truncated" and not value["reason"])
@@ -573,14 +641,14 @@ def normalize_decision_context(value):
         if relations != normalized_relations:
             return None
         normalized_candidates.append({**candidate, "relations": normalized_relations})
-    normalized_candidates.sort(
-        key=lambda row: (
-            row["target"]["owner"],
-            row["target"]["repo"],
-            row["target"]["number"],
-        )
-    )
-    if candidates != normalized_candidates:
+    # v2 candidates written before strength ordering sort by owner/repo/number;
+    # current v2 sorts strongest relation first. Both byte orders remain
+    # readable (the recomputed context identity pins whichever order a card
+    # persisted); v1 was only ever written in the legacy order.
+    orderings = [sorted(normalized_candidates, key=_legacy_candidate_key)]
+    if schema == CONTEXT_SCHEMA:
+        orderings.append(sorted(normalized_candidates, key=_strength_candidate_key))
+    if not any(candidates == ordering for ordering in orderings):
         return None
     claimed = value.get("context_id")
     if claimed != _context_identity(value):

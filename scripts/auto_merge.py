@@ -712,7 +712,7 @@ def fresh_verdict_facts(state, head_sha):
         if not current_head_ok
         else (
             (
-                "current assessment is not admitted for its observation/context"
+                "current assessment is not admitted for its observation/head"
                 if not admission_ok
                 else "no successful auto-triage verdict on the card"
             )

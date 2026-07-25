@@ -322,9 +322,9 @@ def test_decision_context_contract():
         ],
     )
     check(
-        "contract: deterministic sort and context identity round-trip",
+        "contract: deterministic strength sort and context identity round-trip",
         decision_context.normalize_decision_context(context) == context
-        and [entry["target"]["number"] for entry in context["candidates"]] == [905, 21],
+        and [entry["target"]["number"] for entry in context["candidates"]] == [21, 905],
     )
     legacy_context = copy.deepcopy(context)
     legacy_context["schema"] = decision_context.CONTEXT_SCHEMA_V1
@@ -332,6 +332,15 @@ def test_decision_context_contract():
     for entry in legacy_context["candidates"]:
         entry.pop("title")
         entry["card_url"] = ""
+    # v1 was only ever written in the legacy owner/repo/number order; a
+    # persisted v1 payload in any other order is not a valid v1 artifact.
+    legacy_context["candidates"].sort(
+        key=lambda row: (
+            row["target"]["owner"],
+            row["target"]["repo"],
+            row["target"]["number"],
+        )
+    )
     legacy_context["context_id"] = decision_context._context_identity(legacy_context)
     check(
         "contract: persisted v1 context stays readable but cannot feed the v2 model handoff",
@@ -599,7 +608,7 @@ def test_scheduled_epoch_contract():
     check("contract: manual run cannot advance the epoch ledger", manual == 0)
 
 
-def test_incomplete_v2_context_allows_advisory_spend_without_authority():
+def test_incomplete_v2_context_allows_advisory_spend():
     obs = observation()
     context = decision_context.unavailable_context(obs, "snapshot.unavailable")
     item = item_for(obs, context)
@@ -618,11 +627,109 @@ def test_incomplete_v2_context_allows_advisory_spend_without_authority():
         and "- [ ] Merge it" not in projection["body"]
         and render_card.should_auto_triage(item, state, labels, True),
     )
+    # DecisionContext neutrality: context status, content, and identity never
+    # grant or deny authority. Only the exact target observation/head binding,
+    # observation completeness, well-formedness, and check-basis truth do.
     unavailable_assessment = assessment_for(obs, context)
     check(
-        "contract: unavailable context still cannot grant assessment authority",
-        unavailable_assessment["admission"]["status"] == "unavailable"
-        and not admission.admitted(unavailable_assessment),
+        "contract: unavailable context neither grants nor denies authority",
+        admission.admitted(unavailable_assessment),
+    )
+    rotated_context = context_for(
+        obs,
+        [
+            candidate(901, "head-901", ["src/queue.py", "src/writer.py"]),
+            candidate(955, "head-955", ["docs/guide.md"]),
+        ],
+    )
+    check(
+        "contract: context identity rotation alone keeps a current assessment admitted",
+        rotated_context["context_id"] != context["context_id"]
+        and admission.admitted(
+            admission.admit_assessment(
+                {
+                    "summary": unavailable_assessment["summary"],
+                    "product_implications": unavailable_assessment[
+                        "product_implications"
+                    ],
+                    "recommended_action": unavailable_assessment["recommendation"][
+                        "action"
+                    ],
+                    "recommended_reason": unavailable_assessment["recommendation"][
+                        "reason"
+                    ],
+                    "recommendation_basis": unavailable_assessment["recommendation"][
+                        "basis"
+                    ],
+                },
+                obs,
+                rotated_context,
+            )
+        ),
+    )
+    tampered_context = copy.deepcopy(context)
+    tampered_context["reason"] = "forged"
+    missing_observation = admission.admit_assessment(
+        {
+            "summary": "s",
+            "product_implications": "p",
+            "recommended_action": "hold",
+            "recommended_reason": "r",
+            "recommendation_basis": unavailable_assessment["recommendation"]["basis"],
+        },
+        None,
+        context,
+    )
+    other_obs = observation(902, "head-902")
+    stale_observation = admission.admit_assessment(
+        {
+            "summary": "s",
+            "product_implications": "p",
+            "recommended_action": "hold",
+            "recommended_reason": "r",
+            "recommendation_basis": unavailable_assessment["recommendation"]["basis"],
+        },
+        other_obs,
+        context,
+    )
+    incomplete_obs = observation(complete=False)
+    incomplete_observation = admission.admit_assessment(
+        {
+            "summary": "s",
+            "product_implications": "p",
+            "recommended_action": "hold",
+            "recommended_reason": "r",
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": incomplete_obs["observation_id"],
+                "context_id": context["context_id"],
+                "check_names": [],
+            },
+        },
+        incomplete_obs,
+        context,
+    )
+    check(
+        "contract: malformed/missing/rotated target evidence still denies authority",
+        admission.admit_assessment(
+            {
+                "summary": "s",
+                "product_implications": "p",
+                "recommended_action": "hold",
+                "recommended_reason": "r",
+                "recommendation_basis": unavailable_assessment["recommendation"][
+                    "basis"
+                ],
+            },
+            obs,
+            tampered_context,
+        )["admission"]["reason"]
+        == "binding.unavailable"
+        and missing_observation["admission"]["reason"] == "binding.unavailable"
+        and stale_observation["admission"]["status"] == "stale"
+        and stale_observation["admission"]["reason"] == "binding.mismatch"
+        and incomplete_observation["admission"]["reason"]
+        == "observation.incomplete",
     )
 
     complete_context = context_for(obs)
@@ -698,7 +805,7 @@ def test_triage_suppression_is_visible_and_fail_closed():
     )
 
 
-def _triage_payload(obs, context, *, context_id=None):
+def _triage_payload(obs, context, *, context_id=None, observation_id=None):
     return {
         "summary": "Bounded advisory review is visible.",
         "product_implications": "Action authority remains independently admitted.",
@@ -707,7 +814,7 @@ def _triage_payload(obs, context, *, context_id=None):
         "evidence": "target.txt: 'fixture evidence'",
         "recommendation_basis": {
             "kind": "other",
-            "observation_id": obs["observation_id"],
+            "observation_id": observation_id or obs["observation_id"],
             "context_id": context_id or context["context_id"],
             "check_names": [],
         },
@@ -799,7 +906,7 @@ def test_card_1663_high_volume_context_queues_once():
     queued_state = core.parse_state_block(queued_body)
     queued_again = render_card.should_auto_triage(item, queued_state, labels, True)
     stale_result = _triage_payload(
-        obs, context, context_id="sha256:" + "0" * 64
+        obs, context, observation_id="sha256:" + "0" * 64
     )
     visible = render_card.body_with_triage_result(
         queued_body, obs["revision"]["head_sha"], triage=stale_result
@@ -832,14 +939,47 @@ def test_card_1663_high_volume_context_queues_once():
         and visible_state["triage_assessment"]["admission"]["status"] == "stale"
         and "<!-- opt:accept-recommendation -->" not in visible,
     )
+    context_rotated_result = _triage_payload(
+        obs, context, context_id="sha256:" + "0" * 64
+    )
+    rotated_visible = render_card.body_with_triage_result(
+        queued_body,
+        obs["revision"]["head_sha"],
+        triage=context_rotated_result,
+    )
+    rotated_state = core.parse_state_block(rotated_visible)
+    check(
+        "card-1663: context identity provenance alone never denies authority",
+        admission.admitted(rotated_state["triage_assessment"])
+        and "<!-- opt:accept-recommendation -->" in rotated_visible,
+    )
 
 
-def test_related_result_top_ten_stays_advisory():
-    obs = observation(1, "head-1", paths=["src/shared.py"])
-    rows = [
-        candidate(number, "head-%s" % number, ["src/shared.py"])
-        for number in range(1, 14)
-    ]
+def test_related_cap_keeps_strongest_and_stays_honest():
+    obs = observation(1, "head-1", paths=["src/a.py"])
+    target_row = candidate(
+        1,
+        "head-1",
+        ["src/a.py"],
+        closing_issues=[10],
+        references=[
+            {"owner": "owner", "repo": "firstmate", "number": number}
+            for number in (8, 9, 10, 11)
+        ],
+    )
+    rows = [target_row]
+    # The lowest-numbered candidate has the weakest relation kind.
+    rows.append(candidate(2, "head-2", ["src/a.py"]))
+    rows.extend(
+        candidate(number, "head-%s" % number, ["src/other-%s.py" % number], closing_issues=[10])
+        for number in (3, 4, 5, 6, 7)
+    )
+    rows.extend(
+        candidate(number, "head-%s" % number, ["src/ref-%s.py" % number])
+        for number in (8, 9, 10, 11)
+    )
+    # The highest-numbered candidate has the strongest relation kind.
+    rows.append(candidate(12, "head-12", ["src/other-12.py"], closing_issues=[10]))
     context = context_for(obs, rows)
     item = item_for(obs, context)
     compact = decision_context.compact_model_context(context)
@@ -857,53 +997,343 @@ def test_related_result_top_ten_stays_advisory():
         state, obs["revision"]["head_sha"]
     )
     check(
-        "related cap: deterministic top 10 and honest total are rendered",
-        context["status"] == "truncated"
-        and context["reason"] == "related-candidate-bound"
-        and context["related_candidate_count"] == 12
-        and [row["target"]["number"] for row in context["candidates"]]
-        == list(range(2, 12))
-        and "Showing **10 of 12**" in visible,
+        "related cap: deliberate cap is complete context with an honest total",
+        context["status"] == "complete"
+        and context["reason"] == ""
+        and context["related_candidate_count"] == 11
+        and len(context["candidates"]) == 10
+        and "Showing **10 of 11**" in visible
+        and "strongest relations first" in visible
+        and "deliberate display/model context cap" in visible,
+    )
+    check(
+        "related cap: strength ordering retains the most informative candidates",
+        [row["target"]["number"] for row in context["candidates"]]
+        == [3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
     )
     check(
         "related cap: compact model context contains no identities, paths, bodies, or diffs",
-        compact["total_matches"] == 12
+        compact["status"] == "complete"
+        and compact["total_matches"] == 11
         and compact["shown_matches"] == 10
         and all(set(row) == {"title", "url"} for row in compact["items"]),
     )
     check(
-        "related cap: visible triage remains unable to create Accept or satisfy G6",
+        "related cap: capped context admits Accept and G6 triage credit",
         "### Triage" in visible
-        and state["triage_assessment"]["admission"]
-        == {
-            "schema": admission.ADMISSION_SCHEMA,
-            "status": "unavailable",
-            "reason": "context.truncated",
-        }
-        and "<!-- opt:accept-recommendation -->" not in visible
-        and facts["g6_triage_success"]["status"] == criteria.STATUS_UNMET,
+        and admission.admitted(state["triage_assessment"])
+        and "<!-- opt:accept-recommendation -->" in visible
+        and facts["g6_triage_success"]["status"] == criteria.STATUS_MET,
     )
-    truncated_copy = "\n".join(render_card._related_work_section(context))
+    incomplete = context_for(
+        obs,
+        [
+            dict(target_row, paths_complete=False),
+            candidate(2, "head-2", ["src/a.py"]),
+        ],
+    )
+    truncated_copy = "\n".join(render_card._related_work_section(incomplete))
     complete = context_for(
         obs,
         [
-            candidate(1, "head-1", ["src/shared.py"]),
-            candidate(2, "head-2", ["src/shared.py"]),
+            candidate(1, "head-1", ["src/a.py"]),
+            candidate(2, "head-2", ["src/a.py"]),
         ],
     )
     complete_copy = "\n".join(render_card._related_work_section(complete))
     check(
-        "related copy: incomplete contexts explain advisory display and unavailable authority",
-        "never an overlap or action gate" in truncated_copy
-        and "assessment admission is unavailable" in truncated_copy
-        and "Accept and G6 remain unavailable" in truncated_copy
-        and "does not block or authorize any action" not in truncated_copy,
+        "related copy: genuine incompleteness stays explicit and advisory-only",
+        incomplete["status"] == "truncated"
+        and incomplete["reason"] == "comparison_incomplete"
+        and "comparison across open pull requests is incomplete" in truncated_copy
+        and "never an overlap or action gate" in truncated_copy
+        and "assessment admission is unavailable" not in truncated_copy
+        and "Accept and G6 remain unavailable" not in truncated_copy,
     )
     check(
-        "related copy: complete context does not claim unavailable authority",
+        "related copy: complete context does not claim missing evidence",
         complete["status"] == "complete"
-        and "assessment admission is unavailable" not in complete_copy
+        and "cannot claim that no related work exists" not in complete_copy
         and "Shared paths and references are not an auto-merge overlap gate." in complete_copy,
+    )
+
+
+def test_axi84_comparison_incomplete_keeps_target_authority():
+    """Card-1676/axi#84 reproduction: one open PR with 14 changed files
+    (above MAX_CHANGED_PATHS = 12) marks its path comparison incomplete and
+    used to poison every assessment in the repository. The context honestly
+    stays truncated, but a complete target observation is admitted and keeps
+    Accept/G6 authority while the context remains advisory."""
+    obs = observation(114, "1c0adc1d", paths=["README.md", "catalog.yaml", "docs/index.html"])
+    rows = [
+        candidate(114, "1c0adc1d", ["README.md", "catalog.yaml", "docs/index.html"]),
+    ]
+    for number in range(115, 127):
+        if number == 120:
+            # axi#84: 14 changed files, above the observation path cap, so its
+            # comparison input is incomplete (paths_complete=False).
+            rows.append(
+                dict(
+                    candidate(
+                        120,
+                        "head-120",
+                        ["dir-%02d/file.py" % index for index in range(12)],
+                    ),
+                    paths_complete=False,
+                )
+            )
+        else:
+            rows.append(
+                candidate(number, "head-%s" % number, ["src/other-%s.py" % number])
+            )
+    context = context_for(obs, rows)
+    check(
+        "axi#84: one over-cap PR keeps context comparison honestly incomplete",
+        context["status"] == "truncated"
+        and context["reason"] == "comparison_incomplete"
+        and context["related_candidate_count"] == 0,
+    )
+    assessment = assessment_for(obs, context)
+    item = item_for(obs, context, assessment)
+    projection = card_projection.plan_card_projection(item, prior={})
+    state = core.parse_state_block(projection["body"])
+    facts, _behavior_class = auto_merge.fresh_verdict_facts(
+        state, obs["revision"]["head_sha"]
+    )
+    check(
+        "axi#84: complete target observation admits despite truncated context",
+        admission.admitted(assessment)
+        and render_card.assessment_current_admitted(state)
+        and "<!-- opt:accept-recommendation -->" in projection["body"]
+        and facts["g6_triage_success"]["status"] == criteria.STATUS_MET,
+    )
+
+
+def test_card1676_hub_paths_cannot_manufacture_relations():
+    """Card-1676 catalog cohort: nine candidates each share ALL THREE common
+    catalog files with the target, so requiring two or more shared paths
+    cannot suppress them. The fanout rule (a path touched by at least half of
+    the open candidate universe, floor 3) suppresses the manufactured
+    relations while genuine non-hub shared paths still relate."""
+    hub_paths = ["README.md", "catalog.yaml", "docs/index.html"]
+    obs = observation(114, "head-114", paths=hub_paths)
+    rows = [candidate(114, "head-114", hub_paths)]
+    for number in range(115, 128):
+        rows.append(candidate(number, "head-%s" % number, hub_paths))
+    rows.append(candidate(130, "head-130", ["src/unrelated.py"]))
+    context = context_for(obs, rows)
+    check(
+        "card-1676: every cohort member shares all three catalog files",
+        all(
+            len(set(hub_paths).intersection(row["paths"])) == 3
+            for row in rows[1:14]
+        )
+        and len(rows) == 15,
+    )
+    check(
+        "card-1676: hub fanout suppresses every manufactured relation",
+        context["related_candidate_count"] == 0
+        and context["candidates"] == []
+        and context["status"] == "complete",
+    )
+    # Genuine non-hub shared path: target plus two others in the same 15-PR
+    # universe (fanout 3, below half of 15) still forms a relation.
+    genuine_rows = [candidate(114, "head-114", ["src/catalog.py"] + hub_paths)]
+    for number in range(115, 128):
+        genuine_rows.append(candidate(number, "head-%s" % number, hub_paths))
+    genuine_rows.append(candidate(131, "head-131", ["src/catalog.py"]))
+    genuine_rows.append(candidate(132, "head-132", ["src/catalog.py"]))
+    genuine_obs = observation(114, "head-114", paths=["src/catalog.py"] + hub_paths)
+    genuine = context_for(genuine_obs, genuine_rows)
+    genuine_relations = {
+        row["target"]["number"]: [relation["kind"] for relation in row["relations"]]
+        for row in genuine["candidates"]
+    }
+    check(
+        "card-1676: genuine non-hub shared paths still relate",
+        genuine_relations.get(131) == ["exact-shared-path"]
+        and genuine_relations.get(132) == ["exact-shared-path"]
+        and len(genuine_relations) == 2,
+    )
+    # Boundary: at exactly half the universe and the absolute floor the path
+    # is a hub; one candidate fewer and it is not.
+    half_rows = [candidate(114, "head-114", ["src/half.py"])]
+    half_rows.extend(
+        candidate(200 + index, "head-%s" % (200 + index), ["src/half.py"])
+        for index in range(5)
+    )
+    half_context = context_for(observation(114, "head-114", paths=["src/half.py"]), half_rows)
+    check(
+        "card-1676: half-of-universe fanout is the hub boundary",
+        half_context["related_candidate_count"] == 0
+        and half_context["status"] == "complete",
+    )
+    incomplete_rows = [
+        candidate(114, "head-114", ["src/observed.py"]),
+        candidate(200, "head-200", ["src/observed.py"]),
+        candidate(201, "head-201", ["src/observed.py"]),
+    ]
+    incomplete_context = context_for(
+        observation(114, "head-114", paths=["src/observed.py"]),
+        incomplete_rows,
+        complete=False,
+        reason="repository-candidate-bound",
+        candidate_count=9,
+    )
+    check(
+        "card-1676: incomplete snapshot uses the supported open universe",
+        incomplete_context["related_candidate_count"] == 2
+        and incomplete_context["status"] == "truncated",
+    )
+
+
+def _legacy_context_rule_admit(real_admit):
+    """Simulate the retired admission rule: non-complete context denied."""
+
+    def wrapper(data, observation, context):
+        result = real_admit(data, observation, context)
+        normalized_context = decision_context.normalize_decision_context(context)
+        if (
+            result is not None
+            and result["admission"]["status"] == "admitted"
+            and normalized_context is not None
+            and normalized_context["status"] != "complete"
+        ):
+            result = dict(result)
+            result["admission"] = {
+                "schema": admission.ADMISSION_SCHEMA,
+                "status": "unavailable",
+                "reason": "context.%s" % normalized_context["status"],
+            }
+            without_id = dict(result)
+            without_id.pop("assessment_id", None)
+            result["assessment_id"] = admission._identity("sha256:", without_id)
+            result = admission.normalize_assessment(result)
+        return result
+
+    return wrapper
+
+
+def test_context_denied_assessment_readmits_on_ordinary_refresh():
+    """Zero-spend healing: a same-head assessment denied solely under the
+    retired advisory-context rule is re-admitted during the ordinary
+    same-revision refresh path - no replay, no model call - while genuinely
+    denied or observation-rotated assessments stay denied."""
+    obs = observation(114, "head-114", paths=["README.md", "catalog.yaml"])
+    rows = [
+        candidate(114, "head-114", ["README.md", "catalog.yaml"]),
+        dict(
+            candidate(120, "head-120", ["dir-%02d/file.py" % i for i in range(12)]),
+            paths_complete=False,
+        ),
+    ]
+    context = context_for(obs, rows)
+    item = item_for(obs, context)
+    held = card_projection.plan_card_projection(item, prior={}, held=True, has_token=True)
+    queued = render_card.body_with_triage_queued(held["body"], item)
+    saved_admit = render_card.assessment_admission.admit_assessment
+    render_card.assessment_admission.admit_assessment = _legacy_context_rule_admit(
+        saved_admit
+    )
+    try:
+        legacy_body = render_card.body_with_triage_result(
+            queued,
+            obs["revision"]["head_sha"],
+            triage=_triage_payload(obs, context),
+        )
+    finally:
+        render_card.assessment_admission.admit_assessment = saved_admit
+    legacy_warning = "\n".join(
+        [
+            "> [!WARNING]",
+            "> The advisory assessment was not admitted (`context.truncated`). "
+            "It cannot create **Accept recommendation** or satisfy G6.",
+        ]
+    )
+    legacy_body = legacy_body.replace(
+        render_card.TRIAGE_END + "\n\n" + legacy_warning,
+        legacy_warning + "\n" + render_card.TRIAGE_END,
+    )
+    legacy_state = core.parse_state_block(legacy_body)
+    check(
+        "readmission: legacy fixture persists the retired context denial",
+        legacy_state["triage_assessment"]["admission"]["status"] == "unavailable"
+        and legacy_state["triage_assessment"]["admission"]["reason"]
+        == "context.truncated"
+        and legacy_state.get("triage_recommendation") is None
+        and "<!-- opt:accept-recommendation -->" not in legacy_body
+        and legacy_warning in legacy_body,
+    )
+    prior = issue_from_projection(
+        {"title": held["title"], "body": legacy_body, "managed_labels": held["managed_labels"]}
+    )
+    healed = card_projection.plan_card_projection(item, prior=prior)
+    healed_state = core.parse_state_block(healed["body"])
+    check(
+        "readmission: ordinary refresh re-admits the still-current assessment",
+        healed_state["triage_assessment"]["admission"]["status"] == "admitted"
+        and "assessment_admission" not in healed_state
+        and healed_state.get("triage_recommendation")
+        == {"action": "merge", "reason": "Review the exact current revision."}
+        and "<!-- opt:accept-recommendation -->" in healed["body"]
+        and "### Recommended action" not in healed["body"]
+        and "The advisory assessment was not admitted" not in healed["body"]
+        and render_card.assessment_current_admitted(healed_state),
+    )
+
+    # A basis contradiction the context branch had masked stays denied: the
+    # re-admission recomputation surfaces the true verdict instead of healing.
+    contradicting = _triage_payload(obs, context)
+    contradicting["recommendation_basis"] = {
+        "kind": "configured-tests-not-run",
+        "observation_id": obs["observation_id"],
+        "context_id": context["context_id"],
+        "check_names": ["Ubuntu", "macOS", "Windows", "E2E"],
+    }
+    render_card.assessment_admission.admit_assessment = _legacy_context_rule_admit(
+        saved_admit
+    )
+    try:
+        contradicting_body = render_card.body_with_triage_result(
+            queued,
+            obs["revision"]["head_sha"],
+            triage=contradicting,
+        )
+    finally:
+        render_card.assessment_admission.admit_assessment = saved_admit
+    contradicting_prior = issue_from_projection(
+        {"title": held["title"], "body": contradicting_body, "managed_labels": held["managed_labels"]}
+    )
+    unhealed = card_projection.plan_card_projection(item, prior=contradicting_prior)
+    unhealed_state = core.parse_state_block(unhealed["body"])
+    check(
+        "readmission: a masked check contradiction is never healed",
+        unhealed_state["triage_assessment"]["admission"]["status"] != "admitted"
+        and unhealed_state.get("triage_recommendation") is None
+        and "<!-- opt:accept-recommendation -->" not in unhealed["body"],
+    )
+
+    # A rotated target observation (same head, new check rows) is not current:
+    # the legacy assessment stays exactly as persisted.
+    rotated_obs = observation(
+        114,
+        "head-114",
+        paths=["README.md", "catalog.yaml"],
+        checks=[
+            {"name": "PR must be raised via no-mistakes", "role": "compliance", "outcome": "pass"},
+            {"name": "Ubuntu", "role": "test", "outcome": "pass"},
+        ],
+        observed_at="2026-07-23T14:00:00Z",
+    )
+    rotated_item = item_for(rotated_obs, context_for(rotated_obs, rows))
+    rotated = card_projection.plan_card_projection(rotated_item, prior=prior)
+    rotated_state = core.parse_state_block(rotated["body"])
+    check(
+        "readmission: observation rotation keeps the legacy denial untouched",
+        rotated_state["triage_assessment"]["admission"]["status"] == "unavailable"
+        and rotated_state["triage_assessment"]["admission"]["reason"]
+        == "context.truncated"
+        and rotated_state.get("triage_recommendation") is None,
     )
 
 
@@ -1227,10 +1657,16 @@ def test_e2e_06_competing_work_visible_and_advisory():
     )
     acting_source = inspect.getsource(auto_merge.evaluate_candidate)
     final_guard_source = inspect.getsource(auto_merge.final_auto_merge_guard)
+    overlap_source = inspect.getsource(core.same_closing_issue_overlap)
+    closing_map_source = inspect.getsource(core._closing_map)
+    merge_source = inspect.getsource(__import__("apply_decision").do_merge)
     check(
         "E2E-06: DecisionContext remains advisory and is not an overlap acting gate",
         "decision_context" not in acting_source.lower()
-        and "decision_context" not in final_guard_source.lower(),
+        and "decision_context" not in final_guard_source.lower()
+        and "decision_context" not in overlap_source.lower()
+        and "decision_context" not in closing_map_source.lower()
+        and "decision_context" not in merge_source.lower(),
     )
 
 
@@ -1491,10 +1927,13 @@ def main():
         test_decision_context_contract,
         test_assessment_admission_and_class_tristate,
         test_scheduled_epoch_contract,
-        test_incomplete_v2_context_allows_advisory_spend_without_authority,
+        test_incomplete_v2_context_allows_advisory_spend,
         test_triage_suppression_is_visible_and_fail_closed,
         test_card_1663_high_volume_context_queues_once,
-        test_related_result_top_ten_stays_advisory,
+        test_related_cap_keeps_strongest_and_stays_honest,
+        test_axi84_comparison_incomplete_keeps_target_authority,
+        test_card1676_hub_paths_cannot_manufacture_relations,
+        test_context_denied_assessment_readmits_on_ordinary_refresh,
         test_projection_contract_maxima_fit_one_issue_update,
         test_projection_golden_and_purity,
         test_e2e_01_denied_preclaim_then_refresh_once,
