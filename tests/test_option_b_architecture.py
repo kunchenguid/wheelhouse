@@ -1168,6 +1168,23 @@ def test_card1676_hub_paths_cannot_manufacture_relations():
         half_context["related_candidate_count"] == 0
         and half_context["status"] == "complete",
     )
+    incomplete_rows = [
+        candidate(114, "head-114", ["src/observed.py"]),
+        candidate(200, "head-200", ["src/observed.py"]),
+        candidate(201, "head-201", ["src/observed.py"]),
+    ]
+    incomplete_context = context_for(
+        observation(114, "head-114", paths=["src/observed.py"]),
+        incomplete_rows,
+        complete=False,
+        reason="repository-candidate-bound",
+        candidate_count=9,
+    )
+    check(
+        "card-1676: incomplete snapshot uses the supported open universe",
+        incomplete_context["related_candidate_count"] == 2
+        and incomplete_context["status"] == "truncated",
+    )
 
 
 def _legacy_context_rule_admit(real_admit):
@@ -1226,6 +1243,17 @@ def test_context_denied_assessment_readmits_on_ordinary_refresh():
         )
     finally:
         render_card.assessment_admission.admit_assessment = saved_admit
+    legacy_warning = "\n".join(
+        [
+            "> [!WARNING]",
+            "> The advisory assessment was not admitted (`context.truncated`). "
+            "It cannot create **Accept recommendation** or satisfy G6.",
+        ]
+    )
+    legacy_body = legacy_body.replace(
+        render_card.TRIAGE_END + "\n\n" + legacy_warning,
+        legacy_warning + "\n" + render_card.TRIAGE_END,
+    )
     legacy_state = core.parse_state_block(legacy_body)
     check(
         "readmission: legacy fixture persists the retired context denial",
@@ -1233,7 +1261,8 @@ def test_context_denied_assessment_readmits_on_ordinary_refresh():
         and legacy_state["triage_assessment"]["admission"]["reason"]
         == "context.truncated"
         and legacy_state.get("triage_recommendation") is None
-        and "<!-- opt:accept-recommendation -->" not in legacy_body,
+        and "<!-- opt:accept-recommendation -->" not in legacy_body
+        and legacy_warning in legacy_body,
     )
     prior = issue_from_projection(
         {"title": held["title"], "body": legacy_body, "managed_labels": held["managed_labels"]}
@@ -1248,6 +1277,7 @@ def test_context_denied_assessment_readmits_on_ordinary_refresh():
         == {"action": "merge", "reason": "Review the exact current revision."}
         and "<!-- opt:accept-recommendation -->" in healed["body"]
         and "### Recommended action" not in healed["body"]
+        and "The advisory assessment was not admitted" not in healed["body"]
         and render_card.assessment_current_admitted(healed_state),
     )
 

@@ -4388,6 +4388,19 @@ LEGACY_CONTEXT_ADMISSION_REASONS = frozenset(
 )
 
 
+def _without_legacy_context_admission_warning(body, reason):
+    if reason not in LEGACY_CONTEXT_ADMISSION_REASONS:
+        return body
+    warning = "\n".join(
+        [
+            "> [!WARNING]",
+            "> The advisory assessment was not admitted (`%s`). It cannot "
+            "create **Accept recommendation** or satisfy G6." % reason,
+        ]
+    )
+    return (body or "").replace(warning, "", 1)
+
+
 def _readmit_context_denied_assessment(state, owner=""):
     """Deterministic zero-model-spend re-admission during an ordinary refresh.
 
@@ -4402,19 +4415,19 @@ def _readmit_context_denied_assessment(state, owner=""):
     check contradiction the context branch had masked) stays denied.
     """
     if (state or {}).get("kind") != "pr-review":
-        return False
+        return ""
     if (state or {}).get("triage_status") != "succeeded":
-        return False
+        return ""
     assessment = assessment_admission.normalize_assessment(
         (state or {}).get(ASSESSMENT_FIELD)
     )
     if not assessment or assessment["admission"]["status"] == "admitted":
-        return False
+        return ""
+    legacy_reason = assessment["admission"]["reason"]
     if (
-        assessment["admission"]["reason"]
-        not in LEGACY_CONTEXT_ADMISSION_REASONS
+        legacy_reason not in LEGACY_CONTEXT_ADMISSION_REASONS
     ):
-        return False
+        return ""
     observation = target_contracts.normalize_review_observation(
         (state or {}).get(REVIEW_OBSERVATION_FIELD)
     )
@@ -4422,13 +4435,13 @@ def _readmit_context_denied_assessment(state, owner=""):
         (state or {}).get(DECISION_CONTEXT_FIELD)
     )
     if not observation or not context:
-        return False
+        return ""
     target = assessment["target"]
     if (
         target["observation_id"] != observation["observation_id"]
         or target["head_sha"] != (state or {}).get("head_sha")
     ):
-        return False
+        return ""
     recomputed = assessment_admission.admit_assessment(
         {
             "summary": assessment["summary"],
@@ -4441,7 +4454,7 @@ def _readmit_context_denied_assessment(state, owner=""):
         context,
     )
     if not recomputed or not assessment_admission.admitted(recomputed):
-        return False
+        return ""
     state[ASSESSMENT_FIELD] = recomputed
     state.pop("assessment_admission", None)
     recommendation = recommendation_for_state(
@@ -4457,7 +4470,7 @@ def _readmit_context_denied_assessment(state, owner=""):
     )
     if recommendation:
         state["triage_recommendation"] = recommendation
-    return True
+    return legacy_reason
 
 
 def _preserve_same_revision_triage(body, existing_body, item, old_state, owner=""):
@@ -4509,7 +4522,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         if key in (old_state or {}):
             state[key] = old_state[key]
             changed = True
-    if _readmit_context_denied_assessment(state, owner=owner):
+    readmitted_reason = _readmit_context_denied_assessment(state, owner=owner)
+    if readmitted_reason:
+        body = _without_legacy_context_admission_warning(body, readmitted_reason)
         changed = True
     if accept_recommendation_available(state):
         state["options"] = options_for_state(kind, state.get("options"), state)

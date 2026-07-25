@@ -324,7 +324,7 @@ def build_decision_context(target_observation, snapshot, candidate_cap=MAX_CONTE
     comparison_incomplete = False
     relation_truncated = False
     fanout = _path_fanout(rebuilt["candidates"])
-    universe_size = len(rebuilt["candidates"])
+    universe_size = rebuilt["candidate_count"]
     # The repository scan already paid to observe these rows. Match every row
     # before applying the small display/model-result cap so repository volume
     # cannot crowd out a deterministic relation.
