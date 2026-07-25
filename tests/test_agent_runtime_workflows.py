@@ -108,7 +108,7 @@ def main():
     )
     check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
     capture = next(step for step in model_steps if step.get("id") == "capture")
-    check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "bounded = []" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
+    check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "reduce_execution" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
     check("production: immutable inputs are revalidated after every action", "workspace_input_observation" in capture["run"] and "postActionInputObservationSha256" in capture["run"] and "targetInputsReadOnly" in capture["run"])
     check(
         "production: targetInputsReadOnly derives from exact pre/post signed-input observations",
@@ -330,10 +330,11 @@ def main():
     )
     check(
         "triage projection: provider result and consumer commit stay distinct",
-        (triage_stage.get("env") or {}).get("MODEL_ERROR_CODE")
+        (triage_stage.get("env") or {}).get("PRIMARY_ERROR_CODE")
         == "${{ steps.primary-result.outputs.error-code }}"
-        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"]
+        and 'code="${PRIMARY_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"]
         and 'stage="consumer-committed"' in triage_stage["run"]
+        and 'code="consumer.committed.primary.$code"' in triage_stage["run"]
         and 'code="consumer.committed"' in triage_stage["run"],
     )
     check(

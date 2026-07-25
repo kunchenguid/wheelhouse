@@ -18,6 +18,7 @@ from agent_runtime.config import resolve_selection
 from agent_runtime.consumer import result_text
 from agent_runtime.contract import ContractError, canonical_sha256, file_sha256, result_projection_sha256, validate_contract
 from agent_runtime.task_builder import build_task, claude_declared_outputs, claude_declared_tools
+from agent_runtime.retention import reduce_execution
 
 sys.path.insert(0, str(Path("scripts").resolve()))
 import render_card  # noqa: E402
@@ -121,6 +122,63 @@ def main():
     check("bridge: action and harness pins match the runtime lock", lock["actionCommit"] == ACTION_COMMIT and lock["actionRelease"] == "v" + ACTION_VERSION and lock["claudeCodeVersion"] == CLAUDE_CODE_VERSION and lock["model"] == IMMUTABLE_MODEL and lock["allowModelAlias"] is False)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        _, denied_bundle = make_bundle(
+            root / "denied-tool", action="deep-review.local"
+        )
+        denied_raw = [
+            {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "denied-1",
+                            "name": "Read",
+                            "input": {"file_path": "target-src/a.py", "content": "omit"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "denied-1",
+                            "is_error": True,
+                            "content": "Permission denied by the configured allowlist.",
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "bounded deep-review verdict",
+                "duration_ms": 1,
+                "num_turns": 1,
+                "permission_denials_count": 1,
+            },
+        ]
+        denied_execution = root / "denied-tool-execution.json"
+        denied_execution.write_text(
+            json.dumps(reduce_execution(denied_raw, "deep-review.local")),
+            encoding="utf-8",
+        )
+        denied_result, _ = run_bridge(
+            denied_bundle, denied_execution, "denied-tool"
+        )
+        check(
+            "bridge: denied invocation evidence crosses only as bounded proof",
+            denied_result["status"] == "succeeded"
+            and denied_result["proof"]["toolDenials"]["reason"] == "permission_denied"
+            and denied_result["proof"]["toolDenials"]["invocations"][0]["tool"] == "Read"
+            and "content" not in json.dumps(denied_result["proof"]["toolDenials"]),
+        )
+
         def triage_value(
             include_vision: bool = False, include_automerge: bool = True
         ):
@@ -130,6 +188,12 @@ def main():
                 "recommended_action": "merge",
                 "recommended_reason": "Checks are green.",
                 "evidence": 'target.txt: "fixture target"',
+                "recommendation_basis": {
+                    "kind": "other",
+                    "observation_id": "sha256:" + "a" * 64,
+                    "context_id": "sha256:" + "b" * 64,
+                    "check_names": [],
+                },
                 "automerge": {
                     "behavior_class": "A",
                     "behavior_assertions": [],
