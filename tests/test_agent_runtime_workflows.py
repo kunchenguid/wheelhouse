@@ -332,7 +332,7 @@ def main():
         "triage projection: provider result and consumer commit stay distinct",
         (triage_stage.get("env") or {}).get("PRIMARY_ERROR_CODE")
         == "${{ steps.primary-result.outputs.error-code }}"
-        and 'code="${PRIMARY_ERROR_CODE:-consumer.rejected}"' in triage_stage["run"]
+        and 'code="${PRIMARY_ERROR_CODE:-}"' in triage_stage["run"]
         and 'stage="consumer-committed"' in triage_stage["run"]
         and 'code="consumer.committed.primary.$code"' in triage_stage["run"]
         and 'code="consumer.committed"' in triage_stage["run"],

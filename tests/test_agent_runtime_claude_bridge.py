@@ -338,7 +338,7 @@ def main():
                 ("29985527456", 1598, "663ba663-c5f0-4f78-87fb-e10d6bdcaf67"),
             },
         )
-        normalized_successes = 0
+        normalized_failures = 0
         consumer_successes = 0
         for case in production:
             case_root = root / ("production-%s" % case["run_id"])
@@ -431,41 +431,24 @@ def main():
                 "body": queued_body,
                 "labels": rendered["labels"],
             }
-            card_writes = []
             card_error = (
                 "evidence quotes did not match the fetched target"
                 if consumer["outcome"] == "anchor-fail"
                 else None
             )
-            with (
-                patch.object(render_card, "get_card", return_value=card),
-                patch.object(
-                    render_card,
-                    "_edit_issue_body",
-                    side_effect=lambda number, body, **kwargs: card_writes.append(
-                        (number, body, kwargs)
-                    ),
-                ),
-                patch.object(
-                    render_card,
-                    "_evaluate_automerge_card_projection",
-                    return_value=render_card.criteria_schema.unavailable_criteria(
-                        "offline production replay"
-                    ),
-                ),
-            ):
-                applied = render_card.update_card_triage(
-                    case["card"],
-                    binding["target_head_sha"],
-                    triage=consumer["triage"],
-                    error=card_error,
-                    owner=binding["owner"],
-                    vision_sha=binding["vision_sha"],
-                    base_sha=binding["base_sha"],
-                    automerge_behavior_available=True,
-                    require_queued=True,
-                )
-            committed_body = card_writes[0][1] if applied and len(card_writes) == 1 else ""
+            primary_error_code = (case_result.get("error") or {}).get("code", "")
+            committed_body = render_card.body_with_triage_result(
+                card["body"],
+                binding["target_head_sha"],
+                triage=consumer["triage"],
+                error=card_error,
+                owner=binding["owner"],
+                vision_sha=binding["vision_sha"],
+                base_sha=binding["base_sha"],
+                automerge_behavior_available=True,
+                primary_error_code=primary_error_code,
+            )
+            applied = committed_body != card["body"]
             committed_state = render_card.parse_state_block(committed_body)
             stage = stage_from_task(
                 case_task,
@@ -597,11 +580,16 @@ def main():
                     and wrong_head_facts is None,
                 )
             check(
-                "production %s: offline card update commits expected status"
+                "production %s: offline card projection commits split status"
                 % case["run_id"],
                 applied
                 and committed_state.get("triage_status")
-                == case["expected_card_status"],
+                == case["expected_card_status"]
+                and committed_state.get("triage_primary_status") == "failed"
+                and committed_state.get("triage_primary_error_code")
+                == case["expected_normalized_code"]
+                and committed_state.get("triage_consumption") == "advisory"
+                and "not a primary validation success" in committed_body,
             )
             check(
                 "production %s: projection stage binds task and stays distinct"
@@ -613,8 +601,8 @@ def main():
                 and stage["sourceSha"]
                 == case_task["metadata"]["wheelhouseRevision"],
             )
-            if case_result["status"] == "succeeded":
-                normalized_successes += 1
+            if case_result["status"] == "failed":
+                normalized_failures += 1
             if consumer["outcome"] == "success":
                 consumer_successes += 1
                 check(
@@ -640,8 +628,8 @@ def main():
                     and case_result["error"]["code"] == "output.evidence_invalid",
                 )
         check(
-            "production cohort: all six normalized and consumer successes",
-            normalized_successes == 6 and consumer_successes == 6,
+            "production cohort: all six primary failures remain advisory successes",
+            normalized_failures == 6 and consumer_successes == 6,
         )
 
         _, unsupported_bundle = make_bundle(
