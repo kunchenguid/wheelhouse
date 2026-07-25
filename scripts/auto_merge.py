@@ -739,7 +739,18 @@ def fresh_verdict_facts(state, head_sha):
         else ""
     )
     recommendation_ok = card_head_ok and action == "merge"
-    recommendation_reason = "top-level triage recommendation is not an explicit merge"
+    if (
+        current_head_ok
+        and state.get("triage_status") == "succeeded"
+        and not admission_ok
+    ):
+        recommendation_reason = (
+            "recommendation unavailable because the assessment was not admitted"
+        )
+    else:
+        recommendation_reason = (
+            "top-level triage recommendation is not an explicit merge"
+        )
     fact(
         "g6_merge_recommendation",
         recommendation_ok,
