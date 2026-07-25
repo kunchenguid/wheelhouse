@@ -15,6 +15,7 @@ from agent_runtime.retention import (  # noqa: E402
     reduce_execution,
     retained_tool_denials,
 )
+from agent_runtime.claude_handoff import PACKAGED_RUNTIME_FILES  # noqa: E402
 sys.path.insert(0, str(ROOT / "scripts"))
 import render_card as rc  # noqa: E402
 
@@ -113,6 +114,53 @@ def raw_events(denied=True):
     return events
 
 
+def terminal_denial_events(unmatched_count):
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "ordinary-error",
+                        "name": "Read",
+                        "input": {"file_path": "missing.txt"},
+                    },
+                    *[
+                        {
+                            "type": "tool_use",
+                            "id": f"omitted-denial-{index}",
+                            "name": "Bash",
+                            "input": {"command": f"wheelhouse-search request-{index}.json"},
+                        }
+                        for index in range(unmatched_count)
+                    ],
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "ordinary-error",
+                        "is_error": True,
+                        "content": "File does not exist.",
+                    }
+                ]
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "permission_denials_count": 1,
+        },
+    ]
+    return events
+
+
 def card_body():
     item = {
         "repo": "wheelhouse",
@@ -145,6 +193,10 @@ def main():
     first_tool = production_retained[2]["message"]["content"][0]
     check("repro: production retained tool event loses invocation identity", set(first_tool) == {"type"})
     check("repro: production retained artifact cannot recover command shape", "command" not in json.dumps(production_retained))
+    check(
+        "production: retention helper ships in the signed runtime",
+        "retention.py" in PACKAGED_RUNTIME_FILES,
+    )
 
     bounded = reduce_execution(raw_events(), "triage.pr.search")
     evidence = retained_tool_denials(bounded)
@@ -160,6 +212,24 @@ def main():
     success_encoded = json.dumps(compact_success, sort_keys=True, separators=(",", ":"))
     check("success: no denied evidence is retained", retained_tool_denials(compact_success) is None)
     check("success: tool input is not retained unnecessarily", "wheelhouse-search" not in success_encoded and "SECRET FILE BODY" not in success_encoded)
+
+    inferred = retained_tool_denials(
+        reduce_execution(terminal_denial_events(1), "triage.pr.search")
+    )
+    check(
+        "deny: omitted result selects the only unmatched invocation",
+        inferred is not None
+        and [row["tool"] for row in inferred["invocations"]] == ["Bash"],
+    )
+    ambiguous = retained_tool_denials(
+        reduce_execution(terminal_denial_events(2), "triage.pr.search")
+    )
+    check(
+        "deny: ambiguous omitted results retain count without attribution",
+        ambiguous is not None
+        and ambiguous["denialCount"] == 1
+        and ambiguous["invocations"] == [],
+    )
 
     body = card_body()
     verdict = {

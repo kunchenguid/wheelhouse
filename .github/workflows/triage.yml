@@ -2149,7 +2149,7 @@ jobs:
           PRIMARY_ERROR_CODE: ${{ steps.primary-result.outputs.error-code }}
         run: |
           set -euo pipefail
-          code="${PRIMARY_ERROR_CODE:-consumer.rejected}"
+          code="${MODEL_ERROR_CODE:-consumer.rejected}"
           if { [ "${{ steps.card-consumer.outcome }}" = "success" ] && [ "${{ steps.card-consumer.outputs.applied }}" = "true" ]; } || { [ "${{ steps.card-recovery.outcome }}" = "success" ] && [ "${{ steps.card-recovery.outputs.applied }}" = "true" ]; }; then
             if [ "$code" != "source.revision_mismatch" ] && [ -n "$code" ]; then code="consumer.committed.primary.$code"; else code="consumer.committed"; fi
           fi

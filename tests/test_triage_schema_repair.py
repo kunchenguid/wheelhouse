@@ -1115,8 +1115,12 @@ def test_triage_yml_repair_wiring():
     )
     check(
         "yaml: repair source drift is the recorded triage model code",
-        (record.get("env") or {}).get("MODEL_ERROR_CODE")
-        == "${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}",
+        (
+            (record.get("env") or {}).get("MODEL_ERROR_CODE")
+            == "${{ steps.repair-result-received.outputs.error-code == 'source.revision_mismatch' && steps.repair-result-received.outputs.error-code || steps.primary-result.outputs.error-code }}"
+        )
+        and 'code="${MODEL_ERROR_CODE:-consumer.rejected}"'
+        in str(record.get("run", "")),
     )
     check(
         "yaml: terminal evidence follows fail-open recovery",

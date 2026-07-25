@@ -111,7 +111,7 @@ def _tool_use_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _tool_result_rows(rows: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
     denied_ids: set[str] = set()
-    successful_ids: set[str] = set()
+    result_ids: set[str] = set()
     for row in rows:
         if row.get("type") != "user" or not isinstance(row.get("message"), dict):
             continue
@@ -124,6 +124,8 @@ def _tool_result_rows(rows: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
             tool_id = item.get("tool_use_id")
             if not isinstance(tool_id, str):
                 tool_id = ""
+            if tool_id:
+                result_ids.add(tool_id)
             raw = item.get("content")
             pieces = []
             if isinstance(raw, str):
@@ -138,9 +140,7 @@ def _tool_result_rows(rows: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
                 )
             if item.get("is_error") is True and any(_denial_marker(piece) for piece in pieces):
                 denied_ids.add(tool_id)
-            elif item.get("is_error") is not True:
-                successful_ids.add(tool_id)
-    return denied_ids, successful_ids
+    return denied_ids, result_ids
 
 
 def denied_tool_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -153,7 +153,7 @@ def denied_tool_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     retained payload.
     """
     uses = _tool_use_rows(rows)
-    denied_ids, successful_ids = _tool_result_rows(rows)
+    denied_ids, result_ids = _tool_result_rows(rows)
     terminal = next((row for row in reversed(rows) if row.get("type") == "result"), {})
     count = terminal.get("permission_denials_count")
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -163,17 +163,19 @@ def denied_tool_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     for use in uses:
         if use["id"] and use["id"] in denied_ids:
             selected.append(use)
-    # Claude can omit the tool-result event for a permission denial. When its
-    # terminal count proves a denial, unmatched calls are the only bounded,
-    # useful request-shape evidence available. Do not retain calls when count is
-    # zero, and never select a call known to have a successful result.
-    if count > len(selected):
-        for use in uses:
-            if use in selected or (use["id"] and use["id"] in successful_ids):
-                continue
-            selected.append(use)
-            if len(selected) >= min(count, MAX_DENIED_INVOCATIONS):
-                break
+    remaining_count = count - len(selected)
+    unmatched = [
+        use
+        for use in uses
+        if use not in selected and use["id"] and use["id"] not in result_ids
+    ]
+    unmatched_ids = [use["id"] for use in unmatched]
+    if (
+        remaining_count > 0
+        and remaining_count == len(unmatched)
+        and len(unmatched_ids) == len(set(unmatched_ids))
+    ):
+        selected.extend(unmatched)
 
     if count <= 0 and not selected:
         return None
