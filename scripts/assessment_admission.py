@@ -65,6 +65,13 @@ def admit_assessment(data, observation, context):
 
     Prose remains display-only. Only an ``admitted`` result may create an Accept
     shortcut or supply a G6 recommendation/verdict.
+
+    DecisionContext is neutral advisory evidence: its status, content, and
+    identity NEVER grant or deny authority here. ``context_id`` is retained in
+    the basis and artifact for provenance only; admission binds exactly the
+    target observation identity (and, through it, the head revision). A
+    malformed/missing context or observation still fails closed, and a
+    check-basis contradiction still rejects.
     """
     observation = target_observation.normalize_review_observation(observation)
     context = decision_context.normalize_decision_context(context)
@@ -94,12 +101,10 @@ def admit_assessment(data, observation, context):
     code = "admission.ok"
     if observation is None or context is None:
         status, code = "unavailable", "binding.unavailable"
-    elif basis["observation_id"] != observation["observation_id"] or basis["context_id"] != context["context_id"]:
+    elif basis["observation_id"] != observation["observation_id"]:
         status, code = "stale", "binding.mismatch"
     elif observation["compatibility"] != "native-v2" or not observation["completeness"]["complete"]:
         status, code = "unavailable", "observation.incomplete"
-    elif context["status"] != "complete":
-        status, code = "unavailable", "context.%s" % context["status"]
     else:
         test_rows = [
             row for row in observation["facts"]["configured_checks"]

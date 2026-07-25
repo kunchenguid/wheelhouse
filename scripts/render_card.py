@@ -303,8 +303,12 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # hold and manual approve are unchanged). Bumped 6 -> 7 to publish the
 # non-authoritative per-criterion auto-merge preflight UI on PR-review cards.
 # Bumped 9 -> 10 to publish the truthful incomplete-context authority copy.
-# Earlier display-only bumps remain documented in AGENTS.md.
-CARD_RENDER_VERSION = 10
+# Bumped 10 -> 11 to republish DecisionContext-neutral related-work copy and
+# run the zero-spend re-admission that heals assessments denied solely under
+# the retired advisory-context admission rule (see
+# `_readmit_context_denied_assessment`). Earlier display-only bumps remain
+# documented in AGENTS.md.
+CARD_RENDER_VERSION = 11
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -1109,8 +1113,10 @@ def _review_triage_input_problem(item):
     ):
         return "related-context-mismatch"
     # Context status is deliberately not an advisory-spend gate. A well-formed,
-    # observation-bound truncated or unavailable context can inform prose, while
-    # assessment_admission independently prevents Accept/G6/action authority.
+    # observation-bound truncated or unavailable context can inform prose.
+    # DecisionContext status/content/identity never grants or denies Accept/G6
+    # authority either: assessment_admission binds exactly the target
+    # observation identity, and the context is kept for provenance only.
     return ""
 
 
@@ -3867,6 +3873,14 @@ def recommendation_for_state(triage, kind, owner="", repo=""):
 
 
 def assessment_current_admitted(state):
+    """Whether the card's persisted assessment currently bears authority.
+
+    Binds exactly the target: persisted admission status, current head, and
+    current observation identity. DecisionContext is neutral advisory evidence
+    (see decision_context.py): its identity is kept in artifacts for
+    provenance/refresh/telemetry only, so a related-work rotation alone never
+    flips this. A malformed or missing context still fails closed.
+    """
     state = state if isinstance(state, dict) else {}
     if state.get("kind") != "pr-review":
         return True
@@ -3887,7 +3901,6 @@ def assessment_current_admitted(state):
         and assessment["target"]["head_sha"] == state.get("head_sha")
         and assessment["target"]["observation_id"]
         == observation["observation_id"]
-        and assessment["target"]["context_id"] == context["context_id"]
     )
 
 
@@ -3928,11 +3941,11 @@ def _related_work_section(context):
         lines.extend(
             [
                 "> [!NOTE]",
-                "> Related-work context is **%s** (`%s`). The candidate list, "
-                "shared paths, and references are advisory display only and "
-                "never an overlap or action gate. Because this context is not "
-                "complete, assessment admission is unavailable; Accept and G6 "
-                "remain unavailable until a complete context is observed."
+                "> Related-work context is **%s** (`%s`): comparison across "
+                "open pull requests is incomplete, so a relation may be "
+                "missed; this says nothing about the target itself. The "
+                "candidate list, shared paths, and references are advisory "
+                "display only and never an overlap or action gate."
                 % (context["status"], context.get("reason") or "incomplete"),
                 "",
             ]
@@ -3943,8 +3956,10 @@ def _related_work_section(context):
     if total_candidates > len(context["candidates"]):
         lines.extend(
             [
-                "> Showing **%s of %s** deterministic related candidates; the "
-                "remaining matches are omitted by the display/model context cap."
+                "> Showing **%s of %s** deterministic related candidates, "
+                "strongest relations first; the remaining matches are omitted "
+                "by the deliberate display/model context cap, not by missing "
+                "comparison evidence."
                 % (len(context["candidates"]), total_candidates),
                 "",
             ]
@@ -4364,6 +4379,87 @@ def body_with_activity_reflected(body, item, card_updated_at=""):
     return _replace_state_block(body, new_state)
 
 
+# Admission reasons the retired advisory-context rule could produce
+# (`"context.%s" % context["status"]` for a non-complete context). They are the
+# ONLY denial reasons eligible for zero-spend re-admission: every other denial
+# tracks a real target/basis property and is recomputed fresh on any new spend.
+LEGACY_CONTEXT_ADMISSION_REASONS = frozenset(
+    {"context.truncated", "context.unavailable"}
+)
+
+
+def _readmit_context_denied_assessment(state, owner=""):
+    """Deterministic zero-model-spend re-admission during an ordinary refresh.
+
+    A same-revision assessment whose persisted admission was computed under the
+    retired advisory-context rule (DecisionContext status denied authority)
+    would otherwise stay permanently unavailable: the triage cache is
+    revision-keyed and its attempts are spent, so no new assessment is ever
+    queued for the same head. When the bound target observation and head are
+    still current, recompute admission from the persisted artifact under the
+    current rule. No model call, no replay, no target write; target-observation
+    and head binding stay exact, and any genuinely denied basis (for example a
+    check contradiction the context branch had masked) stays denied.
+    """
+    if (state or {}).get("kind") != "pr-review":
+        return False
+    if (state or {}).get("triage_status") != "succeeded":
+        return False
+    assessment = assessment_admission.normalize_assessment(
+        (state or {}).get(ASSESSMENT_FIELD)
+    )
+    if not assessment or assessment["admission"]["status"] == "admitted":
+        return False
+    if (
+        assessment["admission"]["reason"]
+        not in LEGACY_CONTEXT_ADMISSION_REASONS
+    ):
+        return False
+    observation = target_contracts.normalize_review_observation(
+        (state or {}).get(REVIEW_OBSERVATION_FIELD)
+    )
+    context = context_contracts.normalize_decision_context(
+        (state or {}).get(DECISION_CONTEXT_FIELD)
+    )
+    if not observation or not context:
+        return False
+    target = assessment["target"]
+    if (
+        target["observation_id"] != observation["observation_id"]
+        or target["head_sha"] != (state or {}).get("head_sha")
+    ):
+        return False
+    recomputed = assessment_admission.admit_assessment(
+        {
+            "summary": assessment["summary"],
+            "product_implications": assessment["product_implications"],
+            "recommended_action": assessment["recommendation"]["action"],
+            "recommended_reason": assessment["recommendation"]["reason"],
+            "recommendation_basis": assessment["recommendation"]["basis"],
+        },
+        observation,
+        context,
+    )
+    if not recomputed or not assessment_admission.admitted(recomputed):
+        return False
+    state[ASSESSMENT_FIELD] = recomputed
+    state.pop("assessment_admission", None)
+    recommendation = recommendation_for_state(
+        {
+            "triage_recommendation": {
+                "action": recomputed["recommendation"]["action"],
+                "reason": recomputed["recommendation"]["reason"],
+            }
+        },
+        "pr-review",
+        owner=owner,
+        repo=(state or {}).get("repo", ""),
+    )
+    if recommendation:
+        state["triage_recommendation"] = recommendation
+    return True
+
+
 def _preserve_same_revision_triage(body, existing_body, item, old_state, owner=""):
     """Lift the existing `### Triage` section onto a same-revision refresh
     without spending a new triage attempt.
@@ -4413,6 +4509,8 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         if key in (old_state or {}):
             state[key] = old_state[key]
             changed = True
+    if _readmit_context_denied_assessment(state, owner=owner):
+        changed = True
     if accept_recommendation_available(state):
         state["options"] = options_for_state(kind, state.get("options"), state)
         body = _publish_decision_section(body, kind, state["options"])
@@ -5106,8 +5204,6 @@ def render(
         or not decision_context
         or assessment["target"].get("observation_id")
         != review_observation.get("observation_id")
-        or assessment["target"].get("context_id")
-        != decision_context.get("context_id")
     ):
         assessment = None
     triage = (

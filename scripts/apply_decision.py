@@ -398,7 +398,6 @@ def _accept_recommendation(state):
             and assessment["target"]["head_sha"] == revision
             and assessment["target"]["observation_id"]
             == observation["observation_id"]
-            and assessment["target"]["context_id"] == context["context_id"]
         ):
             return (None, "")
     action = _normalize_recommendation_action(rec.get("action"))

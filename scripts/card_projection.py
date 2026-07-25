@@ -197,7 +197,7 @@ def plan_card_projection(
     projected_item["decision_context"] = context
 
     assessment = assessment_admission.normalize_assessment(item.get("assessment"))
-    if assessment and assessment["target"]["observation_id"] == observation["observation_id"] and assessment["target"]["context_id"] == context["context_id"]:
+    if assessment and assessment["target"]["observation_id"] == observation["observation_id"]:
         projected_item["assessment"] = assessment
         projected_item["triage"] = {
             "summary": assessment["summary"],
