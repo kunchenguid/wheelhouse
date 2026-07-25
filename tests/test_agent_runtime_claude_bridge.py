@@ -192,6 +192,7 @@ def main():
                     "kind": "other",
                     "observation_id": "sha256:" + "a" * 64,
                     "context_id": "sha256:" + "b" * 64,
+                    "check_names": [],
                 },
                 "automerge": {
                     "behavior_class": "A",

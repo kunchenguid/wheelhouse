@@ -15,11 +15,15 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "observation_id", "context_id"],
+          "required": ["kind", "observation_id", "context_id", "check_names"],
           "properties": {
             "kind": {"const": "other"},
             "observation_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-            "context_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            "context_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "check_names": {
+              "type": "array",
+              "maxItems": 0
+            }
           }
         },
         {
