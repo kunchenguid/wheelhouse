@@ -755,6 +755,12 @@ jobs:
               echo "For every clause about an existing mode, default, workflow, delivery"
               echo "contract, or documentation/tests, emit an exact behavior_assertion with"
               echo "subject, effect, source, and quote. Omit restoration outside class B."
+              echo "Evidence sources are WORKSPACE PATHS: use exactly target.txt, or"
+              echo "target-src/<repository-relative-path> (for example"
+              echo "target-src/tests/fm-composer-lib.test.sh); never use a bare"
+              echo "repository-relative path such as tests/fm-composer-lib.test.sh."
+              echo "Only a VISION-derived behavior_assertion may use exactly vision.md."
+              echo "The target-src/ prefix is required for every checked-out target file."
               echo "Any existing/default contract change is ineligible. Trusted code independently"
               echo "reconciles complete clauses, roles, polarity, coordination, identifiers,"
               echo "defaults, and evidence spans; missing, extra, ambiguous, or unsupported"
@@ -810,8 +816,8 @@ jobs:
               fi
               echo '  "automerge": {'
               echo '    "behavior_class": "A | B | C | ineligible",'
-              echo '    "behavior_assertions": [{"claim":"exact protected-contract clause","subject":"existing_mode | default_behavior | existing_workflow | delivery_contract | documentation_or_tests","effect":"unchanged | restored | changed | tightened | new_requirement","evidence":{"source":"target.txt or target-src/relative/path or exact vision.md for a VISION-derived assertion","quote":"exact supporting quote"}}],'
-              echo '    "class_b_restoration": {"corrected_defect":"bounded defect claim (class B only)","corrected_defect_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"},"intended_behavior_restored":"bounded restored-behavior claim (class B only)","intended_behavior_restored_evidence":{"source":"target.txt or target-src/relative/path","quote":"exact supporting quote"}},'
+              echo '    "behavior_assertions": [{"claim":"exact protected-contract clause","subject":"existing_mode | default_behavior | existing_workflow | delivery_contract | documentation_or_tests","effect":"unchanged | restored | changed | tightened | new_requirement","evidence":{"source":"target.txt or target-src/src/example.py or exact vision.md for a VISION-derived assertion","quote":"exact supporting quote"}}],'
+              echo '    "class_b_restoration": {"corrected_defect":"bounded defect claim (class B only)","corrected_defect_evidence":{"source":"target.txt or target-src/src/example.py","quote":"exact supporting quote"},"intended_behavior_restored":"bounded restored-behavior claim (class B only)","intended_behavior_restored_evidence":{"source":"target.txt or target-src/src/example.py","quote":"exact supporting quote"}},'
               echo '    "changes_existing_or_default_behavior": true or false,'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '    "optin_default_off": true or false,'
