@@ -201,6 +201,54 @@ def main():
         }
         validate_schema(pr_valid, pr_schema)
         check("action schema: bounded class B restoration evidence accepted", True)
+
+        observed_repository_path = "tests/fm-composer-lib.test.sh"
+        bare_path = copy.deepcopy(pr_valid)
+        bare_path["automerge"]["behavior_assertions"] = [
+            {
+                "claim": "The existing test contract remains covered.",
+                "subject": "documentation_or_tests",
+                "effect": "unchanged",
+                "evidence": {
+                    "source": observed_repository_path,
+                    "quote": "The existing test contract remains covered.",
+                },
+            }
+        ]
+        try:
+            validate_schema(bare_path, pr_schema)
+        except ContractError:
+            check(
+                "action schema: bare repository-relative behavior evidence is rejected",
+                True,
+            )
+        else:
+            check(
+                "action schema: bare repository-relative behavior evidence is rejected",
+                False,
+            )
+        workspace_path = copy.deepcopy(bare_path)
+        workspace_path["automerge"]["behavior_assertions"][0]["evidence"][
+            "source"
+        ] = "target-src/" + observed_repository_path
+        validate_schema(workspace_path, pr_schema)
+        check(
+            "action schema: target-src behavior evidence is accepted",
+            True,
+        )
+        triage_prompt = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "triage.yml"
+        ).read_text(encoding="utf-8")
+        check(
+            "triage prompt: evidence sources explicitly require workspace paths",
+            "target-src/tests/fm-composer-lib.test.sh" in triage_prompt
+            and "never use a bare" in triage_prompt
+            and "repository-relative path such as tests/fm-composer-lib.test.sh"
+            in triage_prompt,
+        )
         missing_basis = copy.deepcopy(pr_valid)
         missing_basis.pop("recommendation_basis")
         try:
