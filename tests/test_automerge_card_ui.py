@@ -325,6 +325,36 @@ def test_all_preflight_criteria_met_and_action_semantics_unchanged():
     )
 
 
+def test_g6_recommendation_evidence_distinguishes_advisory_and_authoritative():
+    denied = card_entry(triage_assessment=None, triage_recommendation=None)
+    denied_facts, _ = am.fresh_verdict_facts(denied["state"], HEAD)
+    denied_row = denied_facts["g6_merge_recommendation"]
+    check(
+        "g6 admission denial remains unmet",
+        denied_row["status"] == schema.STATUS_UNMET,
+    )
+    check(
+        "g6 admission denial distinguishes unavailable authority from advisory prose",
+        denied_row["evidence"]
+        == "recommendation unavailable because the assessment was not admitted",
+    )
+
+    non_merge = card_entry(
+        triage_recommendation={"action": "hold", "reason": ""}
+    )
+    non_merge_facts, _ = am.fresh_verdict_facts(non_merge["state"], HEAD)
+    non_merge_row = non_merge_facts["g6_merge_recommendation"]
+    check(
+        "g6 authoritative non-merge recommendation remains unmet",
+        non_merge_row["status"] == schema.STATUS_UNMET,
+    )
+    check(
+        "g6 authoritative non-merge recommendation keeps distinct evidence",
+        non_merge_row["evidence"]
+        == "top-level triage recommendation is not an explicit merge",
+    )
+
+
 def test_reconcile_absence_state_does_not_affect_criteria_or_eligibility():
     baseline = evaluate(full=False)
     with_absence = card_entry(
