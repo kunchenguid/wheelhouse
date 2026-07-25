@@ -1432,6 +1432,16 @@ def normalize_triage(data):
     return triage
 
 
+def _normalize_external_recommendation_basis(value):
+    if (
+        isinstance(value, dict)
+        and set(value) == {"kind", "observation_id", "context_id"}
+        and value.get("kind") == "other"
+    ):
+        value = dict(value, check_names=[])
+    return assessment_admission.normalize_basis(value)
+
+
 def _normalize_triage_with_reason(data):
     """Validate a candidate triage dict, returning `(triage, reason)`.
 
@@ -1465,7 +1475,9 @@ def _normalize_triage_with_reason(data):
     evidence = _flatten_evidence(data.get(EVIDENCE_FIELD))
     if evidence is None:
         return None, "field %r is missing or empty" % EVIDENCE_FIELD
-    basis = assessment_admission.normalize_basis(data.get("recommendation_basis"))
+    basis = _normalize_external_recommendation_basis(
+        data.get("recommendation_basis")
+    )
     if basis:
         triage["recommendation_basis"] = basis
     action = normalize_recommendation_action(data.get("recommended_action"))
@@ -4748,8 +4760,14 @@ def body_with_triage_result(
         context = context_contracts.normalize_decision_context(
             state.get(DECISION_CONTEXT_FIELD)
         )
+        admission_input = dict(
+            triage,
+            recommendation_basis=_normalize_external_recommendation_basis(
+                triage.get("recommendation_basis")
+            ),
+        )
         assessment = assessment_admission.admit_assessment(
-            triage, observation, context
+            admission_input, observation, context
         )
         if assessment is None:
             assessment_reason = "basis.missing_or_invalid"

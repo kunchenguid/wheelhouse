@@ -821,6 +821,35 @@ def _triage_payload(obs, context, *, context_id=None, observation_id=None):
     }
 
 
+def test_external_other_basis_preserves_admission_authority():
+    obs = observation()
+    context = context_for(obs)
+    payload = _triage_payload(obs, context)
+    payload["recommendation_basis"].pop("check_names")
+
+    projection = card_projection.plan_card_projection(
+        item_for(obs, context),
+        prior={},
+    )
+    body = render_card.body_with_triage_result(
+        projection["body"],
+        obs["revision"]["head_sha"],
+        triage=payload,
+        owner="owner",
+    )
+    state = core.parse_state_block(body)
+    assessment = admission.normalize_assessment(
+        state.get(render_card.ASSESSMENT_FIELD)
+    )
+    check(
+        "assessment admission: external other basis preserves authority",
+        assessment is not None
+        and assessment["admission"]["status"] == "admitted"
+        and assessment["recommendation"]["basis"]["check_names"] == []
+        and "accept-recommendation" in state["options"],
+    )
+
+
 def _scan_context_from_observed(obs, rows):
     result = {
         "name": "firstmate",
@@ -1929,6 +1958,7 @@ def main():
         test_scheduled_epoch_contract,
         test_incomplete_v2_context_allows_advisory_spend,
         test_triage_suppression_is_visible_and_fail_closed,
+        test_external_other_basis_preserves_admission_authority,
         test_card_1663_high_volume_context_queues_once,
         test_related_cap_keeps_strongest_and_stays_honest,
         test_axi84_comparison_incomplete_keeps_target_authority,
