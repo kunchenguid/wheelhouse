@@ -24,7 +24,18 @@
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1, "maxLength": 300}
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {"kind": {"const": "other"}}
+          },
+          "then": {
+            "properties": {"check_names": {"maxItems": 0}}
+          }
+        }
+      ]
     },
     "vision_evidence": {
       "type": "object",

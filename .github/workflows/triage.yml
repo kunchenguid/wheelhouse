@@ -789,8 +789,9 @@ jobs:
               echo
             fi
             if [ "$KIND" = "pr-review" ]; then
-              echo "Copy exact observation/context IDs into recommendation_basis. Use a"
-              echo "configured-tests basis only when current rows support it; else use other."
+              echo "Copy exact observation/context IDs into recommendation_basis. When kind is"
+              echo "other, check_names MUST be []. Use named check_names only for a configured-tests"
+              echo "basis, and only when current rows support that basis; otherwise use other."
               echo
             fi
             echo "Return ONLY a compact JSON object using only the keys shown below."
@@ -809,7 +810,7 @@ jobs:
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
               echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt",'
-              echo '  "recommendation_basis": {"kind":"other | configured-tests-not-run | configured-tests-not-green","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":["exact configured check name"]},'
+              echo '  "recommendation_basis": {"kind":"other","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":[]},'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '  "source_provenance": {"url":"exact public_clone URL","requested_ref":"exact requested ref","resolved_commit":"returned commit","inspected_files":[{"path":"exact file read","sha256":"matching trusted observation digest"}]},'
                 echo '  "vision_evidence": {"target_owner":"'${SLUG%%/*}'","target_repo":"'${SLUG#*/}'","target_number":'$NUMBER',"target_facts_sha256":"'$TARGET_FACTS_SHA256'","vision_sha":"'$VISION_SHA'","vision_content_sha256":"'$VISION_CONTENT_SHA256'","base_sha":"'$BASE_SHA'","target_head_sha":"'$HEAD_SHA'","applicable_criteria":[{"id":"matching declared criterion id","quote":"exact uniquely occurring VISION criterion","external_source_required":true or false}]},'
@@ -834,7 +835,7 @@ jobs:
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
               echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes <=120 chars; one exact from target.txt",'
-              echo '  "recommendation_basis": {"kind":"other | configured-tests-not-run | configured-tests-not-green","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":["exact configured check name"]}'
+              echo '  "recommendation_basis": {"kind":"other","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id","check_names":[]}'
             fi
             echo "}"
             echo "Do not include Markdown fences or extra prose."
