@@ -11,28 +11,32 @@
     "recommended_reason": {"type": "string", "minLength": 1, "maxLength": 4000},
     "evidence": {"type": "string", "minLength": 1, "maxLength": 8000},
     "recommendation_basis": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "observation_id", "context_id", "check_names"],
-      "properties": {
-        "kind": {"type": "string", "enum": ["other", "configured-tests-not-run", "configured-tests-not-green"]},
-        "observation_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "context_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "check_names": {
-          "type": "array",
-          "maxItems": 16,
-          "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 300}
-        }
-      },
-      "allOf": [
+      "oneOf": [
         {
-          "if": {
-            "required": ["kind"],
-            "properties": {"kind": {"const": "other"}}
-          },
-          "then": {
-            "properties": {"check_names": {"maxItems": 0}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observation_id", "context_id"],
+          "properties": {
+            "kind": {"const": "other"},
+            "observation_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "context_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observation_id", "context_id", "check_names"],
+          "properties": {
+            "kind": {"enum": ["configured-tests-not-run", "configured-tests-not-green"]},
+            "observation_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "context_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "check_names": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1, "maxLength": 300}
+            }
           }
         }
       ]

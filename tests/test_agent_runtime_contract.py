@@ -192,7 +192,6 @@ def main():
             "kind": "other",
             "observation_id": "sha256:" + "0" * 64,
             "context_id": "sha256:" + "1" * 64,
-            "check_names": [],
         }
         pr_valid["automerge"] = {
             "behavior_class": "B",
@@ -277,14 +276,12 @@ def main():
             assessment_admission.normalize_basis(card_1704_basis) is None,
         )
 
-        valid_other_basis = dict(card_1704_basis, check_names=[])
+        valid_other_basis = dict(card_1704_basis)
+        valid_other_basis.pop("check_names")
         valid_other = copy.deepcopy(pr_valid)
         valid_other["recommendation_basis"] = valid_other_basis
         validate_schema(valid_other, pr_schema)
-        check(
-            "action schema: kind other with empty check_names accepted",
-            assessment_admission.normalize_basis(valid_other_basis) is not None,
-        )
+        check("action schema: kind other variant omits check_names", True)
         for basis_kind in ("configured-tests-not-run", "configured-tests-not-green"):
             configured_basis = dict(
                 card_1704_basis,
@@ -298,6 +295,21 @@ def main():
                 "action schema: %s basis with named checks accepted" % basis_kind,
                 assessment_admission.normalize_basis(configured_basis) is not None,
             )
+            empty_configured_basis = dict(configured_basis, check_names=[])
+            malformed_configured = copy.deepcopy(pr_valid)
+            malformed_configured["recommendation_basis"] = empty_configured_basis
+            try:
+                validate_schema(malformed_configured, pr_schema)
+            except ContractError:
+                check(
+                    "action schema: %s basis rejects empty check_names" % basis_kind,
+                    True,
+                )
+            else:
+                check(
+                    "action schema: %s basis rejects empty check_names" % basis_kind,
+                    False,
+                )
 
         missing_basis = copy.deepcopy(pr_valid)
         missing_basis.pop("recommendation_basis")
