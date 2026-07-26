@@ -33,13 +33,17 @@ def _identity(prefix, value):
 
 
 def normalize_basis(value):
-    if not isinstance(value, dict) or set(value) != {
-        "kind", "observation_id", "context_id", "check_names"
-    }:
+    if not isinstance(value, dict):
         return None
-    names = value.get("check_names")
+    allowed = {"kind", "observation_id", "context_id", "check_names"}
+    if not {"kind", "observation_id", "context_id"}.issubset(value) or set(value) - allowed:
+        return None
+    kind = value.get("kind")
+    if kind in TEST_BASIS_KINDS and "check_names" not in value:
+        return None
+    names = value.get("check_names", [])
     if (
-        value.get("kind") not in BASIS_KINDS
+        kind not in BASIS_KINDS
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get("observation_id") or ""))
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get("context_id") or ""))
         or not isinstance(names, list)
@@ -48,7 +52,7 @@ def normalize_basis(value):
         or any(not isinstance(name, str) or not name or len(name) > 300 for name in names)
     ):
         return None
-    if value["kind"] == "other" and names:
+    if kind == "other" and names:
         return None
     normalized = dict(value)
     normalized["check_names"] = sorted(names)
