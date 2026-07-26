@@ -502,6 +502,18 @@ def test_assessment_admission_and_class_tristate():
         "contract: exact card-1704 basis remains refused by admission",
         card_1704 is None and admission.normalize_basis(card_1704_basis) is None,
     )
+    for basis_kind in ("configured-tests-not-run", "configured-tests-not-green"):
+        empty_configured_basis = {
+            "kind": basis_kind,
+            "observation_id": obs["observation_id"],
+            "context_id": context["context_id"],
+            "check_names": [],
+        }
+        check(
+            "contract: %s basis with no named check is refused by admission"
+            % basis_kind,
+            admission.normalize_basis(empty_configured_basis) is None,
+        )
     rejected = assessment_for(
         obs,
         context,

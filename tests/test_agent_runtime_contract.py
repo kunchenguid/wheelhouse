@@ -260,6 +260,11 @@ def main():
                     "action schema: %s basis rejects empty check_names" % basis_kind,
                     False,
                 )
+            check(
+                "assessment admission: %s basis rejects empty check_names"
+                % basis_kind,
+                assessment_admission.normalize_basis(empty_configured_basis) is None,
+            )
 
         observed_repository_path = "tests/fm-composer-lib.test.sh"
         bare_path = copy.deepcopy(pr_valid)
