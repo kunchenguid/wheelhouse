@@ -457,6 +457,63 @@ def test_decision_context_contract():
 def test_assessment_admission_and_class_tristate():
     obs = observation()
     context = context_for(obs)
+    absent_other = admission.admit_assessment(
+        {
+            "summary": "Schema-valid other basis.",
+            "product_implications": "The canonical empty basis remains actionable.",
+            "recommended_action": "merge",
+            "recommended_reason": "The exact current revision is ready.",
+            "recommendation_basis": {
+                "kind": "other",
+                "observation_id": obs["observation_id"],
+                "context_id": context["context_id"],
+            },
+        },
+        obs,
+        context,
+    )
+    check(
+        "contract: absent other check_names is admitted as empty",
+        admission.admitted(absent_other)
+        and absent_other["recommendation"]["basis"]["check_names"] == [],
+    )
+    card_1704_basis = {
+        "kind": "other",
+        "observation_id": "sha256:528ef0ef399f77be40d58b3d31e4bf4978b4352f2dfc4845e09ec71601560cc2",
+        "context_id": "sha256:4ba1c003153d9dfc0d7540c6f3d3e77aad0a1596f3cbb65fa8447d7194194a32",
+        "check_names": [
+            "PR must be raised via no-mistakes",
+            "Behavior tests (Herdr)",
+            "Test coverage guard",
+        ],
+    }
+    card_1704 = admission.admit_assessment(
+        {
+            "summary": "Malformed other basis.",
+            "product_implications": "It must remain advisory only.",
+            "recommended_action": "merge",
+            "recommended_reason": "This must not become authority.",
+            "recommendation_basis": card_1704_basis,
+        },
+        obs,
+        context,
+    )
+    check(
+        "contract: exact card-1704 basis remains refused by admission",
+        card_1704 is None and admission.normalize_basis(card_1704_basis) is None,
+    )
+    for basis_kind in ("configured-tests-not-run", "configured-tests-not-green"):
+        empty_configured_basis = {
+            "kind": basis_kind,
+            "observation_id": obs["observation_id"],
+            "context_id": context["context_id"],
+            "check_names": [],
+        }
+        check(
+            "contract: %s basis with no named check remains accepted by admission"
+            % basis_kind,
+            admission.normalize_basis(empty_configured_basis) == empty_configured_basis,
+        )
     rejected = assessment_for(
         obs,
         context,

@@ -11,7 +11,9 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import assessment_admission
 from agent_runtime.contract import ContractError, canonical_sha256, load_schema, validate_contract, validate_schema
 from agent_runtime.events import EventError, EventWriter, read_events
 from agent_runtime.supervisor import RuntimeFailure, _verify_artifacts
@@ -190,7 +192,6 @@ def main():
             "kind": "other",
             "observation_id": "sha256:" + "0" * 64,
             "context_id": "sha256:" + "1" * 64,
-            "check_names": [],
         }
         pr_valid["automerge"] = {
             "behavior_class": "B",
@@ -201,6 +202,70 @@ def main():
         }
         validate_schema(pr_valid, pr_schema)
         check("action schema: bounded class B restoration evidence accepted", True)
+
+        card_1704_basis = {
+            "kind": "other",
+            "observation_id": "sha256:528ef0ef399f77be40d58b3d31e4bf4978b4352f2dfc4845e09ec71601560cc2",
+            "context_id": "sha256:4ba1c003153d9dfc0d7540c6f3d3e77aad0a1596f3cbb65fa8447d7194194a32",
+            "check_names": [
+                "PR must be raised via no-mistakes",
+                "Behavior tests (Herdr)",
+                "Test coverage guard",
+            ],
+        }
+        malformed_1704 = copy.deepcopy(pr_valid)
+        malformed_1704["recommendation_basis"] = card_1704_basis
+        try:
+            validate_schema(malformed_1704, pr_schema)
+        except ContractError:
+            check("action schema: exact card-1704 basis rejected natively", True)
+        else:
+            check("action schema: exact card-1704 basis rejected natively", False)
+        check(
+            "assessment admission: exact card-1704 basis remains denied",
+            assessment_admission.normalize_basis(card_1704_basis) is None,
+        )
+
+        valid_other_basis = dict(card_1704_basis)
+        valid_other_basis.pop("check_names")
+        valid_other = copy.deepcopy(pr_valid)
+        valid_other["recommendation_basis"] = valid_other_basis
+        validate_schema(valid_other, pr_schema)
+        check(
+            "assessment admission: absent other check_names equals empty",
+            assessment_admission.normalize_basis(valid_other_basis)
+            == dict(valid_other_basis, check_names=[]),
+        )
+        for basis_kind in ("configured-tests-not-run", "configured-tests-not-green"):
+            configured_basis = dict(
+                card_1704_basis,
+                kind=basis_kind,
+                check_names=["Behavior tests (Herdr)"],
+            )
+            configured = copy.deepcopy(pr_valid)
+            configured["recommendation_basis"] = configured_basis
+            validate_schema(configured, pr_schema)
+            empty_configured_basis = dict(configured_basis, check_names=[])
+            malformed_configured = copy.deepcopy(pr_valid)
+            malformed_configured["recommendation_basis"] = empty_configured_basis
+            try:
+                validate_schema(malformed_configured, pr_schema)
+            except ContractError:
+                check(
+                    "action schema: %s basis rejects empty check_names" % basis_kind,
+                    True,
+                )
+            else:
+                check(
+                    "action schema: %s basis rejects empty check_names" % basis_kind,
+                    False,
+                )
+            check(
+                "assessment admission: %s basis still accepts empty check_names"
+                % basis_kind,
+                assessment_admission.normalize_basis(empty_configured_basis)
+                == empty_configured_basis,
+            )
 
         observed_repository_path = "tests/fm-composer-lib.test.sh"
         bare_path = copy.deepcopy(pr_valid)

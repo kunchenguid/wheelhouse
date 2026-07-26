@@ -640,7 +640,6 @@ def test_source_review_correction_contracts():
             "kind": "other",
             "observation_id": "sha256:" + "1" * 64,
             "context_id": "sha256:" + "2" * 64,
-            "check_names": [],
         },
         "automerge": {
             "behavior_class": "A",
