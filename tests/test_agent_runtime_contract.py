@@ -261,9 +261,10 @@ def main():
                     False,
                 )
             check(
-                "assessment admission: %s basis rejects empty check_names"
+                "assessment admission: %s basis still accepts empty check_names"
                 % basis_kind,
-                assessment_admission.normalize_basis(empty_configured_basis) is None,
+                assessment_admission.normalize_basis(empty_configured_basis)
+                == empty_configured_basis,
             )
 
         observed_repository_path = "tests/fm-composer-lib.test.sh"

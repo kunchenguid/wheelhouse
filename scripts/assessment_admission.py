@@ -52,7 +52,7 @@ def normalize_basis(value):
         or any(not isinstance(name, str) or not name or len(name) > 300 for name in names)
     ):
         return None
-    if (kind == "other" and names) or (kind in TEST_BASIS_KINDS and not names):
+    if kind == "other" and names:
         return None
     normalized = dict(value)
     normalized["check_names"] = sorted(names)

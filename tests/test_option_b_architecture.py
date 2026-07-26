@@ -510,9 +510,9 @@ def test_assessment_admission_and_class_tristate():
             "check_names": [],
         }
         check(
-            "contract: %s basis with no named check is refused by admission"
+            "contract: %s basis with no named check remains accepted by admission"
             % basis_kind,
-            admission.normalize_basis(empty_configured_basis) is None,
+            admission.normalize_basis(empty_configured_basis) == empty_configured_basis,
         )
     rejected = assessment_for(
         obs,
