@@ -49,6 +49,7 @@ python tests/test_agent_runtime_repo_snapshot.py
 python tests/test_agent_runtime_claude_adapter.py
 python tests/test_agent_runtime_schema_repair_cutover.py
 python tests/test_agent_outage_recovery_gate.py
+python tests/test_agent_runtime_child_timeout.py
 python tests/test_claude_model_dispatch.py
 python tests/test_decision.py
 python tests/test_qualify_refs.py

@@ -59,6 +59,20 @@ ACTION_LIMITS = {
     "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
 }
 
+# Job-level overhead allowance for the claude-action-compat lane. The pinned
+# claude-code-action owns the model process, so the reusable job's GitHub
+# Actions timeout - measured from job start - is the lane's only enforced
+# bound. That job measurably spends ~30-40s before the model starts (handoff
+# hydration, checkpoint, action setup, Claude Code install, SDK init) plus
+# post-model capture/upload time. Without an allowance the enforced model
+# budget silently falls below the action's designed hard budget, and the job
+# timeout can kill the action mid-execution before it commits its execution
+# file (production card #1759, run 30248637187: 6m16s job killed at the
+# 6-minute timeout with the model still running; output.missing). Mirror the
+# two-minute setup/upload allowance the claude-model-call composite action
+# documents for the claude-cli lane.
+CLAUDE_ACTION_JOB_OVERHEAD_MS = 120_000
+
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
 
 
@@ -1592,7 +1606,10 @@ def build_task(
                 "softDeadlineMs": None if adapter == "claude-action-compat" else soft,
                 "hardDeadlineMs": None if adapter == "claude-action-compat" else hard,
                 "dispatchDeadlineMs": None,
-                "childExecutionTimeoutMs": ((hard + 59_999) // 60_000) * 60_000
+                "childExecutionTimeoutMs": (
+                    ((hard + 59_999) // 60_000) * 60_000
+                    + CLAUDE_ACTION_JOB_OVERHEAD_MS
+                )
                 if adapter == "claude-action-compat"
                 else None,
                 "cancelGraceMs": None if adapter == "claude-action-compat" else 10000,

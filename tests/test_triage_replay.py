@@ -802,6 +802,226 @@ def test_advisory_recovery_refuses_every_disconfirming_shape():
         os.unlink(stale)
 
 
+MISSING_OUTPUT_REVISION = "cf7f065de35b9e2931ec883ff650008b6ddfd39e"
+
+
+def missing_output_card(number=1759, target=594, revision=MISSING_OUTPUT_REVISION):
+    """Card #1759's exact production shape after run 30248637187.
+
+    The reusable model job's 6-minute timeout - measured from job start, with
+    no allowance for the measured ~30-40s pre-model setup - killed the
+    claude-code-action mid-execution before it could commit its execution
+    file, so the consumer recorded a terminal ``triage_status: error`` with
+    the honest "Auto triage unavailable for this version." note, one consumed
+    attempt, a durable result id, and no primary telemetry: the
+    ``consumer.committed.primary.output.missing`` class. Unlike the advisory
+    class above, this cache recovers through the ORDINARY terminal-error
+    replay path - no #1749 advisory exception is involved or required.
+    """
+    item = option_b_fixtures.option_b_item(
+        number=target, head_sha=revision, repo="no-mistakes"
+    )
+    rendered = rc.render(item)
+    body = rendered["body"]
+    state = rc._unique_state_block(body)
+    state = rc._state_with_triage(
+        state,
+        revision,
+        "error",
+        error="Auto triage unavailable for this version.",
+        base_sha="e279099c51a667f3d82b3025db88f6ba4736be15",
+        vision_sha="08077197b28d5f6b5b74b405d4617f066f620e33",
+    )
+    state["assessment_result_id"] = "sha256:73404a2bc99b8e394162f7905bbffad8d4ebd0e2b05246080030a3736e67a7be"
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": revision,
+        "count": 1,
+    }
+    body = rc._replace_state_block(body, state)
+    return {
+        "number": number,
+        "title": rendered["title"],
+        "body": body,
+        "labels": [{"name": name} for name in rendered["labels"]],
+        "state": "OPEN",
+        "updatedAt": "2026-07-27T17:30:59Z",
+        "author": {"login": rc.CARD_AUTOMATION_AUTHOR},
+        "comments": [],
+    }, item
+
+
+def missing_output_plan(value, item, selector=None, dry_run=True, wave="missing-output-wave"):
+    """Run one replay over a single missing-output-class card."""
+    selector = "v1:%s" % value["number"] if selector is None else selector
+    path = cards_file([value["number"]])
+    output = StringIO()
+    try:
+        with (
+            advisory_environment(value, item, revision=MISSING_OUTPUT_REVISION) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                result = replay.run(
+                    path,
+                    wave,
+                    1,
+                    dry_run=dry_run,
+                    exact_cards=selector,
+                )
+                error = ""
+            except ValueError as failure:
+                result, error = None, str(failure)
+            return {
+                "result": result,
+                "error": error,
+                "output": output.getvalue(),
+                "calls": dict(calls),
+                "body": value["body"],
+            }
+    finally:
+        os.unlink(path)
+
+
+def test_missing_output_cache_recovers_through_the_existing_error_path():
+    value, item = missing_output_card()
+    state = rc._unique_state_block(value["body"])
+    assert state["triage_status"] == "error"
+    assert state["triage_error"] == "Auto triage unavailable for this version."
+    assert state["triaged_sha"] == MISSING_OUTPUT_REVISION
+    assert rc.TRIAGE_PRIMARY_STATUS_FIELD not in state
+    assert state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 1
+
+    # Dry-run: eligible through the ordinary terminal-error path, zero writes.
+    run = missing_output_plan(value, item)
+    assert run["error"] == "", run["output"]
+    assert run["result"] == {"eligible": 1, "planned": 1, "deferred": 0, "written": 0}
+    assert "DRY-RUN card #1759" in run["output"]
+    assert "clear=error revision=%s" % MISSING_OUTPUT_REVISION in run["output"]
+    assert (
+        not run["calls"]["edits"]
+        and not run["calls"]["queued"]
+        and not run["calls"]["dispatched"]
+    )
+
+    # Write run: the cache is cleared exactly once and re-queued under the
+    # same revision, consuming the remaining attempt budget.
+    cards = {value["number"]: value}
+    sources = {
+        (item["repo"], item["number"], "pr-review"): source(
+            number=item["number"], revision=MISSING_OUTPUT_REVISION
+        )
+    }
+    path = cards_file([value["number"]])
+    try:
+        with replay_environment(cards, sources) as calls:
+            first = replay.run(path, "missing-output-wave", 1, exact_cards="v1:1759")
+            assert first == {
+                "eligible": 1,
+                "planned": 1,
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            new_state = rc._unique_state_block(cards[1759]["body"])
+            assert new_state[replay.REPLAY_FIELD]["cleared"] == "error"
+            assert new_state["triage_status"] == "queued"
+            assert new_state["triaged_sha"] == MISSING_OUTPUT_REVISION
+            assert new_state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+            assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+    finally:
+        os.unlink(path)
+    # Repeated run: the durable replay marker refuses re-entry exactly.
+    second = missing_output_plan(value, item, wave="missing-output-second-wave")
+    assert second["result"] is None
+    assert "already-replayed" in second["output"]
+    assert not second["calls"]["edits"] and not second["calls"]["queued"]
+
+
+def test_missing_output_replay_refuses_a_moved_head_without_writes():
+    value, item = missing_output_card()
+    path = cards_file([value["number"]])
+    output = StringIO()
+    try:
+        with (
+            replay_environment(
+                {value["number"]: value},
+                {
+                    (item["repo"], item["number"], "pr-review"): source(
+                        number=item["number"], revision="f" * 40
+                    )
+                },
+            ) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(path, "missing-output-stale-wave", 1, dry_run=True, exact_cards="v1:1759")
+                raise AssertionError("a moved head must refuse")
+            except ValueError:
+                pass
+        assert "source-revision-moved" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
+def test_missing_output_replay_refuses_exhausted_attempt_budget():
+    value, item = missing_output_card()
+    state = rc._unique_state_block(value["body"])
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": MISSING_OUTPUT_REVISION,
+        "count": 2,
+    }
+    value["body"] = rc._replace_state_block(value["body"], state)
+    run = missing_output_plan(value, item)
+    assert run["result"] is None, run["output"]
+    assert "attempt-cap-exhausted" in run["output"]
+    assert not run["calls"]["edits"] and not run["calls"]["queued"]
+
+
+def test_missing_output_healthy_primary_control_stays_closed():
+    """The proven-good control shape: a same-revision successful primary with
+    an admitted assessment and persisted recommendation (production card
+    #1789) must never be selected - not by the ordinary path, not by the
+    #1749 advisory recovery, and not by generic discovery."""
+    value, item = advisory_card(
+        number=1789,
+        target=1136,
+        basis_kind="other",
+        check_names=[],
+        primary_error_code="",
+    )
+    state = rc._unique_state_block(value["body"])
+    assert state["triage_status"] == "succeeded"
+    assert state[rc.TRIAGE_PRIMARY_STATUS_FIELD] == "succeeded"
+    assert state[rc.TRIAGE_CONSUMPTION_FIELD] == "primary"
+    assert rc.assessment_current_admitted(state)
+    assert "triage_recommendation" in state
+
+    # Exact selector: the advisory recovery refuses because the primary never
+    # failed (there is no advisory cache to recover).
+    reason = advisory_refusal(value, item)
+    assert reason == "advisory-recovery-primary-not-failed", reason
+
+    # Generic discovery: a current succeeded cache is never a replay candidate.
+    path = cards_file([value["number"]])
+    output = StringIO()
+    try:
+        with (
+            advisory_environment(value, item) as calls,
+            redirect_stdout(output),
+        ):
+            result = replay.run(path, "healthy-control-wave", 25, dry_run=True)
+            assert result == {"eligible": 0, "planned": 0, "deferred": 0, "written": 0}
+            assert "triage-cache-not-terminal-error" in output.getvalue()
+            assert not calls["edits"] and not calls["queued"] and not calls["dispatched"]
+    finally:
+        os.unlink(path)
+
+
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
     cards = {42: card()}
     sources = {("wheelhouse", 17, "pr-review"): source()}
@@ -3216,6 +3436,10 @@ TESTS = [
     test_advisory_cache_recovers_only_through_the_exact_card_selector,
     test_advisory_cache_write_run_clears_only_the_dead_advisory_state,
     test_advisory_recovery_refuses_every_disconfirming_shape,
+    test_missing_output_cache_recovers_through_the_existing_error_path,
+    test_missing_output_replay_refuses_a_moved_head_without_writes,
+    test_missing_output_replay_refuses_exhausted_attempt_budget,
+    test_missing_output_healthy_primary_control_stays_closed,
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry,
     test_array_recovery_attempt_reset_grants_exact_cohort_one_reentry,
