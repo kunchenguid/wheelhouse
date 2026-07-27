@@ -60,6 +60,8 @@ CARD_1746_CHECKS = [
     {"name": "E2E", "role": "test", "outcome": "pass"},
 ]
 TRIAGE_WORKFLOW = ROOT / ".github" / "workflows" / "triage.yml"
+WHEELHOUSE_CONFIG = ROOT / "wheelhouse.config.yml"
+TRIAGE_REPLAY = ROOT / "scripts" / "triage_replay.py"
 PR_SCHEMA = json.loads(
     (
         ROOT / "agent_runtime" / "schemas" / "actions" / "triage-pr-v1.schema.json"
@@ -568,6 +570,20 @@ def test_issue_and_pr_paths_stay_coherent():
         not in build_item.normalize(
             {"repo": "firstmate", "number": 771, "kind": "issue-triage"}
         ),
+    )
+    check(
+        "producers: lifecycle and replay items carry no recommendation field",
+        '"recommendation": "Await the next qualifying scheduled observation."'
+        not in (ROOT / "scripts" / "render_card.py").read_text(encoding="utf-8")
+        and '"recommendation": "Needs your call."'
+        not in TRIAGE_REPLAY.read_text(encoding="utf-8"),
+    )
+    config = WHEELHOUSE_CONFIG.read_text(encoding="utf-8")
+    check(
+        "config: operator guidance names only the canonical recommendation surface",
+        "Recommended next step" not in config
+        and "single Recommended action section" in config
+        and "conditional admitted Recommended action section" in config,
     )
 
 

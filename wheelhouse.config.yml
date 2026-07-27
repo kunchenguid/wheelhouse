@@ -269,9 +269,10 @@ agent_runtime:
 # Automatic lightweight PR triage. DEFAULT ON when this key is absent.
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
 # card can queue bounded advisory triage attempts keyed by PR head SHA.
-# The card gains a Summary, Product implications, and Recommended next step.
-# A fresh successful structured recommendation may add an Accept recommendation
-# checkbox, but it still never acts unless the owner/maintainer ticks it.
+# The card gains Summary and Product implications. A fresh admitted structured
+# recommendation adds the single Recommended action section and may add an
+# Accept recommendation checkbox, but it still never acts unless the
+# owner/maintainer ticks it.
 # Known claude-code-action harness polling/status lines are preserved but
 # labeled as automated status in card text.
 # A brand-new eligible card is first labeled pending-triage and shows no
@@ -290,10 +291,10 @@ auto_triage: true
 # A brand-new eligible issue card is first labeled pending-triage and shows no
 # decision checkboxes until that attempt completes or fails open.
 # It checks out the repo's default branch read-only for a little code context;
-# there is no diff to review. Same Summary / Product implications / Recommended
-# next step shape as PR auto triage, with the same possible Accept
-# recommendation shortcut for issue-safe actions; same advisory-only,
-# never-acts-unless-ticked guarantee.
+# there is no diff to review. It uses the same Summary / Product implications
+# analysis and conditional admitted Recommended action section as PR auto
+# triage, with the same possible Accept recommendation shortcut for issue-safe
+# actions and the same advisory-only, never-acts-unless-ticked guarantee.
 # Known claude-code-action harness polling/status lines are preserved but
 # labeled as automated status in card text.
 # Set false to opt out for token-spend control, or override per repo above with

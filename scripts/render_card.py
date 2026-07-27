@@ -7286,7 +7286,6 @@ def plan_reconcile_absence_projection(
             "target_observation": normalized_observation,
             DECISION_CONTEXT_FIELD: context,
             "summary": "Current target state was observed outside the maintainer worklist.",
-            "recommendation": "Await the next qualifying scheduled observation.",
         }
         projection = card_projection.plan_card_projection(
             item,
