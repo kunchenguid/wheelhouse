@@ -477,10 +477,8 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Automatic-triage replay is operator-only, exact-revision, and admission-safe.**
   `docs/AGENT_RUNTIME.md` owns the workflow-level operator invocation, exact-selector replay-only isolation, fail-closed validation, claim tombstone, duplicate-only evidence, and exact-revision admission-denial contracts.
   Legacy candidate listings supply issue numbers only; an optional exact-card selector bypasses that discovery step, while every selected card and live target is still re-read by exact number before a marker write.
-  Replay clears only a proven current `triage_status:error` non-success cache, marks an entirely absent cache, or re-enters the bounded duplicate-only cohort whose prior replay was denied before task construction.
-  The one exception is the exact-card-selector-only advisory-cache recovery (cards #1746/#1704): a `succeeded` pr-review cache whose primary FAILED with an explicit error code, whose delivered candidate was consumed only as advisory prose, and which holds no admitted assessment and no authority-bearing recommendation.
-  `triage_replay._advisory_recovery_refusal` is the single owner of that proof and reuses `render_card.assessment_current_admitted`; the workflow restates no predicate.
-  Generic discovery, scheduled reconcile, same-revision refresh, and the attempt-reset cohorts can never select the class, an admitted assessment or persisted recommendation always refuses it (card #1739 - `output.schema_invalid` alone is not enough), and recovery discards the old advisory state instead of promoting it.
+  Replay normally clears only a proven current `triage_status:error` non-success cache, marks an entirely absent cache, or re-enters the bounded duplicate-only cohort whose prior replay was denied before task construction; `docs/AGENT_RUNTIME.md` owns the narrow exact-selector-only advisory-cache exception.
+  `triage_replay._advisory_recovery_refusal` is the single code owner of that exception's proof, and the workflow deliberately restates no predicate.
   It writes the versioned non-material `triage_replay` marker and re-enters `reconcile.maybe_queue_auto_triage` so the existing reservation, queued checkpoint, sealed dispatch permit, and `triage.yml` admission remain authoritative.
   Malformed or mismatched state, markers, identities, revisions, labels, authorship, sources, attempt counts, or budget ledgers fail closed.
   `--dry-run` performs the same exact-number eligibility reads and reports planned actions without any GitHub write.
