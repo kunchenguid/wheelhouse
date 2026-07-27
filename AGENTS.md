@@ -542,7 +542,10 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Incomplete observations never weaken PR-review projection ownership.**
   The only presentation-only exception is the bounded, operator-selected
   deletions path documented in `docs/OPTION_B_CARD_PROJECTION.md` and guarded by
-  `tests/test_presentation_migration.py`.
+  `tests/test_presentation_migration.py`. Its separate stale-affordance mode
+  may remove only the exact Accept recommendation checkbox when the shipped
+  `accept_recommendation_available` gate is false; it preserves the hidden state
+  and render version and is never a scheduled queue-wide writer.
 - **Accept recommendation is a deterministic shortcut, not model action.** A
   successful current auto-triage attempt for pr-review or issue-triage may
   prepend an `Accept recommendation` checkbox when the structured

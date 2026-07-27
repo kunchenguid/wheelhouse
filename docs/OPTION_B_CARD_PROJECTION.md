@@ -69,7 +69,9 @@ The writer verifies the card by number before mutation, including identity, trus
 
 Closed-card reuse passes only projection-owned labels into the writer. Decision-lifecycle labels such as `resolved` and human labels remain unmanaged passthrough during preparation; the lifecycle activation step owns their removal. For the `migration-current` cause only, the projected state establishes PR-review ownership so a trusted compatible prior kind can migrate into v2. Every other cause still requires the current card to be PR-review, and a current observation remains mandatory.
 
-An incomplete current observation still defers the whole-card refresh and never bypasses the verified projection writer. The sole exception is `render_card.edit_presentation_only_body`, adjacent to the direct-writer refusal it excepts. It exists only for an observation-blocked card whose retired display copy cannot otherwise be removed. The helper re-verifies the proposed body itself and admits only the exact deletion of retired recommendation spans derived structurally from the original body. Added or modified content, any other deletion, a changed hidden state block, or a changed `render_version` fails closed. Leaving `render_version` unchanged is deliberate: a later complete observation must still perform the ordinary full renderer migration. The exception cannot write the title, labels, options, target, or model cache.
+An incomplete current observation still defers the whole-card refresh and never bypasses the verified projection writer. The sole exception is the bounded presentation-only deletion path in `render_card.py`, adjacent to the direct-writer refusal it excepts. Its default `edit_presentation_only_body` mode exists only for an observation-blocked card whose retired display copy cannot otherwise be removed. The helper re-verifies the proposed body itself and admits only the exact deletion of retired recommendation spans derived structurally from the original body. Added or modified content, any other deletion, a changed hidden state block, or a changed `render_version` fails closed. Leaving `render_version` unchanged is deliberate: a later complete observation must still perform the ordinary full renderer migration. The exception cannot write the title, labels, options, target, or model cache.
+
+The same bounded CLI has one separately selected `stale-accept-recommendation` mode for the retired rv8 affordance left by the canonical-recommendation cutover. It may delete exactly `- [ ] Accept recommendation <!-- opt:accept-recommendation -->`, and only when the parsed card state fails the shipped `accept_recommendation_available` gate. It preserves every other body byte, including the hidden state and `render_version`, and never treats a legacy recommendation cache as authority. An authorized current gate is a no-op; malformed, duplicate, raced, owner-authored, moved-target, or otherwise non-admissible cards deny the exact cohort before any write. This remains operator-selected and is never part of scheduled reconciliation.
 
 A supported `decision:*` label erased between the writer's reread and PATCH has one narrow recovery path in `decision_label_recovery.py`. Its fixed recoverable set is `merge`, `close`, `decline`, `hold`, and `investigate`. Recovery requires the already-authorized webhook actor, exact card repository and node identity, identical target/head/observation/context binding, the exact post-erasure body digest, the exact label-set delta, and a complete recoverable-label event sequence consisting only of the triggering human `labeled` event followed by the trusted projection `unlabeled` event. Event and claim histories use fixed page caps and require a short terminal page; incomplete or oversized histories fail closed. A verified bot-authored claim comment makes that event single-use. The workflow rereads the claim, exact body, and complete fixed-set event sequence after taking `processing` and immediately before target action. Any intervening body or checkbox edit, or any later add or remove in the fixed recoverable label set, supersedes the older event. Old, duplicate, replayed, new-head, relabeled, explicitly removed, ambiguous, malformed, or unsupported label events remain inert.
 
@@ -187,7 +189,18 @@ Only after reviewing an admitted plan, repeat the exact selector with `--apply`:
 python scripts/presentation_migration.py --cards 531,1392 --apply
 ```
 
-The operation is idempotent by content. A repeated run reports `noop` and writes nothing once no retired presentation remains.
+For the narrowly bounded stale-affordance correction, use the explicit mode and
+operator-selected cohort:
+
+```bash
+python scripts/presentation_migration.py \
+  --migration stale-accept-recommendation \
+  --cards 531,1392,1562,1594
+```
+
+Review that plan, then repeat the exact command with `--apply`. The operation is
+idempotent by content. A repeated run reports `noop` and writes nothing once no
+retired presentation remains.
 
 Remove the remaining v1 readers and legacy compatibility mutation fallback only when normal scheduled telemetry shows zero trusted open/reusable v1 cards through the reviewed observation window. Removal must preserve legacy state-marker parsing needed by closed-card trust checks.
 

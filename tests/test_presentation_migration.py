@@ -37,7 +37,24 @@ COHORT = json.loads(
         encoding="utf-8"
     )
 )
+ACCEPT_PRODUCTION_FIXTURE = json.loads(
+    (
+        ROOT
+        / "tests"
+        / "fixtures"
+        / "stale_accept_recommendation_card_1594.json"
+    ).read_text(encoding="utf-8")
+)
 CARD_NUMBERS = sorted(int(key) for key in COHORT)
+ACCEPT_COHORT = [531, 1392, 1562, 1594]
+STALE_ACCEPT_CARDS = [1392, 1562, 1594]
+
+
+def production_accept_body(number):
+    """Exact post-PR-1760 shape derived from the captured production body."""
+    if number == 1594:
+        return ACCEPT_PRODUCTION_FIXTURE["body"]
+    return rc.presentation_migration_body(fixture(number)["body"])
 
 
 def check(name, condition):
@@ -203,6 +220,129 @@ def test_migration_is_deletions_only_and_preserves_authority():
         )
 
 
+def test_stale_accept_migration_matches_production_gate_parity():
+    """The exact #1594 shape and its cohort controls exercise the new mode."""
+    check(
+        "accept fixture #1594: exact post-PR-1760 body is pinned",
+        ACCEPT_PRODUCTION_FIXTURE["body"]
+        == rc.presentation_migration_body(fixture(1594)["body"]),
+    )
+    for number in STALE_ACCEPT_CARDS:
+        before = production_accept_body(number)
+        state = rc._unique_state_block(before)
+        after = rc.accept_recommendation_migration_body(before, state)
+        ok, reason = rc.accept_recommendation_migration_verify(before, after)
+        check(
+            "accept migration #%s: exact production-shaped deletion verifies (%s)"
+            % (number, reason or "ok"),
+            ok,
+        )
+        check(
+            "accept migration #%s: gate is false before deletion" % number,
+            not rc.accept_recommendation_available(state),
+        )
+        check(
+            "accept migration #%s: one exact checkbox removed" % number,
+            before.count(rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE) == 1
+            and after.count(rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE) == 0,
+        )
+        check(
+            "accept migration #%s: state and render version stay byte-identical"
+            % number,
+            rc._STATE_BLOCK_RE.search(before).group(0)
+            == rc._STATE_BLOCK_RE.search(after).group(0)
+            and rc._unique_state_block(after)["render_version"] == 8,
+        )
+        check(
+            "accept migration #%s: every other body byte is preserved" % number,
+            after == rc.accept_recommendation_migration_body(before, state),
+        )
+        check(
+            "accept migration #%s: other options remain" % number,
+            all(
+                option in after
+                for option in (
+                    "- [ ] Merge it <!-- opt:merge -->",
+                    "- [ ] Close / decline <!-- opt:close -->",
+                    "- [ ] Investigate - deep code-grounded review (leaves this card open) <!-- opt:investigate -->",
+                    "- [ ] Hold - I'll handle this manually <!-- opt:hold -->",
+                )
+            ),
+        )
+        check(
+            "accept migration #%s: second pass is a no-op" % number,
+            rc.accept_recommendation_migration_body(after, state) == after,
+        )
+
+    clean = production_accept_body(531)
+    clean_state = rc._unique_state_block(clean)
+    check(
+        "accept migration #531: frozen clean control has no stale checkbox",
+        rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE not in clean
+        and not rc.accept_recommendation_available(clean_state)
+        and rc.accept_recommendation_migration_body(clean, clean_state) == clean,
+    )
+
+
+def test_renderer_accept_checkbox_implies_current_gate():
+    """Every body emitted by the current renderer must agree with its state."""
+    item = {
+        "repo": "no-mistakes",
+        "number": 549,
+        "kind": "pr-review",
+        "head_sha": "a" * 40,
+        "title": "frozen observation control",
+        "url": "https://github.com/kunchenguid/no-mistakes/pull/549",
+        "author": "crumgary",
+        "bucket": "ci-state-unknown",
+        "comp": "unknown",
+        "tests": "unknown",
+        "priority": "low",
+    }
+    rendered = rc.render(item, owner="kunchenguid")["body"]
+    rendered_state = rc._unique_state_block(rendered)
+    check(
+        "renderer: unadmitted PR-review output has no Accept checkbox",
+        rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE not in rendered
+        and not rc.accept_recommendation_available(rendered_state),
+    )
+    issue_item = {
+        "repo": "no-mistakes",
+        "number": 549,
+        "kind": "issue-triage",
+        "updated_at": "2026-07-27T00:00:00Z",
+        "title": "issue control",
+        "url": "https://github.com/kunchenguid/no-mistakes/issues/549",
+        "author": "crumgary",
+        "bucket": "issue-triage",
+        "comp": "n/a",
+        "tests": "n/a",
+        "priority": "low",
+    }
+    issue_triage = {
+        "summary": "A grounded issue summary.",
+        "product_implications": "A bounded issue implication.",
+        "recommended_action": "close",
+        "recommended_reason": "The issue is resolved.",
+        "evidence": "The issue is resolved.",
+    }
+    issue_item["triage"] = issue_triage
+    issue_body = rc.render(issue_item, owner="kunchenguid")["body"]
+    issue_state = rc._unique_state_block(issue_body)
+    check(
+        "renderer invariant: rendered Accept checkbox implies its current gate",
+        rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE in issue_body
+        and rc.accept_recommendation_available(issue_state),
+    )
+    clean = production_accept_body(531)
+    clean_state = rc._unique_state_block(clean)
+    check(
+        "renderer invariant: #531 frozen clean control has no checkbox",
+        rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE not in clean
+        and not rc.accept_recommendation_available(clean_state),
+    )
+
+
 def test_verification_fails_closed():
     before = fixture(1392)["body"]
     good = rc.presentation_migration_body(before)
@@ -363,6 +503,145 @@ def test_apply_migrates_the_cohort_and_is_idempotent():
     )
 
 
+def test_stale_accept_apply_is_bounded_and_idempotent():
+    world = World(numbers=ACCEPT_COHORT)
+    for number in ACCEPT_COHORT:
+        world.cards[number]["body"] = production_accept_body(number)
+    original_cards = {
+        number: {
+            "title": world.cards[number]["title"],
+            "labels": copy.deepcopy(world.cards[number]["labels"]),
+            "url": world.cards[number]["url"],
+        }
+        for number in ACCEPT_COHORT
+    }
+    world.install()
+    try:
+        report = pm.run(
+            ACCEPT_COHORT,
+            apply_changes=True,
+            migration=pm.MIGRATION_STALE_ACCEPT,
+        )
+        second = pm.run(
+            ACCEPT_COHORT,
+            apply_changes=True,
+            migration=pm.MIGRATION_STALE_ACCEPT,
+        )
+    finally:
+        world.restore()
+    check(
+        "accept apply: exact cohort writes only the three stale cards",
+        report["outcome"] == "applied"
+        and sorted(row["card"] for row in report["results"]) == STALE_ACCEPT_CARDS
+        and len(world.writes) == 3,
+    )
+    check(
+        "accept apply: #531 remains byte-identical",
+        world.cards[531]["body"] == production_accept_body(531),
+    )
+    check(
+        "accept apply: labels, title, and target identity are untouched",
+        all(
+            world.cards[number][field] == original_cards[number][field]
+            for number in ACCEPT_COHORT
+            for field in ("title", "labels", "url")
+        ),
+    )
+    check(
+        "accept apply: second run is a no-op",
+        second["outcome"] == "noop"
+        and sorted(row["card"] for row in second["noop"]) == ACCEPT_COHORT
+        and len(world.writes) == 3,
+    )
+    for number in STALE_ACCEPT_CARDS:
+        check(
+            "accept apply #%s: gate remains false and no checkbox remains" % number,
+            rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE not in world.cards[number]["body"]
+            and not rc.accept_recommendation_available(
+                rc._unique_state_block(world.cards[number]["body"])
+            ),
+        )
+
+
+def test_stale_accept_refuses_author_race_and_gate_positive():
+    world = World(numbers=ACCEPT_COHORT)
+    for number in ACCEPT_COHORT:
+        world.cards[number]["body"] = production_accept_body(number)
+    world.cards[1562]["author"] = {"login": "kunchenguid"}
+    world.install()
+    try:
+        report = pm.run(
+            ACCEPT_COHORT,
+            apply_changes=True,
+            migration=pm.MIGRATION_STALE_ACCEPT,
+        )
+    finally:
+        world.restore()
+    check(
+        "accept atomic: owner-authored/raced card denies the whole cohort",
+        report["outcome"] == "denied" and world.writes == [],
+    )
+
+    before = production_accept_body(1594)
+    state = rc._unique_state_block(before)
+    authorized = dict(state)
+    authorized.update(
+        {
+            "kind": "issue-triage",
+            "updated_at": "2026-07-27T00:00:00Z",
+            "triaged_sha": "2026-07-27T00:00:00Z",
+            "triage_status": "succeeded",
+            "triage_recommendation": {"action": "close", "reason": "reason"},
+        }
+    )
+    check(
+        "accept gate: a positive shipped gate refuses checkbox deletion",
+        rc.accept_recommendation_available(authorized)
+        and rc.accept_recommendation_migration_verify(
+            before, rc.accept_recommendation_migration_body(before, authorized)
+        )[0]
+        is False,
+    )
+
+
+def test_stale_accept_duplicate_denies_the_entire_run():
+    duplicate = rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE
+    original_gate = rc.accept_recommendation_available
+    for label, gate in (
+        ("gate-negative", original_gate),
+        (
+            "gate-positive",
+            lambda state: (state or {}).get("number") == 542
+            or original_gate(state),
+        ),
+    ):
+        world = World(numbers=ACCEPT_COHORT)
+        for number in ACCEPT_COHORT:
+            world.cards[number]["body"] = production_accept_body(number)
+        world.cards[1562]["body"] = world.cards[1562]["body"].replace(
+            duplicate, "%s\n%s" % (duplicate, duplicate), 1
+        )
+        world.install()
+        rc.accept_recommendation_available = gate
+        try:
+            report = pm.run(
+                ACCEPT_COHORT,
+                apply_changes=True,
+                migration=pm.MIGRATION_STALE_ACCEPT,
+            )
+        finally:
+            rc.accept_recommendation_available = original_gate
+            world.restore()
+        check(
+            "accept atomic: %s duplicate denies the whole cohort" % label,
+            report["outcome"] == "denied"
+            and world.writes == []
+            and [row["card"] for row in report["blocked"]] == [1562]
+            and report["blocked"][0]["reason"]
+            == "card does not contain exactly one canonical Accept checkbox",
+        )
+
+
 def test_one_ambiguous_member_denies_the_entire_run():
     for label, world in (
         (
@@ -495,10 +774,15 @@ def main():
     try:
         test_cohort_fixtures_are_the_frozen_production_shapes()
         test_migration_is_deletions_only_and_preserves_authority()
+        test_stale_accept_migration_matches_production_gate_parity()
+        test_renderer_accept_checkbox_implies_current_gate()
         test_verification_fails_closed()
         test_canonical_recommendation_survives_legacy_bullet_migration()
         test_dry_run_writes_nothing_and_plans_the_whole_cohort()
         test_apply_migrates_the_cohort_and_is_idempotent()
+        test_stale_accept_apply_is_bounded_and_idempotent()
+        test_stale_accept_refuses_author_race_and_gate_positive()
+        test_stale_accept_duplicate_denies_the_entire_run()
         test_one_ambiguous_member_denies_the_entire_run()
         test_later_member_change_denies_before_first_write()
         test_out_of_scope_cards_are_never_migrated()
