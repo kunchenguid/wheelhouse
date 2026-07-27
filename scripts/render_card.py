@@ -36,6 +36,7 @@ back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -6783,6 +6784,133 @@ def _write_body(body):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(body)
         return f.name
+
+
+# --------------------------------------------------------------------------- #
+# Display-only migration for cards the observation-bound writer cannot reach
+# --------------------------------------------------------------------------- #
+# Every pr-review body is an observation-bound projection owned by
+# projection_writer.py, which is why `_edit_issue_body` below refuses one. A
+# card whose CURRENT observation is incomplete has no projection to commit - the
+# authoritative writer cannot express the write at all - so `upsert_card`
+# defers it and the card is excluded from every display-only renderer migration
+# for as long as it stays unobservable (it silently misses each
+# `CARD_RENDER_VERSION` bump).
+#
+# `edit_presentation_only_body` is the ONE narrow, self-verifying exception, and
+# it lives here beside the rule it excepts rather than in a second writer. It
+# admits exactly one shape of write: a DELETIONS-ONLY removal of retired
+# recommendation presentation whose hidden state block is byte-identical, whose
+# `render_version` is unchanged (the observation-bound migration did not run, so
+# a later complete observation must still perform it), and which touches no
+# title, label, option, target, or model cache. Orchestration, cohort preflight,
+# dry-run, and audit live in scripts/presentation_migration.py.
+PRESENTATION_NEXT_STEP_PREFIX = "- **Recommended next step:**"
+
+
+def presentation_removable_lines(body):
+    """The EXACT set of lines this migration may delete from `body`.
+
+    Computed structurally from the original body - the retired
+    `### Recommended action` section in full (heading plus its copy) and the
+    action-bearing `Recommended next step` bullet inside `### Triage`. Nothing
+    else is ever removable, so the allowlist cannot be widened by accident."""
+    allowed = set()
+    for line in (_existing_triage_section(body) or "").split("\n"):
+        if line.startswith(PRESENTATION_NEXT_STEP_PREFIX):
+            allowed.add(line)
+    match = _RECOMMENDATION_SECTION_RE.search(body or "")
+    if match:
+        for line in match.group(0).split("\n"):
+            if line.strip():
+                allowed.add(line)
+    return allowed
+
+
+def presentation_migration_body(body):
+    """Pure: strip retired recommendation presentation, or return `body`.
+
+    Reuses the same helpers the ordinary renderer migration uses so the two
+    paths cannot drift apart."""
+    if not legacy_recommendation_presentation(body):
+        return body
+    updated = body
+    section = _existing_triage_section(updated)
+    if section:
+        stripped = _without_legacy_recommended_next_step(section)
+        if stripped != section:
+            updated = _insert_triage_section(updated, stripped)
+    return _set_recommendation_section(updated, None)
+
+
+def presentation_diff_allowed(before, after):
+    """Machine-checked allowlist: deletions only, and only of retired copy."""
+    if before == after:
+        return (True, "")
+    removable = presentation_removable_lines(before)
+    old_lines = (before or "").split("\n")
+    new_lines = (after or "").split("\n")
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, old_lines, new_lines, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        if any(line.strip() for line in new_lines[j1:j2]):
+            return (False, "migration would add or modify content")
+        for line in old_lines[i1:i2]:
+            if line.strip() and line not in removable:
+                return (False, "migration would remove non-allowlisted content")
+    return (True, "")
+
+
+def presentation_migration_verify(before, after):
+    """Complete fail-closed invariant check for one card. `(ok, reason)`."""
+    if not before or not after:
+        return (False, "card body is unavailable")
+    if before == after:
+        return (False, "no retired recommendation presentation to remove")
+    ok, reason = presentation_diff_allowed(before, after)
+    if not ok:
+        return (False, reason)
+    old_state = _unique_state_block(before)
+    new_state = _unique_state_block(after)
+    if old_state is None or new_state is None:
+        return (False, "card state block is missing or ambiguous")
+    old_marker = _STATE_BLOCK_RE.search(before)
+    new_marker = _STATE_BLOCK_RE.search(after)
+    if not old_marker or not new_marker:
+        return (False, "card state block is missing")
+    if old_marker.group(0) != new_marker.group(0):
+        return (False, "hidden state block bytes would change")
+    if new_state.get("render_version") != old_state.get("render_version"):
+        return (False, "observation-bound render version must not be advanced")
+    if legacy_recommendation_presentation(after):
+        return (False, "retired recommendation presentation survives the migration")
+    for marker in (
+        DECISION_START,
+        DECISION_END,
+        TRIAGE_START,
+        TRIAGE_END,
+        "### Situation",
+        "<!-- opt:",
+    ):
+        if before.count(marker) != after.count(marker):
+            return (False, "card structure would change")
+    return (True, "")
+
+
+def edit_presentation_only_body(number, before, after):
+    """Commit one verified deletions-only presentation correction.
+
+    Re-verifies before writing, so a caller cannot supply an unchecked body."""
+    ok, reason = presentation_migration_verify(before, after)
+    if not ok:
+        raise RuntimeError("presentation-only edit refused: %s" % reason)
+    body_path = _write_body(after)
+    try:
+        _gh(["issue", "edit", str(number), "--body-file", body_path])
+    finally:
+        os.unlink(body_path)
 
 
 def _edit_issue_body(number, body, remove_labels=None):
