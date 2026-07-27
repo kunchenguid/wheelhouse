@@ -168,9 +168,15 @@ def inspect_card(number, card, target_head, migration=MIGRATION_RETIRED_RECOMMEN
             row["action"] = "noop"
             row["reason"] = "Accept recommendation is currently authorized"
             return row
-        if not render_card.accept_recommendation_checkbox_present(body):
+        checkbox_count = render_card._exact_checkbox_line_count(body)
+        if checkbox_count == 0:
             row["action"] = "noop"
             row["reason"] = "no stale Accept recommendation checkbox"
+            return row
+        if checkbox_count != 1:
+            row["reason"] = (
+                "card does not contain exactly one canonical Accept checkbox"
+            )
             return row
         migrated = render_card.accept_recommendation_migration_body(body, state)
         ok, reason = render_card.accept_recommendation_migration_verify(

@@ -604,6 +604,33 @@ def test_stale_accept_refuses_author_race_and_gate_positive():
     )
 
 
+def test_stale_accept_duplicate_denies_the_entire_run():
+    world = World(numbers=ACCEPT_COHORT)
+    for number in ACCEPT_COHORT:
+        world.cards[number]["body"] = production_accept_body(number)
+    duplicate = rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE
+    world.cards[1562]["body"] = world.cards[1562]["body"].replace(
+        duplicate, "%s\n%s" % (duplicate, duplicate), 1
+    )
+    world.install()
+    try:
+        report = pm.run(
+            ACCEPT_COHORT,
+            apply_changes=True,
+            migration=pm.MIGRATION_STALE_ACCEPT,
+        )
+    finally:
+        world.restore()
+    check(
+        "accept atomic: duplicate checkbox denies the whole cohort",
+        report["outcome"] == "denied"
+        and world.writes == []
+        and [row["card"] for row in report["blocked"]] == [1562]
+        and report["blocked"][0]["reason"]
+        == "card does not contain exactly one canonical Accept checkbox",
+    )
+
+
 def test_one_ambiguous_member_denies_the_entire_run():
     for label, world in (
         (
@@ -744,6 +771,7 @@ def main():
         test_apply_migrates_the_cohort_and_is_idempotent()
         test_stale_accept_apply_is_bounded_and_idempotent()
         test_stale_accept_refuses_author_race_and_gate_positive()
+        test_stale_accept_duplicate_denies_the_entire_run()
         test_one_ambiguous_member_denies_the_entire_run()
         test_later_member_change_denies_before_first_write()
         test_out_of_scope_cards_are_never_migrated()
