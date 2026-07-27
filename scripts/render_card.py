@@ -6807,14 +6807,15 @@ def _write_body(body):
 # for as long as it stays unobservable (it silently misses each
 # `CARD_RENDER_VERSION` bump).
 #
-# `edit_presentation_only_body` is the ONE narrow, self-verifying exception, and
-# it lives here beside the rule it excepts rather than in a second writer. It
-# admits exactly one shape of write: a DELETIONS-ONLY removal of retired
-# recommendation presentation whose hidden state block is byte-identical, whose
-# `render_version` is unchanged (the observation-bound migration did not run, so
-# a later complete observation must still perform it), and which touches no
-# title, label, option, target, or model cache. Orchestration, cohort preflight,
-# dry-run, and audit live in scripts/presentation_migration.py.
+# This is the ONE narrow, self-verifying exception surface, and it lives here
+# beside the rule it excepts rather than in a second writer. Its two explicitly
+# selected modes admit only DELETIONS-ONLY removal of retired recommendation
+# presentation or one unauthorized canonical Accept checkbox. Both preserve the
+# hidden state block byte-for-byte and leave `render_version` unchanged (the
+# observation-bound migration did not run, so a later complete observation must
+# still perform it). Neither touches title, labels, hidden options, target, or
+# model cache. Orchestration, cohort preflight, dry-run, and audit live in
+# scripts/presentation_migration.py.
 PRESENTATION_NEXT_STEP_PREFIX = "- **Recommended next step:**"
 ACCEPT_RECOMMENDATION_CHECKBOX_LINE = (
     "- [ ] Accept recommendation <!-- opt:accept-recommendation -->"
