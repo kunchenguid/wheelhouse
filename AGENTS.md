@@ -1170,8 +1170,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   actor duality: REST issue rows use `github-actions[bot]`, while
   `render_card.get_card` returns `app/github-actions` from GraphQL.
   `auto_merge._canonical_card_author` may map only that exact GraphQL spelling to
-  the REST spelling at the `_trusted_card_identity` boundary.
-  It must not strip prefixes, fold case, or accept any other alias.
+  the REST spelling at the `_trusted_card_identity` boundary, and
+  `projection_writer._canonical_automation_author` performs the same
+  exact-spelling mapping where the writer compares its REST lifecycle
+  expected snapshot against the `get_card` reread (the closed-card reuse
+  preparation path).
+  Neither may strip prefixes, fold case, or accept any other alias.
   Keep the regression fixtures in `tests/test_auto_merge_v1.py`
   `get_card`-shaped, with `author` as a `{"login": ...}` dict.
 - The `repository_dispatch` event type is `wheelhouse-item`, but `ingest.yml`

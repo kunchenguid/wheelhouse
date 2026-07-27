@@ -79,7 +79,89 @@ def item(head="a" * 40, kind="pr-review", **overrides):
         "automerge_vision_sha": "c" * 40,
     }
     base.update(overrides)
+    # Production pr-review items always carry a complete bound observation and
+    # DecisionContext, so bind them AFTER overrides land on the identity
+    # fields. Scenarios needing a legacy pre-Option-B item pass
+    # `target_observation=None` explicitly.
+    if base["kind"] == "pr-review" and "target_observation" not in base:
+        observation = current_observation(base)
+        base["target_observation"] = observation
+        base["decision_context"] = rc.context_contracts.build_decision_context(
+            observation, current_repository_snapshot(base)
+        )
     return base
+
+
+def current_observation(base):
+    return reconcile.target_contracts.make_observation(
+        "kunchenguid",
+        base["repo"],
+        int(base["number"]),
+        head_sha=base["head_sha"],
+        base_sha=base["base_sha"],
+        expected_head_sha=base["head_sha"],
+        observed_at=base["updated_at"],
+        source="bulk-scan",
+        completeness={
+            "complete": True,
+            "target": True,
+            "checks": True,
+            "configured_checks": True,
+            "changed_paths": True,
+            "action_required_runs": True,
+            "head_matches_expected": True,
+            "check_contexts_seen": 2,
+            "check_contexts_total": 2,
+            "mergeability": "conclusive",
+        },
+        facts={
+            "open": True,
+            "title": base["title"],
+            "author": base["author"],
+            "updated_at": base["updated_at"],
+            "draft": False,
+            "cross_repo": False,
+            "head_ref": "feature",
+            "mergeable": "MERGEABLE",
+            "ci": True,
+            "comp": base["comp"],
+            "tests": base["tests"],
+            "bucket": base["bucket"],
+            "approval_phase": "not-required",
+            "check_phase": "terminal",
+            "configured_checks": [
+                {"name": "Gate", "role": "compliance", "outcome": "pass"},
+                {"name": "tests", "role": "test", "outcome": "pass"},
+            ],
+        },
+        changed_paths=reconcile.target_contracts.changed_path_facts(
+            ["src/example.py"], complete=True
+        ),
+    )
+
+
+def current_repository_snapshot(base):
+    return rc.context_contracts.repository_snapshot(
+        [
+            {
+                "owner": "kunchenguid",
+                "repo": base["repo"],
+                "number": int(base["number"]),
+                "head_sha": base["head_sha"],
+                "title": base["title"],
+                "paths_complete": True,
+                "paths": ["src/example.py"],
+                "closing_complete": True,
+                "closing_issues": [],
+                "references_complete": True,
+                "references": [],
+                "card_issue": 0,
+                "url": base["url"],
+                "card_url": "",
+            }
+        ],
+        base["updated_at"],
+    )
 
 
 def absence_observation(number=42, head="h" * 40):
@@ -216,6 +298,7 @@ class LifecycleGitHub:
         self.run_number = 0
         self.workflow_calls = []
         self.issue_edit_calls = 0
+        self.patch_calls = 0
         self.timeline_failures = set()
         self.budget_reservations = 0
         if not start_empty:
@@ -415,6 +498,23 @@ class LifecycleGitHub:
                 path = args[args.index("--input") + 1]
                 with open(path, encoding="utf-8") as handle:
                     payload = json.load(handle)
+                self.patch_calls += 1
+                # The v2 writer prepares closed pr-review cards through this
+                # PATCH, so writer-failure-before-reopen injection lives here;
+                # partial modes model a response lost after the server applied
+                # part of the intent.
+                is_closed_prepare = issue["state"] == "CLOSED"
+                if is_closed_prepare and self.fail_prepare == "before":
+                    raise RuntimeError("simulated projection update failure")
+                if is_closed_prepare and self.fail_prepare == "body-only":
+                    issue["title"] = payload["title"]
+                    issue["body"] = payload["body"]
+                    self._touch(issue)
+                    raise RuntimeError("simulated body-only partial projection")
+                if is_closed_prepare and self.fail_prepare == "labels-only":
+                    issue["labels"] = label_objects(payload["labels"])
+                    self._touch(issue)
+                    raise RuntimeError("simulated label-only partial projection")
                 issue["title"] = payload["title"]
                 issue["body"] = payload["body"]
                 issue["labels"] = label_objects(payload["labels"])
@@ -817,6 +917,147 @@ def test_ci_approval_to_pr_review_reuses_issue():
     )
 
 
+def test_production_shaped_resolved_card_reuse_keeps_label_ownership():
+    """The chrome-devtools-axi#86 / wheelhouse card #1408 production shape: a
+    trusted soft-closed pr-review card carrying `resolved` and
+    `wheelhouse:confirming-target-state` reopens through the v2 writer. The
+    commit itself proves `resolved` never entered managed projection input,
+    because normalization rejects lifecycle labels as managed."""
+    current = item(head="e" * 40)
+    github = LifecycleGitHub(item())
+    github.soft_close()
+    # Mirror card #1408: the first-absence confirming label survives on the
+    # closed card alongside `resolved`.
+    github.issues[7]["labels"] = label_objects(
+        label_names(github.issues[7]) | {rc.LIFECYCLE_CONFIRM_LABEL}
+    )
+    out = github.run_reconcile(scan_payload([current]))
+    names = label_names(github.issues[7])
+    check(
+        "production shape: soft-closed resolved card reopens via the writer",
+        github.issues[7]["state"] == "OPEN"
+        and github.create_calls == 0
+        and "reopened card #7" in out
+        and '"cause":"migration-current"' in out
+        and '"event":"committed"' in out,
+    )
+    check(
+        "production shape: prepared closed card keeps `resolved` as passthrough",
+        bool(github.labels_on_reopen)
+        and "resolved" in github.labels_on_reopen[-1]
+        and "needs-decision" not in github.labels_on_reopen[-1],
+    )
+    check(
+        "production shape: activation returns lifecycle labels to their owner",
+        "needs-decision" in names
+        and "resolved" not in names
+        and rc.LIFECYCLE_CONFIRM_LABEL not in names,
+    )
+    edits_after_reuse = github.issue_edit_calls
+    patches_after_reuse = github.patch_calls
+    github.run_reconcile(scan_payload([current]))
+    check(
+        "production shape: the second scan is a no-op",
+        github.issue_edit_calls == edits_after_reuse
+        and github.patch_calls == patches_after_reuse,
+    )
+
+
+def test_writer_authorship_and_managed_ownership_controls():
+    """Focused controls for the two writer-boundary contracts closed-card
+    reuse depends on: the exact REST/GraphQL automation-actor duality and the
+    strict rejection of lifecycle labels as managed projection input."""
+    import card_projection
+    import projection_writer
+
+    canonical = projection_writer._canonical_automation_author
+    check(
+        "duality: only the exact GraphQL spelling maps to the REST actor",
+        canonical("app/github-actions") == "github-actions[bot]"
+        and canonical("github-actions[bot]") == "github-actions[bot]"
+        and canonical("github-actions") == "github-actions"
+        and canonical("app/other-bot") == "app/other-bot"
+        and canonical("APP/GITHUB-ACTIONS") == "APP/GITHUB-ACTIONS",
+    )
+
+    def snapshot(author):
+        return {
+            "number": 7,
+            "title": "t",
+            "body": "b",
+            "labels": ["kind:pr-review"],
+            "updated_at": "2026-07-13T13:00:01Z",
+            "comments": {"count": 0, "digest": ""},
+            "author": author,
+            "open": False,
+            "target": {
+                "repo": "wheelhouse",
+                "number": 42,
+                "kind": "pr-review",
+                "head_sha": "",
+            },
+        }
+
+    check(
+        "duality: expected-snapshot comparison joins exactly the two spellings",
+        projection_writer._expected_matches(
+            snapshot("app/github-actions"), snapshot("github-actions[bot]")
+        )
+        and projection_writer._expected_matches(
+            snapshot("github-actions[bot]"), snapshot("app/github-actions")
+        )
+        and not projection_writer._expected_matches(
+            snapshot("app/other-bot"), snapshot("github-actions[bot]")
+        ),
+    )
+
+    rejected = card_projection.projection_from_values(
+        title="t",
+        body="b",
+        labels=["kind:pr-review", "resolved"],
+        cause="migration-current",
+        observation_id="sha256:" + "0" * 64,
+        context_id="sha256:" + "1" * 64,
+    )
+    accepted = card_projection.projection_from_values(
+        title="t",
+        body="b",
+        labels=["kind:pr-review"],
+        cause="migration-current",
+        observation_id="sha256:" + "0" * 64,
+        context_id="sha256:" + "1" * 64,
+    )
+    check(
+        "ownership: normalization still rejects lifecycle labels as managed",
+        rejected is None and accepted is not None,
+    )
+
+
+def test_reuse_without_current_observation_fails_closed():
+    """An event item with no current ReviewObservation cannot reuse a closed
+    pr-review card: the observation-projection gate holds and nothing mutates."""
+    github = LifecycleGitHub(item())
+    github.soft_close()
+    body_before = github.issues[7]["body"]
+    labels_before = label_names(github.issues[7])
+    legacy = item(head="6" * 40, target_observation=None)
+    legacy.pop("target_observation", None)
+    legacy.pop("decision_context", None)
+    failed = False
+    try:
+        github.event_upsert(legacy)
+    except rc.CardLifecycleError:
+        failed = True
+    check(
+        "no-observation reuse fails closed without mutation or creation",
+        failed
+        and github.issues[7]["state"] == "CLOSED"
+        and github.issues[7]["body"] == body_before
+        and label_names(github.issues[7]) == labels_before
+        and github.create_calls == 0,
+    )
+
+
 def test_census_ci_approval_head_move_reuses_once():
     """F6 proves the non-model CI kind uses the same widened lifecycle path."""
     old = item(kind="ci-approval", head="339a3470" + "0" * 32)
@@ -1198,17 +1439,27 @@ def test_live_races_stop_reuse_before_mutation():
 
 
 def test_partial_prepare_failures_stay_closed_non_actionable():
+    # pr-review preparation runs through the v2 writer's `gh api PATCH`;
+    # ci-approval preparation still runs through `gh issue edit`. A writer
+    # failure always precedes reopen, so every mode must leave the card
+    # closed and non-actionable on both paths.
     safe = True
-    for mode in ("before", "body-only", "labels-only"):
-        github = LifecycleGitHub(item())
-        github.soft_close()
-        github.fail_prepare = mode
-        try:
-            github.event_upsert(item(head="4" * 40))
-        except RuntimeError:
-            pass
-        issue = github.issues[7]
-        safe = safe and issue["state"] == "CLOSED" and github.create_calls == 0
+    for kind in ("pr-review", "ci-approval"):
+        for mode in ("before", "body-only", "labels-only"):
+            github = LifecycleGitHub(item(kind=kind))
+            github.soft_close()
+            github.fail_prepare = mode
+            try:
+                github.event_upsert(item(kind=kind, head="4" * 40))
+            except RuntimeError:
+                pass
+            issue = github.issues[7]
+            safe = (
+                safe
+                and issue["state"] == "CLOSED"
+                and github.create_calls == 0
+                and "needs-decision" not in label_names(issue)
+            )
     check(
         "partial body/label failures leave the reused issue closed and non-actionable",
         safe,
@@ -1402,11 +1653,14 @@ def test_list_lag_create_is_retained_and_queued_once():
         github = LifecycleGitHub(start_empty=True)
         github.list_index_lag_seconds = lag
         github.search_index_lag_seconds = lag
-        current = item(head=("a" if lag == 0 else "b") * 40)
         # Isolate each lag case on a distinct target so markers never collide.
-        current["number"] = 100 + int(lag * 10)
-        current["url"] = "https://github.com/kunchenguid/wheelhouse/pull/%s" % (
-            current["number"],
+        # Identity overrides go through item() so the bound observation and
+        # context carry the scenario's own target, never a stale default.
+        target_number = 100 + int(lag * 10)
+        current = item(
+            head=("a" if lag == 0 else "b") * 40,
+            number=target_number,
+            url="https://github.com/kunchenguid/wheelhouse/pull/%s" % target_number,
         )
         closes_before = github.close_calls
         creates_before = github.create_calls
@@ -1831,6 +2085,9 @@ def main():
     test_new_head_reopens_and_drops_stale_analysis()
     test_census_head_mismatch_reuses_after_trusted_post_close_activity_once()
     test_ci_approval_to_pr_review_reuses_issue()
+    test_production_shaped_resolved_card_reuse_keeps_label_ownership()
+    test_writer_authorship_and_managed_ownership_controls()
+    test_reuse_without_current_observation_fails_closed()
     test_census_ci_approval_head_move_reuses_once()
     test_issue_updated_at_refresh_and_queue_write_ownership()
     test_reconcile_and_ingest_share_reuse_operation()

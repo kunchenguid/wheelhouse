@@ -6501,12 +6501,16 @@ def reuse_closed_card(item, candidate, has_token=False):
             )
         import projection_writer
 
+        # The projection carries only projection-owned labels. Lifecycle and
+        # human labels - `resolved` is guaranteed present on every reuse
+        # candidate - stay unmanaged passthrough that the writer preserves,
+        # and only the activation edit below may remove `resolved`.
         outcome = projection_writer.commit_preplanned(
             current["number"],
             current,
             title=card["title"],
             body=card["body"],
-            managed_labels=sorted(expected_inert_labels),
+            managed_labels=_projection_managed_labels(expected_inert_labels),
             cause="migration-current",
             observation_id=(
                 (rendered_state.get(REVIEW_OBSERVATION_FIELD) or {}).get(

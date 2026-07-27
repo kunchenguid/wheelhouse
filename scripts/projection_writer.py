@@ -113,12 +113,25 @@ def card_snapshot(card):
     return snapshot
 
 
+def _canonical_automation_author(login):
+    # GitHub's one API-specific automation actor duality: REST issue rows carry
+    # "github-actions[bot]" while GraphQL card reads carry "app/github-actions".
+    # Map only that exact GraphQL spelling - no prefix stripping, no case
+    # folding, no other alias - so lifecycle snapshots and get_card rereads
+    # compare as the same trusted actor.
+    return "github-actions[bot]" if login == "app/github-actions" else login
+
+
 def _expected_matches(current, expected):
     if current is None or expected is None:
         return False
     if current["number"] != expected.get("number"):
         return False
-    for key in ("title", "body", "labels", "updated_at", "author", "open", "target"):
+    if _canonical_automation_author(current.get("author")) != _canonical_automation_author(
+        expected.get("author")
+    ):
+        return False
+    for key in ("title", "body", "labels", "updated_at", "open", "target"):
         if key in expected and current.get(key) != expected.get(key):
             return False
     expected_comments = expected.get("comments")
@@ -207,7 +220,17 @@ def commit_projection(number, expected, projection):
             queue_effect="none",
         )
         return "deferred"
-    if current["target"].get("kind") != "pr-review":
+    if projection["cause"] == "migration-current":
+        # Closed-card reuse and v1->v2 migration may carry a card into v2
+        # ownership from a compatible prior kind (e.g. a soft-closed
+        # ci-approval card whose PR is now a pr-review item), so ownership is
+        # asserted by the projected state; every other cause maintains an
+        # already-owned pr-review card and keeps the current-kind guard.
+        projected_state = render_card._unique_state_block(projection["body"]) or {}
+        kind_owned = projected_state.get("kind") == "pr-review"
+    else:
+        kind_owned = current["target"].get("kind") == "pr-review"
+    if not kind_owned:
         _event(
             "deferred",
             card=int(number),
