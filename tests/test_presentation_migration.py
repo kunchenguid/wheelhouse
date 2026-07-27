@@ -605,30 +605,41 @@ def test_stale_accept_refuses_author_race_and_gate_positive():
 
 
 def test_stale_accept_duplicate_denies_the_entire_run():
-    world = World(numbers=ACCEPT_COHORT)
-    for number in ACCEPT_COHORT:
-        world.cards[number]["body"] = production_accept_body(number)
     duplicate = rc.ACCEPT_RECOMMENDATION_CHECKBOX_LINE
-    world.cards[1562]["body"] = world.cards[1562]["body"].replace(
-        duplicate, "%s\n%s" % (duplicate, duplicate), 1
-    )
-    world.install()
-    try:
-        report = pm.run(
-            ACCEPT_COHORT,
-            apply_changes=True,
-            migration=pm.MIGRATION_STALE_ACCEPT,
+    original_gate = rc.accept_recommendation_available
+    for label, gate in (
+        ("gate-negative", original_gate),
+        (
+            "gate-positive",
+            lambda state: (state or {}).get("number") == 542
+            or original_gate(state),
+        ),
+    ):
+        world = World(numbers=ACCEPT_COHORT)
+        for number in ACCEPT_COHORT:
+            world.cards[number]["body"] = production_accept_body(number)
+        world.cards[1562]["body"] = world.cards[1562]["body"].replace(
+            duplicate, "%s\n%s" % (duplicate, duplicate), 1
         )
-    finally:
-        world.restore()
-    check(
-        "accept atomic: duplicate checkbox denies the whole cohort",
-        report["outcome"] == "denied"
-        and world.writes == []
-        and [row["card"] for row in report["blocked"]] == [1562]
-        and report["blocked"][0]["reason"]
-        == "card does not contain exactly one canonical Accept checkbox",
-    )
+        world.install()
+        rc.accept_recommendation_available = gate
+        try:
+            report = pm.run(
+                ACCEPT_COHORT,
+                apply_changes=True,
+                migration=pm.MIGRATION_STALE_ACCEPT,
+            )
+        finally:
+            rc.accept_recommendation_available = original_gate
+            world.restore()
+        check(
+            "accept atomic: %s duplicate denies the whole cohort" % label,
+            report["outcome"] == "denied"
+            and world.writes == []
+            and [row["card"] for row in report["blocked"]] == [1562]
+            and report["blocked"][0]["reason"]
+            == "card does not contain exactly one canonical Accept checkbox",
+        )
 
 
 def test_one_ambiguous_member_denies_the_entire_run():
