@@ -38,6 +38,7 @@ never replays model triage, and never touches a target pull request.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -68,6 +69,16 @@ def _author_login(card):
     return str(author or "").strip()
 
 
+def _admission_fingerprint(card, target_head):
+    payload = json.dumps(
+        {"card": card, "target_head": target_head},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def live_head(state):
     """Exact live head SHA for the card's OPEN target PR, else ''. Read-only."""
     repo = str((state or {}).get("repo") or "")
@@ -87,7 +98,14 @@ def live_head(state):
 
 def inspect_card(number, card, target_head):
     """Classify one cohort member. Pure given its inputs; no writes."""
-    row = {"card": int(number), "action": "skip", "reason": "", "url": "", "target": ""}
+    row = {
+        "card": int(number),
+        "action": "skip",
+        "reason": "",
+        "url": "",
+        "target": "",
+        "_admission_fingerprint": _admission_fingerprint(card, target_head),
+    }
     if not isinstance(card, dict) or not card.get("body"):
         row["reason"] = "card is unreadable"
         return row
@@ -159,6 +177,36 @@ def plan(cohort):
     return rows
 
 
+def _public_rows(rows):
+    return [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in rows
+    ]
+
+
+def admit_plan(rows):
+    """Second-read the complete cohort before its first write."""
+    admitted = []
+    blocked = []
+    for planned in rows:
+        number = planned["card"]
+        card = render_card.get_card(number)
+        state = render_card._unique_state_block((card or {}).get("body") or "")
+        current = inspect_card(number, card, live_head(state))
+        if (
+            current["action"] != planned["action"]
+            or current["_admission_fingerprint"]
+            != planned["_admission_fingerprint"]
+        ):
+            if current["action"] != "skip":
+                current["action"] = "skip"
+                current["reason"] = "card changed after planning"
+            blocked.append(current)
+            continue
+        admitted.append(current)
+    return admitted, blocked
+
+
 def apply_plan(rows):
     """Write the verified plan. Each card is re-read and re-verified first."""
     results = []
@@ -225,9 +273,9 @@ def run(cohort, apply_changes=False):
         "schema": SCHEMA,
         "mode": "apply" if apply_changes else "dry-run",
         "requested": len(cohort),
-        "migrate": migrate,
-        "noop": noop,
-        "blocked": blocked,
+        "migrate": _public_rows(migrate),
+        "noop": _public_rows(noop),
+        "blocked": _public_rows(blocked),
     }
     if blocked:
         # Atomic: one ambiguous member denies the whole run before any write.
@@ -242,7 +290,17 @@ def run(cohort, apply_changes=False):
     if not apply_changes:
         report["outcome"] = "dry-run"
         return report
-    report["results"] = apply_plan(migrate)
+    admitted, admission_blocked = admit_plan(rows)
+    if admission_blocked:
+        report["blocked"] = _public_rows(admission_blocked)
+        report["outcome"] = "denied"
+        _event(
+            "denied-run",
+            blocked=[row["card"] for row in admission_blocked],
+        )
+        return report
+    admitted_migrate = [row for row in admitted if row["action"] == "migrate"]
+    report["results"] = _public_rows(apply_plan(admitted_migrate))
     report["outcome"] = "applied"
     return report
 

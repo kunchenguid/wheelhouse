@@ -401,6 +401,29 @@ def test_one_ambiguous_member_denies_the_entire_run():
         )
 
 
+def test_later_member_change_denies_before_first_write():
+    world = World().install()
+    original_plan = pm.plan
+
+    def plan_then_mutate(cohort):
+        rows = original_plan(cohort)
+        world.cards[1594]["labels"].append({"name": "processing"})
+        return rows
+
+    pm.plan = plan_then_mutate
+    try:
+        report = pm.run(CARD_NUMBERS, apply_changes=True)
+    finally:
+        pm.plan = original_plan
+        world.restore()
+    check(
+        "atomic: a later member changing after planning denies before writes",
+        report["outcome"] == "denied"
+        and world.writes == []
+        and [row["card"] for row in report["blocked"]] == [1594],
+    )
+
+
 def test_out_of_scope_cards_are_never_migrated():
     world = World()
     # An issue-triage card and a card with no retired surface both refuse.
@@ -477,6 +500,7 @@ def main():
         test_dry_run_writes_nothing_and_plans_the_whole_cohort()
         test_apply_migrates_the_cohort_and_is_idempotent()
         test_one_ambiguous_member_denies_the_entire_run()
+        test_later_member_change_denies_before_first_write()
         test_out_of_scope_cards_are_never_migrated()
         test_cohort_selector_is_bounded_and_fails_closed()
         test_no_target_or_label_writes_are_possible()
