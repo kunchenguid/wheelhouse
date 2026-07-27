@@ -661,6 +661,7 @@ scripts/
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, recover durable result projections without spend, reflect target activity, and close consumed ones
   triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
+  presentation_migration.py    dry-run-first, exact-cohort removal of retired presentation from observation-blocked PR-review cards; see docs/OPTION_B_CARD_PROJECTION.md
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_nl_schema_repair.py offline unit test for native-first natural-language structured output, bounded one-turn repair, and retryable failure projection

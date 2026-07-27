@@ -67,6 +67,8 @@ Observation, repository-snapshot, and context identities are semantic and revisi
 
 The writer verifies the card by number before mutation, including identity, trusted author, lifecycle state, body, title, labels, `updatedAt`, and comment activity. It sends one issue-resource PATCH for title, body, and the complete final label set, then rereads and verifies the result. Human labels are preserved. PR-review direct body writers fail closed, including legacy paths without current observation evidence. Triage shares the `wheelhouse-backstop` concurrency group with scan, ingest, and the decision handler, while the handler consumes the immutable owner webhook body and its prior body. Handler mutations cannot interleave a projection, and an owner edit during a projection is still processed from its queued webhook snapshot.
 
+An incomplete current observation still defers the whole-card refresh and never bypasses the verified projection writer. The sole exception is `render_card.edit_presentation_only_body`, adjacent to the direct-writer refusal it excepts. It exists only for an observation-blocked card whose retired display copy cannot otherwise be removed. The helper re-verifies the proposed body itself and admits only the exact deletion of retired recommendation spans derived structurally from the original body. Added or modified content, any other deletion, a changed hidden state block, or a changed `render_version` fails closed. Leaving `render_version` unchanged is deliberate: a later complete observation must still perform the ordinary full renderer migration. The exception cannot write the title, labels, options, target, or model cache.
+
 A supported `decision:*` label erased between the writer's reread and PATCH has one narrow recovery path in `decision_label_recovery.py`. Its fixed recoverable set is `merge`, `close`, `decline`, `hold`, and `investigate`. Recovery requires the already-authorized webhook actor, exact card repository and node identity, identical target/head/observation/context binding, the exact post-erasure body digest, the exact label-set delta, and a complete recoverable-label event sequence consisting only of the triggering human `labeled` event followed by the trusted projection `unlabeled` event. Event and claim histories use fixed page caps and require a short terminal page; incomplete or oversized histories fail closed. A verified bot-authored claim comment makes that event single-use. The workflow rereads the claim, exact body, and complete fixed-set event sequence after taking `processing` and immediately before target action. Any intervening body or checkbox edit, or any later add or remove in the fixed recoverable label set, supersedes the older event. Old, duplicate, replayed, new-head, relabeled, explicitly removed, ambiguous, malformed, or unsupported label events remain inert.
 
 New-card creation still uses one complete Issue creation followed by direct-number admission verification. Stable legacy cards are not mass-rewritten. A real material/current, context, assessment, or lifecycle trigger migrates an open pure card through the v2 planner. Processing, blocked, and resolved cards retain the existing no-refresh rule.
@@ -168,6 +170,22 @@ This cutover does not run a shadow writer and does not mass-rewrite cards.
 - Historical provider results that predate `recommendation_basis` or typed behavior assertions remain readable as advisory triage, but their assessment and G6 admission are unavailable. Legacy Accept and class-B records are never grandfathered into admission.
 - Closed cards, historical comments, and target repositories are not rewritten.
 - Old PR-review body writers are reachable only for a concrete persisted legacy card that lacks a current v2 observation. Normal scan, ingest, triage-result, CI-wait, first-absence, activity, auto-merge hold/release, and reconcile paths use the verified writer once the card enters v2.
+
+When an incomplete observation leaves a pure pending card behind a display-only renderer migration, use the explicit operator CLI. It has no discovery mode, accepts at most 25 unique positive card numbers, preflights the entire cohort twice, and denies the run before its first write if any card is closed, human-authored, not a pure `needs-decision` PR-review card, ambiguous, or no longer bound to its live open target head. It is not part of scheduled reconciliation.
+
+First inspect the zero-write plan:
+
+```bash
+python scripts/presentation_migration.py --cards 531,1392
+```
+
+Only after reviewing an admitted plan, repeat the exact selector with `--apply`:
+
+```bash
+python scripts/presentation_migration.py --cards 531,1392 --apply
+```
+
+The operation is idempotent by content. A repeated run reports `noop` and writes nothing once no retired presentation remains.
 
 Remove the remaining v1 readers and legacy compatibility mutation fallback only when normal scheduled telemetry shows zero trusted open/reusable v1 cards through the reviewed observation window. Removal must preserve legacy state-marker parsing needed by closed-card trust checks.
 
