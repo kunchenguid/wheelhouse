@@ -312,8 +312,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `12`: the
-  11 -> 12 bump establishes ONE canonical recommendation surface - it drops the
+  it is not a material field). `CARD_RENDER_VERSION` is currently `13`: the
+  12 -> 13 bump qualifies bare target-derived references in the deterministic
+  title quote and warning surfaces using the existing
+  `wheelhouse_core.qualify_issue_refs` helper, while leaving Wheelhouse-owned
+  self-references such as G1 `card #N` evidence bare; the 11 -> 12 bump
+  establishes ONE canonical recommendation surface - it drops the
   deterministic check-derived `### Recommended action` copy, drops the cached
   `Recommended next step` bullet from an existing `### Triage` block, and folds
   a legacy admission warning back inside the triage markers so it survives the
@@ -342,7 +346,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   re-inserting it - `owner` is `GITHUB_REPOSITORY_OWNER` (read in
   `_refresh_card`, the same env source the fresh-triage render path uses) and
   `repo` is the card's own deterministic `old_state["repo"]` (falling back to
-  the item's repo), NEVER the model's own text. This is the same one-time,
+  the item's repo), NEVER the model's own text. The renderer also applies this
+  same helper only to the target-derived title quote and warning line; it must
+  never qualify the whole card body because Wheelhouse-owned G1 `card #N`
+  evidence is intentionally a self-reference. This is the same one-time,
   self-terminating propagation shape as the earlier author `@mention` drop:
   every pre-existing card refreshes once, gets its cached triage refs
   qualified, known automated status lines labeled, and its `render_version`

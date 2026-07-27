@@ -84,6 +84,109 @@ def test_render_shows_author_without_mention():
     check("render: author not @-mentioned", "@chrishsu" not in body)
 
 
+def test_render_qualifies_only_target_derived_deterministic_surfaces():
+    """Production-shaped card #1697/#1765 coverage for render-v13.
+
+    The title quote and approve warning are target text displayed in the
+    Wheelhouse repository, while G1 evidence is Wheelhouse-owned card text and
+    must remain a bare self-reference.
+    """
+    warning_card = item(
+        repo="baby-menu",
+        number=99,
+        kind="ci-approval",
+        title="fix: probe an interactive login shell for the GUI PATH",
+        url="https://github.com/kunchenguid/baby-menu/pull/99",
+        warning=(
+            "auto-approve did not complete (error: #99 "
+            "(fm/babymenu-guipath-fix@6c8be23b)): approved 0/3 matching run(s)"
+        ),
+    )
+    warning_body = rc.render(warning_card, owner="kunchenguid")["body"]
+    check(
+        "render-v13: card-1697 warning is target-qualified",
+        "error: kunchenguid/baby-menu#99" in warning_body,
+    )
+    check(
+        "render-v13: warning has no unqualified target ref",
+        "error: #99" not in warning_body,
+    )
+
+    title_card = item(
+        repo="firstmate",
+        number=1106,
+        kind="issue-triage",
+        head_sha="",
+        bucket="issue-triage",
+        comp="n/a",
+        tests="n/a",
+        title=(
+            "Brief scaffold needs decomposition/delegation section + session-state "
+            "validation before dispatch (broader than #1033)"
+        ),
+        url="https://github.com/kunchenguid/firstmate/issues/1106",
+    )
+    title_body = rc.render(title_card, owner="kunchenguid")["body"]
+    check(
+        "render-v13: card-1765 title quote is target-qualified",
+        "broader than kunchenguid/firstmate#1033" in title_body,
+    )
+    check(
+        "render-v13: title quote has no unqualified target ref",
+        "broader than #1033" not in title_body,
+    )
+
+    g1_card = item(
+        title="A ref-free card title",
+        automerge_criteria=[
+            {
+                "id": "g1_card_identity",
+                "status": "met",
+                "evidence": "trusted unique machine-created card #123",
+            }
+        ],
+    )
+    g1_body = rc.render(g1_card, owner="kunchenguid")["body"]
+    check(
+        "render-v13: G1 Wheelhouse self-reference stays bare",
+        "trusted unique machine-created card #123" in g1_body
+        and "kunchenguid/lavish-axi#123" not in g1_body,
+    )
+
+    controls = item(
+        repo="firstmate",
+        title="See kunchenguid/other#7 and `#8` in the target, with no extra ref",
+        warning="Already qualified kunchenguid/other#9; code `#10`; no ref here.",
+    )
+    controls_body = rc.render(controls, owner="kunchenguid")["body"]
+    check(
+        "render-v13: already-qualified and code-span refs stay stable",
+        "See kunchenguid/other#7" in controls_body
+        and "`#8`" in controls_body
+        and "kunchenguid/other#9" in controls_body
+        and "`#10`" in controls_body,
+    )
+    ref_free = item(repo="firstmate", title="A ref-free card title", warning="No refs here.")
+    ref_free_body = rc.render(ref_free, owner="kunchenguid")["body"]
+    check(
+        "render-v13: ref-free surface stays unchanged",
+        "A ref-free card title" in ref_free_body and "> No refs here." in ref_free_body,
+    )
+    check(
+        "render-v13: second render is idempotent",
+        rc.render(controls, owner="kunchenguid") == rc.render(controls, owner="kunchenguid"),
+    )
+
+    stale_state = core.parse_state_block(warning_body)
+    stale_state["render_version"] = rc.CARD_RENDER_VERSION - 1
+    check(
+        "render-v13: version-12 cards enter the established migration path",
+        rc.CARD_RENDER_VERSION == 13
+        and rc.render_stale(stale_state)
+        and rc.refresh_needed(warning_card, stale_state, ["needs-decision"]),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # state block now carries the material fields and round-trips
 # --------------------------------------------------------------------------- #
@@ -1596,6 +1699,7 @@ def test_required_present_writes_fold_absence_reset():
 
 def main():
     test_render_shows_author_without_mention()
+    test_render_qualifies_only_target_derived_deterministic_surfaces()
     test_state_block_carries_material_fields()
     test_material_changed_round_trip_is_noop()
     test_each_material_field_triggers_a_change()
