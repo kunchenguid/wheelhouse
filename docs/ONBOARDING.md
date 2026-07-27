@@ -10,7 +10,8 @@ An ingest dispatch never performs scan-time auto-merge; this fork enables `auto_
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config, token gates, and spend guards as the scheduled scan.
 That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
 When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
-If successful triage returns a fresh structured recommendation with an action allowed for that card kind, the published boxes can include an `Accept recommendation` shortcut.
+If successful triage returns a fresh structured recommendation with an action allowed for that card kind, and the assessment behind it is admitted, the card shows one `Recommended action` section and the published boxes can include an `Accept recommendation` shortcut.
+A card never shows any other recommendation: there is no deterministic check-derived fallback, and a non-admitted advisory result keeps its analysis without presenting an action.
 For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
 For any kind, a new `updated_at` can make a hidden state-only card edit for activity sorting when no refresh or triage-queue write is already happening.
 
@@ -34,7 +35,6 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `comp`           | no       | compliance status shown on the card                               |
 | `tests`          | no       | test status shown on the card                                     |
 | `summary`        | no       | one-line situation summary                                         |
-| `recommendation` | no       | fallback recommended action shown on the card when structured auto triage has not provided an accept-capable recommendation |
 | `priority`       | no       | `high` / `med` / `low`                                             |
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
 | `auto_triage`    | no       | `false` opts this dispatched pr-review item out of automatic PR-card triage |
@@ -70,10 +70,10 @@ If no full refresh is needed but target `updated_at` is newer than the card's hi
 The auto-inserted `accept-recommendation` option is derived from hidden triage state, so it is ignored for material option comparisons.
 `pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
-A stale render version can also apply internal card-body repairs, such as qualifying bare target refs and labeling known automated harness status lines preserved in older cached `Triage` sections.
+A stale render version can also apply internal card-body repairs, such as qualifying bare target refs, labeling known automated harness status lines preserved in older cached `Triage` sections, and removing recommendation copy that a card is no longer allowed to present.
 Title updates use the same deterministic card-title rendering as the hub and refresh a pure pending card when they drift.
-Summary and recommendation updates ride along with another refresh, but do not rewrite an existing card by themselves.
-The activity-stamp edit is also hidden-state only, so it does not update visible title, summary, or recommendation text.
+Summary updates ride along with another refresh, but do not rewrite an existing card by themselves.
+The activity-stamp edit is also hidden-state only, so it does not update visible title or summary text.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh or activity-stamp edit cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub reserves daily budget and writes `triaged_sha` plus `triage_attempts` for the current revision before dispatching `triage.yml`, so a failed or timed-out run does not retry every scan.
 Trusted recovery paths may clear the cache for a later retry, but the next dispatch still has to pass the per-revision attempt cap and daily ceiling.

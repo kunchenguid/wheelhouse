@@ -505,8 +505,12 @@ def test_render_triage_section_has_no_mentions_and_caches_sha():
         "render: triage strips @mentions", "@alice" not in body and "@bob" not in body
     )
     check(
-        "render: triage does not replace Recommended action",
-        "### Recommended action" in body,
+        "render: no deterministic recommendation section",
+        "### Recommended action" not in body,
+    )
+    check(
+        "render: advisory action is not presented as a recommendation",
+        "Recommended next step" not in body,
     )
     check(
         "state: triaged_sha caches the current head",
@@ -574,8 +578,9 @@ def test_structured_recommendation_persists_and_renders_accept():
         "<!-- opt:accept-recommendation -->" in body,
     )
     check(
-        "accept render: deterministic recommendation is suppressed",
-        "### Recommended action" not in body,
+        "accept render: canonical agent recommendation renders exactly once",
+        body.count("### Recommended action") == 1
+        and "- **Agent recommendation:** `decline`" in body,
     )
     check(
         "accept state: structured recommendation persisted",
@@ -632,8 +637,9 @@ def test_accept_checkbox_is_conditional_and_never_ci_approval():
         "<!-- opt:accept-recommendation -->" not in legacy_body,
     )
     check(
-        "accept conditional: legacy keeps deterministic recommendation",
-        "### Recommended action" in legacy_body,
+        "accept conditional: legacy markdown rec renders no recommendation",
+        "### Recommended action" not in legacy_body
+        and "Recommended next step" not in legacy_body,
     )
 
     invalid = item_issue(
@@ -1244,8 +1250,13 @@ def test_body_helpers_queue_and_apply_result():
     updated_state = core.parse_state_block(updated)
     check("result: visible triage section inserted", "### Triage" in updated)
     check(
-        "result: triage sits before recommended action",
-        updated.find("### Triage") < updated.find("### Recommended action"),
+        "result: triage sits before the decision controls",
+        updated.find("### Triage") < updated.find("<!-- wheelhouse-decision:start -->"),
+    )
+    check(
+        "result: legacy markdown next step renders no recommendation",
+        "### Recommended action" not in updated
+        and "Recommended next step" not in updated,
     )
     check("result: status succeeded", updated_state.get("triage_status") == "succeeded")
 
@@ -1273,8 +1284,13 @@ def test_body_helpers_queue_and_apply_result():
         "<!-- opt:accept-recommendation -->" not in structured,
     )
     check(
-        "result: deterministic controls/recommendation remain available",
-        "### Recommended action" in structured,
+        "result: unbound structured rec renders no recommendation section",
+        "### Recommended action" not in structured
+        and "Recommended next step" not in structured,
+    )
+    check(
+        "result: deterministic controls remain available",
+        "<!-- opt:merge -->" in structured,
     )
 
     parsed_structured = rc.parse_triage_json(
@@ -2040,8 +2056,9 @@ def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
         "@alice" not in body and "@bob" not in body,
     )
     check(
-        "render(issue): triage does not replace Recommended action",
-        "### Recommended action" in body,
+        "render(issue): no deterministic recommendation section",
+        "### Recommended action" not in body
+        and "Recommended next step" not in body,
     )
     check(
         "state(issue): triaged_sha caches the current updated_at revision",
@@ -2139,8 +2156,8 @@ def test_body_helpers_queue_and_apply_result_for_issue():
     updated_state = core.parse_state_block(updated)
     check("result(issue): visible triage section inserted", "### Triage" in updated)
     check(
-        "result(issue): triage sits before recommended action",
-        updated.find("### Triage") < updated.find("### Recommended action"),
+        "result(issue): triage sits before the decision controls",
+        updated.find("### Triage") < updated.find("<!-- wheelhouse-decision:start -->"),
     )
     check(
         "result(issue): status succeeded",

@@ -47,6 +47,7 @@ def observation(
     number=901,
     head="head-901",
     *,
+    base="base-main",
     checks=None,
     paths=None,
     bucket="merge-ready",
@@ -78,7 +79,7 @@ def observation(
         "firstmate",
         number,
         head_sha=head,
-        base_sha="base-main",
+        base_sha=base,
         expected_head_sha=head,
         observed_at=observed_at,
         source=source,
@@ -1333,7 +1334,8 @@ def test_context_denied_assessment_readmits_on_ordinary_refresh():
         and healed_state.get("triage_recommendation")
         == {"action": "merge", "reason": "Review the exact current revision."}
         and "<!-- opt:accept-recommendation -->" in healed["body"]
-        and "### Recommended action" not in healed["body"]
+        and healed["body"].count("### Recommended action") == 1
+        and "- **Agent recommendation:** `merge`" in healed["body"]
         and "The advisory assessment was not admitted" not in healed["body"]
         and render_card.assessment_current_admitted(healed_state),
     )

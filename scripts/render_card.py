@@ -306,9 +306,15 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # Bumped 10 -> 11 to republish DecisionContext-neutral related-work copy and
 # run the zero-spend re-admission that heals assessments denied solely under
 # the retired advisory-context admission rule (see
-# `_readmit_context_denied_assessment`). Earlier display-only bumps remain
+# `_readmit_context_denied_assessment`). Bumped 11 -> 12 to establish ONE
+# canonical recommendation surface: the deterministic check-derived
+# `### Recommended action` copy is gone, `### Recommended action` now renders
+# only a current ADMITTED structured agent recommendation, and a cached
+# `### Triage` block's action-bearing `Recommended next step` bullet is
+# stripped (card #1746). Display-only and zero-spend: no authority, admission,
+# cache-freshness, or gate semantics change. Earlier display-only bumps remain
 # documented in AGENTS.md.
-CARD_RENDER_VERSION = 11
+CARD_RENDER_VERSION = 12
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -390,6 +396,26 @@ _TRIAGE_SECTION_RE = re.compile(
 _RECOMMENDATION_SECTION_RE = re.compile(
     r"\n?### Recommended action\n.*?(?=\n<!--\s*wheelhouse-decision:start\s*-->)",
     re.S,
+)
+# The one canonical recommendation surface is `### Recommended action`, and it
+# is sourced ONLY from a current ADMITTED structured agent-triage result (see
+# `_recommendation_section` / `accept_recommendation_available`). Wheelhouse
+# deliberately has NO deterministic check-derived recommendation: compliance,
+# test, and mergeability facts are shown as facts in `### Situation` and the
+# auto-merge criteria, never as an action to take.
+#
+# Cards rendered before that decision also carried the model's advisory action
+# as a `Recommended next step` bullet inside `### Triage`, even when the
+# assessment was not admitted (card #1746). The bullet is stripped from a
+# cached section on the ordinary render-version migration; summary, product
+# implications, and every honest warning are preserved.
+_LEGACY_TRIAGE_NEXT_STEP_RE = re.compile(
+    r"^- \*\*Recommended next step:\*\*.*(?:\n|$)", re.M
+)
+_ADMISSION_WARNING_RE = re.compile(
+    r"> \[!WARNING\]\n> The advisory assessment was not admitted "
+    r"\(`[^`\n]{1,120}`\)\. It cannot create \*\*Accept recommendation\*\* "
+    r"or satisfy G6\."
 )
 _AUTOMERGE_WORKFLOW_HOLD_SECTION_RE = re.compile(
     r"\n?<!--\s*wheelhouse-automerge-workflow-hold:start\s*-->.*?"
@@ -4055,16 +4081,13 @@ def triage_section(
                 )
             )
         )
-        lines.append(
-            "- **Recommended next step:** %s"
-            % label_automated_status_lines(
-                _display_safe_triage_text(
-                    qualify_issue_refs(
-                        triage["recommended_next_step"], owner, repo
-                    )
-                )
-            )
-        )
+        # The model's advisory action deliberately does NOT appear here. A
+        # recommendation is presented only through the canonical
+        # `### Recommended action` section, and only when the assessment
+        # backing it was admitted - otherwise a delivered-but-invalid or
+        # non-admitted candidate's "merge" would read as the agent's
+        # recommendation while G6 truthfully says none was established
+        # (card #1746). Analysis above stays; ownership stays unambiguous.
         primary_error_code = _triage_primary_error_code(primary_error_code)
         if primary_error_code:
             lines.extend(
@@ -4094,10 +4117,13 @@ def _existing_triage_section(body):
 
 def _insert_triage_section(body, section):
     without = remove_triage_section(body).rstrip()
-    marker = "\n### Recommended action"
-    idx = without.find(marker)
-    if idx >= 0:
-        return without[:idx].rstrip() + "\n\n" + section + "\n" + without[idx:]
+    # `### Recommended action` is now conditional (canonical admitted
+    # recommendation only), so the decision block is the stable second anchor -
+    # without it the triage section would land AFTER "Your decision".
+    for marker in ("\n### Recommended action", "\n%s" % DECISION_START):
+        idx = without.find(marker)
+        if idx >= 0:
+            return without[:idx].rstrip() + "\n\n" + section + "\n" + without[idx:]
     state_idx = without.rfind("<!-- wheelhouse-state:")
     if state_idx >= 0:
         return (
@@ -4110,21 +4136,166 @@ def _insert_triage_section(body, section):
     return without + "\n\n" + section
 
 
-def _set_recommendation_section_visible(body, visible):
-    if visible:
-        return body
-    return _RECOMMENDATION_SECTION_RE.sub("\n", body or "", count=1).strip() + "\n"
+LEGACY_DETERMINISTIC_RECOMMENDATION = "deterministic-section"
+LEGACY_ADVISORY_NEXT_STEP = "advisory-next-step"
+CANONICAL_RECOMMENDATION_MARKER = "- **Agent recommendation:**"
 
 
-def _ensure_recommendation_section(body, recommendation):
-    if "### Recommended action" in (body or ""):
+def legacy_recommendation_presentation(body):
+    """Which retired recommendation surfaces a card body still shows.
+
+    Pure and read-only: the census and post-migration verification helper for
+    the `CARD_RENDER_VERSION` 11 -> 12 cohort. Returns a sorted tuple of
+    `deterministic-section` (a `### Recommended action` block that is NOT the
+    canonical admitted-agent one) and/or `advisory-next-step` (the cached
+    action-bearing bullet inside `### Triage`). An empty tuple means the card
+    already presents at most the one canonical recommendation."""
+    body = body or ""
+    found = set()
+    match = _RECOMMENDATION_SECTION_RE.search(body)
+    if match and CANONICAL_RECOMMENDATION_MARKER not in match.group(0):
+        found.add(LEGACY_DETERMINISTIC_RECOMMENDATION)
+    if _LEGACY_TRIAGE_NEXT_STEP_RE.search(_existing_triage_section(body)):
+        found.add(LEGACY_ADVISORY_NEXT_STEP)
+    return tuple(sorted(found))
+
+
+def recommendation_census(cards):
+    """Classify open cards for the canonical-recommendation backfill.
+
+    `cards` is the same list `reconcile.py` consumes (the scan-backstop "List
+    open cards" output). Read-only: no GitHub call, no write, no target touch.
+    Every row lands in exactly one bucket so a backfill report can state
+    affected / unchanged-with-reason counts over the COMPLETE census, never a
+    sample."""
+    report = {"total": 0, "affected": [], "clean": 0, "skipped": []}
+    for card in cards or []:
+        if not isinstance(card, dict):
+            report["skipped"].append({"number": None, "reason": "malformed card row"})
+            continue
+        report["total"] += 1
+        number = card.get("number")
+        body = card.get("body") or ""
+        state = parse_state_block(body)
+        row = {
+            "number": number,
+            "url": card.get("url") or "",
+            "repo": (state or {}).get("repo", ""),
+            "target": (state or {}).get("number"),
+        }
+        if not state or state.get("kind") != "pr-review":
+            report["skipped"].append(
+                dict(row, reason="not a pr-review decision card")
+            )
+            continue
+        surfaces = legacy_recommendation_presentation(body)
+        if not surfaces:
+            report["clean"] += 1
+            continue
+        row["surfaces"] = list(surfaces)
+        labels = _label_names(card.get("labels"))
+        if not is_refreshable(card.get("labels")):
+            # A decision is in flight or consumed; re-rendering would clobber
+            # it. These are reported, never rewritten.
+            report["skipped"].append(
+                dict(
+                    row,
+                    reason="not refreshable (%s)"
+                    % ", ".join(sorted(labels & NON_REFRESHABLE_LABELS)),
+                )
+            )
+            continue
+        row["render_version"] = state.get("render_version", 0)
+        row["migrates_on_refresh"] = render_stale(state)
+        report["affected"].append(row)
+    return report
+
+
+def _triage_section_with_warning(section, warning):
+    """Place `warning` inside the triage markers, at the end of the section."""
+    if not section or not warning or warning in section:
+        return section
+    return section.replace(
+        "\n" + TRIAGE_END, "\n\n" + warning + "\n" + TRIAGE_END, 1
+    )
+
+
+def _with_lifted_admission_warning(section, existing_body):
+    """Carry a legacy admission warning rendered OUTSIDE the triage markers.
+
+    Cards written before the warning moved inside the section keep it just
+    after `TRIAGE_END`, where a same-revision refresh cannot see it - the
+    honest "assessment was not admitted" note would silently disappear on the
+    next render-version migration. Fold it back in instead."""
+    if not section or "The advisory assessment was not admitted" in section:
+        return section
+    match = _ADMISSION_WARNING_RE.search(existing_body or "")
+    return (
+        _triage_section_with_warning(section, match.group(0)) if match else section
+    )
+
+
+def _without_legacy_recommended_next_step(section):
+    """Drop the action-bearing bullet from a cached `### Triage` block.
+
+    Migration-only transform for the render-version bump: the model's advisory
+    action is no longer displayed inside `### Triage` at all (see
+    `triage_section`). Everything else in the cached block - summary, product
+    implications, the primary-failure and admission warnings - is preserved
+    byte-for-byte."""
+    return _LEGACY_TRIAGE_NEXT_STEP_RE.sub("", section or "")
+
+
+def _recommendation_section(recommendation, owner="", repo=""):
+    """The ONE canonical recommendation surface, or no section at all.
+
+    Callers must pass only a recommendation backed by a current ADMITTED
+    structured agent-triage result (`accept_recommendation_available`). There
+    is deliberately no deterministic check-derived fallback: when no valid
+    agent recommendation exists the card shows facts and controls, and the
+    owner makes the call."""
+    action = normalize_recommendation_action((recommendation or {}).get("action"))
+    if not action:
+        return []
+    lines = [
+        "### Recommended action",
+        "",
+        "- **Agent recommendation:** `%s`" % action,
+    ]
+    reason = _clean_triage_text((recommendation or {}).get("reason"), default="")
+    if reason:
+        lines.append(
+            "- **Reason:** %s"
+            % label_automated_status_lines(
+                _display_safe_triage_text(qualify_issue_refs(reason, owner, repo))
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "_From the current admitted automatic triage assessment for this "
+            "exact revision. Tick **Accept recommendation** to apply it - it is "
+            "advisory and never an auto-merge authorization._",
+        ]
+    )
+    return lines
+
+
+def _set_recommendation_section(body, recommendation, owner="", repo=""):
+    """Replace the card's canonical recommendation section in place.
+
+    A falsy/unusable `recommendation` removes the section entirely, which is
+    also how a legacy deterministic section disappears on migration."""
+    body = _RECOMMENDATION_SECTION_RE.sub("\n", body or "", count=1).strip() + "\n"
+    lines = _recommendation_section(recommendation, owner=owner, repo=repo)
+    if not lines:
         return body
-    section = "### Recommended action\n%s\n" % (recommendation or "Needs your call.")
+    section = "\n".join(lines) + "\n"
     marker = "\n%s" % DECISION_START
-    idx = (body or "").find(marker)
+    idx = body.find(marker)
     if idx >= 0:
-        return (body or "")[:idx].rstrip() + "\n\n" + section + (body or "")[idx:]
-    return (body or "").rstrip() + "\n\n" + section
+        return body[:idx].rstrip() + "\n\n" + section + body[idx:]
+    return body.rstrip() + "\n\n" + section
 
 
 def _replace_state_block(body, state):
@@ -4330,8 +4501,13 @@ def body_with_reconcile_absence(
         "_Decision controls are disabled until the scheduled confirmation completes._",
     )
     clean = _DECISION_SECTION_RE.sub(decision.replace("\\", "\\\\"), clean, count=1)
-    marker = "\n### Recommended action"
-    index = clean.find(marker)
+    index = -1
+    # `### Recommended action` is conditional; fall back to the decision block
+    # before the state marker so the section never lands after "Your decision".
+    for marker in ("\n### Recommended action", "\n%s" % DECISION_START):
+        index = clean.find(marker)
+        if index >= 0:
+            break
     if index < 0:
         index = clean.rfind("<!-- wheelhouse-state:")
     if index >= 0:
@@ -4516,11 +4692,13 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     if not revision or state_revision(old_state, kind) != revision:
         return body
 
+    repo = (old_state or {}).get("repo") or item.get("repo", "")
     section = _existing_triage_section(existing_body)
     if section:
-        repo = (old_state or {}).get("repo") or item.get("repo", "")
         section = qualify_issue_refs(section, owner, repo)
         section = label_automated_status_lines(section)
+        section = _without_legacy_recommended_next_step(section)
+        section = _with_lifted_admission_warning(section, existing_body)
         body = _insert_triage_section(body, section)
 
     state = parse_state_block(body)
@@ -4557,7 +4735,9 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     if accept_recommendation_available(state):
         state["options"] = options_for_state(kind, state.get("options"), state)
         body = _publish_decision_section(body, kind, state["options"])
-        body = _set_recommendation_section_visible(body, visible=False)
+        body = _set_recommendation_section(
+            body, state.get("triage_recommendation"), owner=owner, repo=repo
+        )
     return _replace_state_block(body, state) if changed else body
 
 
@@ -4712,7 +4892,10 @@ def body_with_triage_queued(body, item, attempt_cap=None):
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     if not state.get("held"):
         clean = _publish_decision_section(clean, kind, new_state["options"])
-        clean = _ensure_recommendation_section(clean, item.get("recommendation"))
+    # Queueing clears `triage_recommendation` (see `_state_with_triage`), so the
+    # canonical section goes with it - the card carries no recommendation until
+    # a fresh admitted assessment lands.
+    clean = _set_recommendation_section(clean, None)
     return _replace_state_block(clean, new_state)
 
 
@@ -4839,15 +5022,19 @@ def body_with_triage_result(
                     % assessment_reason,
                 ]
             )
+            # Inside the triage markers, so a same-revision refresh that lifts
+            # the cached section carries the honest admission warning with it.
             updated = _insert_triage_section(
                 remove_triage_section(updated),
-                section + "\n\n" + warning,
+                _triage_section_with_warning(section, warning),
             )
         else:
             new_state.pop("assessment_admission", None)
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     updated = _publish_decision_section(updated, kind, new_state["options"])
-    updated = _set_recommendation_section_visible(updated, visible=not recommendation)
+    updated = _set_recommendation_section(
+        updated, recommendation, owner=owner, repo=state.get("repo", "")
+    )
     return _replace_state_block(updated, new_state)
 
 
@@ -4931,8 +5118,9 @@ def body_with_triage_budget_deferred(body, item, message=TRIAGE_BUDGET_DEFERRED)
     )
     new_state["options"] = options_for_state(kind, state.get("options"), new_state)
     clean = _publish_decision_section(clean, kind, new_state["options"])
-    clean = _ensure_recommendation_section(clean, item.get("recommendation"))
-    clean = _set_recommendation_section_visible(clean, visible=True)
+    # Deferral clears `triage_recommendation`, so the canonical section goes
+    # with it: the card carries no recommendation until an admitted one lands.
+    clean = _set_recommendation_section(clean, None)
     return _replace_state_block(clean, new_state)
 
 
@@ -5364,6 +5552,17 @@ def render(
         )
         if recommendation:
             state["triage_recommendation"] = recommendation
+        # NON-MATERIAL primary/advisory telemetry carried by the caller (the
+        # projection re-render path preserves the prior same-revision card's
+        # honest record - see card_projection.plan_card_projection). Never
+        # authority, never a material refresh field.
+        for field in (
+            TRIAGE_PRIMARY_STATUS_FIELD,
+            TRIAGE_PRIMARY_ERROR_FIELD,
+            TRIAGE_CONSUMPTION_FIELD,
+        ):
+            if item.get(field):
+                state[field] = item[field]
     options = options_for_state(kind, base_options, state)
     state["options"] = options
 
@@ -5451,24 +5650,36 @@ def render(
         lines.extend(_security_review_section(item["security_summary"]))
         lines.append("")
     if triage:
-        lines.append(triage_section(triage, owner=owner, repo=repo))
-        lines.append("")
+        section = triage_section(
+            triage,
+            owner=owner,
+            repo=repo,
+            primary_error_code=item.get(TRIAGE_PRIMARY_ERROR_FIELD, ""),
+        )
         if assessment and not assessment_admission.admitted(assessment):
-            lines.extend(
-                [
-                    "> [!WARNING]",
-                    "> The advisory assessment was not admitted (`%s`). It cannot "
-                    "create **Accept recommendation** or satisfy G6."
-                    % assessment["admission"]["reason"],
-                    "",
-                ]
+            # Inside the markers so a same-revision refresh preserves it.
+            section = _triage_section_with_warning(
+                section,
+                "\n".join(
+                    [
+                        "> [!WARNING]",
+                        "> The advisory assessment was not admitted (`%s`). It "
+                        "cannot create **Accept recommendation** or satisfy G6."
+                        % assessment["admission"]["reason"],
+                    ]
+                ),
             )
+        lines.append(section)
+        lines.append("")
     elif suppression_reason:
         lines.append(triage_section(error=suppression_reason))
         lines.append("")
-    if not accept_recommendation_available(state):
-        lines.append("### Recommended action")
-        lines.append(item.get("recommendation", "Needs your call."))
+    if accept_recommendation_available(state):
+        lines.extend(
+            _recommendation_section(
+                state.get("triage_recommendation"), owner=owner, repo=repo
+            )
+        )
         lines.append("")
     lines.append(_decision_section(kind, options, held))
     lines.append("")
@@ -7075,7 +7286,6 @@ def plan_reconcile_absence_projection(
             "target_observation": normalized_observation,
             DECISION_CONTEXT_FIELD: context,
             "summary": "Current target state was observed outside the maintainer worklist.",
-            "recommendation": "Await the next qualifying scheduled observation.",
         }
         projection = card_projection.plan_card_projection(
             item,
@@ -8659,6 +8869,12 @@ def main():
 
     rd = sub.add_parser("render")
     rd.add_argument("--item-file", required=True)
+
+    # Read-only census/verification for the canonical-recommendation backfill.
+    # Consumes the same open-card list reconcile.py takes; performs no GitHub
+    # call, no card write, and no target access.
+    rc_census = sub.add_parser("recommendation-census")
+    rc_census.add_argument("cards_file")
     rd.add_argument("--out-dir", required=True)
 
     vf = sub.add_parser("triage-target-facts")
@@ -8821,6 +9037,12 @@ def main():
         if gh_output and number:
             with open(gh_output, "a") as f:
                 f.write("issue=%s\n" % number)
+    elif args.cmd == "recommendation-census":
+        with open(args.cards_file, encoding="utf-8") as handle:
+            cards = json.load(handle)
+        report = recommendation_census(cards)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        sys.exit(0)
     elif args.cmd == "render":
         item = load_item(args.item_file)
         card = render(item)

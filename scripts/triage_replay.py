@@ -1070,7 +1070,6 @@ def inspect_candidate(
             if isinstance(source.get("user"), dict)
             else ""
         ),
-        "recommendation": "Needs your call.",
         **policy,
     }
     cap = policy["triage_attempt_cap_per_revision"]

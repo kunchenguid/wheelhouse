@@ -4,15 +4,6 @@
 import target_observation as contracts
 
 _UNKNOWN_BUCKET = "ci-state-unknown"
-_TERMINAL_RECOMMENDATIONS = {
-    "merge-ready": "Merge - compliance and tests are green.",
-    "review-needed": "Review before merge - the test signal is missing or unclear.",
-    "needs-reraise": "Wait for the contributor to satisfy the compliance gate.",
-    "fix-tests": "Wait for the contributor to fix the failing tests.",
-    "needs-rebase": "Wait for the contributor to resolve the merge conflict.",
-}
-
-
 def _same_target(target, owner, item):
     return bool(
         isinstance(target, dict)
@@ -60,10 +51,6 @@ def _unknown_projection(item, observation, reason):
                 "Approval-needed, green, and prior-head values are not being "
                 "presented as current. %s"
                 % (observed_at, str(reason or "Observation incomplete.")[:240])
-            ),
-            "recommendation": (
-                "Wait for the next complete target observation before acting on "
-                "CI state. Existing head-bound action guards remain authoritative."
             ),
         }
     )
@@ -182,10 +169,6 @@ def plan_ci_wait_projection(owner, item, observation, receipt=None):
                     "until checks finish; prior-head triage does not apply."
                     % observed_at
                 ),
-                "recommendation": (
-                    "Wait for checks to finish, then re-review. The timestamp is "
-                    "the exact target observation boundary."
-                ),
             }
         )
     else:
@@ -198,9 +181,6 @@ def plan_ci_wait_projection(owner, item, observation, receipt=None):
                 }.get(bucket, "low"),
                 "summary": "compliance=%s tests=%s; exact target observation %s"
                 % (out["comp"], out["tests"], observed_at),
-                "recommendation": _TERMINAL_RECOMMENDATIONS.get(
-                    bucket, "Wait for the target to return to the maintainer worklist."
-                ),
             }
         )
     out["projection_ref"] = contracts.make_projection_ref(
