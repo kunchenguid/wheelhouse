@@ -22,10 +22,12 @@ INCIDENT_OWNER = "kunchenguid"
 INCIDENT_REPO = "no-mistakes"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from scripts import agent_claim  # noqa: E402
 import render_card as rc  # noqa: E402
 import triage_replay as replay  # noqa: E402
+import test_auto_triage as option_b_fixtures  # noqa: E402
 
 # Replay tests exercise exact-revision lifecycle behavior; the atomic
 # evaluator/write integration has dedicated coverage in test_automerge_card_ui.py.
@@ -412,6 +414,392 @@ def assert_card_1585_residual_state_is_scheduler_inert(cards, permit):
         owner="kunchenguid",
         publish_budget_deferral=False,
     )
+
+
+# Production shape of the card #1746/#1704 class: a `succeeded` triage cache
+# whose trusted primary result failed, whose delivered candidate was consumed
+# only as advisory prose, and which therefore carries no admitted assessment
+# and no authority-bearing recommendation.
+ADVISORY_REVISION = "91be95d3584cbcfe3322d0f7827e1224ccb999cc"
+
+
+def advisory_payload(state, basis_kind, check_names=None):
+    basis = {
+        "kind": basis_kind,
+        "observation_id": state["review_observation"]["observation_id"],
+        "context_id": state["decision_context"]["context_id"],
+    }
+    if check_names is not None:
+        basis["check_names"] = list(check_names)
+    return {
+        "summary": "Straight chore pin bump.",
+        "product_implications": "No product behavior changes.",
+        "recommended_action": "merge",
+        "recommended_reason": "Compliance and tests are green.",
+        "evidence": "target.txt: 'chore(ci): bump pinned Treehouse'",
+        "recommendation_basis": basis,
+        "automerge": {
+            "behavior_class": "A",
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+        },
+    }
+
+
+def advisory_card(
+    number=1746,
+    target=1089,
+    revision=ADVISORY_REVISION,
+    basis_kind="configured-tests",
+    check_names=("tests",),
+    primary_error_code="output.schema_invalid",
+):
+    """Build a real card body through the production result writer.
+
+    ``basis_kind="configured-tests"`` is the exact invented kind observed on
+    card #1746, so admission denies it as `basis.missing_or_invalid`.
+    ``basis_kind="other"`` reproduces the card #1739 control, whose advisory
+    result still produced a current admitted assessment.
+    """
+    item = option_b_fixtures.option_b_item(number=target, head_sha=revision)
+    rendered = rc.render(item)
+    body = rendered["body"]
+    body = rc.body_with_triage_result(
+        body,
+        revision,
+        triage=advisory_payload(
+            rc._unique_state_block(body), basis_kind, check_names
+        ),
+        owner="owner",
+        primary_error_code=primary_error_code,
+    )
+    state = rc._unique_state_block(body)
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": revision,
+        "count": 1,
+    }
+    body = rc._replace_state_block(body, state)
+    return {
+        "number": number,
+        "title": rendered["title"],
+        "body": body,
+        "labels": [{"name": name} for name in rendered["labels"]],
+        "state": "OPEN",
+        "updatedAt": "2026-07-27T00:35:01Z",
+        "author": {"login": rc.CARD_AUTOMATION_AUTHOR},
+        "comments": [],
+    }, item
+
+
+def advisory_environment(value, item, revision=ADVISORY_REVISION, **options):
+    return replay_environment(
+        {value["number"]: value},
+        {
+            # Both kinds are registered so a kind-mutated fixture still reads a
+            # live source and is refused on its state, not on a missing read.
+            (item["repo"], item["number"], kind): source(
+                number=item["number"], kind=kind, revision=revision
+            )
+            for kind in ("pr-review", "issue-triage")
+        },
+        **options,
+    )
+
+
+def advisory_plan(value, item, selector=None, dry_run=True, wave="advisory-wave"):
+    """Run one exact-selector replay over a single advisory-class card."""
+    selector = "v1:%s" % value["number"] if selector is None else selector
+    path = cards_file([value["number"]])
+    output = StringIO()
+    try:
+        with (
+            advisory_environment(value, item) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                result = replay.run(
+                    path,
+                    wave,
+                    1,
+                    dry_run=dry_run,
+                    exact_cards=selector,
+                )
+                error = ""
+            except ValueError as failure:
+                result, error = None, str(failure)
+            return {
+                "result": result,
+                "error": error,
+                "output": output.getvalue(),
+                "calls": dict(calls),
+                "body": value["body"],
+            }
+    finally:
+        os.unlink(path)
+
+
+def advisory_refusal(value, item, **kwargs):
+    run = advisory_plan(value, item, **kwargs)
+    assert run["result"] is None, run["output"]
+    assert not run["calls"]["edits"] and not run["calls"]["queued"]
+    reasons = [
+        line.split(": ")[-1]
+        for line in run["output"].splitlines()
+        if "refused card #" in line
+    ]
+    assert len(reasons) == 1, run["output"]
+    return reasons[0]
+
+
+def test_advisory_cache_recovers_only_through_the_exact_card_selector():
+    value, item = advisory_card()
+    state = rc._unique_state_block(value["body"])
+    # The fixture is the production shape, proven field by field.
+    assert state["triage_status"] == "succeeded"
+    assert state[rc.TRIAGE_PRIMARY_STATUS_FIELD] == "failed"
+    assert state[rc.TRIAGE_PRIMARY_ERROR_FIELD] == "output.schema_invalid"
+    assert state[rc.TRIAGE_CONSUMPTION_FIELD] == "advisory"
+    assert state["assessment_admission"] == {
+        "status": "unavailable",
+        "reason": "basis.missing_or_invalid",
+    }
+    assert rc.ASSESSMENT_FIELD not in state
+    assert "triage_recommendation" not in state
+    assert not rc.accept_recommendation_available(state)
+
+    run = advisory_plan(value, item)
+    assert run["result"] == {
+        "eligible": 1,
+        "planned": 1,
+        "deferred": 0,
+        "written": 0,
+    }
+    assert "clear=advisory" in run["output"]
+    assert (
+        "advisory-recovery basis: primary=failed(output.schema_invalid) "
+        "consumption=advisory admission=unavailable/basis.missing_or_invalid "
+        "assessment=none recommendation=none" in run["output"]
+    )
+    assert "writes=0" in run["output"]
+    # Dry-run is zero-write: no body edit, no queue, no dispatch, no claim.
+    assert run["body"] == value["body"]
+    for channel in ("edits", "queued", "dispatched", "claims"):
+        assert not run["calls"][channel], channel
+
+    # Generic (non-exact) discovery can never select this class.
+    generic = advisory_plan(value, item, selector="")
+    assert generic["result"] == {
+        "eligible": 0,
+        "planned": 0,
+        "deferred": 0,
+        "written": 0,
+    }
+    assert '{"triage-cache-not-terminal-error":1}' in generic["output"]
+    assert generic["body"] == value["body"]
+
+    # The attempt-reset cohorts and the incident permit are separate
+    # capabilities that still require a terminal error cache.
+    with advisory_environment(value, item):
+        plan, reason = replay.inspect_candidate(
+            value["number"],
+            config(),
+            "owner",
+            True,
+            attempt_reset=replay._attempt_reset_prior_marker(
+                ADVISORY_REVISION, replay.ATTEMPT_RESET_WAVE, 1, "2026-07-27T00:00:00Z"
+            ),
+            attempt_reset_wave=replay.ATTEMPT_RESET_WAVE,
+            exact_selected=True,
+        )
+    assert plan is None and reason == "attempt-reset-prior-marker-mismatch", reason
+
+
+def test_advisory_cache_write_run_clears_only_the_dead_advisory_state():
+    value, item = advisory_card()
+    before = rc._unique_state_block(value["body"])
+    path = cards_file([value["number"]])
+    try:
+        output = StringIO()
+        with (
+            advisory_environment(value, item) as calls,
+            redirect_stdout(output),
+        ):
+            result = replay.run(
+                path,
+                "advisory-write-wave",
+                1,
+                exact_cards="v1:%s" % value["number"],
+            )
+    finally:
+        os.unlink(path)
+    assert result == {
+        "eligible": 1,
+        "planned": 1,
+        "deferred": 0,
+        "written": 1,
+        "queued": 1,
+    }
+    state = rc._unique_state_block(value["body"])
+    marker = state[replay.REPLAY_FIELD]
+    assert marker["version"] == replay.REPLAY_VERSION
+    assert marker["cleared"] == replay.ADVISORY_RECOVERY_CLEARED
+    assert marker["revision"] == ADVISORY_REVISION
+    # A fresh, spend-guarded attempt is queued for the same exact revision.
+    assert state["triage_status"] == "queued"
+    assert state["triaged_sha"] == ADVISORY_REVISION
+    assert state["triage_attempts"] == {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": ADVISORY_REVISION,
+        "count": before["triage_attempts"]["count"] + 1,
+    }
+    # The dead advisory telemetry and denied admission record are gone; no
+    # authority was synthesized from the old prose or delivered candidate.
+    for field in replay.TRIAGE_ADVISORY_CACHE_FIELDS:
+        if field in {"triaged_sha", "triage_status"}:
+            continue
+        assert field not in state, field
+    assert "Straight chore pin bump" not in value["body"]
+    assert not rc.accept_recommendation_available(state)
+    # Deterministic identity, observation, and context are untouched.
+    for field in ("head_sha", "review_observation", "decision_context", "repo"):
+        assert state[field] == before[field]
+    assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+    assert calls["claims"] and calls["claims"][0]["revision"] == ADVISORY_REVISION
+    # One exact card only, and the recovered card is not replayable again.
+    assert set(calls["card_reads"]) == {value["number"]}
+    second = advisory_plan(value, item, wave="advisory-second-wave")
+    assert second["result"] is None
+    assert "already-replayed" in second["output"]
+
+
+def test_advisory_recovery_refuses_every_disconfirming_shape():
+    control, control_item = advisory_card(
+        number=1739, target=1080, basis_kind="other", check_names=None
+    )
+    control_state = rc._unique_state_block(control["body"])
+    # Card #1739: the same schema-invalid primary, but its advisory result
+    # still produced a current admitted assessment and a merge recommendation.
+    assert control_state[rc.TRIAGE_PRIMARY_ERROR_FIELD] == "output.schema_invalid"
+    assert control_state[rc.TRIAGE_CONSUMPTION_FIELD] == "advisory"
+    assert rc.assessment_current_admitted(control_state)
+    assert control_state["triage_recommendation"]["action"] == "merge"
+    assert (
+        advisory_refusal(control, control_item) == "advisory-recovery-authority-present"
+    )
+
+    ordinary, ordinary_item = advisory_card(
+        number=1744, target=1090, basis_kind="other", check_names=None,
+        primary_error_code="",
+    )
+    ordinary_state = rc._unique_state_block(ordinary["body"])
+    assert ordinary_state[rc.TRIAGE_PRIMARY_STATUS_FIELD] == "succeeded"
+    assert ordinary_state[rc.TRIAGE_CONSUMPTION_FIELD] == "primary"
+    assert rc.assessment_current_admitted(ordinary_state)
+    assert advisory_refusal(ordinary, ordinary_item) == (
+        "advisory-recovery-primary-not-failed"
+    )
+
+    value, item = advisory_card()
+    mutations = {
+        "advisory-recovery-primary-not-failed": (
+            lambda state: state.pop(rc.TRIAGE_PRIMARY_STATUS_FIELD),
+            lambda state: state.__setitem__(rc.TRIAGE_PRIMARY_STATUS_FIELD, "succeeded"),
+            lambda state: state.pop(rc.TRIAGE_PRIMARY_ERROR_FIELD),
+            lambda state: state.__setitem__(rc.TRIAGE_PRIMARY_ERROR_FIELD, ""),
+            lambda state: state.__setitem__(
+                rc.TRIAGE_PRIMARY_ERROR_FIELD, "not a bounded code"
+            ),
+        ),
+        "advisory-recovery-consumption-not-advisory": (
+            lambda state: state.pop(rc.TRIAGE_CONSUMPTION_FIELD),
+            lambda state: state.__setitem__(rc.TRIAGE_CONSUMPTION_FIELD, "primary"),
+        ),
+        "advisory-recovery-admission-unproven": (
+            lambda state: state.pop("assessment_admission"),
+            lambda state: state.__setitem__("assessment_admission", "unavailable"),
+            lambda state: state.__setitem__(
+                "assessment_admission", {"status": "admitted", "reason": "admission.ok"}
+            ),
+            lambda state: state.__setitem__(
+                "assessment_admission",
+                {"status": "unavailable", "reason": "basis.missing_or_invalid",
+                 "extra": True},
+            ),
+            lambda state: state.__setitem__(
+                "assessment_admission", {"status": "bogus", "reason": "x"}
+            ),
+            lambda state: state.__setitem__(
+                "assessment_admission",
+                {"status": "unavailable", "reason": "Basis Missing"},
+            ),
+            lambda state: state.__setitem__(rc.ASSESSMENT_FIELD, {"forged": True}),
+        ),
+        "advisory-recovery-authority-present": (
+            lambda state: state.__setitem__(
+                "triage_recommendation", {"action": "merge", "reason": "green"}
+            ),
+        ),
+        "advisory-recovery-cache-unproven": (
+            lambda state: state.__setitem__("held", True),
+        ),
+    }
+    for expected, cases in mutations.items():
+        for index, mutate in enumerate(cases):
+            broken = with_state(value, mutate)
+            assert advisory_refusal(broken, item) == expected, (expected, index)
+
+    # The class is pr-review only: an issue-triage cache has no assessment
+    # admission to prove, so it can never enter the recovery route. (An
+    # issue-triage card is already refused upstream on its own revision shape,
+    # so the gate is asserted directly on the one owning predicate.)
+    proven = rc._unique_state_block(value["body"])
+    assert replay._advisory_recovery_refusal(proven, "pr-review", ADVISORY_REVISION) == ""
+    assert (
+        replay._advisory_recovery_refusal(
+            dict(proven, kind="issue-triage"), "issue-triage", ADVISORY_REVISION
+        )
+        == "advisory-recovery-kind-unsupported"
+    )
+    assert (
+        replay._advisory_recovery_refusal(proven, "pr-review", "deadbee")
+        == "advisory-recovery-cache-unproven"
+    )
+
+    # A moved target head still refuses before any recovery consideration.
+    moved = advisory_plan(value, item, selector="v1:%s" % value["number"])
+    assert moved["result"] is not None
+    stale = cards_file([value["number"]])
+    try:
+        output = StringIO()
+        with (
+            replay_environment(
+                {value["number"]: value},
+                {
+                    (item["repo"], item["number"], "pr-review"): source(
+                        number=item["number"], revision="f" * 40
+                    )
+                },
+            ) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(
+                    stale,
+                    "advisory-stale-wave",
+                    1,
+                    dry_run=True,
+                    exact_cards="v1:%s" % value["number"],
+                )
+                raise AssertionError("a moved head must refuse")
+            except ValueError:
+                pass
+        assert "source-revision-moved" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"]
+    finally:
+        os.unlink(stale)
 
 
 def test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops():
@@ -2746,8 +3134,23 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert replay.REPLAY_LIMIT_MAX == 25
     assert replay.EXACT_SELECTOR_VERSION == 1
     assert "v1:N[,N...]" in replay.parser().format_help()
+    # Replay eligibility has exactly one owner: the workflow passes inputs
+    # through and never restates a cache predicate of its own.
+    scan_text = (ROOT / ".github/workflows/scan-backstop.yml").read_text(
+        encoding="utf-8"
+    )
+    for predicate in (
+        "triage_primary_status",
+        "triage_consumption",
+        "assessment_admission",
+        replay.ADVISORY_RECOVERY_CLEARED + "-recovery",
+    ):
+        assert predicate not in scan_text, predicate
     runtime_doc = (ROOT / "docs/AGENT_RUNTIME.md").read_text(encoding="utf-8")
     assert "replay_exact_cards" in runtime_doc
+    assert "Advisory-cache recovery for a failed primary" in runtime_doc
+    assert "advisory-recovery-authority-present" in runtime_doc
+    assert "triage-cache-not-terminal-error" in runtime_doc
     assert "v1:1483,1584,1585,1586,1594,1598" in runtime_doc
     assert "no other card is substituted" in runtime_doc
     assert replay.CARD_1585_INCIDENT_WAVE in runtime_doc
@@ -2810,6 +3213,9 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
 
 
 TESTS = [
+    test_advisory_cache_recovers_only_through_the_exact_card_selector,
+    test_advisory_cache_write_run_clears_only_the_dead_advisory_state,
+    test_advisory_recovery_refuses_every_disconfirming_shape,
     test_terminal_error_is_cleared_and_queued_once_then_second_wave_noops,
     test_sanctioned_attempt_reset_grants_exact_cohort_one_reentry,
     test_array_recovery_attempt_reset_grants_exact_cohort_one_reentry,

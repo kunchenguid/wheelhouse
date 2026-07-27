@@ -105,9 +105,31 @@ gh-axi workflow run scan-backstop.yml \
   --field replay_dry_run=true
 ```
 
-When this selector is present, the candidate listing is not used for discovery. Every requested card and source is still read by exact number and must pass the existing trusted identity, exact-revision, pure-card, terminal-error, attempt-cap, replay-marker, claim, daily-budget, sealed-permit, and idempotency checks. Selection grants no admission or authority. The sole code-defined exception to the normal attempt cap is the separately bound, one-use card 1585 incident permit below.
+When this selector is present, the candidate listing is not used for discovery. Every requested card and source is still read by exact number and must pass the existing trusted identity, exact-revision, pure-card, applicable cache-eligibility, attempt-cap, replay-marker, claim, daily-budget, sealed-permit, and idempotency checks. Selection grants no admission or authority. The sole code-defined exception to the normal attempt cap is the separately bound, one-use card 1585 incident permit below.
 
 The planner reports the canonical selector and one `exact-selector/v1 admitted` line per card containing its revision. Dry-run and write-enabled modes use that same planner. If any requested card is missing, ineligible, changed during the full second-read preflight, already recovered, or the complete cohort exceeds remaining daily budget, the wave fails before writes and no generic candidate is substituted. After mutation starts, an unavoidable later GitHub race or write failure stops the wave immediately; already queued cards remain independently safe, no other card is substituted, and the operator must freeze and dry-run an explicit remaining cohort before another write-enabled dispatch.
+
+### Advisory-cache recovery for a failed primary
+
+The ordinary replay cache contract is unchanged: a proven current `triage_status: error` cache is cleared, a genuinely absent cache is marked, a proven duplicate-only cohort may re-enter, and `queued` or ordinary `succeeded` caches are refused as `triage-cache-not-terminal-error`.
+
+The exact-card selector adds exactly one narrow recovery class, proven by cards #1746 and #1704: a `succeeded` cache whose trusted primary result FAILED, whose delivered candidate was consumed only as advisory prose, and which therefore holds no admitted assessment and no authority-bearing recommendation. Such a card cannot heal at its current revision - the cache is fresh, so scheduled scans no-op, and the zero-spend readmission covers only retired context denials.
+
+Admission requires every one of these trusted stored facts on a pure `needs-decision` pr-review card at its exact current revision: `triage_primary_status: failed` with a bounded non-empty `triage_primary_error_code`, `triage_consumption: advisory`, a well-formed non-`admitted` `assessment_admission` record (matching the persisted assessment's own admission when one exists), no current admitted assessment, no `triage_recommendation`, and no available Accept shortcut. Anything missing, malformed, contradictory, legacy-ambiguous, or only partially matching refuses with a precise `advisory-recovery-*` reason: `kind-unsupported`, `cache-unproven`, `primary-not-failed`, `consumption-not-advisory`, `admission-unproven`, or `authority-present`. A schema-invalid primary whose advisory result nevertheless produced a current admitted assessment (card #1739) is refused as `advisory-recovery-authority-present`; `output.schema_invalid` alone never makes a cache replayable.
+
+This is an operator route, not automatic healing. Generic prefix discovery, scheduled reconcile, same-revision refresh, and the attempt-reset cohorts can never select the class - only a card named in `replay_exact_cards`. Selection grants no authority: the old advisory prose and delivered candidate are discarded, never promoted. An admitted replay plan clears its dead cache plus its primary/consumption telemetry, denied admission record, and stale verdict together with the queued write, then requests one ordinary attempt through the same exact-revision, freshness, attempt-cap, daily-budget, claim-tombstone, queued-checkpoint, and sealed-dispatch path every other replay uses. Its version 1 marker records `cleared: advisory`, so the same card and revision cannot be replayed again.
+
+Dry-run remains zero-write and prints the admitted plan plus an `advisory-recovery basis:` line naming the proven facts, so the eligibility decision is auditable before any write-enabled dispatch:
+
+```bash
+gh-axi workflow run scan-backstop.yml \
+  --repo OWNER/wheelhouse \
+  --ref main \
+  --field replay_wave=advisory-cache-recovery \
+  --field replay_limit=1 \
+  --field replay_exact_cards='v1:1746' \
+  --field replay_dry_run=true
+```
 
 ### One-use card 1585 incident permit
 
