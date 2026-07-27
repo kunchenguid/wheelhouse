@@ -6816,6 +6816,92 @@ def _write_body(body):
 # title, label, option, target, or model cache. Orchestration, cohort preflight,
 # dry-run, and audit live in scripts/presentation_migration.py.
 PRESENTATION_NEXT_STEP_PREFIX = "- **Recommended next step:**"
+ACCEPT_RECOMMENDATION_CHECKBOX_LINE = (
+    "- [ ] Accept recommendation <!-- opt:accept-recommendation -->"
+)
+
+
+def _exact_checkbox_line_count(body):
+    return sum(
+        1
+        for line in (body or "").splitlines()
+        if line == ACCEPT_RECOMMENDATION_CHECKBOX_LINE
+    )
+
+
+def accept_recommendation_checkbox_present(body):
+    """Whether `body` contains exactly one canonical Accept checkbox line."""
+    return _exact_checkbox_line_count(body) == 1
+
+
+def accept_recommendation_migration_body(body, state=None):
+    """Purely remove one stale Accept checkbox, never any other body bytes.
+
+    This is the narrow presentation-only correction for cards whose current
+    parsed state cannot authorize the renderer-inserted shortcut. A current
+    authorized state, a malformed state, or a duplicate checkbox is a no-op;
+    the orchestrator and verifier fail closed on those cases before writing.
+    """
+    parsed_state = _unique_state_block(body)
+    if not parsed_state:
+        return body
+    if state is not None and state != parsed_state:
+        return body
+    state = parsed_state
+    if accept_recommendation_available(state):
+        return body
+    lines = (body or "").splitlines(keepends=True)
+    if _exact_checkbox_line_count(body) != 1:
+        return body
+    removed = False
+    updated = []
+    for line in lines:
+        if not removed and line.rstrip("\r\n") == ACCEPT_RECOMMENDATION_CHECKBOX_LINE:
+            removed = True
+            continue
+        updated.append(line)
+    return "".join(updated) if removed else body
+
+
+def accept_recommendation_migration_verify(before, after):
+    """Verify the stale-checkbox deletion against the shipped authority gate."""
+    if not before or not after:
+        return (False, "card body is unavailable")
+    if before == after:
+        return (False, "no stale Accept recommendation checkbox to remove")
+    old_state = _unique_state_block(before)
+    new_state = _unique_state_block(after)
+    if old_state is None or new_state is None:
+        return (False, "card state block is missing or ambiguous")
+    if accept_recommendation_available(old_state):
+        return (False, "Accept recommendation is currently authorized")
+    if _exact_checkbox_line_count(before) != 1:
+        return (False, "card does not contain exactly one canonical Accept checkbox")
+    if _exact_checkbox_line_count(after) != 0:
+        return (False, "stale Accept recommendation checkbox survives the migration")
+    if after != accept_recommendation_migration_body(before, old_state):
+        return (False, "migration differs from exact checkbox deletion")
+    old_marker = _STATE_BLOCK_RE.search(before)
+    new_marker = _STATE_BLOCK_RE.search(after)
+    if not old_marker or not new_marker:
+        return (False, "card state block is missing")
+    if old_marker.group(0) != new_marker.group(0):
+        return (False, "hidden state block bytes would change")
+    if new_state.get("render_version") != old_state.get("render_version"):
+        return (False, "observation-bound render version must not be advanced")
+    return (True, "")
+
+
+def edit_accept_recommendation_only_body(number, before, after):
+    """Commit one verified stale-checkbox deletion under the card token."""
+    ok, reason = accept_recommendation_migration_verify(before, after)
+    if not ok:
+        raise RuntimeError("presentation-only edit refused: %s" % reason)
+    body_path = _write_body(after)
+    try:
+        _gh(["issue", "edit", str(number), "--body-file", body_path])
+    finally:
+        os.unlink(body_path)
 
 
 def presentation_removable_spans(body):

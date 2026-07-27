@@ -10,10 +10,13 @@ migration for as long as it stays unobservable: the five `no-mistakes` cards the
 `CARD_RENDER_VERSION` 11 -> 12 canonical-recommendation migration left behind had
 already missed 8 -> 9, 9 -> 10, and 10 -> 11 exactly the same way.
 
-This closes that gap and nothing else. It REMOVES retired recommendation
-presentation - the deterministic check-derived `### Recommended action` section
-and the action-bearing `Recommended next step` bullet inside `### Triage` - from
-an explicit operator-supplied cohort.
+This closes that gap and nothing else. The default migration REMOVES retired
+recommendation presentation - the deterministic check-derived `### Recommended
+action` section and the action-bearing `Recommended next step` bullet inside
+`### Triage` - from an explicit operator-supplied cohort. The
+`stale-accept-recommendation` migration is a separate deletion-only mode: it
+removes exactly the renderer-inserted Accept checkbox only when the shipped
+`accept_recommendation_available` gate is false for the card's parsed state.
 
 Boundaries, enforced in code rather than by convention (the pure transform,
 diff allowlist, invariant check, and the single verified writer all live in
@@ -50,6 +53,11 @@ import wheelhouse_core as core  # noqa: E402
 
 SCHEMA = "wheelhouse.presentation-migration/v1"
 MAX_COHORT = 25
+MIGRATION_RETIRED_RECOMMENDATION = "retired-recommendation"
+MIGRATION_STALE_ACCEPT = "stale-accept-recommendation"
+MIGRATIONS = frozenset(
+    {MIGRATION_RETIRED_RECOMMENDATION, MIGRATION_STALE_ACCEPT}
+)
 
 
 def _event(kind, **fields):
@@ -96,14 +104,17 @@ def live_head(state):
     return str(head.get("sha") or "") if isinstance(head, dict) else ""
 
 
-def inspect_card(number, card, target_head):
+def inspect_card(number, card, target_head, migration=MIGRATION_RETIRED_RECOMMENDATION):
     """Classify one cohort member. Pure given its inputs; no writes."""
+    if migration not in MIGRATIONS:
+        raise ValueError("unknown presentation migration: %s" % migration)
     row = {
         "card": int(number),
         "action": "skip",
         "reason": "",
         "url": "",
         "target": "",
+        "migration": migration,
         "_admission_fingerprint": _admission_fingerprint(card, target_head),
     }
     if not isinstance(card, dict) or not card.get("body"):
@@ -150,30 +161,48 @@ def inspect_card(number, card, target_head):
             target_head[:12],
         )
         return row
-    surfaces = render_card.legacy_recommendation_presentation(card["body"])
-    if not surfaces:
-        row["action"] = "noop"
-        row["reason"] = "already free of retired recommendation presentation"
-        return row
-    row["surfaces"] = list(surfaces)
-    migrated = render_card.presentation_migration_body(card["body"])
-    ok, reason = render_card.presentation_migration_verify(card["body"], migrated)
+
+    body = card["body"]
+    if migration == MIGRATION_STALE_ACCEPT:
+        if render_card.accept_recommendation_available(state):
+            row["action"] = "noop"
+            row["reason"] = "Accept recommendation is currently authorized"
+            return row
+        if not render_card.accept_recommendation_checkbox_present(body):
+            row["action"] = "noop"
+            row["reason"] = "no stale Accept recommendation checkbox"
+            return row
+        migrated = render_card.accept_recommendation_migration_body(body, state)
+        ok, reason = render_card.accept_recommendation_migration_verify(
+            body, migrated
+        )
+    else:
+        surfaces = render_card.legacy_recommendation_presentation(body)
+        if not surfaces:
+            row["action"] = "noop"
+            row["reason"] = "already free of retired recommendation presentation"
+            return row
+        row["surfaces"] = list(surfaces)
+        migrated = render_card.presentation_migration_body(body)
+        ok, reason = render_card.presentation_migration_verify(body, migrated)
     if not ok:
         row["reason"] = reason
         return row
-    removed = set(card["body"].split("\n")) - set(migrated.split("\n"))
+    removed = set(body.split("\n")) - set(migrated.split("\n"))
     row["removed_lines"] = sorted(line[:120] for line in removed if line.strip())
     row["action"] = "migrate"
     return row
 
 
-def plan(cohort):
+def plan(cohort, migration=MIGRATION_RETIRED_RECOMMENDATION):
     """Read-only plan for the exact cohort. No writes, no target mutations."""
+    if migration not in MIGRATIONS:
+        raise ValueError("unknown presentation migration: %s" % migration)
     rows = []
     for number in cohort:
         card = render_card.get_card(number)
         state = render_card._unique_state_block((card or {}).get("body") or "")
-        rows.append(inspect_card(number, card, live_head(state)))
+        rows.append(inspect_card(number, card, live_head(state), migration))
     return rows
 
 
@@ -184,7 +213,7 @@ def _public_rows(rows):
     ]
 
 
-def admit_plan(rows):
+def admit_plan(rows, migration=MIGRATION_RETIRED_RECOMMENDATION):
     """Second-read the complete cohort before its first write."""
     admitted = []
     blocked = []
@@ -192,7 +221,7 @@ def admit_plan(rows):
         number = planned["card"]
         card = render_card.get_card(number)
         state = render_card._unique_state_block((card or {}).get("body") or "")
-        current = inspect_card(number, card, live_head(state))
+        current = inspect_card(number, card, live_head(state), migration)
         if (
             current["action"] != planned["action"]
             or current["_admission_fingerprint"]
@@ -207,7 +236,7 @@ def admit_plan(rows):
     return admitted, blocked
 
 
-def apply_plan(rows):
+def apply_plan(rows, migration=MIGRATION_RETIRED_RECOMMENDATION):
     """Write the verified plan. Each card is re-read and re-verified first."""
     results = []
     for row in rows:
@@ -215,7 +244,7 @@ def apply_plan(rows):
         card = render_card.get_card(number)
         body = (card or {}).get("body") or ""
         state = render_card._unique_state_block(body)
-        recheck = inspect_card(number, card, live_head(state))
+        recheck = inspect_card(number, card, live_head(state), migration)
         if recheck["action"] != "migrate":
             _event("skipped", card=number, reason=recheck["reason"])
             results.append(
@@ -226,8 +255,12 @@ def apply_plan(rows):
                 )
             )
             continue
-        migrated = render_card.presentation_migration_body(body)
-        render_card.edit_presentation_only_body(number, body, migrated)
+        if migration == MIGRATION_STALE_ACCEPT:
+            migrated = render_card.accept_recommendation_migration_body(body, state)
+            render_card.edit_accept_recommendation_only_body(number, body, migrated)
+        else:
+            migrated = render_card.presentation_migration_body(body)
+            render_card.edit_presentation_only_body(number, body, migrated)
         after = render_card.get_card(number)
         verified = ((after or {}).get("body") or "") == migrated
         _event(
@@ -262,15 +295,31 @@ def parse_cohort(raw):
     return numbers
 
 
-def run(cohort, apply_changes=False):
+def run(
+    cohort,
+    apply_changes=False,
+    migration=MIGRATION_RETIRED_RECOMMENDATION,
+):
     """Plan, then optionally apply. Returns the structured report."""
-    _event("planning", cards=cohort, apply=bool(apply_changes))
-    rows = plan(cohort)
+    if migration not in MIGRATIONS:
+        raise ValueError("unknown presentation migration: %s" % migration)
+    _event(
+        "planning",
+        cards=cohort,
+        apply=bool(apply_changes),
+        migration=migration,
+    )
+    rows = (
+        plan(cohort)
+        if migration == MIGRATION_RETIRED_RECOMMENDATION
+        else plan(cohort, migration)
+    )
     migrate = [row for row in rows if row["action"] == "migrate"]
     noop = [row for row in rows if row["action"] == "noop"]
     blocked = [row for row in rows if row["action"] == "skip"]
     report = {
         "schema": SCHEMA,
+        "migration": migration,
         "mode": "apply" if apply_changes else "dry-run",
         "requested": len(cohort),
         "migrate": _public_rows(migrate),
@@ -290,7 +339,7 @@ def run(cohort, apply_changes=False):
     if not apply_changes:
         report["outcome"] = "dry-run"
         return report
-    admitted, admission_blocked = admit_plan(rows)
+    admitted, admission_blocked = admit_plan(rows, migration)
     if admission_blocked:
         report["blocked"] = _public_rows(admission_blocked)
         report["outcome"] = "denied"
@@ -300,7 +349,7 @@ def run(cohort, apply_changes=False):
         )
         return report
     admitted_migrate = [row for row in admitted if row["action"] == "migrate"]
-    report["results"] = _public_rows(apply_plan(admitted_migrate))
+    report["results"] = _public_rows(apply_plan(admitted_migrate, migration))
     report["outcome"] = "applied"
     return report
 
@@ -309,12 +358,22 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--cards", required=True, help="exact cohort, e.g. 531,1392")
     ap.add_argument(
+        "--migration",
+        choices=sorted(MIGRATIONS),
+        default=MIGRATION_RETIRED_RECOMMENDATION,
+        help="bounded presentation correction to plan (default: retired-recommendation)",
+    )
+    ap.add_argument(
         "--apply",
         action="store_true",
         help="perform the bounded body edits (default is dry-run)",
     )
     args = ap.parse_args()
-    report = run(parse_cohort(args.cards), apply_changes=args.apply)
+    report = run(
+        parse_cohort(args.cards),
+        apply_changes=args.apply,
+        migration=args.migration,
+    )
     print(json.dumps(report, indent=2, sort_keys=True))
     if report["outcome"] == "denied":
         sys.exit(3)
