@@ -36,7 +36,6 @@ back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
-import difflib
 import hashlib
 import json
 import os
@@ -6808,58 +6807,56 @@ def _write_body(body):
 PRESENTATION_NEXT_STEP_PREFIX = "- **Recommended next step:**"
 
 
-def presentation_removable_lines(body):
-    """The EXACT set of lines this migration may delete from `body`.
+def presentation_removable_spans(body):
+    """Exact source spans this migration may delete from `body`."""
+    body = body or ""
+    surfaces = legacy_recommendation_presentation(body)
+    spans = []
+    if LEGACY_DETERMINISTIC_RECOMMENDATION in surfaces:
+        match = _RECOMMENDATION_SECTION_RE.search(body)
+        if match:
+            spans.append(match.span())
+    if LEGACY_ADVISORY_NEXT_STEP in surfaces:
+        triage = _TRIAGE_SECTION_RE.search(body)
+        if triage:
+            for match in _LEGACY_TRIAGE_NEXT_STEP_RE.finditer(triage.group(0)):
+                spans.append(
+                    (triage.start() + match.start(), triage.start() + match.end())
+                )
+    return tuple(sorted(spans))
 
-    Computed structurally from the original body - the retired
-    `### Recommended action` section in full (heading plus its copy) and the
-    action-bearing `Recommended next step` bullet inside `### Triage`. Nothing
-    else is ever removable, so the allowlist cannot be widened by accident."""
-    allowed = set()
-    for line in (_existing_triage_section(body) or "").split("\n"):
-        if line.startswith(PRESENTATION_NEXT_STEP_PREFIX):
-            allowed.add(line)
-    match = _RECOMMENDATION_SECTION_RE.search(body or "")
-    if match:
-        for line in match.group(0).split("\n"):
-            if line.strip():
-                allowed.add(line)
-    return allowed
+
+def presentation_removable_lines(body):
+    """Non-empty lines contained in the exact removable source spans."""
+    return {
+        line
+        for start, end in presentation_removable_spans(body)
+        for line in body[start:end].split("\n")
+        if line.strip()
+    }
 
 
 def presentation_migration_body(body):
     """Pure: strip retired recommendation presentation, or return `body`.
 
-    Reuses the same helpers the ordinary renderer migration uses so the two
-    paths cannot drift apart."""
-    if not legacy_recommendation_presentation(body):
+    Deletes only the exact structural spans classified as retired in the
+    original body."""
+    spans = presentation_removable_spans(body)
+    if not spans:
         return body
     updated = body
-    section = _existing_triage_section(updated)
-    if section:
-        stripped = _without_legacy_recommended_next_step(section)
-        if stripped != section:
-            updated = _insert_triage_section(updated, stripped)
-    return _set_recommendation_section(updated, None)
+    for start, end in reversed(spans):
+        updated = updated[:start] + updated[end:]
+    return updated
 
 
 def presentation_diff_allowed(before, after):
     """Machine-checked allowlist: deletions only, and only of retired copy."""
     if before == after:
         return (True, "")
-    removable = presentation_removable_lines(before)
-    old_lines = (before or "").split("\n")
-    new_lines = (after or "").split("\n")
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, old_lines, new_lines, autojunk=False
-    ).get_opcodes():
-        if tag == "equal":
-            continue
-        if any(line.strip() for line in new_lines[j1:j2]):
-            return (False, "migration would add or modify content")
-        for line in old_lines[i1:i2]:
-            if line.strip() and line not in removable:
-                return (False, "migration would remove non-allowlisted content")
+    expected = presentation_migration_body(before)
+    if after != expected:
+        return (False, "migration differs from exact removable source spans")
     return (True, "")
 
 

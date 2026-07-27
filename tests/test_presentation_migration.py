@@ -217,6 +217,11 @@ def test_verification_fails_closed():
         "fail-closed: an added line is refused",
         rc.presentation_migration_verify(before, added)[0] is False,
     )
+    blank_added = good.replace("### Situation\n", "### Situation\n\n", 1)
+    check(
+        "fail-closed: an added blank line is refused",
+        rc.presentation_migration_verify(before, blank_added)[0] is False,
+    )
     edited = good.replace("- Compliance: `unknown`", "- Compliance: `pass`", 1)
     check(
         "fail-closed: a modified observation-derived fact is refused",
@@ -246,6 +251,24 @@ def test_verification_fails_closed():
         "fail-closed: removing a decision option is refused",
         rc.presentation_migration_verify(before, dropped)[0] is False,
     )
+    next_step = next(
+        line
+        for line in before.splitlines()
+        if line.startswith(rc.PRESENTATION_NEXT_STEP_PREFIX)
+    )
+    duplicate_before = before.replace(
+        "### Situation\n", "### Situation\n%s\n" % next_step, 1
+    )
+    duplicate_good = rc.presentation_migration_body(duplicate_before)
+    duplicate_removed = duplicate_good.replace(next_step + "\n", "", 1)
+    check(
+        "fail-closed: an identical line outside its approved span is preserved",
+        next_step in duplicate_good
+        and rc.presentation_migration_verify(
+            duplicate_before, duplicate_removed
+        )[0]
+        is False,
+    )
     nosection = "no state block at all"
     check(
         "fail-closed: a body without a state block is refused",
@@ -254,6 +277,30 @@ def test_verification_fails_closed():
     check(
         "fail-closed: the verified writer refuses an unverified body",
         _raises(lambda: rc.edit_presentation_only_body(1392, before, added)),
+    )
+
+
+def test_canonical_recommendation_survives_legacy_bullet_migration():
+    before = fixture(1392)["body"]
+    with_canonical = rc._set_recommendation_section(
+        before,
+        {"action": "merge", "reason": "Current admitted assessment."},
+    )
+    canonical_before = rc._RECOMMENDATION_SECTION_RE.search(with_canonical).group(0)
+    after = rc.presentation_migration_body(with_canonical)
+    canonical_after = rc._RECOMMENDATION_SECTION_RE.search(after).group(0)
+    check(
+        "canonical: only the advisory next-step surface is classified",
+        rc.legacy_recommendation_presentation(with_canonical)
+        == (rc.LEGACY_ADVISORY_NEXT_STEP,),
+    )
+    check(
+        "canonical: admitted recommendation is byte-identical",
+        canonical_after == canonical_before,
+    )
+    check(
+        "canonical: migration remains verified",
+        rc.presentation_migration_verify(with_canonical, after)[0] is True,
     )
 
 
@@ -426,6 +473,7 @@ def main():
         test_cohort_fixtures_are_the_frozen_production_shapes()
         test_migration_is_deletions_only_and_preserves_authority()
         test_verification_fails_closed()
+        test_canonical_recommendation_survives_legacy_bullet_migration()
         test_dry_run_writes_nothing_and_plans_the_whole_cohort()
         test_apply_migrates_the_cohort_and_is_idempotent()
         test_one_ambiguous_member_denies_the_entire_run()
