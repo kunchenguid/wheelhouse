@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import assessment_admission  # noqa: E402
 import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
@@ -52,6 +53,26 @@ TRIAGE_NON_SUCCESS_FIELDS = (
     "triage_repair_reason",
     "triage_repair_candidate",
 )
+# The narrow successful-cache class an operator may recover through the exact
+# card selector (cards #1746/#1704): the trusted primary result FAILED with an
+# explicit error code, its delivered candidate was consumed only as advisory
+# prose, and the revision therefore carries no admitted assessment and no
+# authority-bearing recommendation. Clearing it re-opens exactly one ordinary
+# spend-guarded triage attempt; it never promotes the old advisory prose or the
+# delivered candidate into authority. Generic discovery, scheduled scans,
+# attempt-reset cohorts, and ordinary reconcile can never select this class.
+ADVISORY_RECOVERY_CLEARED = "advisory"
+TRIAGE_ADVISORY_CACHE_FIELDS = TRIAGE_NON_SUCCESS_FIELDS + (
+    render_card.TRIAGE_PRIMARY_STATUS_FIELD,
+    render_card.TRIAGE_PRIMARY_ERROR_FIELD,
+    render_card.TRIAGE_CONSUMPTION_FIELD,
+    render_card.ASSESSMENT_FIELD,
+    render_card.ASSESSMENT_RESULT_FIELD,
+    "assessment_admission",
+    "triage_recommendation",
+    "automerge_verdict",
+)
+ADVISORY_ADMISSION_REASON_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,119}")
 MAX_RUN_NUMBER = 9_007_199_254_740_991
 MAX_CARD_NUMBER = MAX_RUN_NUMBER
 
@@ -425,7 +446,8 @@ def _valid_marker(marker, revision):
         and isinstance(marker.get("wave"), str)
         and REPLAY_WAVE_RE.fullmatch(marker["wave"])
         and marker.get("revision") == revision
-        and marker.get("cleared") in {"error", "absent"}
+        and marker.get("cleared")
+        in {"error", "absent", ADVISORY_RECOVERY_CLEARED}
         and _valid_timestamp(marker.get("at"))
         and not isinstance(run_number, bool)
         and isinstance(run_number, int)
@@ -748,6 +770,61 @@ def _effective_policy(config, repo, kind):
     }
 
 
+def _advisory_recovery_refusal(state, kind, revision):
+    """Prove the operator-recoverable advisory class from trusted stored facts.
+
+    Returns "" only when every required fact holds for this exact revision, and
+    otherwise the precise refusal. Missing, malformed, contradictory,
+    legacy-ambiguous, and partially matching state all refuse: an ordinary
+    successful primary, an advisory result that still produced a current
+    admitted assessment (the card #1739 control), and any authority-bearing
+    recommendation stay closed to replay.
+    """
+    if kind != "pr-review":
+        return "advisory-recovery-kind-unsupported"
+    if state.get("held") or state.get("triaged_sha") != revision:
+        return "advisory-recovery-cache-unproven"
+    code = state.get(render_card.TRIAGE_PRIMARY_ERROR_FIELD)
+    if (
+        state.get(render_card.TRIAGE_PRIMARY_STATUS_FIELD) != "failed"
+        or not isinstance(code, str)
+        or not render_card.TRIAGE_BOUNDED_ERROR_RE.fullmatch(code)
+    ):
+        return "advisory-recovery-primary-not-failed"
+    if state.get(render_card.TRIAGE_CONSUMPTION_FIELD) != "advisory":
+        return "advisory-recovery-consumption-not-advisory"
+    # The renderer owns "does this card currently bear assessment authority";
+    # replay reuses that one predicate instead of restating it. An advisory
+    # result that still produced a current admitted assessment or a persisted
+    # recommendation (the card #1739 control) is never recoverable.
+    if (
+        render_card.assessment_current_admitted(state)
+        or "triage_recommendation" in state
+        or render_card.accept_recommendation_available(state)
+    ):
+        return "advisory-recovery-authority-present"
+    record = state.get("assessment_admission")
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"status", "reason"}
+        or record.get("status") not in assessment_admission.ADMISSION_STATUSES
+        or record.get("status") == "admitted"
+        or not isinstance(record.get("reason"), str)
+        or not ADVISORY_ADMISSION_REASON_RE.fullmatch(record["reason"])
+    ):
+        return "advisory-recovery-admission-unproven"
+    stored = state.get(render_card.ASSESSMENT_FIELD)
+    if stored is not None:
+        normalized = assessment_admission.normalize_assessment(stored)
+        if normalized is None or normalized["admission"] != {
+            "schema": assessment_admission.ADMISSION_SCHEMA,
+            "status": record["status"],
+            "reason": record["reason"],
+        }:
+            return "advisory-recovery-admission-unproven"
+    return ""
+
+
 def _maintainer_logins(config, owner):
     return {
         str(login).strip().casefold()
@@ -764,8 +841,15 @@ def inspect_candidate(
     attempt_reset=None,
     attempt_reset_wave="",
     incident_permit=None,
+    exact_selected=False,
 ):
-    """Return an eligible replay plan or a fail-closed skip reason."""
+    """Return an eligible replay plan or a fail-closed skip reason.
+
+    ``exact_selected`` is true only for a card named by the operator's versioned
+    exact-card selector. It never relaxes an existing check; it exclusively
+    gates the narrow advisory-cache recovery class documented on
+    ``_advisory_recovery_refusal``.
+    """
     card = render_card.get_card(number)
     if not isinstance(card, dict):
         return None, "card-unreadable"
@@ -965,7 +1049,12 @@ def inspect_candidate(
     elif state.get("held") and status == "queued":
         return None, "held-queued-owned-by-recovery"
     elif isinstance(status, str) and status in {"queued", "succeeded"}:
-        return None, "triage-cache-not-terminal-error"
+        if not exact_selected or status != "succeeded":
+            return None, "triage-cache-not-terminal-error"
+        refusal = _advisory_recovery_refusal(state, kind, revision)
+        if refusal:
+            return None, refusal
+        cleared = ADVISORY_RECOVERY_CLEARED
     else:
         return None, "triage-status-untrusted"
     item = {
@@ -1116,6 +1205,7 @@ def _preflight_exact_scope(
             owner,
             has_token,
             incident_permit=incident_permit,
+            exact_selected=True,
         )
         if not plan or not _plans_match(initial, plan):
             refusal = reason if not plan else "card-raced-before-replay"
@@ -1152,6 +1242,25 @@ def _print_exact_plans(exact_scope, plans):
                 plan["number"],
                 plan["revision"],
                 plan["cleared"],
+            )
+        )
+        if plan["cleared"] != ADVISORY_RECOVERY_CLEARED:
+            continue
+        state = plan["state"]
+        print(
+            "replay %s card #%s advisory-recovery basis: primary=failed(%s) "
+            "consumption=advisory admission=%s/%s assessment=%s recommendation=none"
+            % (
+                EXACT_SELECTOR_LABEL,
+                plan["number"],
+                state.get(render_card.TRIAGE_PRIMARY_ERROR_FIELD),
+                (state.get("assessment_admission") or {}).get("status"),
+                (state.get("assessment_admission") or {}).get("reason"),
+                (
+                    "not-admitted"
+                    if render_card.ASSESSMENT_FIELD in state
+                    else "none"
+                ),
             )
         )
 
@@ -1195,7 +1304,13 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     if state != plan["state"]:
         return body
     new_state = dict(state)
-    if plan["cleared"] == "error" or plan["duplicate_reentry"]:
+    if plan["cleared"] == ADVISORY_RECOVERY_CLEARED:
+        # The proven advisory cache also carries primary/consumption telemetry
+        # and a non-admitted assessment record. Clear them with the cache so the
+        # replayed attempt starts from the same shape a fresh revision would.
+        for field in TRIAGE_ADVISORY_CACHE_FIELDS:
+            new_state.pop(field, None)
+    elif plan["cleared"] == "error" or plan["duplicate_reentry"]:
         for field in TRIAGE_NON_SUCCESS_FIELDS:
             new_state.pop(field, None)
     new_state[render_card.TRIAGE_ATTEMPTS_FIELD] = {
@@ -1214,7 +1329,8 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     )
     clean = (
         render_card.remove_triage_section(body)
-        if plan["cleared"] == "error" or plan["duplicate_reentry"]
+        if plan["cleared"] in {"error", ADVISORY_RECOVERY_CLEARED}
+        or plan["duplicate_reentry"]
         else body
     )
     return render_card._replace_state_block(clean, new_state)
@@ -1392,6 +1508,7 @@ def run(
             attempt_reset=attempt_reset_scope.get(number),
             attempt_reset_wave=wave,
             incident_permit=incident_permit,
+            exact_selected=bool(exact_scope),
         )
         if plan:
             eligible.append(plan)
@@ -1524,6 +1641,7 @@ def run(
             attempt_reset=attempt_reset_scope.get(initial["number"]),
             attempt_reset_wave=wave,
             incident_permit=incident_permit,
+            exact_selected=bool(exact_scope),
         )
         if not plan or (exact_scope and not _plans_match(initial, plan)):
             refusal = reason if not plan else "card-raced-before-replay"
