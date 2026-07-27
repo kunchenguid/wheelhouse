@@ -6785,6 +6785,131 @@ def _write_body(body):
         return f.name
 
 
+# --------------------------------------------------------------------------- #
+# Display-only migration for cards the observation-bound writer cannot reach
+# --------------------------------------------------------------------------- #
+# Every pr-review body is an observation-bound projection owned by
+# projection_writer.py, which is why `_edit_issue_body` below refuses one. A
+# card whose CURRENT observation is incomplete has no projection to commit - the
+# authoritative writer cannot express the write at all - so `upsert_card`
+# defers it and the card is excluded from every display-only renderer migration
+# for as long as it stays unobservable (it silently misses each
+# `CARD_RENDER_VERSION` bump).
+#
+# `edit_presentation_only_body` is the ONE narrow, self-verifying exception, and
+# it lives here beside the rule it excepts rather than in a second writer. It
+# admits exactly one shape of write: a DELETIONS-ONLY removal of retired
+# recommendation presentation whose hidden state block is byte-identical, whose
+# `render_version` is unchanged (the observation-bound migration did not run, so
+# a later complete observation must still perform it), and which touches no
+# title, label, option, target, or model cache. Orchestration, cohort preflight,
+# dry-run, and audit live in scripts/presentation_migration.py.
+PRESENTATION_NEXT_STEP_PREFIX = "- **Recommended next step:**"
+
+
+def presentation_removable_spans(body):
+    """Exact source spans this migration may delete from `body`."""
+    body = body or ""
+    surfaces = legacy_recommendation_presentation(body)
+    spans = []
+    if LEGACY_DETERMINISTIC_RECOMMENDATION in surfaces:
+        match = _RECOMMENDATION_SECTION_RE.search(body)
+        if match:
+            spans.append(match.span())
+    if LEGACY_ADVISORY_NEXT_STEP in surfaces:
+        triage = _TRIAGE_SECTION_RE.search(body)
+        if triage:
+            for match in _LEGACY_TRIAGE_NEXT_STEP_RE.finditer(triage.group(0)):
+                spans.append(
+                    (triage.start() + match.start(), triage.start() + match.end())
+                )
+    return tuple(sorted(spans))
+
+
+def presentation_removable_lines(body):
+    """Non-empty lines contained in the exact removable source spans."""
+    return {
+        line
+        for start, end in presentation_removable_spans(body)
+        for line in body[start:end].split("\n")
+        if line.strip()
+    }
+
+
+def presentation_migration_body(body):
+    """Pure: strip retired recommendation presentation, or return `body`.
+
+    Deletes only the exact structural spans classified as retired in the
+    original body."""
+    spans = presentation_removable_spans(body)
+    if not spans:
+        return body
+    updated = body
+    for start, end in reversed(spans):
+        updated = updated[:start] + updated[end:]
+    return updated
+
+
+def presentation_diff_allowed(before, after):
+    """Machine-checked allowlist: deletions only, and only of retired copy."""
+    if before == after:
+        return (True, "")
+    expected = presentation_migration_body(before)
+    if after != expected:
+        return (False, "migration differs from exact removable source spans")
+    return (True, "")
+
+
+def presentation_migration_verify(before, after):
+    """Complete fail-closed invariant check for one card. `(ok, reason)`."""
+    if not before or not after:
+        return (False, "card body is unavailable")
+    if before == after:
+        return (False, "no retired recommendation presentation to remove")
+    ok, reason = presentation_diff_allowed(before, after)
+    if not ok:
+        return (False, reason)
+    old_state = _unique_state_block(before)
+    new_state = _unique_state_block(after)
+    if old_state is None or new_state is None:
+        return (False, "card state block is missing or ambiguous")
+    old_marker = _STATE_BLOCK_RE.search(before)
+    new_marker = _STATE_BLOCK_RE.search(after)
+    if not old_marker or not new_marker:
+        return (False, "card state block is missing")
+    if old_marker.group(0) != new_marker.group(0):
+        return (False, "hidden state block bytes would change")
+    if new_state.get("render_version") != old_state.get("render_version"):
+        return (False, "observation-bound render version must not be advanced")
+    if legacy_recommendation_presentation(after):
+        return (False, "retired recommendation presentation survives the migration")
+    for marker in (
+        DECISION_START,
+        DECISION_END,
+        TRIAGE_START,
+        TRIAGE_END,
+        "### Situation",
+        "<!-- opt:",
+    ):
+        if before.count(marker) != after.count(marker):
+            return (False, "card structure would change")
+    return (True, "")
+
+
+def edit_presentation_only_body(number, before, after):
+    """Commit one verified deletions-only presentation correction.
+
+    Re-verifies before writing, so a caller cannot supply an unchecked body."""
+    ok, reason = presentation_migration_verify(before, after)
+    if not ok:
+        raise RuntimeError("presentation-only edit refused: %s" % reason)
+    body_path = _write_body(after)
+    try:
+        _gh(["issue", "edit", str(number), "--body-file", body_path])
+    finally:
+        os.unlink(body_path)
+
+
 def _edit_issue_body(number, body, remove_labels=None):
     state = _unique_state_block(body)
     if state and state.get("kind") == "pr-review":

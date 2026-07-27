@@ -661,6 +661,7 @@ scripts/
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, recover durable result projections without spend, reflect target activity, and close consumed ones
   triage_replay.py             owner-only bounded replay for exact-number auto-triage recovery waves
+  presentation_migration.py    dry-run-first, exact-cohort removal of retired presentation from observation-blocked PR-review cards; see docs/OPTION_B_CARD_PROJECTION.md
 tests/test_decision.py         offline unit test for parse/route logic, workflow-merge gate, accept-recommendation routing, investigate routing, request-changes routing/execution/cleanup arming, and NL answer ref qualification
 tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_nl_schema_repair.py offline unit test for native-first natural-language structured output, bounded one-turn repair, and retryable failure projection
@@ -675,6 +676,8 @@ tests/test_option_b_architecture.py complete Option B contract, golden, E2E-01 t
 tests/test_target_reconcile_transaction.py production-composed timed regression for approval, same-scan completion, pending checks, incomplete reads, force pushes, and card projection
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
+tests/test_presentation_migration.py
+                               offline unit test for the bounded, dry-run-first display-only migration that corrects cards whose incomplete observation blocks the ordinary renderer migration
 tests/test_canonical_recommendation.py
                                offline unit test for the one canonical recommendation surface: the card-1746 shape, the PR-triage basis/optin generation contract, and the render-version migration
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, evidence normalization/anchoring, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
