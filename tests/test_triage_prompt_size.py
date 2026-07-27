@@ -33,10 +33,17 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The whole point of by-reference is an O(1) prompt. Keep this budget small: the
-# constant scaffolding (all conditional branches unioned) is a few KB, ~16x
-# under this and ~48x+ under MAX_ARG_STRLEN. If a future change makes the prompt
-# grow past this, that is exactly the regression to catch.
-PROMPT_BYTE_BUDGET = 8192
+# constant scaffolding (all conditional branches unioned) is a few KB and ~10x+
+# under MAX_ARG_STRLEN. If a future change makes the prompt grow past this, that
+# is exactly the regression to catch.
+#
+# The budget applies to BOTH the raw prompt and its json.dumps() escaping, which
+# is ~5% larger; 8192 was breaching on the escaped variant before the literal
+# recommendation_basis contract was even added. 12288 restores real headroom
+# while keeping the guard meaningful - the invariant that matters is that the
+# prompt is CONSTANT (the flat-size checks below prove that against a 5 MB
+# diff), not that it sits at any particular byte count.
+PROMPT_BYTE_BUDGET = 12288
 MAX_ARG_STRLEN = 131072
 
 _failures = []

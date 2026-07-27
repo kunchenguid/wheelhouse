@@ -45,9 +45,6 @@ on:
       summary:
         description: "One-line situation summary"
         required: false
-      recommendation:
-        description: "Recommended action"
-        required: false
       priority:
         description: "high | med | low"
         default: med
@@ -95,7 +92,6 @@ jobs:
           INPUT_UPDATED_AT: ${{ github.event.inputs.updated_at }}
           INPUT_TITLE: ${{ github.event.inputs.title }}
           INPUT_SUMMARY: ${{ github.event.inputs.summary }}
-          INPUT_RECOMMENDATION: ${{ github.event.inputs.recommendation }}
           INPUT_PRIORITY: ${{ github.event.inputs.priority }}
           INPUT_OPTIONS: ${{ github.event.inputs.options }}
         run: python scripts/build_item.py item.json

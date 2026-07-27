@@ -766,6 +766,8 @@ jobs:
               echo "defaults, and evidence spans; missing, extra, ambiguous, or unsupported"
               echo "semantics are unavailable. Class C alone may use a fully isolated new"
               echo "strictly opt-in, disabled-by-default feature. Be conservative."
+              echo "Always emit automerge.optin_default_off; it is required for EVERY class."
+              echo "Only class C treats true as meaningful; otherwise it is simply false."
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo
                 # Source-review vocabulary below is also a static contract for tests.
@@ -789,9 +791,18 @@ jobs:
               echo
             fi
             if [ "$KIND" = "pr-review" ]; then
-              echo "Copy exact observation/context IDs into recommendation_basis. When kind is"
-              echo "other, omit check_names entirely. Use at least one exact named check only for a"
-              echo "configured-tests basis, and only when current rows support that basis; otherwise use other."
+              # Enumerating the exact union is load-bearing: this prompt is the
+              # model's only recommendation_basis contract surface, and a kind
+              # outside the union is rejected by the bound schema and by
+              # admission (card #1746 invented "configured-tests").
+              echo "Copy exact observation/context IDs into recommendation_basis."
+              echo 'recommendation_basis.kind must be EXACTLY one of: "other",'
+              echo '"configured-tests-not-run", "configured-tests-not-green". No other kind exists.'
+              echo 'There is no positive green-checks kind: a recommendation resting on the'
+              echo 'configured checks being GREEN uses "other" and omits check_names entirely.'
+              echo 'Use "configured-tests-not-run"/"configured-tests-not-green" only to assert that'
+              echo "configured tests were not run or are not green, only when the current rows"
+              echo 'support it, naming at least one exact test-role check row; else use "other".'
               echo
             fi
             echo "Return ONLY a compact JSON object using only the keys shown below."
@@ -821,12 +832,12 @@ jobs:
               echo '    "class_b_restoration": {"corrected_defect":"bounded defect claim (class B only)","corrected_defect_evidence":{"source":"target.txt or target-src/src/example.py","quote":"exact supporting quote"},"intended_behavior_restored":"bounded restored-behavior claim (class B only)","intended_behavior_restored_evidence":{"source":"target.txt or target-src/src/example.py","quote":"exact supporting quote"}},'
               echo '    "changes_existing_or_default_behavior": true or false,'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
-                echo '    "optin_default_off": true or false,'
+                echo '    "optin_default_off": true or false (always required; only class C treats true as meaningful),'
                 echo '    "aligns_with_vision": true or false,'
                 echo '    "recommend_merge": true or false,'
                 echo '    "external_source_required": true or false'
               else
-                echo '    "optin_default_off": true or false (class C only: is the new feature strictly opt-in AND disabled by default)'
+                echo '    "optin_default_off": true or false (always required; only class C treats true as meaningful: strictly opt-in AND disabled by default)'
               fi
               echo '  }'
             else
@@ -1591,8 +1602,16 @@ jobs:
               "> **Security fallback:** Trusted source was unavailable, so Wheelhouse cleared the queued triage cache without re-evaluating Auto-merge criteria. The checklist may temporarily reflect the prior queued state; this is intentional until trusted card maintenance runs.",
               "<!-- wheelhouse-triage:end -->",
           ))
-          section_marker = "\n### Recommended action"
-          section_index = clean.find(section_marker)
+          # `### Recommended action` renders only for an admitted agent
+          # recommendation, so the decision block is the stable second anchor.
+          section_index = -1
+          for section_marker in (
+              "\n### Recommended action",
+              "\n<!-- wheelhouse-decision:start -->",
+          ):
+              section_index = clean.find(section_marker)
+              if section_index >= 0:
+                  break
           if section_index >= 0:
               clean = (
                   clean[:section_index].rstrip()

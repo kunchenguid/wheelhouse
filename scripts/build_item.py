@@ -8,7 +8,7 @@ normalized item.json that render_card.py can turn into a card.
 
 Expected fields (all but repo/number optional):
   repo, number, kind, head_sha, updated_at, title, author, bucket, comp, tests,
-  summary, recommendation, priority, options (list or comma string),
+  summary, priority, options (list or comma string),
   auto_triage (false as an item-level opt-out for pr-review),
   auto_triage_issues (false as an item-level opt-out for issue-triage)
 
@@ -80,7 +80,6 @@ def from_payload():
         "updated_at": os.environ.get("INPUT_UPDATED_AT", ""),
         "title": os.environ.get("INPUT_TITLE", ""),
         "summary": os.environ.get("INPUT_SUMMARY", ""),
-        "recommendation": os.environ.get("INPUT_RECOMMENDATION", ""),
         "priority": os.environ.get("INPUT_PRIORITY", ""),
         "options": os.environ.get("INPUT_OPTIONS", ""),
     }
@@ -153,7 +152,6 @@ def normalize(d):
         "tests": str(d.get("tests", "") or "n/a"),
         "url": url,
         "summary": str(d.get("summary", "") or ""),
-        "recommendation": str(d.get("recommendation", "") or "Needs your call."),
         "priority": str(d.get("priority", "") or "med"),
         "options": options,
         "auto_triage": auto_triage,

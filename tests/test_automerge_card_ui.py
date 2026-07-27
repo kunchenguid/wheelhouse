@@ -334,9 +334,14 @@ def test_g6_recommendation_evidence_distinguishes_advisory_and_authoritative():
         denied_row["status"] == schema.STATUS_UNMET,
     )
     check(
-        "g6 admission denial distinguishes unavailable authority from advisory prose",
+        "g6 admission denial says no valid agent recommendation was established",
         denied_row["evidence"]
-        == "recommendation unavailable because the assessment was not admitted",
+        == "no valid agent recommendation was established: the advisory "
+        "assessment was not admitted",
+    )
+    check(
+        "g6 admission denial never claims the model recommended something else",
+        "not an explicit merge" not in denied_row["evidence"],
     )
 
     non_merge = card_entry(
@@ -1555,7 +1560,8 @@ def test_triage_write_atomically_re_evaluates_and_replaces_stale_criteria():
     check(
         "atomic: updated triage and G6 checklist agree",
         "### Triage" in written_body
-        and "merge - focused and verified" in written_body
+        and "- **Agent recommendation:** `merge`" in written_body
+        and "focused and verified" in written_body
         and written_rows["g6_triage_success"]["status"] == schema.STATUS_MET
         and written_rows["g6_merge_recommendation"]["status"] == schema.STATUS_MET
         and "✅ **MET** `G6 - successful triage for current head`" in written_body

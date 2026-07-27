@@ -744,8 +744,13 @@ def fresh_verdict_facts(state, head_sha):
         and state.get("triage_status") == "succeeded"
         and not admission_ok
     ):
+        # The model may well have written "merge" in its advisory prose. What
+        # is missing is a VALID recommendation: the assessment backing it was
+        # not admitted, so nothing authority-bearing exists. Say exactly that -
+        # never that the model recommended something else (card #1746).
         recommendation_reason = (
-            "recommendation unavailable because the assessment was not admitted"
+            "no valid agent recommendation was established: the advisory "
+            "assessment was not admitted"
         )
     else:
         recommendation_reason = (

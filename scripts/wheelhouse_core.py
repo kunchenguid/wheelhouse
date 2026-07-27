@@ -2442,15 +2442,6 @@ def _overlap_note(number, closes, dup_clusters, addressed):
     return "; ".join(notes)
 
 
-def _recommendation(bucket):
-    return {
-        "merge-ready": "Merge - compliance and tests are green.",
-        "review-needed": "Review before merge - compliant but the test signal is missing/unclear.",
-        "needs-ci-approval": "Approve CI to get a test signal (security-gated; held automatically if the PR touches CI/action files).",
-        "issue-triage": "Triage - open issue with no linked PR yet.",
-    }.get(bucket, "Needs your call.")
-
-
 def _auto_approve_enabled(repo_cfg, global_default):
     """Effective auto_approve_ci for one repo: the per-repo `auto_approve_ci`
     override if set, else the global flag (which itself defaults to True). A
@@ -4049,7 +4040,6 @@ def _ci_wait_refresh_item(
             "An exact final observation is required before projection; automatic "
             "triage is deferred and prior-head triage does not apply."
         ),
-        "recommendation": "Wait for exact current-head reconciliation.",
         "priority": "low",
         "base_sha": pr.get("base_sha") or "",
         "auto_triage": auto_triage_enabled,
@@ -4528,7 +4518,6 @@ def build_repo(
             "tests": pr["tests"],
             "url": "https://github.com/%s/pull/%d" % (slug, pr["number"]),
             "summary": summary,
-            "recommendation": _recommendation(pr["bucket"]),
             "priority": priority,
             # The existing presentation note is also a trusted scan-time
             # auto-merge safety fact. An empty string proves no overlap in this
@@ -4715,7 +4704,6 @@ def build_repo(
                         "tests": "n/a",
                         "url": "https://github.com/%s/issues/%d" % (slug, it["number"]),
                         "summary": "open issue, no linked PR",
-                        "recommendation": _recommendation("issue-triage"),
                         "priority": PRIORITY["issue-triage"],
                         "auto_triage_issues": triage_issues_enabled,
                         "triage_attempt_cap_per_revision": triage_attempt_cap,
@@ -6478,8 +6466,19 @@ def _security_summary_from_card_body(body):
     _, separator, after_notice = after_heading.partition("\n\n")
     if not separator:
         return None
-    summary, _, _ = after_notice.partition("\n### ")
-    summary = summary.rstrip()
+    # The section ends at the next heading or, when it is the last rendered
+    # section, at the decision block. `### Recommended action` used to always
+    # follow it; it is now conditional (admitted agent recommendations only)
+    # and never present on a ci-approval card, so the marker is load-bearing.
+    ends = [
+        index
+        for index in (
+            after_notice.find("\n### "),
+            after_notice.find("\n<!-- wheelhouse-decision:start -->"),
+        )
+        if index >= 0
+    ]
+    summary = (after_notice[: min(ends)] if ends else after_notice).rstrip()
     return summary or None
 
 

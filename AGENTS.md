@@ -312,7 +312,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `11`: the
+  it is not a material field). `CARD_RENDER_VERSION` is currently `12`: the
+  11 -> 12 bump establishes ONE canonical recommendation surface - it drops the
+  deterministic check-derived `### Recommended action` copy, drops the cached
+  `Recommended next step` bullet from an existing `### Triage` block, and folds
+  a legacy admission warning back inside the triage markers so it survives the
+  lift; the
   10 -> 11 bump republishes DecisionContext-neutral related-work copy and runs
   the zero-spend re-admission of assessments denied solely under the retired
   advisory-context admission rule; the
@@ -325,9 +330,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   4 -> 5 bump labels known claude-code-action harness polling/status transcript
   lines in card-visible auto-triage output and older cached `### Triage`
   sections without stripping content; the 3 -> 4 bump publishes the
-  conditional `Accept recommendation` checkbox and
-  suppresses the top-level deterministic recommendation when structured triage
-  recommendation state is present; the 2 -> 3 bump publishes the
+  conditional `Accept recommendation` checkbox (its companion deterministic
+  recommendation was later removed entirely by the 11 -> 12 bump); the
+  2 -> 3 bump publishes the
   `/request-changes <text>` PR-review slash hint on already-open cards; the
   earlier 1 -> 2 bump retroactively re-qualifies cross-repo refs cached in an
   already-open card's `### Triage` section from before `qualify_issue_refs`
@@ -488,6 +493,45 @@ still appears where it's plain English, e.g. "triage the queue".)
   A full cohort second-read preflight refuses any mismatch before a reset write, and a one-use v2 marker excludes completed members from ordinary replay while allowing only the same sanctioned cohort's pending members to resume.
   Each reset refuses policy drift away from cap 2 and leaves both the global per-revision cap and daily ceiling unchanged.
   `docs/AGENT_RUNTIME.md` owns the additive `wheelhouse-triage-record` migration record shape.
+- **One canonical recommendation surface (card #1746).** A card presents a
+  recommendation ONLY when it comes from a current ADMITTED structured
+  agent-triage result, and only in `### Recommended action`
+  (`render_card._recommendation_section`, gated by
+  `accept_recommendation_available`). There is deliberately NO deterministic
+  check-derived recommendation: `wheelhouse_core._recommendation`,
+  `target_reconcile._TERMINAL_RECOMMENDATIONS`, the item `recommendation` field,
+  and the `ingest` `recommendation` input are all gone. Compliance, test, and
+  mergeability facts stay facts in `### Situation` and the auto-merge criteria -
+  never owner guidance to act. `### Triage` carries analysis only (summary,
+  product implications, and the honest primary-failure/admission warnings); the
+  model's advisory action is NOT rendered there, so a delivered-but-invalid or
+  non-admitted candidate can never show "merge" as the agent's recommendation
+  beside a G6 row that truthfully says none was established. That G6 evidence
+  reads "no valid agent recommendation was established: the advisory assessment
+  was not admitted" - it never implies the model recommended something else, and
+  the row stays UNMET with identical authority semantics. Existing cards heal
+  through the ordinary `CARD_RENDER_VERSION` 11 -> 12 migration
+  (`_without_legacy_recommended_next_step` plus `_with_lifted_admission_warning`
+  in `_preserve_same_revision_triage`): zero model spend, no target write, and
+  no change to admission, cache freshness, options, or gates. The admission
+  warning is written INSIDE the triage markers so the same-revision lift keeps
+  it. The projection path (an admitted assessment re-renders `### Triage` from
+  the bound artifact rather than lifting the cached section) explicitly carries
+  the prior same-revision card's NON-MATERIAL
+  `triage_primary_status`/`triage_primary_error_code`/`triage_consumption`, so a
+  refresh cannot delete the honest primary-failure record.
+  `render_card.legacy_recommendation_presentation` /
+  `recommendation_census` (and the read-only
+  `render_card.py recommendation-census <cards.json>` CLI, which takes the same
+  open-card list `reconcile.py` consumes and performs NO GitHub call or write)
+  are the census and post-backfill verification helpers: they classify the
+  complete list into affected / clean / skipped-with-reason. Deliberately NOT
+  auto-corrected, and reported instead: cards carrying
+  `processing`/`resolved`/`blocked` (re-rendering would clobber an in-flight or
+  consumed decision), and cards frozen by an `ok:false`/`truncated`/
+  `indeterminate`/CI-wait scan - each heals on the first scan where it is a
+  pure refreshable `needs-decision` card again. Covered by
+  `tests/test_canonical_recommendation.py`.
 - **Accept recommendation is a deterministic shortcut, not model action.** A
   successful current auto-triage attempt for pr-review or issue-triage may
   prepend an `Accept recommendation` checkbox when the structured
@@ -503,9 +547,6 @@ still appears where it's plain English, e.g. "triage the queue".)
   `free_text`, preserving head-SHA rechecks and token boundaries; if the
   recommendation is `investigate`, it stays non-consuming and clears the clicked
   accept box.
-  While a structured accept recommendation is available, render suppresses the
-  top-level deterministic `### Recommended action` section so the card has one
-  primary recommendation surface.
   Bare `#N` refs in `recommended_reason` are qualified against the card state's
   target repo before the reason can be posted, used as a decline/close note, or
   submitted as a request-changes review.
@@ -1239,7 +1280,8 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   `DIFF_COMPLETE` means the whole non-binary/LFS/submodule diff is present within the 1,500,000-byte on-disk cap; truncation fails closed with no auto-merge verdict.
   Required `evidence` is validation-only: `normalize_triage` rejects missing evidence, and `triage-apply` anchor-checks it against `target.txt`, failing open only when that file cannot be read.
   `tests/test_triage_prompt_size.py` owns the structural regression checks.
-  Trusted code still renders the visible `### Triage` section, including a human-readable Recommended next step line, with `github.token`, never by Claude directly, and labels known harness polling/status transcript lines as automated status.
+  Trusted code still renders the visible `### Triage` section with `github.token`, never by Claude directly, and labels known harness polling/status transcript lines as automated status.
+  That section carries analysis only - summary, product implications, and the honest primary-failure/admission warnings - never the model's advisory action (see "One canonical recommendation surface" in Sharp edges).
   When the structured action is fresh, successful, per-kind allowlisted, and has any required reason text, trusted code persists `triage_recommendation` and may add the `Accept recommendation` checkbox.
   The result is advisory until the owner/maintainer ticks that checkbox, at which point `apply_decision.py` maps it to an existing deterministic action with the same guards.
   Apart from publishing a held card's own `pending-triage` label and placeholder decision section, plus that conditional accept shortcut, it never changes classification, managed labels, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
@@ -1367,6 +1409,7 @@ The notes below record selected non-obvious regression coverage:
 - `python tests/test_compliance_event_evidence.py` - offline contract coverage for opted-in current-body compliance evidence: exact workflow/run/CheckRun identity, complete bounded pagination and scan-local caching, monotonic latest-event selection independent of API/completion order, signed/unsigned/signed histories, conservative malformed/missing/cancelled/action-required evidence, legacy reduction isolation, a fresh G7 observation, and production-shaped PR #549 history without target mutation.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, PR target `updatedAt` propagation for activity sorting, cleanup-closed PR removal before addressed-issue recomputation, plus open-issue/PR/closing-reference pagination guards, no network.
 - `python tests/test_pending_contributor_cleanup.py` - offline coverage for the deterministic, fail-open cleanup invariant above, including thresholds, proof and activity handling, timestamp recovery, legacy rebase records, the conflicting ci-noop exception, and the non-conflicting CI-approval clear-only path.
+- `python tests/test_canonical_recommendation.py` - the one canonical recommendation surface, no network and no model: the exact card-1746 production shape (advisory merge prose beside `output.schema_invalid`, `basis.missing_or_invalid`, G6/G3 UNMET) renders with no deterministic recommendation, no advisory action presented as a recommendation, both honest warnings preserved, and G6 evidence stating no valid agent recommendation was established; the unsupported `configured-tests` kind and the omitted `optin_default_off` each stay schema-invalid in isolation and no positive green-checks kind exists; the real PR-triage prompt enumerates exactly the three valid basis kinds on the shared pr-review branch, drops the bare `configured-tests basis` shorthand, routes a green-checks rationale to `other`, and marks `optin_default_off` always required in both automerge branches; plus the controls - an admitted merge recommendation renders exactly once, an admitted non-merge recommendation renders correctly with deterministic ref qualification, invalid/non-admitted/pre-triage/queued/no-result cards present none, issue and PR paths stay coherent, the deterministic producers are gone, and a render-version-stale v11 card migrates with byte-identical authority state, unchanged G6 rows, no fresh triage spend, and a no-op next scan.
 - `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, `activity_reflected_at` remaining non-material and being folded into queued writes, rendered section/no-mention behavior for both kinds, deterministic automated-status labeling for the narrow harness-line allowlist, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued, preserving held-ness while refresh eligibility still holds, publishing silently when refreshed eligibility turns off, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision). Also covers the pass-by-reference `evidence` schema field (`normalize_triage` requires a non-empty string or non-empty string list, rejects missing/blank/malformed lists, and never leaks it into the rendered triage dict) and the `evidence_anchor_ok`/`_triage_evidence_verified` lazy/fabrication guard (genuine single-quoted, double-quoted, markdown-normalized, or conservative fallback target spans verify; fabricated or too-short spans are rejected; and an unreadable `target.txt` fails OPEN).
 - `python tests/test_triage_budget.py` - fully offline automatic-triage spend-guard coverage for typed cap and ceiling configuration, strict non-material attempt records, cap exhaustion, trusted by-number daily-ledger creation and verification, UTC rollover, all fail-closed ledger failures, safe reservation leakage, the sealed dispatch boundary, workflow admission, shared concurrency, and the bounded two-call schema-repair amplification.
 - `python tests/test_triage_replay.py` - fully offline operator-only replay coverage for exact-number card/source reads, strict exact-revision and identity gates, claim tombstone verification, duplicate-only re-entry, terminal-error and absent-cache recovery, admission-duplicate card projection, fail-closed malformed/mismatch matrices, dry-run zero-write behavior, reviewable wave bounds, bounded dual-written triage result records, the two exact-cohort one-use evidence-array attempts resets, the code-defined one-use incident permit with the global cap pinned at 2, and the exact-selector-only advisory-cache recovery (production-shaped card #1746 acceptance with its zero-write auditable dry-run basis line, the card #1739 admitted-assessment control, ordinary successful caches, every independently refused predicate, generic/cohort discovery isolation, stale-revision refusal, and one-shot marker behavior).

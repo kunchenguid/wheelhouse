@@ -68,6 +68,7 @@ python tests/test_check_status.py
 python tests/test_compliance_event_evidence.py
 python tests/test_author_filter.py
 python tests/test_auto_triage.py
+python tests/test_canonical_recommendation.py
 python tests/test_triage_budget.py
 python tests/test_triage_replay.py
 python tests/test_triage_prompt_size.py

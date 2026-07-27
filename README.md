@@ -23,7 +23,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 - **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
   A scan-created contributor CI-approval card that holds for changed workflow/action files also includes a deterministic, read-only *Security review (advisory)* section to inform the same manual approval decision.
   A PR-review card whose final auto-merge gate proves a history-only workflow touch includes a head-scoped *Manual merge required* section with bounded evidence.
-  When successful auto triage returns a fresh structured recommendation, the card shows an *Accept recommendation* checkbox and hides the older top-level recommended-action text so there is one primary recommendation surface.
+  A card presents a recommendation only when it comes from a current admitted structured auto-triage result, in one place: the `Recommended action` section, alongside an *Accept recommendation* checkbox. There is no deterministic check-derived recommendation - compliance, test, and mergeability facts stay facts in `Situation` and the auto-merge criteria.
   A brand-new PR-review or issue-triage card that is waiting for its first auto-triage attempt temporarily shows a placeholder instead of those checkboxes; the normal checkboxes appear as soon as that attempt completes, even if triage fails.
   PR-review Situation, configured checks, related work, admitted triage, criteria, controls, and hidden state are one observation-bound projection for the same target revision. Related work filters high-fanout hub paths, ranks genuine matches by relation strength, then caps the display/model entries at 10 with an honest total; that deliberate cap does not make the context incomplete. Related work remains advisory and never becomes an overlap acting gate. Truncated or unavailable related context may still produce visible advisory triage, but a non-admitted assessment cannot create Accept recommendation, satisfy G6, or authorize an action.
   When a complete scheduled scan first finds an open target outside the worklist, the card visibly says that confirmation is pending and removes all decision controls. Only the next adjacent qualifying scheduled observation soft-closes it; manual runs do not advance that lifecycle.
@@ -42,7 +42,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 ```
 
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
-Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
+Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through the scoped read-only production search path.
 The disabled Codex adapter keeps that credential in a typed host broker instead of exposing it to the model worker.
 The current production selection uses the exact pinned Claude Action for eight non-repair actions and the pinned direct Claude CLI for both schema-repair actions, all inside the same separate read-only reusable model workflow from a bounded content-addressed task handoff.
@@ -247,7 +247,8 @@ See [Agent runtime operations](docs/AGENT_RUNTIME.md) before changing provider s
 Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TOKEN`):
 Auto triage and deep review keep their action prompts independent of target size by writing fetched target content to runner files for Claude to read; PR diffs are bounded to 1,500,000 bytes on disk instead of being embedded in the action input.
 
-- **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and a Recommended next step into the card.
+- **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary and Product implications into the card.
+  Its recommended action is shown only when the resulting assessment is admitted, as the card's one `Recommended action` section; an invalid or non-admitted result keeps its analysis but never presents an action as the agent's recommendation.
   The workflow asks for structured `recommended_action` and `recommended_reason` fields; trusted code normalizes them and only adds *Accept recommendation* when the action is safe for that card kind and any required reason text is present.
   It also requires source evidence and checks at least one anchored span against the fetched target text before publishing the advisory result.
   If a captured field is one of the known claude-code-action harness polling/status lines, trusted rendering preserves it and labels it `[automated status]`.
@@ -319,7 +320,8 @@ If nothing appears, see [Troubleshooting](#troubleshooting).
 
 You drive the queue three ways - whichever fits the decision:
 
-- **Read the automatic triage.** PR-review and issue-triage cards can both include a `Triage` section with a quick Summary, Product implications, and Recommended next step.
+- **Read the automatic triage.** PR-review and issue-triage cards can both include a `Triage` section with a quick Summary and Product implications.
+  An admitted recommendation appears separately, once, in `Recommended action`.
   For PR-review this is automatic when `auto_triage` is on and `CLAUDE_CODE_OAUTH_TOKEN` exists, with the cache keyed by PR head SHA; for issue-triage it is gated by the INDEPENDENT `auto_triage_issues` and keyed by issue `updatedAt` instead (issues have no head SHA).
   A newly created eligible card may first show `pending-triage` and a placeholder instead of decision boxes; decide after the `Triage` section or unavailable note appears and the boxes publish.
   A fresh successful structured recommendation can prepend *Accept recommendation* to the decision boxes; ticking it maps the recommendation to the same deterministic action that a checkbox or slash-command would have used.
@@ -392,7 +394,7 @@ Complete pending checks render `ci-running` with an as-of time; complete termina
 An incomplete, failed, ambiguous, or head-mismatched final read renders explicit `unknown` values and last-known wording, never current green or approval-needed state, while the card remains frozen from consumption and automatic triage remains deferred.
 Every such card persists a compact observation ID/time/head/freshness projection reference; a successful approval receipt can never project `needs-ci-approval` for the same head.
 It also refreshes once when Wheelhouse's internal card render version is stale, so display-only card fixes propagate to existing pure pending cards without a target change.
-The current render-version sweep labels known automated harness polling/status lines preserved in older cached `Triage` sections, while keeping the earlier sweeps for conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
+The current render-version sweep removes the deterministic check-derived `Recommended action` copy and the cached advisory `Recommended next step` line from already-open cards, keeping their analysis and honest warnings, while keeping the earlier sweeps for automated harness status labels, conditional *Accept recommendation*, the PR-review `/request-changes <text>` slash hint, and cached target-ref qualification.
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch may queue a fresh spend-guarded triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change, but it does make the card eligible for a fresh spend-guarded triage attempt.
@@ -673,6 +675,8 @@ tests/test_option_b_architecture.py complete Option B contract, golden, E2E-01 t
 tests/test_target_reconcile_transaction.py production-composed timed regression for approval, same-scan completion, pending checks, incomplete reads, force pushes, and card projection
 tests/test_check_status.py     offline unit test for check_status compliance aggregation and rollup fail-closed backstop
 tests/test_author_filter.py    offline unit test for queue author filtering, PR updatedAt propagation, and skipped-card CI handling
+tests/test_canonical_recommendation.py
+                               offline unit test for the one canonical recommendation surface: the card-1746 shape, the PR-triage basis/optin generation contract, and the render-version migration
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, evidence normalization/anchoring, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
 tests/test_triage_replay.py    offline unit test for owner-only replay eligibility, claim tombstones, duplicate-only re-entry, sanctioned attempt reset, dry-run behavior, exact-revision gates, and result records
 tests/test_triage_prompt_size.py offline regression test for bounded pass-by-reference triage and deep-review prompts
