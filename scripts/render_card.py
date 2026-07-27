@@ -311,10 +311,12 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # `### Recommended action` copy is gone, `### Recommended action` now renders
 # only a current ADMITTED structured agent recommendation, and a cached
 # `### Triage` block's action-bearing `Recommended next step` bullet is
-# stripped (card #1746). Display-only and zero-spend: no authority, admission,
-# cache-freshness, or gate semantics change. Earlier display-only bumps remain
-# documented in AGENTS.md.
-CARD_RENDER_VERSION = 12
+# stripped (card #1746). Bumped 12 -> 13 to qualify bare target references in
+# the deterministic target-title quote and warning surfaces, without changing
+# the rest of the card body. These are display-only and zero-spend: no
+# authority, admission, cache-freshness, or gate semantics change. Earlier
+# display-only bumps remain documented in AGENTS.md.
+CARD_RENDER_VERSION = 13
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -5580,7 +5582,10 @@ def render(
         meta += " &middot; `%s`" % item["bucket"]
     lines.append(meta)
     lines.append("")
-    lines.append("> %s" % title)
+    # This quote is target-derived text rendered inside the Wheelhouse repo.
+    # Qualify only this surface so target refs do not autolink to Wheelhouse;
+    # self-references elsewhere in the deterministic card remain unchanged.
+    lines.append("> %s" % core.qualify_issue_refs(title, owner, repo))
     lines.append("")
     lines.append("### Situation")
     lines.append("- Compliance: `%s`" % item.get("comp", "n/a"))
@@ -5641,7 +5646,9 @@ def render(
     # eyes open. Display-only - not part of the material refresh signature.
     if item.get("warning"):
         lines.append("> [!WARNING]")
-        lines.append("> %s" % item["warning"])
+        # The warning is deterministic target-derived text. Keep the rewrite
+        # scoped to this line rather than qualifying the whole card body.
+        lines.append("> %s" % core.qualify_issue_refs(item["warning"], owner, repo))
         lines.append("")
     # An advisory, read-only security summary of the workflow/action changes on
     # a CI-approval HOLD card (fork PR touching CI-execution files). Presentation
