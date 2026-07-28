@@ -1211,10 +1211,9 @@ def _triage_context_uses(state, revision):
     """Read the bounded context-allowance record for one head revision.
 
     Returns `(uses, untrusted)`: `uses` is the list of exact {"base_sha",
-    "vision_sha"} identities already consumed for `revision`. A record keyed
-    to a different head is inert history and reads as no uses. A malformed,
-    duplicate-carrying, oversized, or internally mismatched record is
-    untrusted and denies rather than granting capacity.
+    "vision_sha"} identities already consumed for `revision`. A malformed,
+    duplicate-carrying, oversized, head-mismatched, or internally mismatched
+    record is untrusted and denies rather than granting capacity.
     """
     state = state if isinstance(state, dict) else {}
     if TRIAGE_CONTEXT_FIELD not in state:
@@ -1240,7 +1239,7 @@ def _triage_context_uses(state, revision):
     ):
         return [], True
     if record.get("revision") != revision:
-        return [], False
+        return [], True
     seen = set()
     normalized = []
     for entry in uses:

@@ -289,7 +289,7 @@ def test_context_refresh_detection_matrix():
 def test_uses_record_strictness_matrix():
     revision = HEAD
     assert rc._triage_context_uses({}, revision) == ([], False)
-    # A record keyed to another head is inert history, not spend and not malformed.
+    # A record keyed to another head is untrusted and denies capacity.
     stale = {
         rc.TRIAGE_CONTEXT_FIELD: {
             "version": 1,
@@ -299,7 +299,7 @@ def test_uses_record_strictness_matrix():
         },
         "head_sha": revision,
     }
-    assert rc._triage_context_uses(stale, revision) == ([], False)
+    assert rc._triage_context_uses(stale, revision) == ([], True)
 
     valid_uses = [{"base_sha": B2, "vision_sha": V1}]
     base_record = {
@@ -882,11 +882,11 @@ def test_allowance_record_is_nonmaterial_and_preserved_across_refresh():
         == state_with[rc.TRIAGE_CONTEXT_FIELD]
     )
 
-    # A queue at a NEW head starts a clean record: the head-keyed record from
-    # the old head is inert history on the read path.
+    # Reading an old-head record against a NEW head denies capacity. Rendering
+    # the new head starts a clean card without carrying the stale record.
     new_head = item(B2, V1, head=HEAD2)
     uses, untrusted = rc._triage_context_uses(state_with, HEAD2)
-    assert uses == [] and not untrusted
+    assert uses == [] and untrusted
     fresh = state_of(rc.render(new_head)["body"])
     assert rc.TRIAGE_CONTEXT_FIELD not in fresh
     assert rc.should_auto_triage(new_head, fresh, PURE, has_token=True)
