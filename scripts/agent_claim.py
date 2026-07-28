@@ -180,7 +180,12 @@ def supersede_triage_claim(
             raise ContractError("superseded triage claim write was not trusted")
     if list_claims(repo_slug, issue, marker):
         raise ContractError("superseded triage claim remained admissibility-visible")
-    return {"event_key": event_key, "superseded": True, "comment_id": claim["id"]}
+    return {
+        "event_key": event_key,
+        "superseded": True,
+        "comment_id": claim["id"],
+        "body": body,
+    }
 
 
 def _trusted_comment_time(value: object) -> datetime | None:

@@ -231,6 +231,40 @@ def replay_environment(
     )
     try:
 
+        def _mirror_tombstone(issue, comment_id, event_key, body=None):
+            card = cards.get(issue)
+            if card is None:
+                return
+            if body is None:
+                marker = replay.agent_claim.triage_claim_superseded_marker(
+                    event_key, "2026-07-16T09:00:00Z"
+                )
+                body = (
+                    "Agent triage event finished with consumer.committed. %s\n\n"
+                    "Superseded by an operator-approved exact-revision "
+                    "auto-triage replay." % marker
+                )
+            comments = [
+                row
+                for row in list(card.get("comments") or [])
+                if replay._issue_comment_database_id(row) != comment_id
+            ]
+            comments.append(
+                {
+                    "id": "IC_test_%s" % comment_id,
+                    "url": (
+                        "https://github.com/owner/wheelhouse/issues/%s"
+                        "#issuecomment-%s" % (issue, comment_id)
+                    ),
+                    "author": {"login": "github-actions"},
+                    "body": body,
+                    "createdAt": "2026-07-16T09:00:00Z",
+                    "updatedAt": "2026-07-16T11:00:00Z",
+                }
+            )
+            card["comments"] = comments
+            card["updatedAt"] = "2026-07-16T11:00:00Z"
+
         def supersede(**kwargs):
             events.append("tombstone")
             claims.append(kwargs)
@@ -242,23 +276,40 @@ def replay_environment(
                 card_issue=kwargs["issue"],
                 revision=kwargs["revision"],
             )
-            return {
-                "event_key": replay.agent_claim.event_key_sha256(identity),
-                "superseded": kwargs["issue"]
-                == replay.CARD_1585_INCIDENT_PERMIT["card"],
-            }
-
-        claim_context = (
-            patched(
-                replay.agent_claim,
-                {
-                    "supersede_triage_claim": supersede,
-                    "triage_replay_duplicate_only_evidence": lambda **kwargs: False,
-                },
+            event_key = replay.agent_claim.event_key_sha256(identity)
+            superseded = (
+                kwargs["issue"] == replay.CARD_1585_INCIDENT_PERMIT["card"]
             )
-            if stub_claim
-            else nullcontext()
-        )
+            result = {"event_key": event_key, "superseded": superseded}
+            if superseded:
+                comment_id = 9000 + int(kwargs["issue"])
+                result["comment_id"] = comment_id
+                _mirror_tombstone(kwargs["issue"], comment_id, event_key)
+            return result
+
+        original_supersede = replay.agent_claim.supersede_triage_claim
+
+        def supersede_live(**kwargs):
+            events.append("tombstone")
+            claims.append(kwargs)
+            result = original_supersede(**kwargs)
+            if result.get("superseded") is True:
+                _mirror_tombstone(
+                    kwargs["issue"],
+                    result["comment_id"],
+                    result["event_key"],
+                    body=result.get("body"),
+                )
+            return result
+
+        claim_patches = {
+            "supersede_triage_claim": supersede if stub_claim else supersede_live,
+        }
+        if stub_claim:
+            claim_patches["triage_replay_duplicate_only_evidence"] = (
+                lambda **kwargs: False
+            )
+        claim_context = patched(replay.agent_claim, claim_patches)
         with (
             patched(rc, replacements),
             patched(
@@ -2980,6 +3031,461 @@ def test_duplicate_only_parked_replay_does_not_consume_cap_or_once_marker():
         os.unlink(path)
 
 
+def _tombstone_body(event_key, original_updated_at="2026-07-16T09:00:00Z"):
+    marker = replay.agent_claim.triage_claim_superseded_marker(
+        event_key, original_updated_at
+    )
+    return (
+        "Agent triage event finished with consumer.committed. %s\n\n"
+        "Superseded by an operator-approved exact-revision auto-triage replay."
+        % marker
+    )
+
+
+def _get_card_tombstone_comment(issue, comment_id, event_key):
+    return {
+        "id": "IC_lag_%s" % comment_id,
+        "url": (
+            "https://github.com/owner/wheelhouse/issues/%s#issuecomment-%s"
+            % (issue, comment_id)
+        ),
+        "author": {"login": "github-actions"},
+        "body": _tombstone_body(event_key),
+        "createdAt": "2026-07-16T09:00:00Z",
+        "updatedAt": "2026-07-16T11:00:00Z",
+    }
+
+
+def test_card_shows_superseded_claim_requires_exact_id_and_marker():
+    event_key = "ab" * 32
+    comment = _get_card_tombstone_comment(42, 77, event_key)
+    card_row = {"number": 42, "comments": [comment]}
+    assert replay.card_shows_superseded_claim(
+        card_row, comment_id=77, event_key=event_key
+    )
+    assert not replay.card_shows_superseded_claim(
+        card_row, comment_id=78, event_key=event_key
+    )
+    assert not replay.card_shows_superseded_claim(
+        card_row, comment_id=77, event_key="cd" * 32
+    )
+    stale = copy.deepcopy(card_row)
+    stale["comments"][0]["body"] = "Agent triage event finished with consumer.committed."
+    assert not replay.card_shows_superseded_claim(
+        stale, comment_id=77, event_key=event_key
+    )
+    # Any comments change without the exact tombstone is insufficient.
+    foreign = {"number": 42, "comments": [{"id": 1, "body": "owner note"}]}
+    assert not replay.card_shows_superseded_claim(
+        foreign, comment_id=77, event_key=event_key
+    )
+    assert not replay.card_shows_superseded_claim(
+        {"number": 42, "comments": 3}, comment_id=77, event_key=event_key
+    )
+
+
+def test_tombstone_visibility_poll_waits_then_queues_without_false_race():
+    """Production self-race shape: first get_card is pre-tombstone, later visible."""
+    cards = {
+        42: card(),
+        43: card(number=43, target=18, revision="bbcdef2"),
+    }
+    sources = {
+        ("wheelhouse", 17, "pr-review"): source(),
+        ("wheelhouse", 18, "pr-review"): source(number=18, revision="bbcdef2"),
+    }
+    path = cards_file([42, 43])
+    event_keys = {}
+    comment_ids = {42: 501, 43: 502}
+    visibility_polls = []
+    sleeps = []
+    poll_counts = {42: 0, 43: 0}
+
+    def supersede(**kwargs):
+        identity = replay.agent_claim.normalized_event_identity(
+            action=kwargs["action"],
+            owner=kwargs["owner"],
+            repo=kwargs["repo"],
+            number=kwargs["number"],
+            card_issue=kwargs["issue"],
+            revision=kwargs["revision"],
+        )
+        event_key = replay.agent_claim.event_key_sha256(identity)
+        issue = kwargs["issue"]
+        event_keys[issue] = event_key
+        # Deliberately do NOT mirror into get_card yet - the poll must wait.
+        cards[issue]["comments"] = []
+        return {
+            "event_key": event_key,
+            "superseded": True,
+            "comment_id": comment_ids[issue],
+            "body": _tombstone_body(event_key),
+        }
+
+    def get_card_with_lag(number):
+        value = cards.get(number)
+        if value is None:
+            return None
+        # After supersede records the event key, empty comments mean the
+        # visibility poll is still waiting on GitHub replication.
+        if (
+            number in event_keys
+            and value.get("comments") == []
+            and not replay.card_shows_superseded_claim(
+                value,
+                comment_id=comment_ids[number],
+                event_key=event_keys[number],
+            )
+        ):
+            poll_counts[number] += 1
+            visibility_polls.append(number)
+            if poll_counts[number] >= 2:
+                value = copy.deepcopy(value)
+                value["comments"] = [
+                    _get_card_tombstone_comment(
+                        number, comment_ids[number], event_keys[number]
+                    )
+                ]
+                value["updatedAt"] = "2026-07-16T11:00:00Z"
+                cards[number]["comments"] = value["comments"]
+                cards[number]["updatedAt"] = value["updatedAt"]
+                return value
+        return copy.deepcopy(value)
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as calls,
+            patched(
+                replay.agent_claim,
+                {"supersede_triage_claim": supersede},
+            ),
+            patched(rc, {"get_card": get_card_with_lag}),
+            patched(
+                replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}
+            ),
+        ):
+            result = replay.run(path, "visibility-wave", 2, exact_cards="v1:42,43")
+        assert result["eligible"] == result["queued"] == 2
+        assert result["written"] == 2
+        assert poll_counts[42] >= 2 and poll_counts[43] >= 2
+        assert sleeps  # deterministic injected sleep, no wall clock
+        assert all(
+            delay == replay.TOMBSTONE_VISIBILITY_DELAY_SECONDS for delay in sleeps
+        )
+        for number in (42, 43):
+            state = rc._unique_state_block(cards[number]["body"])
+            assert state["triage_status"] == "queued"
+            assert state[replay.REPLAY_FIELD]["wave"] == "visibility-wave"
+        # Multi-card order: first card's visibility polls complete before second.
+        assert visibility_polls[0] == 42
+        assert 42 in visibility_polls and 43 in visibility_polls
+        first_43 = visibility_polls.index(43)
+        assert all(n == 42 for n in visibility_polls[:first_43])
+    finally:
+        os.unlink(path)
+
+
+def test_tombstone_visibility_waits_for_updated_at_after_comment_arrives():
+    event_key = "ab" * 32
+    comment_id = 503
+    value = card()
+    value["comments"] = [
+        _get_card_tombstone_comment(value["number"], comment_id, event_key)
+    ]
+    stale_updated_at = value["updatedAt"]
+    settled_updated_at = "2026-07-16T11:00:00Z"
+    reads = []
+    sleeps = []
+
+    def get_card_with_staggered_snapshot(number):
+        row = copy.deepcopy(value)
+        if len(reads) >= 1:
+            row["updatedAt"] = settled_updated_at
+        reads.append(replay.projection_writer.card_snapshot(row))
+        return row
+
+    with (
+        patched(rc, {"get_card": get_card_with_staggered_snapshot}),
+        patched(replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}),
+    ):
+        assert replay.wait_for_claim_tombstone_visibility(
+            value["number"],
+            {
+                "event_key": event_key,
+                "superseded": True,
+                "comment_id": comment_id,
+            },
+        )
+
+    assert len(reads) == 3
+    assert reads[0]["updated_at"] == stale_updated_at
+    assert reads[1]["updated_at"] == reads[2]["updated_at"] == settled_updated_at
+    assert reads[0]["comments"] == reads[1]["comments"] == reads[2]["comments"]
+    assert len(sleeps) == 2
+
+
+def test_tombstone_visibility_timeout_pauses_with_zero_queue_or_budget_writes():
+    cards = {
+        42: card(),
+        43: card(number=43, target=18, revision="bbcdef2"),
+    }
+    sources = {
+        ("wheelhouse", 17, "pr-review"): source(),
+        ("wheelhouse", 18, "pr-review"): source(number=18, revision="bbcdef2"),
+    }
+    path = cards_file([42, 43])
+    before = {number: value["body"] for number, value in cards.items()}
+    sleeps = []
+    budget_calls = []
+
+    tombstones = []
+
+    def supersede(**kwargs):
+        identity = replay.agent_claim.normalized_event_identity(
+            action=kwargs["action"],
+            owner=kwargs["owner"],
+            repo=kwargs["repo"],
+            number=kwargs["number"],
+            card_issue=kwargs["issue"],
+            revision=kwargs["revision"],
+        )
+        event_key = replay.agent_claim.event_key_sha256(identity)
+        # Tombstone authorized, but get_card never observes it.
+        cards[kwargs["issue"]]["comments"] = []
+        tombstones.append(kwargs["issue"])
+        return {
+            "event_key": event_key,
+            "superseded": True,
+            "comment_id": 777,
+            "body": _tombstone_body(event_key),
+        }
+
+    def reserve(number, item, ceiling):
+        budget_calls.append(number)
+        raise AssertionError("budget reserved before tombstone visibility")
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False, stub_queue=False) as calls,
+            patched(replay.agent_claim, {"supersede_triage_claim": supersede}),
+            patched(
+                rc,
+                {
+                    "reserve_triage_budget": reserve,
+                    "_configured_triage_spend_limits": lambda item: (2, 1200),
+                },
+            ),
+            patched(
+                replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}
+            ),
+        ):
+            try:
+                replay.run(path, "visibility-timeout", 2, exact_cards="v1:42,43")
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("visibility timeout did not pause the wave")
+        assert len(sleeps) == replay.TOMBSTONE_VISIBILITY_ATTEMPTS - 1
+        assert not budget_calls
+        assert not calls["queued"] and not calls["dispatched"]
+        # Authorized tombstone only - no replay marker / queued cache body write.
+        assert "queue" not in calls["events"] and not calls["edits"]
+        assert cards[42]["body"] == before[42]
+        assert cards[43]["body"] == before[43]
+        # Partial-progress semantics: first card blocked visibility; second never
+        # reached claim mutation.
+        assert tombstones == [42]
+    finally:
+        os.unlink(path)
+
+
+def test_tombstone_visibility_absent_claim_skips_poll_without_invented_success():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    sleeps = []
+    supersedes = []
+
+    def supersede(**kwargs):
+        supersedes.append(kwargs["issue"])
+        identity = replay.agent_claim.normalized_event_identity(
+            action=kwargs["action"],
+            owner=kwargs["owner"],
+            repo=kwargs["repo"],
+            number=kwargs["number"],
+            card_issue=kwargs["issue"],
+            revision=kwargs["revision"],
+        )
+        return {
+            "event_key": replay.agent_claim.event_key_sha256(identity),
+            "superseded": False,
+        }
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as calls,
+            patched(replay.agent_claim, {"supersede_triage_claim": supersede}),
+            patched(
+                replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}
+            ),
+        ):
+            result = replay.run(path, "absent-claim-wave", 25)
+        assert result["queued"] == 1
+        assert not sleeps  # no visibility poll when supersede is a no-op
+        assert supersedes == [42]
+        assert "queue" in calls["events"]
+    finally:
+        os.unlink(path)
+
+
+def test_tombstone_visibility_malformed_supersede_pauses_without_queue():
+    cards = {42: card()}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    before = cards[42]["body"]
+    sleeps = []
+
+    def supersede(**kwargs):
+        # superseded True without comment_id must not invent visibility success.
+        return {"event_key": "ab" * 32, "superseded": True}
+
+    try:
+        with (
+            replay_environment(cards, sources, stub_claim=False) as calls,
+            patched(replay.agent_claim, {"supersede_triage_claim": supersede}),
+            patched(replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}),
+        ):
+            try:
+                replay.run(path, "malformed-tombstone", 1, exact_cards="v1:42")
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("malformed supersede did not pause")
+        assert not sleeps
+        assert not calls["queued"]
+        assert cards[42]["body"] == before
+    finally:
+        os.unlink(path)
+
+
+def test_post_visibility_foreign_mutation_still_fails_projection_cas():
+    """Visibility success must not weaken the projection writer's race CAS."""
+    value = card()
+    state = rc._unique_state_block(value["body"])
+    state[rc.PROJECTION_OWNER_FIELD] = rc.PROJECTION_OWNER
+    value["body"] = rc._replace_state_block(value["body"], state)
+    cards = {42: value}
+    sources = {("wheelhouse", 17, "pr-review"): source()}
+    path = cards_file([42])
+    phase = {"name": "pre", "event_key": "", "queue_reads": 0}
+    cas_deferred = []
+
+    def supersede(**kwargs):
+        identity = replay.agent_claim.normalized_event_identity(
+            action=kwargs["action"],
+            owner=kwargs["owner"],
+            repo=kwargs["repo"],
+            number=kwargs["number"],
+            card_issue=kwargs["issue"],
+            revision=kwargs["revision"],
+        )
+        event_key = replay.agent_claim.event_key_sha256(identity)
+        phase["event_key"] = event_key
+        phase["name"] = "visible"
+        comment_id = 888
+        cards[42]["comments"] = [
+            _get_card_tombstone_comment(42, comment_id, event_key)
+        ]
+        cards[42]["updatedAt"] = "2026-07-16T11:00:00Z"
+        return {
+            "event_key": event_key,
+            "superseded": True,
+            "comment_id": comment_id,
+            "body": _tombstone_body(event_key),
+        }
+
+    original_wait = replay.wait_for_claim_tombstone_visibility
+
+    def wait_then_queue_phase(number, superseded):
+        ok = original_wait(number, superseded)
+        if ok:
+            phase["name"] = "queue"
+        return ok
+
+    def get_card_foreign_race(number):
+        row = copy.deepcopy(cards.get(number))
+        if phase["name"] != "queue" or row is None:
+            return row
+        # mark_triage_queued prewrite snapshot vs later post-reservation /
+        # projection CAS reread: inject a genuine foreign body+comments mutation.
+        phase["queue_reads"] += 1
+        if phase["queue_reads"] == 1:
+            return row
+        row["body"] = row["body"] + "\n\n<!-- owner edit -->\n"
+        row["updatedAt"] = "2026-07-16T11:05:00Z"
+        row["comments"] = list(row.get("comments") or []) + [
+            {
+                "id": "IC_owner",
+                "author": {"login": "owner"},
+                "body": "I am deciding this now",
+                "url": (
+                    "https://github.com/owner/wheelhouse/issues/42"
+                    "#issuecomment-999"
+                ),
+            }
+        ]
+        return row
+
+    import projection_writer
+
+    original_commit = projection_writer.commit_preplanned
+
+    def commit_tracking(*args, **kwargs):
+        outcome = original_commit(*args, **kwargs)
+        cas_deferred.append(outcome)
+        return outcome
+
+    try:
+        with (
+            replay_environment(
+                cards, sources, stub_claim=False, stub_queue=False
+            ) as calls,
+            patched(replay.agent_claim, {"supersede_triage_claim": supersede}),
+            patched(
+                replay,
+                {
+                    "wait_for_claim_tombstone_visibility": wait_then_queue_phase,
+                    "_tombstone_sleep": lambda seconds: None,
+                },
+            ),
+            patched(
+                rc,
+                {
+                    "get_card": get_card_foreign_race,
+                    "reserve_triage_budget": lambda number, item, ceiling: True,
+                    "_configured_triage_spend_limits": lambda item: (2, 1200),
+                },
+            ),
+            patched(projection_writer, {"commit_preplanned": commit_tracking}),
+        ):
+            try:
+                replay.run(path, "foreign-race-wave", 1, exact_cards="v1:42")
+            except ValueError as error:
+                assert "could not be queued" in str(error)
+            else:
+                raise AssertionError("foreign mutation did not fail closed")
+        state = rc._unique_state_block(cards[42]["body"])
+        assert state.get("triage_status") == "error"
+        assert replay.REPLAY_FIELD not in state
+        assert not calls["dispatched"]
+        assert phase["queue_reads"] >= 2
+        # Either post-reservation snapshot mismatch or projection CAS deferred -
+        # both are the preserved fail-closed race path, never a committed queue.
+        assert not cas_deferred or cas_deferred == ["deferred"]
+    finally:
+        os.unlink(path)
+
+
 def test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral():
     parked = card()
     state = rc._unique_state_block(parked["body"])
@@ -3413,6 +3919,14 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert wheelhouse_config["triage_daily_ceiling"] == 1200
     assert "reconcile.maybe_queue_auto_triage" in replay_text
     assert "dispatch_triage_workflow" not in replay_text
+    # Single owner: write-loop call order is supersede -> visibility -> queue.
+    write_loop = replay_text.split("def run(", 1)[1]
+    supersede_at = write_loop.index("agent_claim.supersede_triage_claim(")
+    visibility_at = write_loop.index("wait_for_claim_tombstone_visibility(")
+    queue_at = write_loop.index("reconcile.maybe_queue_auto_triage(")
+    assert supersede_at < visibility_at < queue_at
+    assert "_tombstone_sleep" in replay_text
+    assert "claim-tombstone-not-visible" in replay_text
     assert replay.REPLAY_FIELD not in rc.MATERIAL_FIELDS
     triage_text = (ROOT / ".github/workflows/triage.yml").read_text(encoding="utf-8")
     assert "triage_queued_for_head" in triage_text
@@ -3455,6 +3969,13 @@ TESTS = [
     test_same_revision_refresh_preserves_replay_marker,
     test_queue_failure_does_not_unlock_card_for_later_schedule,
     test_claim_tombstone_failure_refuses_replay_before_attempt_or_reservation,
+    test_card_shows_superseded_claim_requires_exact_id_and_marker,
+    test_tombstone_visibility_poll_waits_then_queues_without_false_race,
+    test_tombstone_visibility_waits_for_updated_at_after_comment_arrives,
+    test_tombstone_visibility_timeout_pauses_with_zero_queue_or_budget_writes,
+    test_tombstone_visibility_absent_claim_skips_poll_without_invented_success,
+    test_tombstone_visibility_malformed_supersede_pauses_without_queue,
+    test_post_visibility_foreign_mutation_still_fails_projection_cas,
     test_never_cleared_matrix_fails_closed,
     test_marker_mismatch_matrix_never_clears_or_resets_cap,
     test_replay_applies_scan_author_filter_to_live_source,

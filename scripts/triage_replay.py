@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import assessment_admission  # noqa: E402
+import projection_writer  # noqa: E402
 import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
@@ -40,6 +42,17 @@ EXACT_SELECTOR_VERSION = 1
 EXACT_SELECTOR_PREFIX = "v%s:" % EXACT_SELECTOR_VERSION
 EXACT_SELECTOR_LABEL = "exact-selector/v%s" % EXACT_SELECTOR_VERSION
 EXACT_SELECTOR_MAX_BYTES = 512
+# After supersede_triage_claim PATCHes the claim comment, GitHub's issue-view
+# GraphQL path used by render_card.get_card can lag the REST write. The
+# projection writer's CAS compares consecutive get_card snapshots including
+# updated_at and comments digest, so queueing before that lag settles races the
+# replay against its own tombstone. Poll the same get_card path until consecutive
+# full snapshots containing the exact tombstone match, then queue. Fail closed
+# on timeout - never relax CAS.
+TOMBSTONE_VISIBILITY_ATTEMPTS = 10
+TOMBSTONE_VISIBILITY_DELAY_SECONDS = 1.0
+_tombstone_sleep = time.sleep
+ISSUE_COMMENT_URL_ID_RE = re.compile(r"#issuecomment-(\d+)(?:\D|$)")
 REPLAY_WAVE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
 PR_REVISION_RE = re.compile(r"^[0-9A-Fa-f]{7,64}$")
 ISSUE_REVISION_RE = re.compile(
@@ -1139,6 +1152,137 @@ def _card_snapshot_identity(card):
     }
 
 
+def _issue_comment_database_id(comment):
+    """REST issue-comment id from get_card (GraphQL) or REST comment shapes."""
+    if not isinstance(comment, dict):
+        return None
+    raw_id = comment.get("id")
+    if not isinstance(raw_id, bool) and isinstance(raw_id, int) and raw_id >= 1:
+        return raw_id
+    for key in ("databaseId", "database_id"):
+        value = comment.get(key)
+        if not isinstance(value, bool) and isinstance(value, int) and value >= 1:
+            return value
+    url = comment.get("url")
+    if isinstance(url, str):
+        match = ISSUE_COMMENT_URL_ID_RE.search(url)
+        if match:
+            try:
+                parsed = int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+            if parsed >= 1:
+                return parsed
+    return None
+
+
+def _comment_automation_login(comment):
+    if not isinstance(comment, dict):
+        return ""
+    author = comment.get("author")
+    if isinstance(author, dict):
+        login = author.get("login")
+        if isinstance(login, str) and login:
+            return login
+    user = comment.get("user")
+    if isinstance(user, dict):
+        login = user.get("login")
+        if isinstance(login, str) and login:
+            return login
+    return ""
+
+
+def _trusted_tombstone_automation_login(login):
+    # get_card comments use GraphQL author.login ("github-actions"); REST claim
+    # rows use "github-actions[bot]". Accept only those exact automation spellings.
+    return login in {
+        "github-actions",
+        render_card.CARD_AUTOMATION_AUTHOR,
+        render_card.GET_CARD_AUTOMATION_AUTHOR,
+    }
+
+
+def card_shows_superseded_claim(card, *, comment_id, event_key):
+    """True when get_card comments include exactly one matching tombstone.
+
+    Identity is the REST comment id plus the superseded marker's event_key.
+    Any other comments-digest change is insufficient; missing, malformed, or
+    duplicate evidence fails closed as not visible.
+    """
+    if (
+        not isinstance(card, dict)
+        or isinstance(comment_id, bool)
+        or not isinstance(comment_id, int)
+        or comment_id < 1
+        or not isinstance(event_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", event_key)
+    ):
+        return False
+    comments = card.get("comments")
+    if not isinstance(comments, list):
+        return False
+    matches = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            return False
+        if _issue_comment_database_id(comment) != comment_id:
+            continue
+        if not _trusted_tombstone_automation_login(_comment_automation_login(comment)):
+            return False
+        record = agent_claim.parse_triage_claim_superseded_marker(comment.get("body"))
+        if record is None:
+            return False
+        if record.get("event_key") != event_key:
+            return False
+        matches.append(comment)
+    return len(matches) == 1
+
+
+def wait_for_claim_tombstone_visibility(number, superseded):
+    """Poll get_card until the supersede result has a stable CAS snapshot.
+
+    A successful supersede that found no claim (``superseded is False``) needs
+    no visibility wait - there is no self-write for get_card to observe. A
+    successful supersede that wrote a tombstone must appear in two consecutive
+    matching snapshots from the same get_card path the projection CAS uses
+    before any queue/budget write. Timeout or malformed/ambiguous evidence
+    returns False so the wave pauses.
+    """
+    if not isinstance(superseded, dict):
+        return False
+    if superseded.get("superseded") is not True:
+        # Absent or already-tombstoned claim: supersede is a verified no-op.
+        # Do not invent a visibility success that would mask a bad payload.
+        return superseded.get("superseded") is False
+    comment_id = superseded.get("comment_id")
+    event_key = superseded.get("event_key")
+    if (
+        isinstance(comment_id, bool)
+        or not isinstance(comment_id, int)
+        or comment_id < 1
+        or not isinstance(event_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", event_key)
+    ):
+        return False
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        return False
+    prior_snapshot = None
+    for attempt in range(TOMBSTONE_VISIBILITY_ATTEMPTS):
+        card = render_card.get_card(number)
+        if card_shows_superseded_claim(
+            card, comment_id=comment_id, event_key=event_key
+        ):
+            snapshot = projection_writer.card_snapshot(card)
+            if snapshot is not None and snapshot == prior_snapshot:
+                return True
+            prior_snapshot = snapshot
+        else:
+            prior_snapshot = None
+        if attempt + 1 < TOMBSTONE_VISIBILITY_ATTEMPTS:
+            _tombstone_sleep(TOMBSTONE_VISIBILITY_DELAY_SECONDS)
+    return False
+
+
 def _plans_match(initial, reread):
     return bool(
         initial
@@ -1729,6 +1873,23 @@ def run(
             )
         if superseded["superseded"]:
             print("replay superseded stale triage claim for card #%s" % plan["number"])
+        # Prove a stable tombstone snapshot through get_card before any
+        # queue/budget write so the projection CAS cannot straddle this
+        # self-write (card-1759 waves).
+        if not wait_for_claim_tombstone_visibility(plan["number"], superseded):
+            print(
+                "::warning::replay deferred card #%s: claim-tombstone-not-visible"
+                % plan["number"]
+            )
+            if attempt_reset_scope:
+                raise ValueError(
+                    "attempt reset paused because a sanctioned card could not be queued"
+                )
+            if exact_scope:
+                raise ValueError(
+                    "exact replay paused because a requested card could not be queued"
+                )
+            continue
 
         if incident_permit is not None:
             consumed_state = current["state"]
