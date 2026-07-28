@@ -48,7 +48,7 @@
       "properties": {
         "target_owner": {"type": "string", "minLength": 1, "maxLength": 100},
         "target_repo": {"type": "string", "minLength": 1, "maxLength": 100},
-        "target_number": {"type": "integer", "minimum": 1},
+        "target_number": {"type": "integer", "minimum": 1, "maximum": 2147483647},
         "target_facts_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "vision_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
         "vision_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

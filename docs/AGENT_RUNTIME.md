@@ -273,6 +273,63 @@ Its generated test configuration forces `chatgpt` login and an explicitly suppli
 Ambient `OPENAI_API_KEY`, `CODEX_API_KEY`, and `CODEX_ACCESS_TOKEN` are rejected before the worker starts.
 An undeclared provider, model reroute, model mismatch, or effort mismatch fails closed.
 
+## Size budgets
+
+`agent_runtime/size_budget.py` is the one authoritative owner of every byte
+bound that shapes a model interaction; no consumer carries its own copy of a
+size constant.
+The per-action table records the bound action schema, the canonical
+final-byte cap (`maxFinalBytes`), and the repair-candidate retention bound;
+the module also owns the prompt budgets (`MAX_ARG_STRLEN`-derived env budget
+and the compiled stdin-artifact cap), the transcript and result-artifact read
+bounds, the contract ceiling for `maxFinalBytes` / `delivered.bytes` /
+`final.bytes`, and the NL trusted-history inline budget.
+`tests/test_size_budget.py` holds the property tests that keep the table
+coherent.
+
+The invariants, all test-enforced:
+
+- Every action's `maxFinalBytes` dominates the worst-case canonical encoding
+  of any schema-valid value plus explicit headroom, so a schema-valid result
+  can never be rejected by its own byte bound. Character maxima in schemas
+  are costed at six canonical bytes per character (`\u00XX` escaping is the
+  worst case); ASCII-pattern-bound strings are costed exactly.
+- A delivered candidate that still exceeds its cap (only possible for
+  schema-invalid output) is retained in marker-truncated bounded form, so
+  the triage correction turn and the NL schema repair stay eligible for
+  exactly the oversize class; nothing is silently dropped.
+- The NL repair candidate bound covers the worst-case schema-valid
+  `nl-decision-v1` candidate, and the final JSON-packed repair prompt fits
+  BOTH repair lanes: the production direct stdin lane and the reviewed
+  env-carried action-lane rollback. This is why `answer` is bounded at
+  12288 characters and `free_text` at 6144: every potentially valid
+  candidate is guaranteed to reach the no-tool repair model complete.
+  If canonical `\u00XX` escapes would grow past the action lane's bound when
+  the whole prompt is JSON-packed, the prompt uses a documented reversible
+  `~HH` control-character transport (`~~` for a literal tilde) instead of
+  truncating or rejecting the valid candidate.
+  Schema-invalid candidates are truncated with an explicit marker according
+  to the final packed prompt size, not only their raw byte size.
+- The `deep-review-text-v1` verdict cap equals GitHub's 65536-character
+  comment bound (a longer verdict could never post), the final transformed
+  body is bounded after qualification and claim metadata are added, and it
+  travels to `gh api` over stdin, never as one argv/env string.
+- The NL "Conversation so far" history is bounded by turn count, per-turn
+  bytes, and total bytes with explicit elision and truncation markers, so a
+  long-lived card can never push the env-carried NL prompt past the
+  kernel's per-string `execve` limit again. The trusted-author filter is
+  byte-independent and unchanged. The task compiler applies the env cap only
+  to `claude-action-compat`; oversized trusted NL instructions fail before
+  model execution instead of being truncated, while stdin adapters retain the
+  larger compiled-prompt cap.
+- Result-artifact read caps dominate the largest possible envelope
+  (`delivered` plus `final` at the largest action cap), and the correction
+  path's larger reads dominate the result-artifact cap.
+
+When adding or resizing a schema field, change the schema and, if the worst
+case grows past the cap's headroom, raise that action's cap in the table;
+`tests/test_size_budget.py` fails until both sides agree.
+
 ## Tools and outputs
 
 Canonical tools are:

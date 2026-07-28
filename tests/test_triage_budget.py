@@ -1048,7 +1048,10 @@ def test_one_reservation_prices_the_bounded_two_call_schema_repair():
     workflow_text = read(".github/workflows/triage.yml")
     assert workflow_text.count("id: claude-repair-model") == 1
     task_builder = read("agent_runtime/task_builder.py")
-    assert '"triage.schema-repair": (60_000, 75_000, 1, 0, 65_536)' in task_builder
+    assert '"triage.schema-repair": (60_000, 75_000, 1, 0)' in task_builder
+    from agent_runtime.task_builder import ACTION_LIMITS
+
+    assert ACTION_LIMITS["triage.schema-repair"][:4] == (60_000, 75_000, 1, 0)
 
     readme = read("README.md")
     assert "1200 automatic-triage reservations and 2400 model calls" in readme

@@ -53,6 +53,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 )
 import apply_decision as ad  # noqa: E402
+from agent_runtime import size_budget  # noqa: E402
 
 _failures = []
 
@@ -3221,7 +3222,8 @@ def test_decline_prose_contract_and_real_action_path():
     check(
         "decline contract: native schema keeps the strict bounded prose carrier",
         schema["additionalProperties"] is False
-        and schema["properties"]["free_text"] == {"type": "string", "maxLength": 32768},
+        and schema["properties"]["free_text"]
+        == {"type": "string", "maxLength": size_budget.NL_FREE_TEXT_MAX_CHARS},
     )
 
     omission_cases = (

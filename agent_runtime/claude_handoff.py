@@ -58,6 +58,7 @@ PACKAGED_RUNTIME_FILES = (
     "retention.py",
     "runtime.lock.json",
     "sandbox.py",
+    "size_budget.py",
     "supervisor.py",
     "task_builder.py",
     "tools.py",

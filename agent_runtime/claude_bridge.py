@@ -28,6 +28,14 @@ from .output_validation import (
     extract_json_object,
 )
 from .retention import retained_tool_denials
+from .size_budget import (
+    CANDIDATE_TRUNCATION_TEMPLATE,
+    TRANSCRIPT_MAX_BYTES,
+    bounded_candidate_text,
+    delivered_retention_canonical_max_bytes,
+    max_final_bytes,
+    repair_candidate_max_bytes,
+)
 from .supervisor import _anchor_ok, _error, _verify_artifacts
 from .task_builder import (
     claude_capabilities,
@@ -47,9 +55,9 @@ PROTOCOL = "claude-agent-sdk-json-v1"
 
 def _transcript(path: str) -> list[dict[str, Any]]:
     candidate = Path(path)
-    if not path or candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > 8 * 1024 * 1024:
+    if not path or candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > TRANSCRIPT_MAX_BYTES:
         return []
-    value = load_json_regular(candidate, max_bytes=8 * 1024 * 1024)
+    value = load_json_regular(candidate, max_bytes=TRANSCRIPT_MAX_BYTES)
     if not isinstance(value, list):
         raise ContractError("Claude action transcript was not an event array")
     if any(not isinstance(row, dict) for row in value):
@@ -191,7 +199,9 @@ def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> An
             raise ContractError("Claude action result was not an object")
         return value
     if delivered_file:
-        return load_json_regular(delivered_file, max_bytes=131072)
+        return load_json_regular(
+            delivered_file, max_bytes=max_final_bytes(action) + 4096
+        )
     text = _result_text(terminal)
     if not text:
         raise ContractError("Claude action delivered no final result")
@@ -213,7 +223,12 @@ def _delivered(action: str, terminal: dict[str, Any], delivered_file: str) -> An
 
 
 def _raw_delivered_file(path: str, max_bytes: int) -> str:
-    """Retain bounded malformed declared output as repair-only delivered data."""
+    """Retain bounded malformed declared output as repair-only delivered data.
+
+    An oversized file is retained as a bounded truncation with an explicit
+    marker rather than dropped, so a delivered-but-oversized candidate stays
+    visible to the correction/repair path.
+    """
     if not path:
         return ""
     candidate = Path(path)
@@ -222,11 +237,15 @@ def _raw_delivered_file(path: str, max_bytes: int) -> str:
         descriptor = os.open(candidate, flags)
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            if not stat.S_ISREG(info.st_mode):
                 return ""
             raw = handle.read(max_bytes + 1)
         if len(raw) > max_bytes:
-            return ""
+            prefix = raw[:max_bytes].decode("utf-8", "ignore")
+            return prefix + (
+                CANDIDATE_TRUNCATION_TEMPLATE
+                % (len(prefix.encode("utf-8")), info.st_size)
+            )
         return raw.decode("utf-8").strip()
     except (OSError, UnicodeError):
         return ""
@@ -238,15 +257,27 @@ def _repair_candidate(
     delivered_file: str,
     max_bytes: int,
 ) -> tuple[bool, Any]:
-    """Return bounded untrusted data for the separate portable repair task."""
+    """Return bounded untrusted data for the separate portable repair task.
+
+    A candidate whose canonical encoding exceeds the action's final-byte cap
+    is retained as a marker-truncated text bounded by the action's repair
+    candidate budget, never dropped: correction eligibility requires a
+    delivered candidate, so a silent drop would disable the one correction
+    turn for exactly the oversize class it exists to heal.
+    """
+    retention = repair_candidate_max_bytes(action)
     if (
         claude_native_structured_output(action)
         and "structured_output" in terminal
     ):
         value = terminal["structured_output"]
         try:
-            if len(canonical_json_bytes(value)) <= max_bytes:
+            encoded = canonical_json_bytes(value)
+            if len(encoded) <= max_bytes:
                 return True, value
+            return True, bounded_candidate_text(
+                encoded.decode("utf-8"), retention
+            )
         except (ContractError, RecursionError, TypeError, ValueError):
             pass
     result_text = _result_text(terminal)
@@ -256,17 +287,21 @@ def _repair_candidate(
                 value, _ = extract_json_object(result_text)
             else:
                 value = json.loads(result_text)
-            if (
-                isinstance(value, dict)
-                and len(canonical_json_bytes(value)) <= max_bytes
-            ):
-                return True, value
+            if isinstance(value, dict):
+                encoded = canonical_json_bytes(value)
+                if len(encoded) <= max_bytes:
+                    return True, value
+                return True, bounded_candidate_text(
+                    encoded.decode("utf-8"), retention
+                )
         except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
             pass
-    raw_file = _raw_delivered_file(delivered_file, max_bytes)
+    raw_file = _raw_delivered_file(delivered_file, retention)
     if raw_file:
         return True, raw_file
-    return (bool(result_text), result_text)
+    if result_text:
+        return True, bounded_candidate_text(result_text, retention)
+    return False, result_text
 
 
 def _usage(rows: list[dict[str, Any]], terminal: dict[str, Any] | None, duration_ms: int) -> dict[str, Any]:
@@ -752,7 +787,7 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             )
             if has_candidate:
                 encoded = canonical_json_bytes(repair_value)
-                if len(encoded) <= task["spec"]["limits"]["maxFinalBytes"]:
+                if len(encoded) <= delivered_retention_canonical_max_bytes(task["metadata"]["action"]):
                     delivered = {"value": repair_value, "valueSha256": canonical_sha256(repair_value), "bytes": len(encoded)}
             error = _error("output.schema_invalid" if rows or delivered_file else "output.missing", "Claude action output failed trusted contract validation.", spend_started=spend_started)
     started_at, duration = _attempt_timing(execution_file, terminal, task["spec"]["limits"]["childExecutionTimeoutMs"])

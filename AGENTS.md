@@ -1262,6 +1262,7 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 All agent-assisted paths now share Agent Runtime Contract `wheelhouse.agent-runtime/v1alpha1` as the provider-portability boundary.
 The contract, action schemas, pinned Codex app-server protocol, capability negotiation, canonical tools, brokers, sandbox supervisor, adapters, consumers, and tests live under `agent_runtime/`, with the trusted CLI at `scripts/agent_runtime.py` and operator runbook at `docs/AGENT_RUNTIME.md`.
+Every model-facing byte bound - schema maxima vs `maxFinalBytes`, repair-candidate retention, prompt budgets, and the NL trusted-history inline budget - is owned by the one `agent_runtime/size_budget.py` table ("Size budgets" in `docs/AGENT_RUNTIME.md`, property-tested by `tests/test_size_budget.py`); never copy a size constant into a consumer.
 Claude is the named production primary.
 The two schema-repair actions resolve to the direct `claude-cli-pinned` profile, while the other eight actions remain on `claude-action-current-pinned`.
 `agent_runtime/config.py` guards that exact split, and `temporary_rollback_profile` is the reviewed one-setting rollback for an explicit durable replay.

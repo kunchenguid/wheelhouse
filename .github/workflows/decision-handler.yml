@@ -431,10 +431,9 @@ jobs:
         if: steps.nl-pre-model-freshness.outputs.fresh == 'true'
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
           TARGET_FILE: target.txt
+          NL_PROMPT_FILE: nl-prompt.txt
           COMMENTS_FILE: card_comments.json
           TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
           READONLY_SEARCH_ENABLED: ${{ steps.nl-readonly.outputs.enabled }}
@@ -451,7 +450,6 @@ jobs:
         name: Build the immutable Claude natural-language AgentTask
         if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' && steps.nl-gate.outputs.runtime_mode == 'claude' }}
         env:
-          NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ steps.nl-gate.outputs.repo }}
           NUMBER: ${{ steps.nl-gate.outputs.number }}
@@ -463,10 +461,9 @@ jobs:
           EVENT_KEY: ${{ steps.nl-claim.outputs.event_key }}
         run: |
           set -euo pipefail
-          printf '%s' "$NL_PROMPT" > prompt.txt
           if [ "$SEARCH" = "true" ]; then action="nl-decision.search"; else action="nl-decision.local"; fi
           python scripts/agent_runtime.py build-task \
-            --action "$action" --prompt prompt.txt --bundle "$BUNDLE" \
+            --action "$action" --prompt nl-prompt.txt --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" --owner "$OWNER" --repo "$REPO" \
             --number "$NUMBER" --kind "$KIND" --revision "$REVISION" \
             --wheelhouse-revision "$WHEELHOUSE_REVISION" --target-file target.txt \
@@ -522,7 +519,6 @@ jobs:
         name: Build the immutable natural-language decision AgentTask
         if: ${{ steps.nl-pre-model-freshness.outputs.fresh == 'true' && steps.nl-gate.outputs.runtime_mode == 'codex' }}
         env:
-          NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ steps.nl-gate.outputs.repo }}
           NUMBER: ${{ steps.nl-gate.outputs.number }}
@@ -534,7 +530,6 @@ jobs:
           EVENT_KEY: ${{ steps.nl-claim.outputs.event_key }}
         run: |
           set -euo pipefail
-          printf '%s' "$NL_PROMPT" > prompt.txt
           if [ "$SEARCH" = "true" ]; then
             action="nl-decision.search"
           else
@@ -542,7 +537,7 @@ jobs:
           fi
           python scripts/agent_runtime.py build-task \
             --action "$action" \
-            --prompt prompt.txt \
+            --prompt nl-prompt.txt \
             --bundle "$BUNDLE" \
             --out "$BUNDLE/task.json" \
             --owner "$OWNER" \

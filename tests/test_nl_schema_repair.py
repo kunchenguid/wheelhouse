@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import apply_decision as decision  # noqa: E402
+from agent_runtime import size_budget  # noqa: E402
 from agent_runtime.claude_bridge import (  # noqa: E402
     IMMUTABLE_MODEL,
     _repair_candidate,
@@ -177,10 +178,20 @@ def test_pure_repair_contract():
         "prompt: repair is no-tool and not a re-analysis",
         "NO tools" in plan["prompt"] and "NOT a re-analysis" in plan["prompt"],
     )
-    huge = MALFORMED_ESCAPE + ("x" * 100000)
+    huge = MALFORMED_ESCAPE + ("x" * 300000)
+    bounded = decision.build_nl_repair_prompt(huge)
     check(
         "prompt: pathological candidate is byte-bounded",
-        len(decision.build_nl_repair_prompt(huge).encode("utf-8")) < 30000,
+        len(bounded.encode("utf-8"))
+        < size_budget.NL_REPAIR_CANDIDATE_MAX_BYTES + 4096
+        and "[candidate truncated: retained" in bounded,
+    )
+    escape_bounded = decision.build_nl_repair_prompt("\\" * 80000)
+    check(
+        "prompt: escape-heavy invalid candidate is packed-byte-bounded",
+        size_budget.claude_action_packed_prompt_bytes(escape_bounded)
+        <= size_budget.ENV_PROMPT_MAX_BYTES
+        and "[candidate truncated: retained" in escape_bounded,
     )
 
     encoded = canonical_json_bytes(QUOTED_ANSWER)

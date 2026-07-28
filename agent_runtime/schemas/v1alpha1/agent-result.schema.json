@@ -157,7 +157,7 @@
       "properties": {
         "value": {},
         "valueSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "bytes": {"type": "integer", "minimum": 0, "maximum": 131072}
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 2097152}
       }
     },
     "final": {
@@ -167,7 +167,7 @@
         "schemaId": {"type": "string"},
         "value": {},
         "valueSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "bytes": {"type": "integer", "minimum": 0, "maximum": 131072},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 2097152},
         "validation": {
           "type": "array", "maxItems": 16,
           "items": {

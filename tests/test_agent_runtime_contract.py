@@ -17,6 +17,7 @@ import assessment_admission
 from agent_runtime.contract import ContractError, canonical_sha256, load_schema, validate_contract, validate_schema
 from agent_runtime.events import EventError, EventWriter, read_events
 from agent_runtime.supervisor import RuntimeFailure, _verify_artifacts
+from agent_runtime.size_budget import MAX_FINAL_BYTES_CEILING
 from agent_runtime.task_builder import ACTION_SCHEMAS, build_task
 from agent_runtime_testlib import WHEELHOUSE_REVISION, codex_selection, make_task
 
@@ -85,7 +86,7 @@ def main():
         changed["spec"]["selection"]["candidates"][0]["allowModelAlias"] = "false"
         check("task: alias flag has a strict type", rejects(changed, "wrong type"))
         changed = copy.deepcopy(task)
-        changed["spec"]["limits"]["maxFinalBytes"] = 999999
+        changed["spec"]["limits"]["maxFinalBytes"] = MAX_FINAL_BYTES_CEILING + 1
         check("task: output byte limit bounded", rejects(changed, "maximum"))
         changed = copy.deepcopy(task)
         changed["spec"]["limits"]["maxToolCalls"] = None
