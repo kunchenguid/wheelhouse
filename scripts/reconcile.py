@@ -355,6 +355,14 @@ def maybe_queue_auto_triage(
             item, state, row.get("labels"), has_token
         ):
             render_card.report_triage_attempt_exhaustion(row["number"], item)
+        else:
+            context_reason = render_card.triage_context_deferral_reason(
+                item, state, row.get("labels"), has_token
+            )
+            if context_reason:
+                render_card.report_triage_context_deferral(
+                    row["number"], item, context_reason
+                )
         return False
     revision = render_card.triage_revision(item)
     try:

@@ -47,8 +47,10 @@ from wheelhouse_core import (  # noqa: E402
     _auto_triage_enabled,
     _auto_triage_issues_enabled,
     _triage_attempt_cap,
+    _triage_context_allowance,
     load_config,
     TRIAGE_ATTEMPT_CAP_DEFAULT,
+    TRIAGE_CONTEXT_ALLOWANCE_DEFAULT,
 )
 
 VALID_KINDS = {"pr-review", "ci-approval", "issue-triage"}
@@ -130,10 +132,23 @@ def normalize(d):
                 ),
             )
         )
+        allowance_map = cfg.get("triage_context_allowances", {})
+        triage_context_allowance = (
+            allowance_map[repo]
+            if repo in allowance_map
+            else _triage_context_allowance(
+                repo_cfg,
+                cfg.get(
+                    "triage_context_refresh_allowance",
+                    TRIAGE_CONTEXT_ALLOWANCE_DEFAULT,
+                ),
+            )
+        )
     except SystemExit:
         auto_triage = True
         auto_triage_issues = True
         triage_attempt_cap = 1
+        triage_context_allowance = 0
     if "auto_triage" in d and not boolish(d.get("auto_triage")):
         auto_triage = boolish(d.get("auto_triage"))
     if "auto_triage_issues" in d and not boolish(d.get("auto_triage_issues")):
@@ -157,6 +172,7 @@ def normalize(d):
         "auto_triage": auto_triage,
         "auto_triage_issues": auto_triage_issues,
         "triage_attempt_cap_per_revision": triage_attempt_cap,
+        "triage_context_refresh_allowance": triage_context_allowance,
     }
 
 

@@ -321,6 +321,13 @@ PRIORITY = {
 TRIAGE_ATTEMPT_CAP_DEFAULT = 2
 TRIAGE_ATTEMPT_CAP_MIN = 1
 TRIAGE_ATTEMPT_CAP_MAX = 5
+# Separate small allowance for queued re-triages triggered ONLY by a verified
+# base-SHA or VISION-SHA movement against an unchanged head (audit F13). Zero
+# disables it; each use binds the exact (head, base, VISION) identity so a
+# repeated context grants nothing.
+TRIAGE_CONTEXT_ALLOWANCE_DEFAULT = 2
+TRIAGE_CONTEXT_ALLOWANCE_MIN = 0
+TRIAGE_CONTEXT_ALLOWANCE_MAX = 5
 TRIAGE_DAILY_CEILING_DEFAULT = 1200
 TRIAGE_DAILY_CEILING_MIN = 1
 TRIAGE_DAILY_CEILING_MAX = 2000
@@ -388,6 +395,33 @@ def _triage_attempt_cap(repo_cfg, global_default):
     )
 
 
+def _triage_context_allowance(repo_cfg, global_default):
+    """Effective verified-context (base/VISION move) refresh allowance.
+
+    The global and per-repository values both use the approved [0, 5] range;
+    zero disables the separate allowance. A malformed override fails closed to
+    zero (no allowance) rather than falling back to a potentially larger
+    global value.
+    """
+    if "triage_context_refresh_allowance" not in (repo_cfg or {}):
+        return _bounded_config_int(
+            global_default,
+            "triage_context_refresh_allowance",
+            TRIAGE_CONTEXT_ALLOWANCE_MIN,
+            TRIAGE_CONTEXT_ALLOWANCE_MAX,
+            0,
+        )
+    name = str((repo_cfg or {}).get("name") or "?")
+    return _bounded_config_int(
+        repo_cfg.get("triage_context_refresh_allowance"),
+        "triage_context_refresh_allowance",
+        TRIAGE_CONTEXT_ALLOWANCE_MIN,
+        TRIAGE_CONTEXT_ALLOWANCE_MAX,
+        0,
+        scope="repo %s" % name,
+    )
+
+
 def load_config():
     if yaml is None:
         sys.exit("PyYAML is required (pip install pyyaml)")
@@ -416,11 +450,26 @@ def load_config():
             0,
         )
     )
+    global_context_allowance = (
+        TRIAGE_CONTEXT_ALLOWANCE_DEFAULT
+        if "triage_context_refresh_allowance" not in cfg
+        else _bounded_config_int(
+            cfg.get("triage_context_refresh_allowance"),
+            "triage_context_refresh_allowance",
+            TRIAGE_CONTEXT_ALLOWANCE_MIN,
+            TRIAGE_CONTEXT_ALLOWANCE_MAX,
+            0,
+        )
+    )
     by_name = {}
     triage_attempt_caps = {}
+    triage_context_allowances = {}
     for r in repos:
         if isinstance(r, dict) and r.get("name"):
             triage_attempt_caps[r["name"]] = _triage_attempt_cap(r, global_attempt_cap)
+            triage_context_allowances[r["name"]] = _triage_context_allowance(
+                r, global_context_allowance
+            )
             _, compliance_evidence_error = compliance_evidence_config(r)
             if compliance_evidence_error:
                 print(
@@ -468,6 +517,11 @@ def load_config():
         "triage_attempt_cap_per_revision": global_attempt_cap,
         "triage_attempt_caps": triage_attempt_caps,
         "triage_daily_ceiling": daily_ceiling,
+        # Separate small allowance (audit F13) for queued re-triages triggered
+        # only by a verified base-SHA/VISION-SHA move against an unchanged
+        # head; per-repo overridable, zero disables it.
+        "triage_context_refresh_allowance": global_context_allowance,
+        "triage_context_allowances": triage_context_allowances,
         # Contributor-etiquette DEFAULT ON: a successful merge posts a short,
         # friendly @-mention thank-you on the contributor's PR. Set false (globally
         # or per-repo) to restore silent merges.
@@ -4095,6 +4149,7 @@ def build_repo(
     ci_security_summary_cache=None,
     auto_merge=False,
     triage_attempt_cap_per_revision=TRIAGE_ATTEMPT_CAP_DEFAULT,
+    triage_context_refresh_allowance=TRIAGE_CONTEXT_ALLOWANCE_DEFAULT,
 ):
     """Scan one repo. Returns (repo_result, items).
 
@@ -4473,6 +4528,9 @@ def build_repo(
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
     triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
     triage_attempt_cap = _triage_attempt_cap(repo_cfg, triage_attempt_cap_per_revision)
+    triage_context_allowance = _triage_context_allowance(
+        repo_cfg, triage_context_refresh_allowance
+    )
     auto_merge_vision_sha = ""
     if _auto_merge_enabled(repo_cfg, auto_merge) and any(
         pr.get("bucket") == "merge-ready" for pr in enriched
@@ -4540,6 +4598,7 @@ def build_repo(
         if kind == "pr-review":
             item["auto_triage"] = triage_enabled
             item["triage_attempt_cap_per_revision"] = triage_attempt_cap
+            item["triage_context_refresh_allowance"] = triage_context_allowance
             item["base_sha"] = pr.get("base_sha") or ""
             item["automerge_vision_sha"] = auto_merge_vision_sha
 
@@ -7187,6 +7246,7 @@ def cmd_scan(only_repo=None, cards_path=None):
             summary_cache,
             cfg["auto_merge"],
             cfg["triage_attempt_cap_per_revision"],
+            cfg["triage_context_refresh_allowance"],
         )
         out_repos[name] = result
         items.extend(repo_items)
