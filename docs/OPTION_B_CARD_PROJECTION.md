@@ -79,7 +79,7 @@ New-card creation still uses one complete Issue creation followed by direct-numb
 
 ### Async results and recovery
 
-A terminal triage attempt persists a bounded `wheelhouse.assessment-result/v1` comment before projection. The comment visibly says whether projection is pending or complete and includes a content digest through its result identity. The projected card binds that result ID. If immediate projection fails, scheduled reconcile finds the exact revision record and retries without dispatching a model or reserving more budget. If only the final comment update failed after a verified card write, reconcile completes that finalization without rewriting the card.
+A terminal triage attempt persists a bounded `wheelhouse.assessment-result/v2` comment before projection. The comment visibly says whether projection is pending or complete and includes a content digest through its result identity. The record preserves the authority disposition and consumption class so an advisory-only result remains non-authoritative during projection recovery. The projected card binds that result ID. If immediate projection fails, scheduled reconcile finds the exact revision record and retries without dispatching a model or reserving more budget. If only the final comment update failed after a verified card write, reconcile completes that finalization without rewriting the card. The reader retains v1 compatibility for already-pending records.
 
 The no-trusted-source security fallback remains the sole direct exception. It clears the queued cache, preserves its visible warning, and cannot fabricate a current assessment or criteria result.
 

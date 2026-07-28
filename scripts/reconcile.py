@@ -315,6 +315,9 @@ def recover_pending_assessment_projection(item, row, owner=""):
             isinstance(result.get("triage"), dict)
             and result["triage"].get("automerge")
         ),
+        primary_error_code=result.get("primary_error_code", ""),
+        authority_allowed=result.get("authority_allowed", True),
+        consumption=result.get("consumption"),
         require_queued=True,
     )
     if applied:

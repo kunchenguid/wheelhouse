@@ -101,8 +101,16 @@ def evidence_quote_utf8_byte_violations(
 
     evidence = value.get("evidence")
     if isinstance(evidence, str):
-        for index, segment in enumerate(_EVIDENCE_SEGMENT_RE.split(evidence)):
-            check("$.evidence segment %d" % index, segment)
+        quoted, malformed = _scan_quoted_evidence(
+            evidence, max_span_len=max(len(evidence), 1)
+        )
+        if quoted:
+            for index, quote in enumerate(quoted):
+                check("$.evidence quote %d" % index, quote)
+        elif not malformed:
+            _, fallback = evidence_candidates(evidence)
+            for index, quote in enumerate(fallback):
+                check("$.evidence quote %d" % index, quote)
     elif isinstance(evidence, list):
         for index, item in enumerate(evidence):
             check("$.evidence[%d]" % index, item)
@@ -239,8 +247,6 @@ def _scan_quoted_evidence(
         decoded = []
         while cursor < len(text):
             char = text[cursor]
-            if char in "\r\n":
-                break
             if char == "\\":
                 run_end = cursor
                 while run_end < len(text) and text[run_end] == "\\":

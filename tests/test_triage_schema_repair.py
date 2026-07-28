@@ -438,6 +438,32 @@ def test_decide_routing():
             dec8["outcome"] == "repaired"
             and dec8["reason"] == "primary validation failed (output.schema_invalid)",
         )
+        provenance_calls = []
+        saved_provenance = rc.enforce_triage_source_provenance
+        rc.enforce_triage_source_provenance = (
+            lambda data, provenance_file, *_args, **expected: (
+                provenance_calls.append((provenance_file, expected["event_key"]))
+                or data
+            )
+        )
+        try:
+            provenance_decision = rc.decide_triage_apply(
+                valid,
+                valid,
+                tf,
+                primary_error_code="output.schema_invalid",
+                source_provenance_file="primary-provenance.json",
+                repair_source_provenance_file="repair-provenance.json",
+                source_provenance_expected={"event_key": "primary-event"},
+                repair_source_provenance_expected={"event_key": "repair-event"},
+            )
+        finally:
+            rc.enforce_triage_source_provenance = saved_provenance
+        check(
+            "route: corrected result uses its own provenance and event binding",
+            provenance_decision["outcome"] == "repaired"
+            and provenance_calls == [("repair-provenance.json", "repair-event")],
+        )
         dec9 = rc.decide_triage_apply(
             valid, "", tf, primary_error_code="output.schema_invalid"
         )
@@ -1158,6 +1184,15 @@ def test_triage_yml_repair_wiring():
         and "Wheelhouse updated while this request waited; please retry." in update_run,
     )
     check(
+        "yaml: corrected consumption carries its own public-clone provenance binding",
+        upd.get("env", {}).get("REPAIR_SOURCE_PROVENANCE_FILE")
+        == "${{ steps.repair-result-received.outputs.public-clone-provenance }}"
+        and upd.get("env", {}).get("REPAIR_SOURCE_REVIEW_EVENT_KEY")
+        == "${{ needs.triage-repair-prepare.outputs.repair_event_key }}"
+        and "--repair-source-provenance-file" in update_run
+        and "--repair-source-review-event-key" in update_run,
+    )
+    check(
         "yaml: scrubbed consumers preserve the output channel",
         'GITHUB_OUTPUT="$GITHUB_OUTPUT"' in update_run,
     )
@@ -1403,6 +1438,27 @@ def test_evidence_quote_byte_policy():
             "bytes: %s quote surface is byte-checked" % name,
             len(evidence_quote_utf8_byte_violations(shape)) == 1,
         )
+    prefixed_boundary = {"evidence": 'target.txt: "%s"' % ("x" * 2048)}
+    split_oversized = {
+        "evidence": 'target.txt: "%s"'
+        % (("x" * 1024) + " | \n" + ("y" * 1024))
+    }
+    check(
+        "bytes: source prefixes are excluded from the quote byte count",
+        evidence_quote_utf8_byte_violations(prefixed_boundary) == [],
+    )
+    split_violations = evidence_quote_utf8_byte_violations(split_oversized)
+    check(
+        "bytes: separators inside one quoted value cannot evade the ceiling",
+        len(split_violations) == 1
+        and "2052" in split_violations[0]
+        and "$.evidence quote 0" in split_violations[0],
+    )
+    multibyte_prefixed = {"evidence": 'target.txt: "%s"' % ("é" * 1024)}
+    check(
+        "bytes: prefixed multibyte quotes honor the inclusive byte boundary",
+        evidence_quote_utf8_byte_violations(multibyte_prefixed) == [],
+    )
     # The prompt tells the model the 1024-byte rule in every branch: one
     # unconditional line plus each branch's evidence field description.
     triage_source = read(".github", "workflows", "triage.yml")
@@ -1653,6 +1709,15 @@ def test_context_equivalent_correction_task():
             and "Restores the crew merge guard rules." in cprompt
             and "2048 UTF-8 bytes" in cprompt
             and "COMPLETE replacement" in cprompt,
+        )
+        from agent_runtime.task_builder import correction_prompt
+
+        all_errors = ["$.field[%d] failed" % index for index in range(48)]
+        complete_error_prompt = correction_prompt("original", "candidate", all_errors)
+        check(
+            "correction: every trusted validation error reaches the correction turn",
+            all(error in complete_error_prompt for error in all_errors)
+            and "further errors omitted" not in complete_error_prompt,
         )
         check(
             "correction: no recursion, no fallback, no second correction",

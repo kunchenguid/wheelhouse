@@ -2058,8 +2058,10 @@ jobs:
           BASE_SHA: ${{ needs.triage.outputs.base_sha }}
           AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
           SOURCE_PROVENANCE_FILE: ${{ steps.primary-result.outputs.public-clone-provenance }}
+          REPAIR_SOURCE_PROVENANCE_FILE: ${{ steps.repair-result-received.outputs.public-clone-provenance }}
           SOURCE_REVIEW_ACTION: ${{ needs.triage.outputs.event_action }}
           SOURCE_REVIEW_EVENT_KEY: ${{ needs.triage.outputs.event_key }}
+          REPAIR_SOURCE_REVIEW_EVENT_KEY: ${{ needs.triage-repair-prepare.outputs.repair_event_key }}
           SOURCE_REVIEW_OWNER: ${{ github.repository_owner }}
           SOURCE_REVIEW_REPO: ${{ needs.triage.outputs.repo }}
           SOURCE_REVIEW_NUMBER: ${{ needs.triage.outputs.number }}
@@ -2102,8 +2104,10 @@ jobs:
               --target-facts-sha256 "$TARGET_FACTS_SHA256" \
               --target-facts-file "${TARGET_FACTS_FILE:-}" \
               --source-provenance-file "${SOURCE_PROVENANCE_FILE:-}" \
+              --repair-source-provenance-file "${REPAIR_SOURCE_PROVENANCE_FILE:-}" \
               --source-review-action "$SOURCE_REVIEW_ACTION" \
               --source-review-event-key "$SOURCE_REVIEW_EVENT_KEY" \
+              --repair-source-review-event-key "${REPAIR_SOURCE_REVIEW_EVENT_KEY:-}" \
               --source-review-owner "$SOURCE_REVIEW_OWNER" \
               --source-review-repo "$SOURCE_REVIEW_REPO" \
               --source-review-number "$SOURCE_REVIEW_NUMBER" \

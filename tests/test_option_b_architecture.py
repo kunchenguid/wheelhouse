@@ -1754,6 +1754,9 @@ def test_e2e_07_result_recovery_and_owner_race():
                 ("target.txt", "bounded verified span"),
             ),
         },
+        authority_allowed=False,
+        consumption="advisory",
+        primary_error_code="output.schema_invalid",
     )
     round_trip = assessment_record.parse_body(
         assessment_record.body(record, projected=False)
@@ -1789,7 +1792,12 @@ def test_e2e_07_result_recovery_and_owner_race():
         render_card.dispatch_triage_workflow = saved_dispatch
     check(
         "E2E-07: durable result recovers once without another model dispatch",
-        recovered is True and len(applied) == 1 and applied[0][1]["require_queued"] is True,
+        recovered is True
+        and len(applied) == 1
+        and applied[0][1]["require_queued"] is True
+        and applied[0][1]["authority_allowed"] is False
+        and applied[0][1]["consumption"] == "advisory"
+        and applied[0][1]["primary_error_code"] == "output.schema_invalid",
     )
     finalized_state = dict(state)
     finalized_state.update(

@@ -8527,6 +8527,9 @@ def update_card_triage(
             revision,
             triage=triage if isinstance(triage, dict) else None,
             error=(error or TRIAGE_UNAVAILABLE) if not isinstance(triage, dict) else "",
+            authority_allowed=authority_allowed,
+            consumption=consumption,
+            primary_error_code=primary_error_code,
         )
         assessment_record.persist(number, durable_result)
         # The durable visible agent-status comment is itself a queue event.
@@ -9293,9 +9296,11 @@ def decide_triage_apply(
     target_src_revision="",
     repair_claim_admitted=None,
     source_provenance_file="",
+    repair_source_provenance_file="",
     vision_file="",
     target_facts_file="",
     source_provenance_expected=None,
+    repair_source_provenance_expected=None,
     primary_error_code="",
     repair_error_code="",
 ):
@@ -9338,7 +9343,7 @@ def decide_triage_apply(
     triage = parse_triage_json(result_text)
     correction_attempted = bool(repaired_text) or repair_claim_admitted is not None
 
-    def _finalize(data):
+    def _finalize(data, provenance_file, provenance_expected):
         data = _bind_verified_evidence_spans(
             data,
             target_file,
@@ -9346,14 +9351,14 @@ def decide_triage_apply(
             target_src_manifest,
             target_src_revision,
             vision_file,
-            (source_provenance_expected or {}).get("vision_content_sha256", ""),
+            (provenance_expected or {}).get("vision_content_sha256", ""),
         )
         return enforce_triage_source_provenance(
             data,
-            source_provenance_file,
+            provenance_file,
             vision_file,
             target_facts_file,
-            **(source_provenance_expected or {}),
+            **(provenance_expected or {}),
         )
 
     if (
@@ -9364,7 +9369,9 @@ def decide_triage_apply(
     ):
         return {
             "outcome": "success",
-            "triage": _finalize(triage),
+            "triage": _finalize(
+                triage, source_provenance_file, source_provenance_expected
+            ),
             "reason": "",
             "candidate": "",
             "correction_attempted": False,
@@ -9403,7 +9410,11 @@ def decide_triage_apply(
         ):
             return {
                 "outcome": "repaired",
-                "triage": _finalize(corrected),
+                "triage": _finalize(
+                    corrected,
+                    repair_source_provenance_file,
+                    repair_source_provenance_expected,
+                ),
                 "reason": reason,
                 "candidate": candidate,
                 "correction_attempted": True,
@@ -9434,7 +9445,9 @@ def decide_triage_apply(
     if triage is not None and _triage_evidence_verified(triage, target_file):
         return {
             "outcome": "advisory",
-            "triage": _finalize(triage),
+            "triage": _finalize(
+                triage, source_provenance_file, source_provenance_expected
+            ),
             "reason": reason,
             "failed_reason": failed_reason,
             "candidate": candidate,
@@ -9513,12 +9526,14 @@ def main():
     ta.add_argument("--base-sha", default="")
     ta.add_argument("--automerge-behavior-available", action="store_true")
     ta.add_argument("--source-provenance-file", default="")
+    ta.add_argument("--repair-source-provenance-file", default="")
     ta.add_argument("--vision-file", default="")
     ta.add_argument("--target-facts-file", default="")
     ta.add_argument("--vision-content-sha256", default="")
     ta.add_argument("--target-facts-sha256", default="")
     ta.add_argument("--source-review-action", default="")
     ta.add_argument("--source-review-event-key", default="")
+    ta.add_argument("--repair-source-review-event-key", default="")
     ta.add_argument("--source-review-owner", default="")
     ta.add_argument("--source-review-repo", default="")
     ta.add_argument("--source-review-number", type=int, default=0)
@@ -9710,11 +9725,24 @@ def main():
             target_src_revision=args.target_src_revision,
             repair_claim_admitted=repair_claim_admitted,
             source_provenance_file=args.source_provenance_file,
+            repair_source_provenance_file=args.repair_source_provenance_file,
             vision_file=args.vision_file,
             target_facts_file=args.target_facts_file,
             source_provenance_expected={
                 "action": args.source_review_action,
                 "event_key": args.source_review_event_key,
+                "owner": args.source_review_owner,
+                "repo": args.source_review_repo,
+                "number": args.source_review_number,
+                "revision": args.revision,
+                "base_sha": args.base_sha,
+                "vision_sha": args.vision_sha,
+                "vision_content_sha256": args.vision_content_sha256,
+                "target_facts_sha256": args.target_facts_sha256,
+            },
+            repair_source_provenance_expected={
+                "action": args.source_review_action,
+                "event_key": args.repair_source_review_event_key,
                 "owner": args.source_review_owner,
                 "repo": args.source_review_repo,
                 "number": args.source_review_number,
