@@ -1052,6 +1052,21 @@ def test_observation_drift_refresh_recovers_only_through_the_exact_card_selector
     # spend, and remains zero-write.
     assert "planned card mutations" in run["output"]
     assert "triage_attempts 1->2" in run["output"]
+    for effect in (
+        "queued Triage section",
+        "triaged_base_sha=",
+        "triaged_vision_sha=",
+        "reconcile-absence state plus lifecycle projection",
+        "activity_reflected_at",
+        "recomputes derived options",
+        "removing Accept recommendation while queued",
+        "Recommended action section",
+        "visible Auto-merge criteria checklist",
+        "automerge_criteria_version/automerge_criteria",
+    ):
+        assert effect in run["output"], effect
+    assert "No label, comment, title, or target-repository writes." in run["output"]
+    assert "No label, comment, title, option," not in run["output"]
     assert "planned model spend" in run["output"]
     assert "at most 2 model calls" in run["output"]
     assert "never reset" in run["output"]

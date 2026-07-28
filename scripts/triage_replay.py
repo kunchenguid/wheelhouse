@@ -1882,6 +1882,11 @@ def run(
                 )
                 if plan["cleared"] == OBSERVATION_DRIFT_REFRESH_CLEARED:
                     cap = plan["item"]["triage_attempt_cap_per_revision"]
+                    base_sha = plan["item"].get("base_sha", "") or "cleared"
+                    vision_sha = (
+                        plan["item"].get("automerge_vision_sha", "") or "cleared"
+                    )
+                    activity = plan["item"].get("updated_at", "") or "unchanged"
                     print(
                         "DRY-RUN card #%s planned card mutations (card-only, in "
                         "order): (1) clear the stale observation-bound triage cache "
@@ -1889,9 +1894,19 @@ def run(
                         "residual recommendation, auto-merge verdict, primary/"
                         "consumption telemetry) and remove the stale Triage section; "
                         "(2) write the triage_replay v%s marker cleared=%s; (3) the "
-                        "atomic queued checkpoint writes triaged_sha=%s, "
-                        "triage_status=queued, triage_attempts %s->%s. No label, "
-                        "comment, title, option, or target-repository writes."
+                        "shared atomic queued checkpoint inserts the queued Triage "
+                        "section; writes triaged_sha=%s, triage_status=queued, "
+                        "triage_attempts %s->%s, triaged_base_sha=%s, "
+                        "triaged_vision_sha=%s; clears triage error/repair telemetry "
+                        "and any reconcile-absence state plus lifecycle projection; "
+                        "advances activity_reflected_at to %s when newer; recomputes "
+                        "derived options and republishes decision controls, removing "
+                        "Accept recommendation while queued and preserving the "
+                        "remaining allowed options; removes any Recommended action "
+                        "section; (4) the atomic auto-merge projection recomputes and "
+                        "replaces the visible Auto-merge criteria checklist and the "
+                        "frozen automerge_criteria_version/automerge_criteria state. "
+                        "No label, comment, title, or target-repository writes."
                         % (
                             plan["number"],
                             marker_version,
@@ -1899,6 +1914,9 @@ def run(
                             plan["revision"],
                             plan["attempt_count"],
                             plan["attempt_count"] + 1,
+                            base_sha,
+                            vision_sha,
+                            activity,
                         )
                     )
                     print(
