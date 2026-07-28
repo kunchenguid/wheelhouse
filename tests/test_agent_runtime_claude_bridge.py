@@ -975,9 +975,438 @@ def main():
 
         _, overflow_bundle = make_bundle(root / "overflow")
         overflow_execution = root / "overflow.json"
-        transcript(overflow_execution, IMMUTABLE_MODEL, "HOLD", 10**100)
+        transcript(overflow_execution, IMMUTABLE_MODEL, "HOLD\n\n- Reviewed the bounded target.", 10**100)
         overflow, _ = run_bridge(overflow_bundle, overflow_execution, "overflow")
-        check("bridge: oversized duration emits stable protocol failure", overflow["status"] == "failed" and overflow["error"]["code"] == "harness.protocol")
+        check(
+            "bridge: oversized duration is non-authoritative telemetry variance",
+            overflow["status"] == "succeeded"
+            and overflow["final"]["value"]["text"].startswith("HOLD")
+            and overflow["usage"]["durationMs"] == 0
+            and overflow["proof"]["transcriptVariance"]["accepted"] == ["optional-timing-out-of-range"],
+        )
+
+        # F3 / R2: benign transcript variance keeps one consistent result+identity,
+        # while conflict/substitution/error shapes stay fail-closed.
+        hold_text = "HOLD\n\n- Reviewed the bounded target."
+
+        def variance_rows(*extra_prefix, result_overrides=None, trailing=None):
+            rows = list(extra_prefix)
+            rows.append({"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL})
+            result_row = {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": hold_text,
+                "duration_ms": 10,
+                "num_turns": 1,
+            }
+            if result_overrides:
+                result_row.update(result_overrides)
+            rows.append(result_row)
+            if trailing:
+                rows.extend(trailing)
+            return rows
+
+        _, trail_bundle = make_bundle(root / "trailing-non-result")
+        trail_execution = root / "trailing-non-result.json"
+        trail_execution.write_text(
+            json.dumps(
+                variance_rows(
+                    trailing=[
+                        {"type": "assistant", "message": {"content": [{"type": "text", "text": "post-result telemetry"}]}},
+                        {"type": "system", "subtype": "status", "status": "compacted"},
+                    ]
+                )
+            ),
+            encoding="utf-8",
+        )
+        trail, _ = run_bridge(trail_bundle, trail_execution, "trailing-non-result")
+        check(
+            "bridge: trailing non-result rows after one terminal result are accepted",
+            trail["status"] == "succeeded"
+            and trail["final"]["value"]["text"] == hold_text
+            and trail["selection"]["actualModel"] == IMMUTABLE_MODEL
+            and trail["proof"]["transcriptVariance"]["accepted"] == ["trailing-non-result-rows"],
+        )
+
+        _, reduced_trail_bundle = make_bundle(root / "reduced-trailing-non-result")
+        reduced_trail_execution = root / "reduced-trailing-non-result.json"
+        reduced_trail_rows = reduce_execution(
+            variance_rows(
+                trailing=[
+                    {"type": "system", "subtype": "status", "status": "compacted"},
+                    {"type": "future-telemetry", "payload": "must not survive"},
+                    {"type": "assistant", "message": {}},
+                    {"type": "assistant", "message": {"content": "malformed"}},
+                ]
+            ),
+            "deep-review.local",
+        )
+        reduced_trail_execution.write_text(
+            json.dumps(reduced_trail_rows),
+            encoding="utf-8",
+        )
+        reduced_trail, _ = run_bridge(
+            reduced_trail_bundle,
+            reduced_trail_execution,
+            "reduced-trailing-non-result",
+        )
+        check(
+            "bridge: production reduction preserves trailing variance evidence",
+            reduced_trail["status"] == "succeeded"
+            and reduced_trail["final"]["value"]["text"] == hold_text
+            and reduced_trail["proof"]["transcriptVariance"]["accepted"]
+            == ["trailing-non-result-rows"]
+            and "must not survive" not in reduced_trail_execution.read_text(encoding="utf-8")
+            and len(reduced_trail_rows) == 6
+            and reduced_trail_rows[-2:] == [{}, {}],
+        )
+
+        _, two_init_bundle = make_bundle(root / "two-agreeing-inits")
+        two_init_execution = root / "two-agreeing-inits.json"
+        two_init_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        two_init, _ = run_bridge(two_init_bundle, two_init_execution, "two-agreeing-inits")
+        check(
+            "bridge: repeated agreeing init events are accepted",
+            two_init["status"] == "succeeded"
+            and two_init["final"]["value"]["text"] == hold_text
+            and two_init["selection"]["actualModel"] == IMMUTABLE_MODEL
+            and two_init["proof"]["transcriptVariance"]["accepted"] == ["repeated-agreeing-init"],
+        )
+
+        _, late_init_bundle = make_bundle(root / "late-init")
+        late_init_execution = root / "late-init.json"
+        late_init_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    [
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "duration_ms": 10,
+                            "num_turns": 1,
+                        },
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    ],
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        late_init, _ = run_bridge(late_init_bundle, late_init_execution, "late-init")
+        check(
+            "bridge: model identity first observed after result fails closed",
+            late_init["status"] == "failed"
+            and late_init["error"]["code"] == "model.mismatch"
+            and not late_init["selection"]["actualModel"]
+            and "final" not in late_init
+            and "transcriptVariance" not in late_init["proof"],
+        )
+
+        _, trailing_init_bundle = make_bundle(root / "trailing-agreeing-init")
+        trailing_init_execution = root / "trailing-agreeing-init.json"
+        trailing_init_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    variance_rows(
+                        trailing=[
+                            {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL}
+                        ]
+                    ),
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        trailing_init, _ = run_bridge(
+            trailing_init_bundle,
+            trailing_init_execution,
+            "trailing-agreeing-init",
+        )
+        check(
+            "bridge: later init is accepted only with prior agreeing identity",
+            trailing_init["status"] == "succeeded"
+            and trailing_init["final"]["value"]["text"] == hold_text
+            and trailing_init["selection"]["actualModel"] == IMMUTABLE_MODEL
+            and trailing_init["proof"]["transcriptVariance"]["accepted"]
+            == ["repeated-agreeing-init", "trailing-non-result-rows"],
+        )
+
+        for label, malformed_model in (
+            ("missing", None),
+            ("empty", ""),
+            ("non-string", 46),
+        ):
+            _, malformed_init_bundle = make_bundle(root / f"{label}-repeated-init")
+            malformed_init_execution = root / f"{label}-repeated-init.json"
+            malformed_init = {"type": "system", "subtype": "init"}
+            if label != "missing":
+                malformed_init["model"] = malformed_model
+            malformed_init_execution.write_text(
+                json.dumps(
+                    [
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                        malformed_init,
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "duration_ms": 10,
+                            "num_turns": 1,
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            malformed_init_result, _ = run_bridge(
+                malformed_init_bundle,
+                malformed_init_execution,
+                f"{label}-repeated-init",
+            )
+            check(
+                f"bridge: {label} repeated init model identity fails closed",
+                malformed_init_result["status"] == "failed"
+                and malformed_init_result["error"]["code"] == "model.mismatch"
+                and not malformed_init_result["selection"]["actualModel"]
+                and "final" not in malformed_init_result
+                and "transcriptVariance" not in malformed_init_result["proof"],
+            )
+
+        _, zero_init_bundle = make_bundle(root / "zero-init")
+        zero_init_execution = root / "zero-init.json"
+        zero_init_execution.write_text(
+            json.dumps(
+                [
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        zero_init, _ = run_bridge(zero_init_bundle, zero_init_execution, "zero-init")
+        check(
+            "bridge: zero init events still fail closed for missing model identity",
+            zero_init["status"] == "failed"
+            and zero_init["error"]["code"] == "model.mismatch"
+            and not zero_init["selection"]["actualModel"]
+            and "final" not in zero_init
+            and "transcriptVariance" not in zero_init["proof"],
+        )
+
+        _, conflict_bundle = make_bundle(root / "conflicting-inits")
+        conflict_execution = root / "conflicting-inits.json"
+        conflict_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {"type": "system", "subtype": "init", "model": "claude-other-model"},
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        conflict, _ = run_bridge(conflict_bundle, conflict_execution, "conflicting-inits")
+        check(
+            "bridge: disagreeing init model identities fail closed",
+            conflict["status"] == "failed"
+            and conflict["error"]["code"] == "model.mismatch"
+            and not conflict["selection"]["actualModel"]
+            and "final" not in conflict
+            and "transcriptVariance" not in conflict["proof"],
+        )
+
+        _, error_subtype_bundle = make_bundle(root / "error-subtype")
+        error_subtype_execution = root / "error-subtype.json"
+        error_subtype_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {
+                        "type": "result",
+                        "subtype": "error",
+                        "is_error": True,
+                        "result": "provider failed",
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        error_subtype, _ = run_bridge(error_subtype_bundle, error_subtype_execution, "error-subtype")
+        check(
+            "bridge: error subtype terminal result fails closed",
+            error_subtype["status"] == "failed"
+            and error_subtype["error"]["code"] == "harness.crash"
+            and "final" not in error_subtype
+            and "transcriptVariance" not in error_subtype["proof"],
+        )
+
+        _, missing_duration_bundle = make_bundle(root / "missing-duration")
+        missing_duration_execution = root / "missing-duration.json"
+        missing_duration_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    [
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "num_turns": 1,
+                        },
+                    ],
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        missing_duration, _ = run_bridge(missing_duration_bundle, missing_duration_execution, "missing-duration")
+        check(
+            "bridge: absent duration_ms is accepted as optional timing variance",
+            missing_duration["status"] == "succeeded"
+            and missing_duration["final"]["value"]["text"] == hold_text
+            and missing_duration["usage"]["durationMs"] == 0
+            and missing_duration["proof"]["transcriptVariance"]["accepted"] == ["optional-timing-absent"],
+        )
+
+        _, string_duration_bundle = make_bundle(root / "string-duration")
+        string_duration_execution = root / "string-duration.json"
+        string_duration_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": "12",
+                        "num_turns": 1,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        string_duration, _ = run_bridge(string_duration_bundle, string_duration_execution, "string-duration")
+        check(
+            "bridge: non-integer duration_ms is accepted as optional timing variance",
+            string_duration["status"] == "succeeded"
+            and string_duration["final"]["value"]["text"] == hold_text
+            and string_duration["usage"]["durationMs"] == 0
+            and string_duration["proof"]["transcriptVariance"]["accepted"] == ["optional-timing-non-integer"],
+        )
+
+        _, combined_bundle = make_bundle(root / "combined-benign-variance")
+        combined_execution = root / "combined-benign-variance.json"
+        combined_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "num_turns": 1,
+                    },
+                    {"type": "assistant", "message": {"content": [{"type": "text", "text": "tail"}]}},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        combined, _ = run_bridge(combined_bundle, combined_execution, "combined-benign-variance")
+        check(
+            "bridge: combined benign variance keeps one consistent result and identity",
+            combined["status"] == "succeeded"
+            and combined["final"]["value"]["text"] == hold_text
+            and combined["selection"]["actualModel"] == IMMUTABLE_MODEL
+            and combined["proof"]["transcriptVariance"]["accepted"]
+            == ["repeated-agreeing-init", "trailing-non-result-rows", "optional-timing-absent"],
+        )
+
+        # Control: existing duplicate-result and model-substitution fixtures above
+        # remain fail-closed; re-assert substitution still rejects after variance work.
+        _, still_sub_bundle = make_bundle(root / "still-substituted")
+        still_sub_execution = root / "still-substituted.json"
+        transcript(still_sub_execution, "claude-substituted-model", hold_text)
+        still_sub, _ = run_bridge(still_sub_bundle, still_sub_execution, "still-substituted")
+        check(
+            "bridge: model substitution remains rejected after benign-variance acceptance",
+            still_sub["status"] == "failed"
+            and still_sub["error"]["code"] == "model.mismatch"
+            and "final" not in still_sub
+            and "transcriptVariance" not in still_sub["proof"],
+        )
+
+        _, still_dup_bundle = make_bundle(root / "still-duplicate")
+        still_dup_execution = root / "still-duplicate.json"
+        still_dup_execution.write_text(
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    },
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": hold_text,
+                        "duration_ms": 10,
+                        "num_turns": 1,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        still_dup, _ = run_bridge(still_dup_bundle, still_dup_execution, "still-duplicate")
+        check(
+            "bridge: duplicate terminal results remain rejected after benign-variance acceptance",
+            still_dup["status"] == "failed"
+            and still_dup["error"]["code"] == "harness.protocol"
+            and "final" not in still_dup
+            and "transcriptVariance" not in still_dup["proof"],
+        )
 
         # Successful controller completion still requires equal non-null signed-input evidence.
         def bridge_with_observations(label: str, post_observation, target_inputs_read_only: bool, pre_observation: str = "b" * 64):
