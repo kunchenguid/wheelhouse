@@ -221,14 +221,23 @@ def reduce_execution(rows: list[dict[str, Any]], action: str) -> list[dict[str, 
         raise ValueError("execution data was not an event array")
     bounded = []
     for row in rows:
+        kept = {}
         if row.get("type") == "system" and row.get("subtype") == "init":
-            bounded.append({"type": "system", "subtype": "init", "model": row.get("model")})
+            kept = {
+                key: row[key]
+                for key in ("type", "subtype", "model")
+                if key in row
+            }
         elif row.get("type") == "assistant" and isinstance(row.get("message"), dict):
             content = row["message"].get("content")
             if isinstance(content, list):
-                bounded.append({"type": "assistant", "message": {"content": [{"type": "tool_use"} for item in content if isinstance(item, dict) and item.get("type") == "tool_use"]}})
+                kept = {"type": "assistant", "message": {"content": [{"type": "tool_use"} for item in content if isinstance(item, dict) and item.get("type") == "tool_use"]}}
         elif row.get("type") == "result":
-            kept = {key: row.get(key) for key in ("type", "subtype", "is_error", "result", "duration_ms", "num_turns")}
+            kept = {
+                key: row[key]
+                for key in ("type", "subtype", "is_error", "result", "duration_ms", "num_turns")
+                if key in row
+            }
             if (
                 isinstance(row.get("permission_denials_count"), int)
                 and not isinstance(row.get("permission_denials_count"), bool)
@@ -240,9 +249,7 @@ def reduce_execution(rows: list[dict[str, Any]], action: str) -> list[dict[str, 
             usage = row.get("usage")
             if isinstance(usage, dict):
                 kept["usage"] = {key: usage.get(key) for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
-            bounded.append(kept)
-        else:
-            bounded.append({})
+        bounded.append(kept)
     evidence = denied_tool_evidence(rows)
     if evidence:
         terminal_index = next((index for index, row in enumerate(bounded) if row.get("type") == "result"), len(bounded))

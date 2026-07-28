@@ -1031,18 +1031,19 @@ def main():
 
         _, reduced_trail_bundle = make_bundle(root / "reduced-trailing-non-result")
         reduced_trail_execution = root / "reduced-trailing-non-result.json"
-        reduced_trail_execution.write_text(
-            json.dumps(
-                reduce_execution(
-                    variance_rows(
-                        trailing=[
-                            {"type": "system", "subtype": "status", "status": "compacted"},
-                            {"type": "future-telemetry", "payload": "must not survive"},
-                        ]
-                    ),
-                    "deep-review.local",
-                )
+        reduced_trail_rows = reduce_execution(
+            variance_rows(
+                trailing=[
+                    {"type": "system", "subtype": "status", "status": "compacted"},
+                    {"type": "future-telemetry", "payload": "must not survive"},
+                    {"type": "assistant", "message": {}},
+                    {"type": "assistant", "message": {"content": "malformed"}},
+                ]
             ),
+            "deep-review.local",
+        )
+        reduced_trail_execution.write_text(
+            json.dumps(reduced_trail_rows),
             encoding="utf-8",
         )
         reduced_trail, _ = run_bridge(
@@ -1056,7 +1057,9 @@ def main():
             and reduced_trail["final"]["value"]["text"] == hold_text
             and reduced_trail["proof"]["transcriptVariance"]["accepted"]
             == ["trailing-non-result-rows"]
-            and "must not survive" not in reduced_trail_execution.read_text(encoding="utf-8"),
+            and "must not survive" not in reduced_trail_execution.read_text(encoding="utf-8")
+            and len(reduced_trail_rows) == 6
+            and reduced_trail_rows[-2:] == [{}, {}],
         )
 
         _, two_init_bundle = make_bundle(root / "two-agreeing-inits")
@@ -1215,16 +1218,19 @@ def main():
         missing_duration_execution = root / "missing-duration.json"
         missing_duration_execution.write_text(
             json.dumps(
-                [
-                    {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
-                    {
-                        "type": "result",
-                        "subtype": "success",
-                        "is_error": False,
-                        "result": hold_text,
-                        "num_turns": 1,
-                    },
-                ]
+                reduce_execution(
+                    [
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "num_turns": 1,
+                        },
+                    ],
+                    "deep-review.local",
+                )
             ),
             encoding="utf-8",
         )
