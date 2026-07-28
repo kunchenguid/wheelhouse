@@ -1889,11 +1889,14 @@ def run(
                     activity = plan["item"].get("updated_at", "") or "unchanged"
                     print(
                         "DRY-RUN card #%s planned card mutations (card-only, in "
-                        "order): (1) clear the stale observation-bound triage cache "
+                        "order): (1) if the exact prior triage claim comment exists, "
+                        "PATCH that existing bot comment into the verified supersede "
+                        "tombstone before queueing; (2) clear the stale "
+                        "observation-bound triage cache "
                         "(admitted assessment, assessment result/admission records, "
                         "residual recommendation, auto-merge verdict, primary/"
                         "consumption telemetry) and remove the stale Triage section; "
-                        "(2) write the triage_replay v%s marker cleared=%s; (3) the "
+                        "(3) write the triage_replay v%s marker cleared=%s; (4) the "
                         "shared atomic queued checkpoint inserts the queued Triage "
                         "section; writes triaged_sha=%s, triage_status=queued, "
                         "triage_attempts %s->%s, triaged_base_sha=%s, "
@@ -1903,10 +1906,12 @@ def run(
                         "derived options and republishes decision controls, removing "
                         "Accept recommendation while queued and preserving the "
                         "remaining allowed options; removes any Recommended action "
-                        "section; (4) the atomic auto-merge projection recomputes and "
+                        "section; (5) the atomic auto-merge projection recomputes and "
                         "replaces the visible Auto-merge criteria checklist and the "
                         "frozen automerge_criteria_version/automerge_criteria state. "
-                        "No label, comment, title, or target-repository writes."
+                        "No label, title, new-comment, or target-repository writes; "
+                        "the conditional existing-comment PATCH above is the only "
+                        "planned comment mutation."
                         % (
                             plan["number"],
                             marker_version,
@@ -1924,9 +1929,10 @@ def run(
                         "attempt (at most 2 model calls with the bounded correction "
                         "turn) reserved as 1 daily-ledger slot through the trusted "
                         "checkpoint; the per-revision attempt cap is preserved "
-                        "(%s/%s after queue, never reset). Claim identity is rebound "
-                        "through one supersede tombstone and dispatch uses only the "
-                        "existing sealed permit."
+                        "(%s/%s after queue, never reset). Claim identity is checked "
+                        "and, when the exact prior claim exists, rebound through the "
+                        "same supersede tombstone described above; dispatch uses only "
+                        "the existing sealed permit."
                         % (plan["number"], plan["attempt_count"] + 1, cap)
                     )
             else:
