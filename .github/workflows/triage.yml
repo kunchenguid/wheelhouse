@@ -15,20 +15,25 @@ name: triage
 # decision checkboxes in the same update step that records success or failure,
 # and its final recovery step fail-opens a held card whose run never reached
 # that update step.
-# Every primary and repair path resolves through the shared selection boundary.
-# Primary triage stays on the pinned Claude Action; schema repair uses the
-# pinned direct Claude CLI, with the action step retained as rollback target.
-# Codex remains disabled non-target adapter evidence, and no runtime failure
-# automatically invokes another provider.
+# Every primary and correction path resolves through the shared selection
+# boundary. Primary triage stays on the pinned Claude Action; the correction
+# turn rebuilds the ORIGINAL task from its verified handoff and rides the same
+# pinned Claude Action step. Codex remains disabled non-target adapter
+# evidence, and no runtime failure automatically invokes another provider.
 #
-# Bounded schema repair (cards #551/#547 class): when the model DELIVERS a
-# result that fails parse/normalize schema validation, exactly ONE extra
-# tokenless, no-tool, single-turn task reshapes that candidate to the required
-# schema (no diff re-read, no fresh analysis). The repaired result is
-# re-validated; if it is still invalid the card records the visible
-# triage-unavailable error carrying the structural validation reason. A missing
-# result (E2BIG / auth / rate-limit / infra - no extractable result) never
-# triggers repair and keeps today's behavior. See "Bounded schema repair" in
+# Context-equivalent single correction turn: when the model DELIVERS a
+# candidate that fails the complete bound action schema, the evidence-quote
+# UTF-8 byte policy, or trusted evidence anchoring - including candidates the
+# looser advisory parser can consume - exactly ONE correction task re-runs the
+# original action with identical inputs, tools, search capability, and network
+# boundaries, plus the rejected candidate and every trusted validation error
+# appended to the original prompt. The corrected result is revalidated through
+# the same trusted guards before any authority; a failed correction leaves the
+# advisory-consumable original explicitly advisory-only, and anything less
+# records the visible triage-unavailable error carrying the structural reason.
+# A missing result and authentication / quota / rate-limit / transport /
+# sandbox / timeout / provider / other infrastructure failures never trigger
+# the correction. See "Context-equivalent single correction turn" in
 # AGENTS.md.
 # Trusted rendering preserves known claude-code-action harness polling/status
 # transcript lines but labels them as automated status in the visible card text.
@@ -806,6 +811,7 @@ jobs:
               echo
             fi
             echo "Return ONLY a compact JSON object using only the keys shown below."
+            echo "Every evidence quote must be at most 1024 UTF-8 bytes; prefer the shortest span that proves the claim."
             echo "Include source_provenance only when a sanctioned public_clone completed and returned a non-empty resolved commit plus inspected files."
             echo "When required source inspection is unavailable or failed, omit source_provenance entirely; never emit an empty stub."
             echo "{"
@@ -814,13 +820,13 @@ jobs:
               echo '  "product_implications": "owner discussion or routine/low-risk, with why",'
               echo '  "recommended_action": "close | decline | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment",'
-              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes <=120 chars; one exact from target.txt"'
+              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes, each at most 1024 UTF-8 bytes; one exact from target.txt"'
             elif [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then
               echo '  "summary": "one-sentence PR summary",'
               echo '  "product_implications": "owner discussion or routine, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
-              echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes (<=120 chars); at least one copied exactly from target.txt",'
+              echo '  "evidence": "one JSON string with 2-4 short verbatim source-qualified quotes, each at most 1024 UTF-8 bytes; at least one copied exactly from target.txt",'
               echo '  "recommendation_basis": {"kind":"other","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id"},'
               if [ "$AUTOMERGE_VERDICT_AVAILABLE" = "true" ]; then
                 echo '  "source_provenance": {"url":"exact public_clone URL","requested_ref":"exact requested ref","resolved_commit":"returned commit","inspected_files":[{"path":"exact file read","sha256":"matching trusted observation digest"}]},'
@@ -845,7 +851,7 @@ jobs:
               echo '  "product_implications": "owner discussion or routine, with why",'
               echo '  "recommended_action": "merge | request-changes | decline | close | hold | investigate | comment",'
               echo '  "recommended_reason": "concise reason/comment/review body",'
-              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes <=120 chars; one exact from target.txt",'
+              echo '  "evidence": "one string: 2-4 source-qualified verbatim quotes, each at most 1024 UTF-8 bytes; one exact from target.txt",'
               echo '  "recommendation_basis": {"kind":"other","observation_id":"exact trusted-review-facts observation_id","context_id":"exact trusted-review-facts context_id"}'
             fi
             echo "}"
@@ -1104,11 +1110,14 @@ jobs:
           fi
           echo "path=$result_path" >> "$GITHUB_OUTPUT"
 
-      # Bounded schema-repair (cards #551/#547 class). ONLY triggers when a
+      # LEGACY bounded schema-repair (cards #551/#547 class), retained only in
+      # this disabled codex inline evidence branch. ONLY triggers when a
       # result was DELIVERED but fails parse/normalize schema validation - never
       # for a missing result (E2BIG/auth/rate-limit/infra all leave no
-      # extractable result, so repair_needed stays false and today's fail-open
-      # path is unchanged). See "Bounded schema repair" in AGENTS.md.
+      # extractable result, so repair_needed stays false and the fail-open
+      # path is unchanged). The production claude lane instead runs the
+      # context-equivalent correction in the triage-repair-prepare job; see
+      # "Context-equivalent single correction turn" in AGENTS.md.
       - id: repair-prep
         name: Detect a schema-miss and prepare the bounded repair turn
         if: ${{ always() && steps.event-claim.outputs.admitted == 'true' }}
@@ -1769,23 +1778,13 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
-      - id: trusted-src
-        run: |
-          set -euo pipefail
-          trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
-          python_path="$(command -v python)"
-          gh_path="$(command -v gh)"
-          safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          rm -rf "$trusted"
-          mkdir -p "$trusted"
-          tar --exclude=.git -cf - . | tar -xf - -C "$trusted"
-          find "$trusted" -type f -exec chmod a-w {} +
-          find "$trusted" -type d -exec chmod a-w {} +
-          {
-            echo "path=$trusted"
-            echo "python=$python_path"
-            echo "safe_path=$safe_path"
-          } >> "$GITHUB_OUTPUT"
+      - name: Download the primary model handoff
+        if: ${{ needs.triage.outputs.input_artifact != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.triage.outputs.input_artifact }}
+          path: ${{ runner.temp }}/wheelhouse-primary-handoff
 
       - id: primary-result
         name: Receive the trusted normalized triage result
@@ -1796,52 +1795,42 @@ jobs:
           artifact: ${{ needs.triage-model.outputs.result_artifact }}
           invocation-id: triage-repair-primary
 
-      - id: triage-result
-        name: Extract the compact primary triage result
-        if: ${{ always() }}
-        env:
-          EXECUTION_FILE: ${{ steps.primary-result.outputs.result }}
-          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
-          TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
-        run: |
-          set -euo pipefail
-          out_dir="${RUNNER_TEMP}/wheelhouse-triage"
-          result_file="$out_dir/execution.json"
-          rm -rf "$out_dir"
-          mkdir -p "$out_dir"
-          result_path=""
-          if [ -n "${EXECUTION_FILE:-}" ] && [ -f "$EXECUTION_FILE" ] && [ ! -L "$EXECUTION_FILE" ]; then
-            if "$TRUSTED_PYTHON" "$TRUSTED_SRC/scripts/render_card.py" \
-                 extract-result --execution-file "$EXECUTION_FILE" --out "$result_file"; then
-              result_path="$result_file"
-            fi
-          fi
-          echo "path=$result_path" >> "$GITHUB_OUTPUT"
-
       - id: repair-prep
-        name: Detect a schema-miss and prepare the bounded repair turn
+        name: Decide context-equivalent correction eligibility
         if: ${{ always() }}
         env:
-          ORIG_RESULT: ${{ steps.triage-result.outputs.path }}
-          KIND: ${{ needs.triage.outputs.kind }}
-          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
-          TRUSTED_SRC: ${{ steps.trusted-src.outputs.path }}
+          RESULT: ${{ steps.primary-result.outputs.result }}
+          HANDOFF: ${{ runner.temp }}/wheelhouse-primary-handoff
+          HANDOFF_SHA256: ${{ needs.triage.outputs.handoff_sha256 }}
+          REVISION: ${{ needs.triage.outputs.revision }}
         run: |
           set -euo pipefail
-          if [ -z "${ORIG_RESULT:-}" ] || [ ! -f "${ORIG_RESULT:-}" ]; then
+          # Eligibility is the trusted correction owner's fail-closed replay:
+          # only a DELIVERED candidate that failed the complete bound action
+          # schema or trusted evidence validation (output.schema_invalid /
+          # output.evidence_invalid) qualifies, including candidates the
+          # advisory parser can consume. Missing results and infrastructure
+          # failures never qualify. All bindings (handoff manifest, primary
+          # task/result hash, target revision, Wheelhouse source SHA) are
+          # verified before any claim or spend.
+          if [ -z "${RESULT:-}" ] || [ ! -f "${RESULT:-}" ] || [ ! -d "$HANDOFF" ]; then
+            echo "repair-prep: no delivered primary result or handoff to consider for correction"
             echo "repair_needed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          "$TRUSTED_PYTHON" "$TRUSTED_SRC/scripts/render_card.py" triage-repair-prep \
-            --execution-file "$ORIG_RESULT" --kind "$KIND"
+          python scripts/agent_runtime.py correction-eligible \
+            --handoff "$HANDOFF" --result-dir "$(dirname "$RESULT")" \
+            --expected-revision "$REVISION" \
+            --expected-source-sha "${{ github.sha }}" \
+            --handoff-sha256 "$HANDOFF_SHA256"
 
       - id: repair-gate
-        name: Resolve the schema-repair runtime selection
+        name: Resolve the correction runtime selection
         if: ${{ steps.repair-prep.outputs.repair_needed == 'true' }}
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           TARGET_REPO: ${{ needs.triage.outputs.repo }}
-        run: python scripts/agent_runtime.py auth-status --action triage.schema-repair --repo "$TARGET_REPO"
+        run: python scripts/agent_runtime.py auth-status --action "${{ needs.triage.outputs.event_action }}" --repo "$TARGET_REPO"
 
       - id: repair-claim
         name: Claim the exact schema-repair revision before spend
@@ -1861,36 +1850,32 @@ jobs:
             --repo-slug "$REPO_SLUG"
 
       - id: claude-repair-task
-        name: Build the immutable Claude schema-repair AgentTask
+        name: Build the immutable context-equivalent correction AgentTask
         if: ${{ steps.repair-claim.outputs.admitted == 'true' && steps.repair-gate.outputs.mode == 'claude' }}
         env:
-          REPAIR_PROMPT: ${{ steps.repair-prep.outputs.repair_prompt }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ needs.triage.outputs.repo }}
-          NUMBER: ${{ needs.triage.outputs.number }}
-          KIND: ${{ needs.triage.outputs.kind }}
+          RESULT: ${{ steps.primary-result.outputs.result }}
+          HANDOFF: ${{ runner.temp }}/wheelhouse-primary-handoff
+          HANDOFF_SHA256: ${{ needs.triage.outputs.handoff_sha256 }}
           REVISION: ${{ needs.triage.outputs.revision }}
-          VISION_SHA: ${{ needs.triage.outputs.vision_sha }}
-          VISION_CONTENT_SHA256: ${{ needs.triage.outputs.vision_content_sha256 }}
-          TARGET_FACTS_SHA256: ${{ needs.triage.outputs.target_facts_sha256 }}
-          AUTOMERGE_BEHAVIOR_AVAILABLE: ${{ needs.triage.outputs.automerge_behavior_available }}
-          WHEELHOUSE_REVISION: ${{ github.sha }}
-          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-repair
+          ACTION: ${{ needs.triage.outputs.event_action }}
+          REPO: ${{ needs.triage.outputs.repo }}
+          BUNDLE: ${{ runner.temp }}/wheelhouse-claude-triage-correction
           EVENT_KEY: ${{ steps.repair-claim.outputs.event_key }}
         run: |
           set -euo pipefail
-          printf '%s' "$REPAIR_PROMPT" > repair-prompt.txt
-          if [ "$KIND" = "issue-triage" ]; then repair_kind="issue"; else repair_kind="pr"; fi
-          vision_schema_args=()
-          if [ -n "$VISION_SHA" ]; then vision_schema_args=(--require-vision-fields); fi
-          behavior_schema_args=()
-          if [ "$AUTOMERGE_BEHAVIOR_AVAILABLE" = "true" ]; then behavior_schema_args=(--allow-automerge-behavior); fi
-          python scripts/agent_runtime.py build-task \
-            --action triage.schema-repair --prompt repair-prompt.txt \
-            --bundle "$BUNDLE" --out "$BUNDLE/task.json" --owner "$OWNER" \
-            --repo "$REPO" --number "$NUMBER" --kind schema-repair \
-            --revision "$REVISION" --wheelhouse-revision "$WHEELHOUSE_REVISION" \
-            --repair-kind "$repair_kind" --event-key "$EVENT_KEY" "${vision_schema_args[@]}" "${behavior_schema_args[@]}"
+          # The correction task is the verified ORIGINAL task rebuilt from its
+          # content-addressed handoff: same action, model, tools, search
+          # capability, network boundaries, schema binding, and immutable
+          # inputs. Only the prompt (original plus rejected candidate and every
+          # trusted validation error), the claim identity, and the explicit
+          # no-recursion retry policy differ.
+          python scripts/agent_runtime.py build-correction-task \
+            --handoff "$HANDOFF" --result-dir "$(dirname "$RESULT")" \
+            --bundle "$BUNDLE" --out "$BUNDLE/task.json" \
+            --event-key "$EVENT_KEY" --expected-revision "$REVISION" \
+            --expected-source-sha "${{ github.sha }}" \
+            --handoff-sha256 "$HANDOFF_SHA256" \
+            --action "$ACTION" --repo "$REPO"
 
       - name: Record schema-repair task-build failure stage
         if: ${{ always() && steps.repair-claim.outputs.admitted == 'true' && steps.claude-repair-task.outcome == 'failure' }}
@@ -1901,13 +1886,14 @@ jobs:
             --stage task-failed --status failed --code task.build_failed
 
       - id: claude-repair-model
-        name: Prepare Claude schema repair for the caller-bound model job
+        name: Prepare the correction for the caller-bound model job
         if: ${{ steps.claude-repair-task.outcome == 'success' }}
         uses: ./.github/actions/claude-model-call
         with:
           task: ${{ steps.claude-repair-task.outputs.task }}
           bundle: ${{ steps.claude-repair-task.outputs.bundle }}
           invocation-id: triage-repair
+          allowed-repos: ${{ steps.claude-repair-task.outputs.allowed_repos || '[]' }}
 
   triage-repair-model:
     needs: triage-repair-prepare
@@ -2122,6 +2108,7 @@ jobs:
               --source-review-repo "$SOURCE_REVIEW_REPO" \
               --source-review-number "$SOURCE_REVIEW_NUMBER" \
               --primary-error-code "${PRIMARY_ERROR_CODE:-}" \
+              --repair-error-code "${REPAIR_ERROR_CODE:-}" \
               "${behavior_args[@]}" \
               --target-file "${TARGET_FILE:-}" \
               --target-src-dir "${TARGET_SRC_DIR:-}" \

@@ -45,7 +45,7 @@ The deterministic core (ingest + decision-handler + scan-backstop) runs with a s
 Three agent-assisted features layer on top: **auto triage** adds lightweight Summary / Product implications context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`) and can add a deterministic *Accept recommendation* shortcut for fresh structured recommendations, **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three use one provider-agnostic, versioned runtime contract and can use an optional `READONLY_TOKEN` through the scoped read-only production search path.
 The disabled Codex adapter keeps that credential in a typed host broker instead of exposing it to the model worker.
-The current production selection uses the exact pinned Claude Action for eight non-repair actions and the pinned direct Claude CLI for both schema-repair actions, all inside the same separate read-only reusable model workflow from a bounded content-addressed task handoff.
+The current production selection uses the exact pinned Claude Action for eight non-repair actions and the pinned direct Claude CLI for natural-language schema repair, all inside the same separate read-only reusable model workflow from a bounded content-addressed task handoff; the triage correction turn re-runs the original triage action's own pinned step with the rejected candidate and trusted validation errors appended.
 The local reusable-workflow call resolves at the caller's exact commit, and the model job independently verifies that observed source revision before hydrating inputs or admitting provider spend.
 The action lane's runtime proof records the observed read-only job, verified artifact, exact action tools, local no-remote repository, cancellation outcome, and bounded transcript boundary without claiming the stronger disabled Codex worker sandbox; direct repair results record the verified CLI, Bubblewrap sandbox, credential isolation, and native-schema validation.
 Unenforceable Claude provider budgets and the exact end-to-end hard deadline are explicit unavailable values, while the child-job timeout plus a durable conservative spend checkpoint constrains each direct invocation.
@@ -239,7 +239,7 @@ That is the only secret the deterministic machine needs.
 ### 4. (Optional) Add the Claude production token for agent-assisted features
 
 Skip this for the deterministic machine.
-The pinned Claude Action remains the explicit production selection for non-repair work and the deployable schema-repair rollback target; schema repair uses the direct Claude CLI through the same trusted boundary.
+The pinned Claude Action remains the explicit production selection for non-repair work, the triage correction turn (which rides the original action's step), and the deployable schema-repair rollback target; natural-language schema repair uses the direct Claude CLI through the same trusted boundary.
 Trusted jobs prepare immutable inputs and perform all card or target mutations, while the separate reusable model workflow has read-only permissions and returns only a verified normalized result artifact to the trusted consumer.
 Do not add `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json` blob to this public repository.
 Do not add credentials for disabled or deferred provider candidates.

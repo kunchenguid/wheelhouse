@@ -666,8 +666,13 @@ def main():
             "evidence boundary: structurally valid unsupported quote is not a schema failure",
             unsupported_result["status"] == "failed"
             and unsupported_result["error"]["code"] == "output.evidence_invalid"
+            # The legacy no-tool planner still declines (parse/normalize pass);
+            # the context-equivalent correction owner is what makes this
+            # delivered evidence failure correction-eligible.
             and unsupported_repair["repair_needed"] is False
-            and unsupported_consumer["outcome"] == "anchor-fail",
+            and unsupported_consumer["outcome"] == "repair-failed"
+            and unsupported_consumer["reason"]
+            == "evidence quotes did not match the fetched target",
         )
 
         _, invalid_bundle = make_bundle(

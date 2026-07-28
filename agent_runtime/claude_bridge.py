@@ -23,7 +23,10 @@ from .contract import (
     result_projection_sha256,
 )
 from .events import EventWriter
-from .output_validation import extract_json_object
+from .output_validation import (
+    evidence_quote_utf8_byte_violations,
+    extract_json_object,
+)
 from .retention import retained_tool_denials
 from .supervisor import _anchor_ok, _error, _verify_artifacts
 from .task_builder import (
@@ -611,6 +614,15 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
             delivered = {"value": value, "valueSha256": canonical_sha256(value), "bytes": len(encoded)}
             schema = load_json_regular(bundle / task["spec"]["output"]["schemaArtifact"], max_bytes=65536)
             validate_schema(value, schema)
+            if task["metadata"]["action"].startswith("triage."):
+                # The schema's maxLength counts characters; the captain-fixed
+                # evidence-quote policy counts UTF-8 bytes explicitly. Quotes
+                # through 2048 bytes inclusive are valid; larger fails as a
+                # schema-policy violation with the candidate retained for the
+                # one correction turn.
+                byte_violations = evidence_quote_utf8_byte_violations(value)
+                if byte_violations:
+                    raise ContractError("; ".join(byte_violations))
             if not _anchor_ok(value, task, bundle):
                 error = _error("output.evidence_invalid", "Delivered evidence did not anchor to the immutable target input.", spend_started=True)
             else:

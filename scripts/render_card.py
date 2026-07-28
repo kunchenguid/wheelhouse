@@ -23,8 +23,8 @@ CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
   render_card.py render --item-file item.json --out-dir DIR    debug: write title/body/labels
   render_card.py queue-triage --item-file item.json [--issue N]    mark triage queued and dispatch triage.yml when eligible
-  render_card.py triage-apply --issue N --revision REV --execution-file FILE [--repair-execution-file FILE]    update the card from Claude output (repaired result wins when the original is a schema-miss)
-  render_card.py triage-repair-prep --execution-file FILE --kind KIND    if the delivered result is a schema-miss, emit the ONE bounded repair turn's prompt to $GITHUB_OUTPUT
+  render_card.py triage-apply --issue N --revision REV --execution-file FILE [--repair-execution-file FILE]    update the card from Claude output (a fully revalidated correction result wins; a validation-failed original may remain advisory-only)
+  render_card.py triage-repair-prep --execution-file FILE --kind KIND    legacy no-tool repair prep, kept only for the disabled codex evidence branch (the claude lane uses agent_runtime.py correction-eligible)
   render_card.py triage-fail --issue N --revision REV --message TEXT    write the auto-triage unavailable section
   render_card.py triage-recover --issue N --kind KIND --revision REV    fail-open safety net: publish a held card still stuck "queued" for REV
 
@@ -62,6 +62,7 @@ from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
 from agent_runtime.output_validation import (  # noqa: E402
     evidence_anchor_ok as _shared_evidence_anchor_ok,
     evidence_candidates as _shared_evidence_candidates,
+    evidence_quote_utf8_byte_violations as _shared_quote_byte_violations,
     extract_json_object as _shared_extract_json_object,
     flatten_evidence as _shared_flatten_evidence,
     normalize_evidence_text as _shared_normalize_evidence_text,
@@ -5018,6 +5019,7 @@ def _state_with_triage(
     repair_reason=None,
     repair_candidate=None,
     primary_error_code="",
+    consumption=None,
 ):
     new_state = dict(state or {})
     new_state["triaged_sha"] = revision
@@ -5032,9 +5034,13 @@ def _state_with_triage(
         )
         if primary_error_code:
             new_state[TRIAGE_PRIMARY_ERROR_FIELD] = primary_error_code
-            new_state[TRIAGE_CONSUMPTION_FIELD] = "advisory"
-        else:
-            new_state[TRIAGE_CONSUMPTION_FIELD] = "primary"
+        # `corrected` records a fully revalidated context-equivalent correction
+        # result: the primary failed (recorded above) but the consumed result
+        # passed complete trusted validation, so it keeps normal authority
+        # semantics rather than the advisory-only class.
+        new_state[TRIAGE_CONSUMPTION_FIELD] = consumption or (
+            "advisory" if primary_error_code else "primary"
+        )
     # Bounded schema-repair telemetry (NON-MATERIAL, like triaged_sha): set only
     # when this attempt actually went through a repair turn - `repaired` (the
     # repair produced a valid result and the card got real triage) or
@@ -5176,6 +5182,8 @@ def body_with_triage_result(
     repair_reason=None,
     repair_candidate=None,
     primary_error_code="",
+    authority_allowed=True,
+    consumption=None,
 ):
     state = parse_state_block(body)
     kind = (state or {}).get("kind") if state else None
@@ -5189,19 +5197,26 @@ def body_with_triage_result(
     assessment = None
     assessment_reason = ""
     if normalized and kind == "pr-review":
-        observation = target_contracts.normalize_review_observation(
-            state.get(REVIEW_OBSERVATION_FIELD)
-        )
-        context = context_contracts.normalize_decision_context(
-            state.get(DECISION_CONTEXT_FIELD)
-        )
-        assessment = assessment_admission.admit_assessment(
-            triage, observation, context
-        )
-        if assessment is None:
-            assessment_reason = "basis.missing_or_invalid"
-        elif not assessment_admission.admitted(assessment):
-            assessment_reason = assessment["admission"]["reason"]
+        if authority_allowed:
+            observation = target_contracts.normalize_review_observation(
+                state.get(REVIEW_OBSERVATION_FIELD)
+            )
+            context = context_contracts.normalize_decision_context(
+                state.get(DECISION_CONTEXT_FIELD)
+            )
+            assessment = assessment_admission.admit_assessment(
+                triage, observation, context
+            )
+            if assessment is None:
+                assessment_reason = "basis.missing_or_invalid"
+            elif not assessment_admission.admitted(assessment):
+                assessment_reason = assessment["admission"]["reason"]
+        else:
+            # Explicitly advisory-only: the applied candidate failed trusted
+            # validation and its one correction turn failed or was unavailable,
+            # so the analysis may inform the owner but can never be admitted,
+            # create Accept, persist a recommendation, or satisfy G6.
+            assessment_reason = "result.validation_failed"
     status = "succeeded" if normalized else "error"
     primary_error_code = _triage_primary_error_code(primary_error_code)
     section = triage_section(
@@ -5217,12 +5232,15 @@ def body_with_triage_result(
             normalized, kind, owner=owner, repo=state.get("repo", "")
         )
         if normalized
+        and authority_allowed
         and (kind != "pr-review" or (assessment and assessment_admission.admitted(assessment)))
         else None
     )
     automerge_verdict = (
         (normalized or {}).get("automerge_verdict")
-        if kind == "pr-review" and automerge_behavior_available is True
+        if kind == "pr-review"
+        and automerge_behavior_available is True
+        and authority_allowed
         else None
     )
     if automerge_verdict:
@@ -5263,6 +5281,7 @@ def body_with_triage_result(
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
         primary_error_code=primary_error_code,
+        consumption=consumption,
     )
     if kind == "pr-review":
         if assessment:
@@ -8463,6 +8482,8 @@ def update_card_triage(
     repair_reason=None,
     repair_candidate=None,
     primary_error_code="",
+    authority_allowed=True,
+    consumption=None,
     require_queued=False,
 ):
     """Attach a completed auto-triage attempt's result to its card.
@@ -8544,6 +8565,8 @@ def update_card_triage(
         repair_reason=repair_reason,
         repair_candidate=repair_candidate,
         primary_error_code=primary_error_code,
+        authority_allowed=authority_allowed,
+        consumption=consumption,
     )
     if new_body == body and not held:
         return False
@@ -9226,13 +9249,16 @@ def build_repair_prompt(
 
 
 def plan_triage_repair(result_text, kind):
-    """Decide whether a delivered triage result should get ONE bounded
-    schema-repair turn, and build that turn's prompt. ONLY the #551 schema-miss
-    class qualifies: a NON-EMPTY delivered result that fails parse/normalize.
+    """LEGACY no-tool repair planner, kept only for the disabled codex
+    adapter-evidence branch in triage.yml. The production claude lane decides
+    correction eligibility through `agent_runtime.task_builder
+    .correction_eligibility` (the context-equivalent correction turn), which
+    also covers bound-schema and evidence-validation failures the advisory
+    parser can consume. This planner still keys on the advisory contract: a
+    NON-EMPTY delivered result that fails parse/normalize.
 
     An EMPTY result (E2BIG / missing-result / infra / auth / rate-limit - all of
-    which leave no extractable result) is NOT repairable and keeps today's
-    behavior. A result that already validates needs no repair."""
+    which leave no extractable result) is NOT repairable in any lane."""
     text = (result_text or "").strip()
     if not text:
         return {
@@ -9250,6 +9276,14 @@ def plan_triage_repair(result_text, kind):
     }
 
 
+def _quote_byte_reasons(text):
+    """Structural evidence-quote byte-policy violations for a delivered text."""
+    data, _ = _extract_json_object(text)
+    if data is None:
+        return []
+    return _shared_quote_byte_violations(data)
+
+
 def decide_triage_apply(
     result_text,
     repaired_text,
@@ -9262,35 +9296,51 @@ def decide_triage_apply(
     vision_file="",
     target_facts_file="",
     source_provenance_expected=None,
+    primary_error_code="",
+    repair_error_code="",
 ):
-    """Deterministic decision for the (repair-aware) triage-apply step. Returns
-    `{outcome, triage, reason}` where outcome is one of:
+    """Deterministic decision for the (correction-aware) triage-apply step.
+    Returns `{outcome, triage, reason, ...}` where outcome is one of:
 
-    - `success`      : the original delivered result is valid (no repair used).
-    - `repaired`     : original invalid (schema-miss) AND the ONE repair turn
-                       produced a valid result -> apply the repaired triage.
-    - `repair-failed`: original invalid (schema-miss) and no valid repair -> the
-                       visible triage-unavailable error, now carrying `reason`.
-    - `anchor-fail`  : original parsed but its evidence spans did not anchor to
-                       the fetched target -> unchanged fail-open (NO repair; a
-                       repair turn cannot conjure real target spans).
-    - `no-result`    : nothing was delivered (excluded classes) -> unchanged.
+    - `success`      : the primary result passed trusted validation (bridge
+                       bound-schema/byte/anchor plus the local advisory
+                       normalize, byte, and anchor re-checks) -> full authority
+                       semantics.
+    - `repaired`     : the primary failed trusted validation AND the ONE
+                       context-equivalent correction turn produced a complete
+                       replacement that passes the same trusted validation ->
+                       apply the corrected triage with full authority
+                       semantics.
+    - `advisory`     : the primary failed trusted validation, no valid
+                       correction exists, but the primary is still
+                       advisory-consumable (normalizes and anchors) -> apply it
+                       explicitly advisory-only; the caller must grant NO
+                       authority (no admission, no Accept, no persisted
+                       recommendation, no auto-merge verdict).
+    - `repair-failed`: the primary failed trusted validation, no valid
+                       correction exists, and the primary is not even
+                       advisory-consumable -> the visible triage-unavailable
+                       error carrying the structural `reason`.
+    - `no-result`    : nothing was delivered (missing-result and
+                       infrastructure classes) -> unchanged fail-open.
 
-    `triage` is the RAW parsed dict for success/repaired (fed straight to
-    update_card_triage, which re-normalizes), else None. For the repair paths the
-    result also carries `candidate`, a redacted content-free shape of the
-    original failed candidate (for diagnosis)."""
+    `primary_error_code` is the trusted bridge's validation verdict for the
+    primary; `repair_error_code` the same for the correction. A non-empty code
+    means that result failed the complete bound action schema, byte policy, or
+    evidence-anchor validation in the model workflow's trusted finalizer, so
+    it can never take the authority path here regardless of local parsing.
+    `triage` is the RAW parsed dict for success/repaired/advisory (fed to
+    update_card_triage, which re-normalizes); the correction paths also carry
+    `candidate`, a redacted content-free shape of the failed candidate, and
+    `correction_attempted` for honest repair telemetry."""
+    primary_error_code = _triage_primary_error_code(primary_error_code)
+    repair_error_code = _triage_primary_error_code(repair_error_code)
     triage = parse_triage_json(result_text)
-    if triage is not None:
-        if not _triage_evidence_verified(triage, target_file):
-            return {
-                "outcome": "anchor-fail",
-                "triage": None,
-                "reason": "evidence quotes did not match the fetched target",
-                "candidate": "",
-            }
-        triage = _bind_verified_evidence_spans(
-            triage,
+    correction_attempted = bool(repaired_text) or repair_claim_admitted is not None
+
+    def _finalize(data):
+        data = _bind_verified_evidence_spans(
+            data,
             target_file,
             target_src_dir,
             target_src_manifest,
@@ -9298,78 +9348,104 @@ def decide_triage_apply(
             vision_file,
             (source_provenance_expected or {}).get("vision_content_sha256", ""),
         )
-        triage = enforce_triage_source_provenance(
-            triage,
+        return enforce_triage_source_provenance(
+            data,
             source_provenance_file,
             vision_file,
             target_facts_file,
             **(source_provenance_expected or {}),
         )
-        return {"outcome": "success", "triage": triage, "reason": "", "candidate": ""}
+
+    if (
+        triage is not None
+        and not primary_error_code
+        and not _quote_byte_reasons(result_text)
+        and _triage_evidence_verified(triage, target_file)
+    ):
+        return {
+            "outcome": "success",
+            "triage": _finalize(triage),
+            "reason": "",
+            "candidate": "",
+            "correction_attempted": False,
+        }
     if not (result_text or "").strip():
-        return {"outcome": "no-result", "triage": None, "reason": "", "candidate": ""}
-    # Delivered but invalid: the #551 schema-miss class.
-    reason = (
-        triage_schema_reason(result_text) or "delivered result failed schema validation"
-    )
+        return {
+            "outcome": "no-result",
+            "triage": None,
+            "reason": "",
+            "candidate": "",
+            "correction_attempted": False,
+        }
+    # Delivered but failed trusted validation: the correction-eligible class
+    # (bound schema, byte policy, or evidence anchoring), including candidates
+    # the advisory parser can consume.
+    if primary_error_code:
+        reason = "primary validation failed (%s)" % primary_error_code
+    else:
+        reason = (
+            triage_schema_reason(result_text)
+            or "; ".join(_quote_byte_reasons(result_text))
+            or (
+                "evidence quotes did not match the fetched target"
+                if triage is not None
+                else "delivered result failed schema validation"
+            )
+        )
     candidate = redacted_candidate_shape(result_text)
     if repaired_text:
-        original_data, _ = _extract_json_object(result_text)
-        repaired_data, _ = _extract_json_object(repaired_text)
-        original_basis = assessment_admission.normalize_basis(
-            (original_data or {}).get("recommendation_basis")
-        )
+        corrected = parse_triage_json(repaired_text)
         if (
-            isinstance(repaired_data, dict)
-            and original_basis is not None
-            and "recommendation_basis" not in repaired_data
+            corrected is not None
+            and not repair_error_code
+            and not _quote_byte_reasons(repaired_text)
+            and _triage_evidence_verified(corrected, target_file)
         ):
-            repaired_data["recommendation_basis"] = original_basis
-            repaired_text = json.dumps(
-                repaired_data, sort_keys=True, separators=(",", ":")
+            return {
+                "outcome": "repaired",
+                "triage": _finalize(corrected),
+                "reason": reason,
+                "candidate": candidate,
+                "correction_attempted": True,
+            }
+        if repair_error_code:
+            failed_reason = "corrected result failed trusted validation (%s)" % (
+                repair_error_code
             )
-        repaired = parse_triage_json(repaired_text)
-        if repaired is not None:
-            if _triage_evidence_verified(repaired, target_file):
-                repaired = _bind_verified_evidence_spans(
-                    repaired,
-                    target_file,
-                    target_src_dir,
-                    target_src_manifest,
-                    target_src_revision,
-                    vision_file,
-                    (source_provenance_expected or {}).get("vision_content_sha256", ""),
-                )
-                repaired = enforce_triage_source_provenance(
-                    repaired,
-                    source_provenance_file,
-                    vision_file,
-                    target_facts_file,
-                    **(source_provenance_expected or {}),
-                )
-                return {
-                    "outcome": "repaired",
-                    "triage": repaired,
-                    "reason": reason,
-                    "candidate": candidate,
-                }
-            failed_reason = (
-                "repaired field 'evidence' did not anchor to the fetched target"
-            )
-        else:
+        elif corrected is None:
             failed_reason = (
                 triage_schema_reason(repaired_text)
-                or "repaired result failed schema validation"
+                or "corrected result failed schema validation"
+            )
+        elif _quote_byte_reasons(repaired_text):
+            failed_reason = "; ".join(_quote_byte_reasons(repaired_text))
+        else:
+            failed_reason = (
+                "corrected field 'evidence' did not anchor to the fetched target"
             )
     elif repair_claim_admitted is False:
         failed_reason = "schema repair claim was duplicate"
+    elif correction_attempted:
+        failed_reason = "correction produced no result"
     else:
-        failed_reason = "schema repair produced no result"
+        failed_reason = ""
+    # Failed or absent correction: the delivered analysis may remain explicitly
+    # advisory, but it grants no action authority.
+    if triage is not None and _triage_evidence_verified(triage, target_file):
+        return {
+            "outcome": "advisory",
+            "triage": _finalize(triage),
+            "reason": reason,
+            "failed_reason": failed_reason,
+            "candidate": candidate,
+            "correction_attempted": correction_attempted,
+        }
     return {
         "outcome": "repair-failed",
         "triage": None,
-        "reason": failed_reason,
+        "reason": failed_reason or reason,
         "candidate": candidate,
+        "correction_attempted": correction_attempted,
     }
 
 
@@ -9467,6 +9543,13 @@ def main():
         "triage-unavailable error now carries the validation reason.",
     )
     ta.add_argument("--primary-error-code", default="")
+    ta.add_argument(
+        "--repair-error-code",
+        default="",
+        help="Trusted bridge validation verdict for the one context-equivalent "
+        "correction result; non-empty means the correction failed complete "
+        "trusted validation and can never take the authority path.",
+    )
     ta.add_argument(
         "--repair-claim-admitted",
         default="",
@@ -9641,6 +9724,8 @@ def main():
                 "vision_content_sha256": args.vision_content_sha256,
                 "target_facts_sha256": args.target_facts_sha256,
             },
+            primary_error_code=args.primary_error_code,
+            repair_error_code=args.repair_error_code,
         )
         outcome = decision["outcome"]
         applied = False
@@ -9661,8 +9746,9 @@ def main():
                 print("auto triage result skipped for card #%s" % args.issue)
         elif outcome == "repaired":
             print(
-                "::notice::auto triage schema repair succeeded for card #%s "
-                "(original failure: %s)" % (args.issue, decision["reason"])
+                "::notice::auto triage context-equivalent correction succeeded "
+                "for card #%s (original failure: %s)"
+                % (args.issue, decision["reason"])
             )
             applied = update_card_triage(
                 args.issue,
@@ -9676,10 +9762,48 @@ def main():
                 repair_reason=decision["reason"],
                 repair_candidate=decision.get("candidate"),
                 primary_error_code=args.primary_error_code,
+                consumption="corrected",
+            )
+        elif outcome == "advisory":
+            print(
+                "::warning::auto triage kept a validation-failed candidate "
+                "advisory-only for card #%s (%s%s)"
+                % (
+                    args.issue,
+                    decision["reason"],
+                    "; " + decision["failed_reason"]
+                    if decision.get("failed_reason")
+                    else "",
+                )
+            )
+            applied = update_card_triage(
+                args.issue,
+                args.revision,
+                triage=decision["triage"],
+                owner=owner,
+                vision_sha=args.vision_sha,
+                base_sha=args.base_sha,
+                automerge_behavior_available=args.automerge_behavior_available,
+                repair_status=(
+                    "repair-failed" if decision.get("correction_attempted") else None
+                ),
+                repair_reason=(
+                    decision.get("failed_reason")
+                    if decision.get("correction_attempted")
+                    else None
+                ),
+                repair_candidate=(
+                    decision.get("candidate")
+                    if decision.get("correction_attempted")
+                    else None
+                ),
+                primary_error_code=args.primary_error_code,
+                authority_allowed=False,
+                consumption="advisory",
             )
         elif outcome == "repair-failed":
             print(
-                "::warning::auto triage schema repair did not yield a valid "
+                "::warning::auto triage correction did not yield a valid "
                 "result for card #%s: %s" % (args.issue, decision["reason"])
             )
             applied = update_card_triage(
@@ -9687,18 +9811,25 @@ def main():
                 args.revision,
                 error="%s (%s)" % (TRIAGE_UNAVAILABLE, decision["reason"]),
                 owner=owner,
-                repair_status="repair-failed",
-                repair_reason=decision["reason"],
-                repair_candidate=decision.get("candidate"),
+                repair_status=(
+                    "repair-failed"
+                    if decision.get("correction_attempted")
+                    else None
+                ),
+                repair_reason=(
+                    decision["reason"]
+                    if decision.get("correction_attempted")
+                    else None
+                ),
+                repair_candidate=(
+                    decision.get("candidate")
+                    if decision.get("correction_attempted")
+                    else None
+                ),
             )
         else:
-            # anchor-fail or no-result: unchanged fail-open behavior. Both record
-            # the plain triage-unavailable error; anchor-fail additionally warns.
-            if outcome == "anchor-fail":
-                print(
-                    "::warning::auto triage evidence quotes did not match the "
-                    "fetched target content"
-                )
+            # no-result: unchanged fail-open behavior recording the plain
+            # triage-unavailable error.
             print("::warning::auto triage produced no valid structured result")
             applied = update_card_triage(
                 args.issue, args.revision, error=TRIAGE_UNAVAILABLE, owner=owner
@@ -9706,7 +9837,9 @@ def main():
         _github_output("applied", "true" if applied else "false")
         _github_output(
             "triage_status",
-            "succeeded" if outcome in {"success", "repaired"} else "error",
+            "succeeded"
+            if outcome in {"success", "repaired", "advisory"}
+            else "error",
         )
     elif args.cmd == "triage-repair-prep":
         # Decide whether the ORIGINAL delivered result is a schema-miss that

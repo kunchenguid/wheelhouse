@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-Cards #551/#547 regression: bounded automatic recovery for the MODEL-SCHEMA-MISS
-auto-triage failure class.
+The context-equivalent single correction turn plus the evidence-quote UTF-8
+byte policy (cards #551/#547 lineage; card #1693 byte-policy class).
 
-A schema-miss is a DELIVERED execution result (the model ran and produced an
-answer) that reaches parse/normalize and yields None - distinct from the #556
-delivered-then-dropped cap defect and from E2BIG / auth / rate-limit / infra
-failures, which leave NO extractable result. On a schema-miss, exactly ONE
-bounded, tokenless, no-tool Claude turn is given the preserved candidate plus the
-required schema and asked to REPAIR its structure (no diff re-read, no fresh
-analysis). The repaired output is validated again; if still invalid the card
-records the visible triage-unavailable error now carrying the structural
-validation reason. Structurally there is at most one repair attempt per admitted
-triage dispatch.
+Any DELIVERED triage candidate that fails the complete bound action schema,
+the evidence-quote byte policy, or trusted evidence anchoring - including
+candidates the looser advisory parser can consume - is eligible for exactly
+ONE correction turn: the ORIGINAL AgentTask rebuilt from its verified handoff
+(same action, model, tools, search, network boundaries, and immutable inputs)
+with the rejected candidate and every trusted validation error appended to the
+original prompt. Missing results and infrastructure failures (auth / quota /
+rate-limit / transport / sandbox / timeout / provider) never enter correction.
+The corrected result is revalidated through the same trusted guards before any
+authority; a failed correction leaves an advisory-consumable original
+explicitly advisory-only, and anything less records the visible
+triage-unavailable error carrying the structural reason. The legacy no-tool
+repair helpers remain only for the disabled codex inline evidence branch.
 
-These tests are OFFLINE: pure helpers, mocked card I/O, and static YAML
-inspection - the live LLM turn is only exercised end-to-end in CI.
+These tests are OFFLINE: pure helpers, mocked card I/O, the real bridge over
+synthetic transcripts, and static YAML inspection - the live LLM turn is only
+exercised end-to-end in CI.
 
 Run: python tests/test_triage_schema_repair.py
 """
@@ -330,11 +334,13 @@ def test_decide_routing():
         bound_repair = rc.decide_triage_apply(
             json.dumps(bound_original), valid, tf
         )
+        # The context-equivalent correction is a COMPLETE replacement validated
+        # on its own: trusted code never merges fields (like a basis) from the
+        # rejected candidate into the corrected result.
         check(
-            "route: trusted consumer restores only an already-valid original basis",
+            "route: corrected result is complete - no basis restore from the rejected candidate",
             bound_repair["outcome"] == "repaired"
-            and bound_repair["triage"].get("recommendation_basis")
-            == bound_original["recommendation_basis"],
+            and "recommendation_basis" not in bound_repair["triage"],
         )
 
         # repair-failure cap (clause 6): invalid original + still-invalid repair.
@@ -348,15 +354,25 @@ def test_decide_routing():
             "recommended_action" in dec2["reason"],
         )
 
-        # schema-miss with NO repair supplied (repair step errored / no output).
+        # schema-miss with NO correction supplied and no claim outcome known:
+        # honest telemetry says a correction was never attempted, so the visible
+        # reason is the ORIGINAL structural failure.
         dec3 = rc.decide_triage_apply(invalid, "", tf)
         check(
             "route: schema-miss + no repair output -> repair-failed",
             dec3["outcome"] == "repair-failed",
         )
         check(
-            "route: missing repair output reports the actual stage",
-            dec3["reason"] == "schema repair produced no result",
+            "route: unattempted correction reports the original structural stage",
+            "recommended_action" in dec3["reason"]
+            and dec3["correction_attempted"] is False,
+        )
+        claimed = rc.decide_triage_apply(invalid, "", tf, repair_claim_admitted=True)
+        check(
+            "route: claimed-but-missing correction reports the actual stage",
+            claimed["outcome"] == "repair-failed"
+            and claimed["reason"] == "correction produced no result"
+            and claimed["correction_attempted"] is True,
         )
         duplicate = rc.decide_triage_apply(invalid, "", tf, repair_claim_admitted=False)
         check(
@@ -377,30 +393,84 @@ def test_decide_routing():
             "route(EXCLUDED): empty result -> no-result", dec5["outcome"] == "no-result"
         )
 
-        # EXCLUDED: parse-valid but fabricated evidence not anchored to target ->
-        # anchor-fail, NOT repair (a repair turn can't conjure real quotes).
+        # Fabricated evidence (parse-valid, unanchored) is now part of the
+        # correction-eligible class: the correction turn has the same evidence
+        # access as the primary and CAN produce genuinely anchored quotes.
+        # With no correction result supplied, the consume side lands on the
+        # visible failure carrying the anchor reason - never silent success and
+        # never the advisory path (advisory consumption requires anchoring).
         fabricated = dict(VALID)
         fabricated["evidence"] = (
             'target.txt: "a quote that does not appear in the fetched target at all"'
         )
         dec6 = rc.decide_triage_apply(json.dumps(fabricated), "", tf)
         check(
-            "route(EXCLUDED): anchor-fail is not routed to repair",
-            dec6["outcome"] == "anchor-fail",
+            "route: unanchored primary is correction-class, not advisory",
+            dec6["outcome"] == "repair-failed"
+            and dec6["reason"]
+            == "evidence quotes did not match the fetched target",
         )
 
-        # The repaired output must STILL pass the evidence anchor guard: a repair
-        # that dropped/fabricated evidence is rejected as repair-failed.
+        # The corrected output must STILL pass the evidence anchor guard: a
+        # correction that dropped/fabricated evidence is rejected.
         repaired_fabricated = json.dumps(fabricated)
         dec7 = rc.decide_triage_apply(invalid, repaired_fabricated, tf)
         check(
-            "route: a repair with non-anchoring evidence -> repair-failed",
+            "route: a correction with non-anchoring evidence -> repair-failed",
             dec7["outcome"] == "repair-failed",
         )
         check(
-            "route: repaired anchor failure reports the actual stage",
+            "route: corrected anchor failure reports the actual stage",
             dec7["reason"]
-            == "repaired field 'evidence' did not anchor to the fetched target",
+            == "corrected field 'evidence' did not anchor to the fetched target",
+        )
+
+        # A trusted-bridge validation failure on the primary (e.g. the bound
+        # schema or byte policy) makes an advisory-consumable candidate the
+        # correction class even though it parses and anchors locally: a valid
+        # correction wins with full authority, and a failed/absent correction
+        # leaves the original explicitly advisory-only.
+        dec8 = rc.decide_triage_apply(
+            valid, valid, tf, primary_error_code="output.schema_invalid"
+        )
+        check(
+            "route: bridge-invalid primary + valid correction -> repaired",
+            dec8["outcome"] == "repaired"
+            and dec8["reason"] == "primary validation failed (output.schema_invalid)",
+        )
+        dec9 = rc.decide_triage_apply(
+            valid, "", tf, primary_error_code="output.schema_invalid"
+        )
+        check(
+            "route: bridge-invalid advisory-consumable primary without correction -> advisory",
+            dec9["outcome"] == "advisory"
+            and isinstance(dec9["triage"], dict)
+            and dec9["correction_attempted"] is False,
+        )
+        dec10 = rc.decide_triage_apply(
+            valid,
+            valid,
+            tf,
+            primary_error_code="output.schema_invalid",
+            repair_error_code="output.schema_invalid",
+        )
+        check(
+            "route: bridge-invalid correction can never take the authority path",
+            dec10["outcome"] == "advisory"
+            and dec10["failed_reason"]
+            == "corrected result failed trusted validation (output.schema_invalid)"
+            and dec10["correction_attempted"] is True,
+        )
+        oversized = dict(VALID)
+        oversized["evidence"] = [
+            "target.txt: 'add bounded stop conditions to crewmate briefs'",
+            "x" * 2049,
+        ]
+        dec11 = rc.decide_triage_apply(json.dumps(oversized), "", tf)
+        check(
+            "route: local byte-policy violation is correction-class, not success",
+            dec11["outcome"] in {"advisory", "repair-failed"}
+            and "2048 UTF-8 bytes" in (dec11.get("reason") or ""),
         )
 
         array_valid = dict(
@@ -901,8 +971,13 @@ def test_triage_yml_repair_wiring():
                 return i
         return None
 
-    tr_i = idx(prepare_steps, lambda s: s.get("id") == "triage-result")
+    handoff_i = idx(
+        prepare_steps,
+        lambda s: s.get("name") == "Download the primary model handoff",
+    )
+    tr_i = idx(prepare_steps, lambda s: s.get("id") == "primary-result")
     prep_i = idx(prepare_steps, lambda s: s.get("id") == "repair-prep")
+    task_i = idx(prepare_steps, lambda s: s.get("id") == "claude-repair-task")
     rep_i = idx(prepare_steps, lambda s: s.get("id") == "claude-repair-model")
     received_i = idx(consume_steps, lambda s: s.get("id") == "repair-result-received")
     compact_i = idx(consume_steps, lambda s: s.get("id") == "compact-results")
@@ -916,8 +991,9 @@ def test_triage_yml_repair_wiring():
     check("yaml: Claude repair model boundary exists", rep_i is not None)
     check("yaml: repair-result receiver exists", received_i is not None)
     check(
-        "yaml: repair preparation follows primary result extraction",
-        None not in (tr_i, prep_i, rep_i) and tr_i < prep_i < rep_i,
+        "yaml: correction eligibility follows the verified handoff and result receipt",
+        None not in (handoff_i, tr_i, prep_i, task_i, rep_i)
+        and handoff_i < tr_i < prep_i < task_i < rep_i,
     )
     check(
         "yaml: repair model and projection follow the caller-bound job graph",
@@ -941,19 +1017,55 @@ def test_triage_yml_repair_wiring():
     prep = prepare_steps[prep_i]
     prun = str(prep.get("run", ""))
     check(
-        "yaml: repair-prep reads the delivered result path",
-        prep.get("env", {}).get("ORIG_RESULT")
-        == "${{ steps.triage-result.outputs.path }}",
+        "yaml: repair-prep reads the bind-verified result and handoff",
+        prep.get("env", {}).get("RESULT")
+        == "${{ steps.primary-result.outputs.result }}"
+        and prep.get("env", {}).get("HANDOFF_SHA256")
+        == "${{ needs.triage.outputs.handoff_sha256 }}",
     )
     check(
-        "yaml: repair-prep runs the trusted render_card.py triage-repair-prep",
-        "triage-repair-prep" in prun
-        and "TRUSTED_SRC/scripts/render_card.py"
-        in prun.replace('"', "").replace("$", ""),
+        "yaml: repair-prep runs the trusted correction-eligibility owner",
+        "correction-eligible" in prun
+        and "scripts/agent_runtime.py" in prun
+        and "--expected-revision" in prun
+        and "--expected-source-sha" in prun
+        and "--handoff-sha256" in prun,
     )
     check(
         "yaml: repair-prep is pass-by-reference (never inlines target.txt)",
         "cat target.txt" not in prun and "gh pr diff" not in prun,
+    )
+    task_step = prepare_steps[task_i]
+    task_run = str(task_step.get("run", ""))
+    check(
+        "yaml: correction task rebuilds the ORIGINAL task from its handoff",
+        "build-correction-task" in task_run
+        and "--handoff" in task_run
+        and "--result-dir" in task_run
+        and "--event-key" in task_run
+        and "--action" in task_run
+        and task_step.get("env", {}).get("ACTION")
+        == "${{ needs.triage.outputs.event_action }}"
+        and task_step.get("env", {}).get("EVENT_KEY")
+        == "${{ steps.repair-claim.outputs.event_key }}",
+    )
+    check(
+        "yaml: correction task build is claim-gated",
+        "steps.repair-claim.outputs.admitted == 'true'"
+        in str(task_step.get("if", "")),
+    )
+    check(
+        "yaml: correction model call carries the original search scope",
+        prepare_steps[rep_i].get("with", {}).get("allowed-repos")
+        == "${{ steps.claude-repair-task.outputs.allowed_repos || '[]' }}",
+    )
+    claim_i = idx(prepare_steps, lambda s: s.get("id") == "repair-claim")
+    claim_run = str(prepare_steps[claim_i].get("run", ""))
+    check(
+        "yaml: the correction keeps the exact triage.schema-repair claim identity",
+        claim_i is not None
+        and prep_i < claim_i < task_i
+        and "--action triage.schema-repair" in claim_run,
     )
 
     rep = next(s for s in model_steps if s.get("id") == "triage_repair")
@@ -1141,6 +1253,585 @@ def test_triage_yml_repair_wiring():
     )
 
 
+# --------------------------------------------------------------------------- #
+# 10. Evidence-quote UTF-8 byte policy (card #1693 class)
+# --------------------------------------------------------------------------- #
+# The exact 253-byte production quote from card #1693 (firstmate#1024, revision
+# 91a74e4e), recovered verbatim from the durable assessment record
+# result_id sha256:033aa02111c846e09b74af857ba8f1f03790cdc12226a8174fa0105baa1a8a40.
+# Under the retired 240-character schema bound it made the whole candidate
+# `output.schema_invalid` while the advisory parser consumed it, so the card
+# stayed advisory-only with no correction. It MUST be valid now.
+CARD_1693_QUOTE = (
+    "fm_crew_merge_block_rules() {\n  printf '%s' '[\"Bash(gh pr merge:*)\","
+    "\"Bash(gh-axi pr merge:*)\",\"Bash(gh api *pulls/*/merge*)\","
+    "\"Bash(gh api *repos/*/merges*)\",\"Bash(gh api graphql*mergePullRequest*)\","
+    "\"Bash(tk-feature land:*)\",\"Bash(tk-feature-land:*)\"]'\n}"
+)
+
+
+def _pr_candidate_with_quote(quote):
+    return {
+        "summary": "Restores the crew merge guard rules.",
+        "product_implications": "Routine fix; no owner discussion needed.",
+        "recommended_action": "merge",
+        "recommended_reason": "Narrow corrective fix.",
+        "evidence": 'target.txt: "add bounded stop conditions to crewmate briefs"',
+        "recommendation_basis": {
+            "kind": "other",
+            "observation_id": "sha256:" + "1" * 64,
+            "context_id": "sha256:" + "2" * 64,
+        },
+        "automerge": {
+            "behavior_class": "A",
+            "behavior_assertions": [
+                {
+                    "claim": "Merge guard rules stay enforced",
+                    "subject": "existing_mode",
+                    "effect": "unchanged",
+                    "evidence": {"source": "target.txt", "quote": quote},
+                }
+            ],
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+        },
+    }
+
+
+def test_evidence_quote_byte_policy():
+    from agent_runtime.contract import ContractError, load_json_regular, validate_schema
+    from agent_runtime.output_validation import (
+        EVIDENCE_QUOTE_MAX_UTF8_BYTES,
+        evidence_quote_utf8_byte_violations,
+    )
+    from agent_runtime.task_builder import _bound_output_schema
+
+    check(
+        "bytes: the trusted ceiling is the captain-fixed 2048 inclusive",
+        EVIDENCE_QUOTE_MAX_UTF8_BYTES == 2048,
+    )
+    schema = load_json_regular(
+        os.path.join(
+            ROOT, "agent_runtime", "schemas", "actions", "triage-pr-v1.schema.json"
+        ),
+        max_bytes=65536,
+    )
+    bound = _bound_output_schema(schema, "triage.pr.search", "pr", True, False)
+
+    def trusted_valid(candidate):
+        try:
+            validate_schema(candidate, bound)
+        except ContractError:
+            return False
+        return not evidence_quote_utf8_byte_violations(candidate)
+
+    quote_1693 = CARD_1693_QUOTE
+    check(
+        "bytes: the card #1693 fixture is byte-exact (253 UTF-8 bytes)",
+        len(quote_1693.encode("utf-8")) == 253,
+    )
+    check(
+        "bytes: the exact 253-byte card #1693 production quote is VALID",
+        trusted_valid(_pr_candidate_with_quote(quote_1693)),
+    )
+    check(
+        "bytes: the retired 240-character bound is gone from every quote surface",
+        '"maxLength": 240' not in read(
+            "agent_runtime", "schemas", "actions", "triage-pr-v1.schema.json"
+        ),
+    )
+    # ASCII boundaries: char count == byte count.
+    for n, expect in ((1024, True), (1025, True), (2048, True), (2049, False)):
+        check(
+            "bytes: %d ASCII-byte quote is %s" % (n, "valid" if expect else "invalid"),
+            trusted_valid(_pr_candidate_with_quote("x" * n)) is expect,
+        )
+    # Multibyte divergence: 1025 two-byte chars = 2050 bytes. The character
+    # (secondary) bound passes; ONLY the explicit byte count catches it.
+    multibyte_over = _pr_candidate_with_quote("é" * 1025)
+    schema_passes = True
+    try:
+        validate_schema(multibyte_over, bound)
+    except ContractError:
+        schema_passes = False
+    violations = evidence_quote_utf8_byte_violations(multibyte_over)
+    check(
+        "bytes: 1025 multibyte chars (2050 bytes) pass the char bound but fail the byte count",
+        schema_passes
+        and len(violations) == 1
+        and "2048 UTF-8 bytes (2050)" in violations[0]
+        and "behavior_assertions[0]" in violations[0],
+    )
+    check(
+        "bytes: 1024 multibyte chars (2048 bytes) are valid at the inclusive ceiling",
+        trusted_valid(_pr_candidate_with_quote("é" * 1024)),
+    )
+    # Secondary defense: over 2048 characters is necessarily over 2048 bytes,
+    # so the schema character bound can never reject a byte-valid quote.
+    over_chars = _pr_candidate_with_quote("é" * 2049)
+    schema_rejects = False
+    try:
+        validate_schema(over_chars, bound)
+    except ContractError:
+        schema_rejects = True
+    check("bytes: the 2048-char schema bound remains as secondary defense", schema_rejects)
+    # Violations are structural (path + counts), never quote content.
+    check(
+        "bytes: violation text never echoes quote content",
+        all("xxxx" not in v and "é" not in v for v in
+            evidence_quote_utf8_byte_violations(_pr_candidate_with_quote("x" * 4000))),
+    )
+    # Every quote surface is covered: top-level evidence (list and string
+    # segments), vision criteria, class-B restoration.
+    surfaces = {
+        "evidence": {"evidence": ["ok quote", "y" * 3000]},
+        "vision": {
+            "vision_evidence": {
+                "applicable_criteria": [{"id": "c1", "quote": "y" * 3000}]
+            }
+        },
+        "class_b": {
+            "automerge": {
+                "class_b_restoration": {
+                    "corrected_defect_evidence": {"quote": "y" * 3000}
+                }
+            }
+        },
+    }
+    for name, shape in surfaces.items():
+        check(
+            "bytes: %s quote surface is byte-checked" % name,
+            len(evidence_quote_utf8_byte_violations(shape)) == 1,
+        )
+    # The prompt tells the model the 1024-byte rule in every branch: one
+    # unconditional line plus each branch's evidence field description.
+    triage_source = read(".github", "workflows", "triage.yml")
+    check(
+        "bytes: every prompt branch states the 1024-UTF-8-byte quote rule",
+        "Every evidence quote must be at most 1024 UTF-8 bytes" in triage_source
+        and triage_source.count("each at most 1024 UTF-8 bytes") == 3
+        and "<=120 chars" not in triage_source,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 11. Context-equivalent correction task: bindings, parity, no recursion
+# --------------------------------------------------------------------------- #
+def _correction_fixture(root, candidate, action="triage.pr.search"):
+    """Build a real primary task+handoff+bridge result for correction tests."""
+    from agent_runtime.claude_bridge import IMMUTABLE_MODEL, bridge
+    from agent_runtime.claude_handoff import pack
+    from agent_runtime.config import resolve_selection
+    from agent_runtime.contract import canonical_sha256, file_sha256
+    from agent_runtime.task_builder import (
+        build_task,
+        claude_declared_outputs,
+        claude_declared_tools,
+    )
+
+    source_sha = "30271b6907e568419cdc48694a11b0c2f699b433"
+    root = Path(root)
+    prompt = root / "prompt.txt"
+    prompt.write_text(
+        "Do READ-ONLY advisory triage. Read target.txt first.\n", encoding="utf-8"
+    )
+    target = root / "target.txt"
+    target.write_text(
+        "<target-content>\n# add bounded stop conditions to crewmate briefs\n"
+        "</target-content>\n",
+        encoding="utf-8",
+    )
+    bundle = root / "bundle"
+    task = build_task(
+        action=action,
+        selection=resolve_selection(action, "repo"),
+        prompt_path=str(prompt),
+        bundle_dir=str(bundle),
+        output_path=str(bundle / "task.json"),
+        owner="owner",
+        repo="repo",
+        number=7,
+        target_kind="pr-review",
+        revision="abcdef1",
+        wheelhouse_revision=source_sha,
+        event_key="a" * 64,
+        target_file=str(target),
+        allow_automerge_behavior=True,
+    )
+    handoff = root / "handoff"
+    meta = pack(str(bundle / "task.json"), str(bundle), str(handoff), '["owner/repo"]')
+    execution = root / "execution.json"
+    execution.write_text(
+        json.dumps(
+            [
+                {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": json.dumps(candidate),
+                    "duration_ms": 2500,
+                    "num_turns": 2,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    enforced = {
+        name: task["spec"]["limits"][name]
+        for name, quality in task["spec"]["limits"]["enforcement"].items()
+        if quality == "externally-enforced"
+    }
+    enforcement = root / "enforcement.json"
+    enforcement.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "boundary": "separate-read-only-github-job",
+                "jobPermissions": {
+                    "actions": "read",
+                    "contents": "read",
+                    "issues": "none",
+                },
+                "writeCapableGithubTokenAvailable": False,
+                "fleetTokenAvailable": False,
+                "readonlyTokenBoundary": "in-process"
+                if action.endswith(".search")
+                else "absent",
+                "spendStarted": True,
+                "isolationLevel": "github-readonly-artifact-bridge-v1",
+                "artifactHydration": "content-addressed-bounded-verified",
+                "targetInputsReadOnly": True,
+                "preActionInputObservationSha256": "b" * 64,
+                "postActionInputObservationSha256": "b" * 64,
+                "declaredOutputPaths": claude_declared_outputs(action),
+                "workspaceRepository": "local-no-remote",
+                "declaredTools": claude_declared_tools(action),
+                "action": action,
+                "actionSourceCommit": "af0559ee4f514d1ef21826982bed13f7edc3c35e",
+                "actionMetadataQuality": "pinned-action-reference",
+                "actionMetadataSha256": None,
+                "taskSha256": canonical_sha256(task),
+                "handoffManifestSha256": meta["manifestSha256"],
+                "transcriptSha256": file_sha256(execution),
+                "childExecutionTimeoutMs": task["spec"]["limits"][
+                    "childExecutionTimeoutMs"
+                ],
+                "controller": {
+                    "parentRunId": "1",
+                    "parentRunAttempt": "1",
+                    "modelRunId": "2",
+                    "hardDeadlineMs": None,
+                    "dispatchDeadlineMs": task["spec"]["limits"]["dispatchDeadlineMs"],
+                    "childExecutionTimeoutMs": task["spec"]["limits"][
+                        "childExecutionTimeoutMs"
+                    ],
+                    "enforcedLimits": enforced,
+                    "conclusion": "success",
+                    "terminationReason": "completed",
+                    "dispatchRef": "main",
+                    "expectedCommitSha": source_sha,
+                    "observedCommitSha": source_sha,
+                    "correlationId": "a" * 32,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_dir = root / "received"
+    result_dir.mkdir()
+    result = bridge(
+        str(bundle / "task.json"),
+        str(bundle),
+        str(execution),
+        "",
+        str(enforcement),
+        meta["manifestSha256"],
+        str(result_dir / "result.json"),
+        str(result_dir / "events.ndjson"),
+    )
+    (result_dir / "task.json").write_bytes((bundle / "task.json").read_bytes())
+    return task, handoff, meta["manifestSha256"], result_dir, result, source_sha
+
+
+def test_context_equivalent_correction_task():
+    from agent_runtime.config import resolve_selection
+    from agent_runtime.contract import canonical_sha256
+    from agent_runtime.task_builder import (
+        build_correction_task,
+        correction_eligibility,
+    )
+
+    with tempfile.TemporaryDirectory() as d:
+        # A complete-schema-invalid candidate that the advisory parser can
+        # consume: valid except one over-ceiling (2049-byte) quote.
+        candidate = _pr_candidate_with_quote("x" * 2049)
+        task, handoff, handoff_sha, result_dir, result, source_sha = (
+            _correction_fixture(d, candidate)
+        )
+        check(
+            "correction: the fixture primary fails trusted validation but stays advisory-normalizable",
+            result["status"] == "failed"
+            and result["error"]["code"] == "output.schema_invalid"
+            and "delivered" in result
+            and rc.normalize_triage(candidate) is not None,
+        )
+        ok, reason, errors = correction_eligibility(
+            str(handoff), str(result_dir), "abcdef1", source_sha, handoff_sha
+        )
+        check(
+            "correction: an advisory-normalizable bound-schema failure enters exactly one correction",
+            ok and any("2048 UTF-8 bytes" in e for e in errors),
+        )
+        # Stale or mismatched bindings refuse rather than correcting changed
+        # evidence.
+        refusals = [
+            correction_eligibility(
+                str(handoff), str(result_dir), "fffffff", source_sha, handoff_sha
+            ),
+            correction_eligibility(
+                str(handoff), str(result_dir), "abcdef1", "c" * 40, handoff_sha
+            ),
+            correction_eligibility(
+                str(handoff), str(result_dir), "abcdef1", source_sha, "d" * 64
+            ),
+        ]
+        check(
+            "correction: stale revision / source SHA / handoff identity all refuse",
+            all(not row[0] for row in refusals),
+        )
+        cbundle = Path(d) / "correction-bundle"
+        ctask, allowed = build_correction_task(
+            handoff_dir=str(handoff),
+            result_dir=str(result_dir),
+            bundle_dir=str(cbundle),
+            output_path=str(cbundle / "task.json"),
+            event_key="b" * 64,
+            expected_revision="abcdef1",
+            expected_source_sha=source_sha,
+            expected_handoff_sha256=handoff_sha,
+            selection=resolve_selection("triage.pr.search", "repo"),
+        )
+        check(
+            "correction: model/tool/search/network/evidence/limit parity with the original task",
+            ctask["metadata"]["action"] == task["metadata"]["action"]
+            and all(
+                ctask["spec"][key] == task["spec"][key]
+                for key in (
+                    "selection",
+                    "capabilities",
+                    "tools",
+                    "isolation",
+                    "limits",
+                    "inputs",
+                    "output",
+                    "session",
+                    "retention",
+                )
+            ),
+        )
+        check(
+            "correction: the original search scope rides along",
+            allowed == ["owner/repo"],
+        )
+        check(
+            "correction: exact task/result bindings are recorded",
+            ctask["metadata"]["correction"]["originalTaskSha256"]
+            == canonical_sha256(task)
+            and ctask["metadata"]["correction"]["rejectedValueSha256"]
+            == result["delivered"]["valueSha256"]
+            and ctask["metadata"]["target"] == task["metadata"]["target"]
+            and ctask["metadata"]["idempotencyKey"] == "b" * 64,
+        )
+        cprompt = (cbundle / ctask["spec"]["prompt"]["userArtifact"]).read_text(
+            encoding="utf-8"
+        )
+        check(
+            "correction: prompt is the exact original plus rejected candidate and every trusted error",
+            cprompt.startswith("Do READ-ONLY advisory triage.")
+            and "<rejected-candidate>" in cprompt
+            and "Restores the crew merge guard rules." in cprompt
+            and "2048 UTF-8 bytes" in cprompt
+            and "COMPLETE replacement" in cprompt,
+        )
+        check(
+            "correction: no recursion, no fallback, no second correction",
+            ctask["spec"]["retry"]
+            == {"sameCandidateMaxAttempts": 1, "retryable": [], "repairTask": None}
+            and ctask["spec"]["selection"]["fallback"] == {"mode": "none"},
+        )
+        # A correction task can never be corrected again.
+        from agent_runtime.claude_handoff import pack as pack_handoff
+
+        chandoff = Path(d) / "correction-handoff"
+        cmeta = pack_handoff(
+            str(cbundle / "task.json"), str(cbundle), str(chandoff), "[]"
+        )
+        cresult_dir = Path(d) / "correction-received"
+        cresult_dir.mkdir()
+        (cresult_dir / "result.json").write_bytes(
+            (result_dir / "result.json").read_bytes()
+        )
+        (cresult_dir / "task.json").write_bytes((cbundle / "task.json").read_bytes())
+        ok2, reason2, _ = correction_eligibility(
+            str(chandoff), str(cresult_dir), "abcdef1", source_sha,
+            cmeta["manifestSha256"],
+        )
+        check(
+            "correction: correcting a correction is refused",
+            not ok2
+            and ("forbidden" in reason2 or "does not match" in reason2),
+        )
+        # The correction task grants no mutation capability beyond the original
+        # read-only surface: same read-only github permissions constraint, no
+        # acting token, and read-only declared tools.
+        perms = next(
+            row["constraints"]
+            for row in ctask["spec"]["capabilities"]["required"]
+            if row["name"] == "github.permissions"
+        )
+        creds = next(
+            row["constraints"]
+            for row in ctask["spec"]["capabilities"]["required"]
+            if row["name"] == "credentials.isolated"
+        )
+        check(
+            "correction: read-only privilege parity (no acting token, no card/target writes)",
+            perms == {"actions": "read", "contents": "read", "issues": "none", "actingToken": False}
+            and creds["fleetToken"] == "absent",
+        )
+
+
+def test_correction_excludes_missing_and_infrastructure_failures():
+    from agent_runtime.task_builder import correction_eligibility
+
+    with tempfile.TemporaryDirectory() as d:
+        # A VALID primary is never correction-eligible.
+        candidate = _pr_candidate_with_quote(CARD_1693_QUOTE)
+        task, handoff, handoff_sha, result_dir, result, source_sha = (
+            _correction_fixture(d, candidate)
+        )
+        check(
+            "correction(EXCLUDED): the 253-byte card #1693 quote now passes the primary outright",
+            result["status"] == "succeeded" and "final" in result,
+        )
+        ok, reason, _ = correction_eligibility(
+            str(handoff), str(result_dir), "abcdef1", source_sha, handoff_sha
+        )
+        check(
+            "correction(EXCLUDED): a trusted-valid primary never enters correction",
+            not ok and "passed trusted validation" in reason,
+        )
+        # Missing and infrastructure failures never enter correction: rewrite
+        # the result as failure classes with and without a delivered candidate.
+        from agent_runtime.contract import canonical_json_bytes, canonical_sha256
+        from agent_runtime.supervisor import _error as make_error
+
+        base = json.loads((result_dir / "result.json").read_text(encoding="utf-8"))
+        for code, drop_delivered in (
+            ("output.missing", True),
+            ("lifecycle.timeout", False),
+            ("auth.invalid", False),
+            ("provider.quota_exhausted", False),
+            ("transport.connection", False),
+            ("sandbox.violation", False),
+        ):
+            mutated = json.loads(json.dumps(base))
+            mutated.pop("final", None)
+            mutated["status"] = "failed"
+            mutated["error"] = make_error(
+                code, "synthetic excluded-class failure", spend_started=True
+            )
+            if drop_delivered:
+                mutated.pop("delivered", None)
+            elif "delivered" not in mutated:
+                mutated["delivered"] = {
+                    "value": candidate,
+                    "valueSha256": canonical_sha256(candidate),
+                    "bytes": len(canonical_json_bytes(candidate)),
+                }
+            (result_dir / "result.json").write_text(
+                json.dumps(mutated), encoding="utf-8"
+            )
+            ok2, reason2, _ = correction_eligibility(
+                str(handoff), str(result_dir), "abcdef1", source_sha, handoff_sha
+            )
+            check(
+                "correction(EXCLUDED): %s never enters correction" % code,
+                not ok2,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# 12. Authority semantics: corrected keeps authority, failed correction is
+#     explicitly advisory-only
+# --------------------------------------------------------------------------- #
+def test_correction_authority_semantics():
+    _, body = _queued_body()
+    valid = dict(VALID)
+    with tempfile.TemporaryDirectory() as d:
+        tf = target_file_with(d)
+        # Failed correction: the advisory-consumable original is applied with
+        # NO authority - no recommendation, no Accept, and advisory consumption.
+        advisory = rc.body_with_triage_result(
+            body,
+            "8b7547c1",
+            triage=valid,
+            owner="kunchenguid",
+            primary_error_code="output.schema_invalid",
+            authority_allowed=False,
+            consumption="advisory",
+            repair_status="repair-failed",
+            repair_reason="corrected result failed trusted validation (output.schema_invalid)",
+        )
+        state = rc.parse_state_block(advisory)
+        check(
+            "authority: failed correction stays advisory and non-authoritative",
+            state.get("triage_status") == "succeeded"
+            and state.get("triage_primary_status") == "failed"
+            and state.get("triage_consumption") == "advisory"
+            and "triage_recommendation" not in state
+            and "automerge_verdict" not in state
+            and not rc.accept_recommendation_available(state),
+        )
+        check(
+            "authority: advisory-only telemetry records the failed correction",
+            state.get("triage_repair_status") == "repair-failed",
+        )
+        # A fully revalidated correction keeps existing authority semantics:
+        # the recommendation persists exactly as a valid primary's would.
+        corrected = rc.body_with_triage_result(
+            body,
+            "8b7547c1",
+            triage=valid,
+            owner="kunchenguid",
+            primary_error_code="output.schema_invalid",
+            consumption="corrected",
+            repair_status="repaired",
+            repair_reason="primary validation failed (output.schema_invalid)",
+        )
+        cstate = rc.parse_state_block(corrected)
+        primary = rc.body_with_triage_result(
+            body, "8b7547c1", triage=valid, owner="kunchenguid"
+        )
+        pstate = rc.parse_state_block(primary)
+        check(
+            "authority: a valid corrected result keeps existing authority semantics",
+            cstate.get("triage_status") == "succeeded"
+            and cstate.get("triage_consumption") == "corrected"
+            and cstate.get("triage_primary_status") == "failed"
+            and cstate.get("triage_recommendation")
+            == pstate.get("triage_recommendation")
+            and cstate.get("triage_repair_status") == "repaired",
+        )
+        check(
+            "authority: a valid primary keeps existing authority semantics",
+            pstate.get("triage_status") == "succeeded"
+            and pstate.get("triage_consumption") == "primary"
+            and pstate.get("triage_recommendation") is not None,
+        )
+
+
 def main():
     test_schema_reason_is_structural_and_leak_free()
     test_redacted_candidate_shape_is_content_free()
@@ -1153,6 +1844,10 @@ def main():
     test_cli_repair_prep()
     test_cli_triage_apply_repair_end_to_end()
     test_triage_yml_repair_wiring()
+    test_evidence_quote_byte_policy()
+    test_context_equivalent_correction_task()
+    test_correction_excludes_missing_and_infrastructure_failures()
+    test_correction_authority_semantics()
     if _failures:
         print("\n%d check(s) failed:" % len(_failures))
         for name in _failures:
