@@ -691,7 +691,7 @@ def test_render_version_migration_heals_an_existing_card():
     check(
         "migration: the card is stamped with the current render version",
         healed_state["render_version"] == rc.CARD_RENDER_VERSION
-        and rc.CARD_RENDER_VERSION == 13,
+        and rc.CARD_RENDER_VERSION == 14,
     )
     check(
         "migration: no fresh triage is queued for the same revision (no spend)",
