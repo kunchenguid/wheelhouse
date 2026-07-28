@@ -13,11 +13,17 @@ head. The near-miss control (run 30254186583, model finished at ~324s) proves
 the boundary: its action committed the execution file seconds before the same
 timeout fired and its card received an admitted assessment.
 
-The fix mirrors the two-minute setup/upload allowance the
-``claude-model-call`` composite action has always documented for the
-claude-cli lane: the claude-action-compat lane's ``childExecutionTimeoutMs``
-is now the hard budget rounded up to whole minutes plus
-``CLAUDE_ACTION_JOB_OVERHEAD_MS``.
+Every claude-action-compat lane carries ``CLAUDE_ACTION_JOB_OVERHEAD_MS`` on
+top of its whole-minute hard budget, mirroring the two-minute setup/upload
+allowance the ``claude-model-call`` composite action has always documented
+for the claude-cli lane.
+
+The pr-review triage lane is additionally TOTAL-FIRST by captain decision
+(the card #1759 missing-triage campaign): ``TRIAGE_PR_CHILD_TOTAL_MS`` fixes
+the whole child job at exactly 15 minutes because agents can be slow, the
+overhead allowance lives INSIDE that total, and the lane's hard
+model-execution budget is derived as total minus allowance. This supersedes
+the interim 8-minute total that PR #1790 landed for this lane.
 """
 
 from __future__ import annotations
@@ -29,10 +35,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent_runtime.admission import stage_from_task
 from agent_runtime.config import resolve_selection
 from agent_runtime.task_builder import (
     ACTION_LIMITS,
     CLAUDE_ACTION_JOB_OVERHEAD_MS,
+    TRIAGE_PR_CHILD_TOTAL_MS,
+    TRIAGE_PR_HARD_MS,
+    TRIAGE_PR_SOFT_MS,
     build_task,
 )
 
@@ -83,6 +93,17 @@ REPAIR_ACTIONS = sorted(
     action for action in ACTION_LIMITS if action.endswith(".schema-repair")
 )
 
+# The captain-authorized 15-minute total applies to the pr-review triage lane
+# only. Every sibling action family intentionally keeps its previous total.
+UNCHANGED_SIBLING_TOTALS_MS = {
+    "triage.issue.local": 420_000,
+    "triage.issue.search": 420_000,
+    "deep-review.local": 720_000,
+    "deep-review.search": 720_000,
+    "nl-decision.local": 420_000,
+    "nl-decision.search": 420_000,
+}
+
 
 def main():
     check(
@@ -105,6 +126,10 @@ def main():
                 timeout % 60_000 == 0,
             )
             check(
+                "limits: %s soft deadline stays below the hard budget" % action,
+                soft < hard,
+            )
+            check(
                 "limits: %s enforced model budget still covers the designed hard "
                 "budget after the worst measured pre-model setup" % action,
                 timeout - MEASURED_MAX_SETUP_MS >= hard,
@@ -117,6 +142,12 @@ def main():
                 "limits: %s keeps soft/hard deadlines with the action-owned lane" % action,
                 limits["softDeadlineMs"] is None and limits["hardDeadlineMs"] is None,
             )
+            if action in UNCHANGED_SIBLING_TOTALS_MS:
+                check(
+                    "limits: %s sibling total intentionally unchanged by the "
+                    "captain's 15-minute triage.pr decision" % action,
+                    timeout == UNCHANGED_SIBLING_TOTALS_MS[action],
+                )
         for action in REPAIR_ACTIONS:
             task = claude_task(Path(tmp) / action, action)
             limits = task["spec"]["limits"]
@@ -129,21 +160,80 @@ def main():
                 and limits["hardDeadlineMs"] == hard,
             )
 
-    # The card #1759 counterfactual pinned as arithmetic: under the old
-    # formula the enforced model budget (360s) minus the worst measured setup
-    # (38s) fell 8s short of the designed 330s hard budget, which is exactly
-    # the band where run 30248637187 (killed at ~337s of model execution) and
-    # run 30248300898 lost their results while near-miss run 30254186583
-    # (~324s) still committed.
+        # The captain-authorized 15-minute total for the card #1759
+        # missing-triage campaign: both production triage.pr actions carry
+        # exactly 900000 ms total, the allowance fits INSIDE that total (the
+        # total is 15 minutes, not 15 + 2), and the derived hard budget is
+        # materially above the previous 330s design and the ~324s enforced
+        # reality that killed run 30248637187.
+        for action in ("triage.pr.local", "triage.pr.search"):
+            task = claude_task(Path(tmp) / ("pin-" + action), action)
+            timeout = task["spec"]["limits"]["childExecutionTimeoutMs"]
+            check(
+                "captain: generated %s task carries exactly the 15-minute "
+                "(900000 ms) total" % action,
+                timeout == 900_000 and timeout == TRIAGE_PR_CHILD_TOTAL_MS,
+            )
+            check(
+                "captain: %s no longer carries the interim 8-minute total" % action,
+                timeout != 480_000,
+            )
+            # The admission stage-record layer must accept the new deadline,
+            # exactly as the model workflow records it via --deadline-ms.
+            record = stage_from_task(
+                task,
+                stage="hydrated",
+                status="ok",
+                code="handoff.hydrated",
+                deadline_ms=timeout,
+            )
+            check(
+                "captain: admission stage records accept the 15-minute deadline "
+                "for %s" % action,
+                record["deadlineMs"] == 900_000,
+            )
+        soft, hard, turns, _, _ = ACTION_LIMITS["triage.pr.search"]
+        check(
+            "captain: the effective hard model budget is derived total-minus-"
+            "allowance, not a duplicated 15-minute figure",
+            hard == TRIAGE_PR_HARD_MS
+            and TRIAGE_PR_HARD_MS == TRIAGE_PR_CHILD_TOTAL_MS - CLAUDE_ACTION_JOB_OVERHEAD_MS
+            and hard == 780_000,
+        )
+        check(
+            "captain: the hard model budget materially exceeds the old 330s design",
+            hard != 330_000 and hard > 330_000 and hard - 330_000 >= 300_000,
+        )
+        check(
+            "captain: allowance plus hard budget fits exactly within the total",
+            CLAUDE_ACTION_JOB_OVERHEAD_MS + hard == TRIAGE_PR_CHILD_TOTAL_MS,
+        )
+        check(
+            "captain: the derived hard budget is whole minutes, so the shared "
+            "round-up arithmetic reproduces the exact total",
+            hard % 60_000 == 0
+            and ((hard + 59_999) // 60_000) * 60_000 + CLAUDE_ACTION_JOB_OVERHEAD_MS
+            == TRIAGE_PR_CHILD_TOTAL_MS,
+        )
+        check(
+            "captain: the soft deadline keeps the 32-turn families' fixed "
+            "30-second wrap-up window below hard",
+            soft == TRIAGE_PR_SOFT_MS
+            and soft == hard - 30_000
+            and soft < hard
+            and turns == 32,
+        )
+
+    # The card #1759 counterfactual pinned as arithmetic (historical: the
+    # pre-#1790 formula): the enforced model budget (360s) minus the worst
+    # measured setup (38s) fell 8s short of the then-designed 330s hard
+    # budget, which is exactly the band where run 30248637187 (killed at
+    # ~337s of model execution) and run 30248300898 lost their results while
+    # near-miss run 30254186583 (~324s) still committed.
     old_formula = ((330_000 + 59_999) // 60_000) * 60_000
     check(
-        "limits: the old formula left the model budget below the designed hard budget",
+        "limits: the old formula left the model budget below the then-designed hard budget",
         old_formula - MEASURED_MAX_SETUP_MS < 330_000,
-    )
-    task = claude_task(Path(tempfile.mkdtemp()) / "p", "triage.pr.search")
-    check(
-        "limits: card #1759's lane now enforces 480s (8 minutes)",
-        task["spec"]["limits"]["childExecutionTimeoutMs"] == 480_000,
     )
 
     # The single-owner boundary: the task value is the sole timeout source, so
@@ -167,6 +257,48 @@ def main():
         "dispatch: model job timeout remains bound to the task value",
         "timeout-minutes: ${{ inputs.child_timeout_minutes }}" in model_workflow
         and 'raise SystemExit("child job timeout does not match AgentTask")' in model_workflow,
+    )
+    check(
+        "dispatch: the model job carries no other hard-coded timeout that could "
+        "cap the lane earlier",
+        model_workflow.count("timeout-minutes:") == 1,
+    )
+    check(
+        "dispatch: the pinned action steps receive no inner execution timeout "
+        "input (the job timeout stays the lane's only wall-clock bound)",
+        not any(
+            line.lstrip().startswith("timeout_minutes:")
+            for line in model_workflow.splitlines()
+        ),
+    )
+    check(
+        "dispatch: the triage turn envelope is unchanged by the timeout decision",
+        "--max-turns 32" in model_workflow,
+    )
+    # Cancellation and delivered-cancelled semantics: the capture step still
+    # always runs after an outer cancellation, a committed execution file
+    # still finalizes as completed/delivered, and only the checkpoint-only
+    # cancelled path is classified child-timeout.
+    check(
+        "cancel: the capture step still runs on cancellation",
+        "if: ${{ always() && steps.source.outputs.match == 'true' && (steps.hydrate.outcome != 'success' || steps.hydrate.outputs.adapter == 'claude-action-compat') }}"
+        in model_workflow,
+    )
+    check(
+        "cancel: a committed execution file survives outer cancellation as a "
+        "delivered result",
+        'conclusion="success"' in model_workflow
+        and 'termination="completed"' in model_workflow,
+    )
+    check(
+        "cancel: only the checkpoint-only cancelled path is classified child-timeout",
+        'if [ "$MODEL_JOB_RESULT" = "cancelled" ]; then' in model_workflow
+        and 'conclusion="timed_out"' in model_workflow
+        and 'termination="child-timeout"' in model_workflow,
+    )
+    check(
+        "cancel: an uncommitted cancelled run still reports honest output.missing",
+        "capture_status=failed; capture_code=output.missing" in model_workflow,
     )
 
     if FAILURES:
