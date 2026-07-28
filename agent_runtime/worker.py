@@ -25,6 +25,7 @@ from typing import Any
 from .adapters.claude import ClaudeProtocolError, ClaudeStreamParser
 from .contract import ContractError, atomic_write_json, canonical_json_bytes, canonical_sha256, load_json_regular
 from .redaction import redact_text, sanitize_message
+from .size_budget import COMPILED_PROMPT_MAX_BYTES
 from .tools import CanonicalTools, ToolError, dynamic_tool_spec
 
 
@@ -495,7 +496,7 @@ def _run_claude(plan: dict[str, Any], output: Path, events: InternalEvents, canc
     prompt_path = Path(str(claude_plan.get("stdinArtifact") or ""))
     try:
         prompt_info = prompt_path.lstat()
-        if prompt_path.is_symlink() or not prompt_path.is_file() or prompt_info.st_size > 262144:
+        if prompt_path.is_symlink() or not prompt_path.is_file() or prompt_info.st_size > COMPILED_PROMPT_MAX_BYTES:
             raise OSError("invalid prompt artifact")
         prompt = prompt_path.read_bytes()
         prompt.decode("utf-8", errors="strict")

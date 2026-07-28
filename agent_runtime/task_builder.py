@@ -14,6 +14,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .limits import TARGET_FACTS_MAX_BYTES
+from .size_budget import (
+    COMPILED_PROMPT_MAX_BYTES,
+    SIZE_BUDGETS,
+    TRANSCRIPT_MAX_BYTES,
+    TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
+    bounded_candidate_text,
+)
 
 from . import API_VERSION
 from .admission import DIGEST
@@ -75,17 +82,23 @@ TRIAGE_PR_HARD_MS = TRIAGE_PR_CHILD_TOTAL_MS - CLAUDE_ACTION_JOB_OVERHEAD_MS
 # wrap-up work, not proportional to the budget.
 TRIAGE_PR_SOFT_MS = TRIAGE_PR_HARD_MS - 30_000
 
+# Final-byte caps come from the one authoritative size-budget table so the
+# transport bound provably dominates each action's schema worst case
+# (agent_runtime/size_budget.py, pinned by tests/test_size_budget.py).
 ACTION_LIMITS = {
-    "triage.issue.local": (240_000, 270_000, 32, 80, 65_536),
-    "triage.issue.search": (240_000, 270_000, 32, 80, 65_536),
-    "triage.pr.local": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80, 65_536),
-    "triage.pr.search": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80, 65_536),
-    "triage.schema-repair": (60_000, 75_000, 1, 0, 65_536),
-    "deep-review.local": (540_000, 600_000, 64, 160, 131_072),
-    "deep-review.search": (540_000, 600_000, 64, 160, 131_072),
-    "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
-    "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
-    "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
+    action: (soft, hard, turns, tool_calls, SIZE_BUDGETS[action].max_final_bytes)
+    for action, (soft, hard, turns, tool_calls) in {
+        "triage.issue.local": (240_000, 270_000, 32, 80),
+        "triage.issue.search": (240_000, 270_000, 32, 80),
+        "triage.pr.local": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80),
+        "triage.pr.search": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80),
+        "triage.schema-repair": (60_000, 75_000, 1, 0),
+        "deep-review.local": (540_000, 600_000, 64, 160),
+        "deep-review.search": (540_000, 600_000, 64, 160),
+        "nl-decision.local": (240_000, 270_000, 32, 80),
+        "nl-decision.search": (240_000, 270_000, 32, 80),
+        "nl-decision.schema-repair": (60_000, 75_000, 1, 0),
+    }.items()
 }
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
@@ -1126,7 +1139,7 @@ def claude_capabilities(action: str, schema_digest: str) -> dict[str, Any]:
         },
         {
             "name": "transcript.bounded",
-            "constraints": {"maxBytes": 8388608, "reduced": True},
+            "constraints": {"maxBytes": TRANSCRIPT_MAX_BYTES, "reduced": True},
         },
     ]
     return {
@@ -1387,7 +1400,7 @@ def build_task(
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
-        compiled_path, bundle, 262144
+        compiled_path, bundle, COMPILED_PROMPT_MAX_BYTES
     )
     compiled_path.unlink()
     inputs: list[dict[str, Any]] = []
@@ -1633,7 +1646,7 @@ def build_task(
                 if adapter == "claude-action-compat"
                 else tool_calls,
                 "maxFinalBytes": final_bytes,
-                "maxEventBytes": 8388608,
+                "maxEventBytes": TRANSCRIPT_MAX_BYTES,
                 "maxProviderRequests": None
                 if adapter == "claude-action-compat"
                 else (64 if turns > 32 else 40),
@@ -1724,7 +1737,8 @@ CORRECTION_ELIGIBLE_ERROR_CODES = frozenset(
 )
 # The rejected candidate is embedded in the correction prompt as bounded data;
 # a real compact triage object is a few hundred bytes to low single-digit KB.
-CORRECTION_CANDIDATE_MAX_BYTES = 24000
+# The bound is owned by the size-budget table (size_budget.py).
+CORRECTION_CANDIDATE_MAX_BYTES = TRIAGE_REPAIR_CANDIDATE_MAX_BYTES
 
 
 def _correction_candidate_text(value: Any) -> str:
@@ -1735,13 +1749,7 @@ def _correction_candidate_text(value: Any) -> str:
             text = canonical_json_bytes(value).decode("utf-8")
         except (ArtifactError, UnicodeDecodeError):
             text = ""
-    raw = text.encode("utf-8")
-    if len(raw) > CORRECTION_CANDIDATE_MAX_BYTES:
-        text = (
-            raw[:CORRECTION_CANDIDATE_MAX_BYTES].decode("utf-8", "ignore")
-            + "\n[candidate truncated]"
-        )
-    return text
+    return bounded_candidate_text(text, CORRECTION_CANDIDATE_MAX_BYTES)
 
 
 def correction_prompt(
@@ -1948,7 +1956,7 @@ def build_correction_task(
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
-        compiled_path, bundle, 262144
+        compiled_path, bundle, COMPILED_PROMPT_MAX_BYTES
     )
     compiled_path.unlink()
 

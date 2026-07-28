@@ -243,7 +243,10 @@ def test_build_repair_prompt():
     # never re-introduce the E2BIG class the pass-by-reference redesign fixed.
     huge = json.dumps({"summary": "x" * 200000, "junk": "y" * 200000})
     pbig = rc.build_repair_prompt(huge, "pr-review")
-    check("prompt: oversized candidate is truncated", "[candidate truncated]" in pbig)
+    check(
+        "prompt: oversized candidate is truncated",
+        "[candidate truncated: retained" in pbig,
+    )
     check(
         "prompt: bounded well under MAX_ARG_STRLEN even for a huge candidate",
         len(pbig.encode("utf-8")) < 60000,

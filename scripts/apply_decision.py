@@ -107,6 +107,17 @@ from agent_runtime.contract import (  # noqa: E402
     load_json_regular,
     validate_schema,
 )
+from agent_runtime.size_budget import (  # noqa: E402
+    NL_ANSWER_MAX_CHARS,
+    NL_FREE_TEXT_MAX_CHARS,
+    NL_HISTORY_ELISION_TEMPLATE,
+    NL_HISTORY_MAX_TOTAL_BYTES,
+    NL_HISTORY_MAX_TURNS,
+    NL_HISTORY_TURN_MAX_BYTES,
+    NL_HISTORY_TURN_TRUNCATION_TEMPLATE,
+    NL_REPAIR_CANDIDATE_MAX_BYTES,
+    bounded_candidate_text,
+)
 
 _AUTO_TRIAGE_SECTION_RE = re.compile(
     r"\n?<!--\s*wheelhouse-triage:start\s*-->.*?"
@@ -1586,6 +1597,22 @@ def _same_comment(comment_id, trigger_id):
     return str(comment_id) == str(trigger_id)
 
 
+def _bounded_history_turn(speaker, body):
+    """Render one trusted turn, truncated to the per-turn byte budget.
+
+    The head of the comment is kept (verdicts and answers lead with their
+    conclusion) and the truncation is explicit, never silent."""
+    raw = body.encode("utf-8")
+    if len(raw) <= NL_HISTORY_TURN_MAX_BYTES:
+        return "%s: %s" % (speaker, body)
+    retained = raw[:NL_HISTORY_TURN_MAX_BYTES].decode("utf-8", "ignore")
+    marker = NL_HISTORY_TURN_TRUNCATION_TEMPLATE % (
+        len(retained.encode("utf-8")),
+        len(raw),
+    )
+    return "%s: %s\n%s" % (speaker, retained, marker)
+
+
 def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
     """Render the card's prior thread as an owner-scoped "Conversation so far".
 
@@ -1599,9 +1626,19 @@ def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
     entirely so unauthorized text can NEVER enter the trusted instruction context.
     The current triggering comment is excluded too (it is passed separately as
     the new instruction). `comments` is the chronological raw list; the rendered
-    string is "" when there is no prior trusted turn."""
+    string is "" when there is no prior trusted turn.
+
+    SIZE - the rendered history is inlined into an env-carried prompt, so it is
+    bounded by the size-budget table (agent_runtime/size_budget.py): only the
+    most recent NL_HISTORY_MAX_TURNS trusted turns are kept, each truncated to
+    NL_HISTORY_TURN_MAX_BYTES, and turns are dropped oldest-first until the
+    rendered whole fits NL_HISTORY_MAX_TOTAL_BYTES. Every elision or
+    truncation is explicit via a marker, so an unbounded card thread can never
+    push the prompt past the kernel's per-string execve limit again (the F1
+    E2BIG class). The trusted-author filter above is byte-independent and
+    unchanged."""
     trusted = set(trusted_logins) | {bot_login}
-    lines = []
+    turns = []
     for c in comments or []:
         if not isinstance(c, dict):
             continue
@@ -1614,8 +1651,25 @@ def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
         if not body:
             continue
         speaker = "Assistant" if login == bot_login else "Maintainer"
-        lines.append("%s: %s" % (speaker, body))
-    return "\n\n".join(lines)
+        turns.append((speaker, body))
+    if not turns:
+        return ""
+    elided = turns[:-NL_HISTORY_MAX_TURNS] if len(turns) > NL_HISTORY_MAX_TURNS else []
+    kept = turns[len(elided):]
+    rendered = [_bounded_history_turn(speaker, body) for speaker, body in kept]
+    while rendered and sum(len(r.encode("utf-8")) + 2 for r in rendered) > NL_HISTORY_MAX_TOTAL_BYTES:
+        elided.append(kept[0])
+        kept = kept[1:]
+        rendered = rendered[1:]
+    if elided:
+        elided_bytes = sum(len(body.encode("utf-8")) for _, body in elided)
+        marker = NL_HISTORY_ELISION_TEMPLATE % (
+            len(elided),
+            "" if len(elided) == 1 else "s",
+            elided_bytes,
+        )
+        rendered.insert(0, marker)
+    return "\n\n".join(rendered)
 
 
 def cmd_nl_prompt():
@@ -1691,7 +1745,6 @@ NL_SCHEMA_PATH = (
     / "actions"
     / "nl-decision-v1.schema.json"
 )
-NL_REPAIR_CANDIDATE_MAX_BYTES = 24000
 _NL_SCHEMA_FIELDS = ("mode", "action", "free_text", "answer")
 
 
@@ -1746,14 +1799,14 @@ def nl_schema_reason(text):
 def build_nl_repair_prompt(
     candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDATE_MAX_BYTES
 ):
-    """Build the self-contained prompt for the ONE no-tool NL repair turn."""
-    candidate = candidate_text or ""
-    raw = candidate.encode("utf-8")
-    if len(raw) > max_candidate_bytes:
-        candidate = (
-            raw[:max_candidate_bytes].decode("utf-8", "ignore")
-            + "\n[candidate truncated]"
-        )
+    """Build the self-contained prompt for the ONE no-tool NL repair turn.
+
+    The candidate bound comes from the one size-budget table and covers the
+    worst-case schema-valid nl-decision-v1 candidate, so every potentially
+    valid delivered candidate reaches the repair model COMPLETE; only junk
+    beyond that bound is truncated, with an explicit marker.
+    """
+    candidate = bounded_candidate_text(candidate_text or "", max_candidate_bytes)
     return "\n".join(
         [
             "You previously produced a natural-language decision result whose native",
@@ -1773,8 +1826,10 @@ def build_nl_repair_prompt(
             "{",
             '  "mode": "action | answer | clarify" (required),',
             '  "action": "string up to 80 characters" (optional),',
-            '  "free_text": "string up to 32768 characters" (required and non-empty for decline; optional otherwise),',
-            '  "answer": "string up to 65536 characters" (optional)',
+            '  "free_text": "string up to %d characters" (required and non-empty for decline; optional otherwise),'
+            % NL_FREE_TEXT_MAX_CHARS,
+            '  "answer": "string up to %d characters" (optional)'
+            % NL_ANSWER_MAX_CHARS,
             "}",
             "No other keys are allowed.",
             "",

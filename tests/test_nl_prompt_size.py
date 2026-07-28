@@ -450,6 +450,79 @@ def test_nl_prompt_step_is_pass_by_reference_not_inline():
         )
 
 
+def test_trusted_history_is_bounded_with_explicit_elision():
+    """The F1 class: trusted history is the one unbounded inline the #555 fix
+    left behind. A long-lived card accumulating large bot verdicts and answers
+    must still yield a spawnable prompt - bounded by the size-budget table with
+    explicit elision - while the trusted-author filter stays byte-independent."""
+    from agent_runtime.size_budget import (
+        NL_HISTORY_MAX_TOTAL_BYTES,
+        NL_HISTORY_MAX_TURNS,
+    )
+
+    verdict = "Deep review verdict: HOLD.\n" + ("v" * 100_000)
+    answer = "Prior answer. " + ("a" * 60_000)
+    comments = [
+        {"id": 1, "login": "github-actions[bot]", "body": verdict},
+        {"id": 2, "login": "github-actions[bot]", "body": verdict},
+        {"id": 3, "login": "github-actions[bot]", "body": answer},
+        {"id": 4, "login": "kunchenguid", "body": answer},
+        {"id": 5, "login": "github-actions[bot]", "body": answer},
+        {"id": 6, "login": "random-contributor", "body": "untrusted " + ("u" * 500_000)},
+        {"id": 7, "login": "kunchenguid", "body": "merge it please"},
+    ]
+    history = ad.assemble_history(comments, ["kunchenguid"], "7")
+    check(
+        "history: rendered history respects the total byte budget",
+        len(history.encode("utf-8")) <= NL_HISTORY_MAX_TOTAL_BYTES + 256,
+    )
+    check(
+        "history: per-turn truncation is explicit, never silent",
+        "[truncated: retained" in history,
+    )
+    check(
+        "history: the trusted-author filter is unchanged by bounding",
+        "untrusted" not in history and "random-contributor" not in history,
+    )
+    check(
+        "history: the triggering comment stays excluded from history",
+        "merge it please" not in history,
+    )
+    check(
+        "history: the newest trusted turn survives with its head intact",
+        "Prior answer." in history,
+    )
+    prompt = ad.build_nl_prompt("card body", "merge it please", "pr-review", history)
+    raw = len(prompt.encode("utf-8"))
+    escaped = len(json.dumps(prompt).encode("utf-8"))
+    check(
+        "history: two 100 KB verdicts + three 60 KB answers stay spawnable "
+        "(raw %d, escaped %d < %d)" % (raw, escaped, MAX_ARG_STRLEN - 4096),
+        raw < MAX_ARG_STRLEN - 4096 and escaped < MAX_ARG_STRLEN - 4096,
+    )
+    # More turns than the turn budget: the oldest are elided with a marker.
+    many = [
+        {"id": i, "login": "kunchenguid", "body": "turn %d" % i}
+        for i in range(NL_HISTORY_MAX_TURNS + 5)
+    ]
+    crowded = ad.assemble_history(many, ["kunchenguid"], None)
+    check(
+        "history: turn-count overflow is elided with an explicit marker",
+        "[earlier conversation elided: 5 turns," in crowded
+        and "turn %d" % (NL_HISTORY_MAX_TURNS + 4) in crowded
+        and "Maintainer: turn 0" not in crowded,
+    )
+    small = [
+        {"id": 1, "login": "kunchenguid", "body": "short question"},
+        {"id": 2, "login": "github-actions[bot]", "body": "short answer"},
+    ]
+    check(
+        "history: a small thread renders verbatim with no markers",
+        ad.assemble_history(small, ["kunchenguid"], None)
+        == "Maintainer: short question\n\nAssistant: short answer",
+    )
+
+
 def main():
     test_e2big_repro_giant_target_never_reaches_all_inputs()
     test_prompt_names_target_file_and_keeps_untrusted_framing()
@@ -459,6 +532,7 @@ def main():
     test_nl_failure_visibility_is_bounded_and_fire_once()
     test_nl_consumer_evidence_requires_execution_and_durable_projection()
     test_nl_prompt_step_is_pass_by_reference_not_inline()
+    test_trusted_history_is_bounded_with_explicit_elision()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

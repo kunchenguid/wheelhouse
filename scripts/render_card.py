@@ -59,6 +59,10 @@ import target_observation as target_contracts  # noqa: E402
 import decision_context as context_contracts  # noqa: E402
 import assessment_admission  # noqa: E402
 from agent_runtime.limits import TARGET_FACTS_MAX_BYTES  # noqa: E402
+from agent_runtime.size_budget import (  # noqa: E402
+    TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
+    bounded_candidate_text,
+)
 from agent_runtime.output_validation import (  # noqa: E402
     evidence_anchor_ok as _shared_evidence_anchor_ok,
     evidence_candidates as _shared_evidence_candidates,
@@ -9675,8 +9679,9 @@ def redacted_candidate_shape(result_text):
 # The schema-repair candidate is the model's OWN (small) final answer, embedded
 # in the repair prompt. Bound it so a pathological candidate cannot re-introduce
 # the E2BIG-class problem the pass-by-reference redesign fixed. A real compact
-# triage object is a few hundred bytes to low single-digit KB.
-REPAIR_CANDIDATE_MAX_BYTES = 24000
+# triage object is a few hundred bytes to low single-digit KB. The bound is
+# owned by the size-budget table (agent_runtime/size_budget.py).
+REPAIR_CANDIDATE_MAX_BYTES = TRIAGE_REPAIR_CANDIDATE_MAX_BYTES
 
 
 def _repair_schema_lines(kind):
@@ -9716,13 +9721,7 @@ def build_repair_prompt(
     STRUCTURE ONLY - no file reads, no re-analysis, evidence copied verbatim.
     The candidate is byte-bounded so this prompt stays tiny regardless of the
     original target size."""
-    candidate = candidate_text or ""
-    raw = candidate.encode("utf-8")
-    if len(raw) > max_candidate_bytes:
-        candidate = (
-            raw[:max_candidate_bytes].decode("utf-8", "ignore")
-            + "\n[candidate truncated]"
-        )
+    candidate = bounded_candidate_text(candidate_text or "", max_candidate_bytes)
     lines = [
         "You previously produced a structured triage result that FAILED",
         "automated schema validation. Your ONLY task now is to REPAIR its",

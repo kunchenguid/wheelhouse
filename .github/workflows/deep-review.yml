@@ -870,6 +870,7 @@ jobs:
             CLAIM_ID="$CLAIM_ID" \
             CLAIM_MARKER="$CLAIM_MARKER" \
             "$TRUSTED_PYTHON" - <<'PY'
+          import json
           import os
           import subprocess
           import sys
@@ -895,7 +896,10 @@ jobs:
           verdict = cards.label_automated_status_lines(verdict)
           verdict = core.qualify_issue_refs(verdict, os.environ.get("GITHUB_REPOSITORY_OWNER", ""), os.environ.get("TARGET_REPO", ""))
           body = "%s\n\n%s" % (verdict, os.environ["CLAIM_MARKER"])
-          subprocess.run(["gh", "api", "--method", "PATCH", "repos/%s/issues/comments/%s" % (os.environ["GH_REPO"], os.environ["CLAIM_ID"]), "-f", "body=%s" % body], check=True)
+          # The verdict may be up to its schema bound (65536 characters), so it
+          # is passed over stdin: a single argv/env string is capped by the
+          # kernel's MAX_ARG_STRLEN and must never carry model-sized text.
+          subprocess.run(["gh", "api", "--method", "PATCH", "repos/%s/issues/comments/%s" % (os.environ["GH_REPO"], os.environ["CLAIM_ID"]), "--input", "-"], check=True, input=json.dumps({"body": body}).encode("utf-8"))
           if failed:
               sys.exit(1)
           PY

@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from .contract import ContractError, load_json_regular, validate_contract
+from .size_budget import RESULT_ARTIFACT_MAX_BYTES
 
 
 def load_agent_result(path: str) -> dict[str, Any] | None:
     if not path:
         return None
     try:
-        value = load_json_regular(path, max_bytes=2 * 1024 * 1024)
+        value = load_json_regular(path, max_bytes=RESULT_ARTIFACT_MAX_BYTES)
         validate_contract(value, "AgentResult")
     except (ContractError, OSError, ValueError):
         return None
