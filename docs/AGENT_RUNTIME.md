@@ -137,6 +137,26 @@ gh-axi workflow run scan-backstop.yml \
   --field replay_dry_run=true
 ```
 
+### Observation-drift targeted refresh for a stale admitted assessment
+
+The exact-card selector adds one more narrow recovery class, proven by card #1584: a `succeeded` cache that still carries a persisted ADMITTED assessment whose observation binding drifted on an UNCHANGED head. A same-revision projection refresh rotates the card's `review_observation` whenever the scan observes new facts for the same head, while the triage cache (`triaged_sha`) and same-revision triage preservation are head-bound. The card then keeps a stale-observation assessment (and any residual recommendation) with no path to heal: the renderer's authority predicate is observation-bound, so Accept and G6 stay off; `triage_fresh` is true, so scheduled scans never re-triage the revision; and the residual authority makes the advisory class above refuse as `advisory-recovery-authority-present` (or a non-admitted stored assessment as `advisory-recovery-admission-unproven`). Only a target head move would heal naturally.
+
+Admission requires every one of these trusted stored facts on a pure `needs-decision` pr-review card at its exact current revision: no current admitted assessment under the renderer's one owning predicate, a well-formed persisted assessment whose own admission is `admitted`, the assessment's target head equal to the card's current head and to the selected revision, a well-formed current review observation, and an assessment observation id that differs from the current observation id. Anything missing, malformed, contradictory, or only partially matching refuses with a precise `drift-refresh-*` reason (`kind-unsupported`, `cache-unproven`, `assessment-current`, `assessment-not-admitted`, `head-mismatch`, `observation-unproven`, or `not-observation-drift`) and the original advisory refusal is preserved verbatim. A card whose assessment is already current - the ordinary healthy shape - refuses as `drift-refresh-assessment-current`; a non-current assessment whose observation did NOT drift (for example a malformed decision context) refuses as `drift-refresh-not-observation-drift`, because those shapes have their own owners.
+
+This is an operator route, not automatic healing, on the same terms as the advisory class: generic prefix discovery, scheduled reconcile, same-revision refresh, and the attempt-reset cohorts can never select it - only a card named in `replay_exact_cards`. Selection grants no authority: the stale assessment and any residual recommendation are discarded, never promoted. An admitted plan clears the drifted cache together with the stale assessment, assessment result/admission records, residual recommendation, stale verdict, and primary/consumption telemetry, removes the stale Triage section, writes a version 1 replay marker recording `cleared: observation-drift` (so the same card and revision cannot be replayed again), then requests one ordinary attempt through the same exact-revision, freshness, attempt-cap, daily-budget, claim-tombstone, queued-checkpoint, and sealed-dispatch path every other replay uses. The attempt cap is preserved (never reset), so the refresh consumes exactly one of the revision's remaining attempts. The fresh attempt binds the observation current at its own run time: it either re-admits an observation-bound assessment (restoring the owner control) or ends in an explicit unavailable state with no residual misleading recommendation.
+
+Dry-run remains zero-write, card-bound, and idempotent. It prints the admitted plan, an `observation-drift basis:` line naming the proven facts (assessment admission, head currency, the two observation ids, residual-recommendation presence, and the attempt count), and an explicit enumeration of every planned card mutation and the model spend (one triage attempt of at most two model calls, one daily-ledger reservation, one claim tombstone, dispatch only through the existing sealed permit):
+
+```bash
+gh-axi workflow run scan-backstop.yml \
+  --repo OWNER/wheelhouse \
+  --ref main \
+  --field replay_wave=observation-drift-refresh \
+  --field replay_limit=1 \
+  --field replay_exact_cards='v1:1584' \
+  --field replay_dry_run=true
+```
+
 ### One-use card 1585 incident permit
 
 `card-1585-anchor-fix-r3-final` is a code-defined, one-use permit for card 1585 only. It is not a general reset. It requires `replay_exact_cards='v1:1585'`, limit 1, the owner actor, the search action and its exact event key, the existing 2/2 attempt record, reviewed prior replay marker, exact terminal claim and result records, and the landed escaped-quote anchor behavior. Every planning and mutation reread rebuilds the approved source-review binding: `kunchenguid/no-mistakes#547` at head `0f29152c44b808064f9a2a2621c9bde6456f6262`, base `3d4691aedba97d9f877c073e3e652a8fde69d574`, target-facts digest `c8308310c07e85d840ea41785f78786a04d181bcf25c1b2ae6dbe4db278f6ea9`, immutable title/body/update snapshot digest `a0dd38be93e516c4bd3c376993d2dc3eee89f6e90638f63c55017aac808661a6` at `2026-07-23T04:56:49Z`, default-branch VISION blob `08077197b28d5f6b5b74b405d4617f066f620e33`, and VISION content digest `be04f798e4e616390c87a7fd21db7a3f656a4a7077b897c6a8aeb5cb49721b43`. Any mismatch stops before reservation.

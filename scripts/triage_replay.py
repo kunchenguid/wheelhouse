@@ -75,6 +75,19 @@ TRIAGE_NON_SUCCESS_FIELDS = (
 # delivered candidate into authority. Generic discovery, scheduled scans,
 # attempt-reset cohorts, and ordinary reconcile can never select this class.
 ADVISORY_RECOVERY_CLEARED = "advisory"
+# The distinct exact-selector-only class proven by card #1584: a persisted
+# ADMITTED assessment lost currency purely because the card's review
+# observation rotated on an UNCHANGED head (a same-revision projection
+# refresh). Authority surfaces (Accept, G6) are observation-bound, but the
+# triage cache and same-revision triage preservation are head-bound, so the
+# card keeps a stale-observation assessment (and any residual recommendation)
+# while `triage_fresh` blocks every automatic re-triage and the residual
+# authority makes the advisory class refuse. Clearing the drifted cache
+# re-opens exactly one ordinary spend-guarded attempt for the same revision;
+# it never promotes the stale assessment or recommendation into authority.
+# Generic discovery, scheduled scans, attempt-reset cohorts, and ordinary
+# reconcile can never select this class.
+OBSERVATION_DRIFT_REFRESH_CLEARED = "observation-drift"
 TRIAGE_ADVISORY_CACHE_FIELDS = TRIAGE_NON_SUCCESS_FIELDS + (
     render_card.TRIAGE_PRIMARY_STATUS_FIELD,
     render_card.TRIAGE_PRIMARY_ERROR_FIELD,
@@ -460,7 +473,7 @@ def _valid_marker(marker, revision):
         and REPLAY_WAVE_RE.fullmatch(marker["wave"])
         and marker.get("revision") == revision
         and marker.get("cleared")
-        in {"error", "absent", ADVISORY_RECOVERY_CLEARED}
+        in {"error", "absent", ADVISORY_RECOVERY_CLEARED, OBSERVATION_DRIFT_REFRESH_CLEARED}
         and _valid_timestamp(marker.get("at"))
         and not isinstance(run_number, bool)
         and isinstance(run_number, int)
@@ -838,6 +851,53 @@ def _advisory_recovery_refusal(state, kind, revision):
     return ""
 
 
+def _observation_drift_refresh_refusal(state, kind, revision):
+    """Prove the exact card-bound observation-drift refresh class (card #1584).
+
+    Returns "" only when a persisted ADMITTED assessment lost currency purely
+    because the card's review observation rotated on an unchanged head, and
+    otherwise the precise refusal. This is the one stuck shape neither the
+    head-keyed automatic cache nor the advisory recovery class can heal:
+    `triage_fresh` is true (so scheduled scans never re-triage the revision),
+    while the renderer's authority predicate is observation-bound (so Accept
+    and G6 stay off) and any residual recommendation keeps advisory replay
+    refused as `authority-present`. A current admitted assessment, a missing
+    or non-admitted assessment, a head mismatch, an unavailable observation,
+    and non-current assessments whose observation did NOT drift all refuse -
+    they are different shapes with their own owners.
+    """
+    if kind != "pr-review":
+        return "drift-refresh-kind-unsupported"
+    if state.get("held") or state.get("triaged_sha") != revision:
+        return "drift-refresh-cache-unproven"
+    if render_card.assessment_current_admitted(state):
+        return "drift-refresh-assessment-current"
+    stored = state.get(render_card.ASSESSMENT_FIELD)
+    assessment = (
+        assessment_admission.normalize_assessment(stored)
+        if stored is not None
+        else None
+    )
+    if assessment is None or not assessment_admission.admitted(assessment):
+        return "drift-refresh-assessment-not-admitted"
+    if (
+        assessment["target"]["head_sha"] != revision
+        or state.get("head_sha") != revision
+    ):
+        return "drift-refresh-head-mismatch"
+    observation = render_card.target_contracts.normalize_review_observation(
+        state.get(render_card.REVIEW_OBSERVATION_FIELD)
+    )
+    if observation is None:
+        return "drift-refresh-observation-unproven"
+    if assessment["target"]["observation_id"] == observation["observation_id"]:
+        # The assessment is non-current for a reason OTHER than observation
+        # drift (for example a malformed decision context): a different shape
+        # this class deliberately does not own.
+        return "drift-refresh-not-observation-drift"
+    return ""
+
+
 def _maintainer_logins(config, owner):
     return {
         str(login).strip().casefold()
@@ -1066,8 +1126,18 @@ def inspect_candidate(
             return None, "triage-cache-not-terminal-error"
         refusal = _advisory_recovery_refusal(state, kind, revision)
         if refusal:
-            return None, refusal
-        cleared = ADVISORY_RECOVERY_CLEARED
+            # The advisory class stays refused on its own terms. The distinct
+            # observation-drift refresh class may still prove itself for an
+            # authority-present card whose admitted assessment went stale
+            # purely through observation rotation on this unchanged head.
+            drift_refusal = _observation_drift_refresh_refusal(
+                state, kind, revision
+            )
+            if drift_refusal:
+                return None, refusal
+            cleared = OBSERVATION_DRIFT_REFRESH_CLEARED
+        else:
+            cleared = ADVISORY_RECOVERY_CLEARED
     else:
         return None, "triage-status-untrusted"
     item = {
@@ -1387,6 +1457,40 @@ def _print_exact_plans(exact_scope, plans):
                 plan["cleared"],
             )
         )
+        if plan["cleared"] == OBSERVATION_DRIFT_REFRESH_CLEARED:
+            state = plan["state"]
+            assessment = (
+                assessment_admission.normalize_assessment(
+                    state.get(render_card.ASSESSMENT_FIELD)
+                )
+                or {}
+            )
+            target = assessment.get("target") or {}
+            observation = (
+                render_card.target_contracts.normalize_review_observation(
+                    state.get(render_card.REVIEW_OBSERVATION_FIELD)
+                )
+                or {}
+            )
+            print(
+                "replay %s card #%s observation-drift basis: assessment=admitted "
+                "head=current(%s) observation=drifted(assessment %s, current %s) "
+                "recommendation=%s attempts=%s"
+                % (
+                    EXACT_SELECTOR_LABEL,
+                    plan["number"],
+                    str(target.get("head_sha") or "")[:12],
+                    str(target.get("observation_id") or "")[:19],
+                    str(observation.get("observation_id") or "")[:19],
+                    (
+                        "residual"
+                        if "triage_recommendation" in state
+                        else "none"
+                    ),
+                    plan["attempt_count"],
+                )
+            )
+            continue
         if plan["cleared"] != ADVISORY_RECOVERY_CLEARED:
             continue
         state = plan["state"]
@@ -1447,10 +1551,16 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     if state != plan["state"]:
         return body
     new_state = dict(state)
-    if plan["cleared"] == ADVISORY_RECOVERY_CLEARED:
+    if plan["cleared"] in {
+        ADVISORY_RECOVERY_CLEARED,
+        OBSERVATION_DRIFT_REFRESH_CLEARED,
+    }:
         # The proven advisory cache also carries primary/consumption telemetry
-        # and a non-admitted assessment record. Clear them with the cache so the
-        # replayed attempt starts from the same shape a fresh revision would.
+        # and a non-admitted assessment record. The proven observation-drift
+        # cache carries the stale-observation admitted assessment, any
+        # residual recommendation, and the stale verdict. Clear them with the
+        # cache so the replayed attempt starts from the same shape a fresh
+        # revision would.
         for field in TRIAGE_ADVISORY_CACHE_FIELDS:
             new_state.pop(field, None)
     elif plan["cleared"] == "error" or plan["duplicate_reentry"]:
@@ -1472,7 +1582,8 @@ def _body_with_replay_marker(body, plan, wave, run_number):
     )
     clean = (
         render_card.remove_triage_section(body)
-        if plan["cleared"] in {"error", ADVISORY_RECOVERY_CLEARED}
+        if plan["cleared"]
+        in {"error", ADVISORY_RECOVERY_CLEARED, OBSERVATION_DRIFT_REFRESH_CLEARED}
         or plan["duplicate_reentry"]
         else body
     )
@@ -1752,6 +1863,37 @@ def run(
                         plan["cleared"],
                     )
                 )
+                if plan["cleared"] == OBSERVATION_DRIFT_REFRESH_CLEARED:
+                    cap = plan["item"]["triage_attempt_cap_per_revision"]
+                    print(
+                        "DRY-RUN card #%s planned card mutations (card-only, in "
+                        "order): (1) clear the stale observation-bound triage cache "
+                        "(admitted assessment, assessment result/admission records, "
+                        "residual recommendation, auto-merge verdict, primary/"
+                        "consumption telemetry) and remove the stale Triage section; "
+                        "(2) write the triage_replay v%s marker cleared=%s; (3) the "
+                        "atomic queued checkpoint writes triaged_sha=%s, "
+                        "triage_status=queued, triage_attempts %s->%s. No label, "
+                        "comment, title, option, or target-repository writes."
+                        % (
+                            plan["number"],
+                            marker_version,
+                            plan["cleared"],
+                            plan["revision"],
+                            plan["attempt_count"],
+                            plan["attempt_count"] + 1,
+                        )
+                    )
+                    print(
+                        "DRY-RUN card #%s planned model spend: exactly 1 triage "
+                        "attempt (at most 2 model calls with the bounded correction "
+                        "turn) reserved as 1 daily-ledger slot through the trusted "
+                        "checkpoint; the per-revision attempt cap is preserved "
+                        "(%s/%s after queue, never reset). Claim identity is rebound "
+                        "through one supersede tombstone and dispatch uses only the "
+                        "existing sealed permit."
+                        % (plan["number"], plan["attempt_count"] + 1, cap)
+                    )
             else:
                 print(
                     "DRY-RUN card #%s: write triage_replay v1 cleared=%s, "

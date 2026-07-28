@@ -559,14 +559,21 @@ def advisory_environment(value, item, revision=ADVISORY_REVISION, **options):
     )
 
 
-def advisory_plan(value, item, selector=None, dry_run=True, wave="advisory-wave"):
+def advisory_plan(
+    value,
+    item,
+    selector=None,
+    dry_run=True,
+    wave="advisory-wave",
+    revision=ADVISORY_REVISION,
+):
     """Run one exact-selector replay over a single advisory-class card."""
     selector = "v1:%s" % value["number"] if selector is None else selector
     path = cards_file([value["number"]])
     output = StringIO()
     try:
         with (
-            advisory_environment(value, item) as calls,
+            advisory_environment(value, item, revision=revision) as calls,
             redirect_stdout(output),
         ):
             try:
@@ -854,6 +861,537 @@ def test_advisory_recovery_refuses_every_disconfirming_shape():
 
 
 MISSING_OUTPUT_REVISION = "cf7f065de35b9e2931ec883ff650008b6ddfd39e"
+
+
+# Production shape of card #1584: a persisted ADMITTED assessment whose
+# observation binding drifted on an UNCHANGED head (a same-revision projection
+# refresh rotated `review_observation` while the head-keyed triage cache and
+# same-revision triage preservation carried the now-stale assessment and its
+# residual recommendation forward verbatim). Accept is off, G6 is unmet, the
+# advisory recovery class refuses as authority-present, and `triage_fresh`
+# blocks every automatic re-triage.
+DRIFT_REVISION = "cd10d1e97c4212b313c62b4045f22149bdee6b42"
+
+
+def drift_payload(state):
+    return {
+        "summary": "Adds opt-in forge_profiles routing.",
+        "product_implications": "Substantial new credential-routing mechanism.",
+        "recommended_action": "merge",
+        "recommended_reason": "Class C strictly opt-in; all checks green.",
+        "evidence": "target.txt: 'forge_profiles'",
+        "recommendation_basis": {
+            "kind": "other",
+            "observation_id": state["review_observation"]["observation_id"],
+            "context_id": state["decision_context"]["context_id"],
+            "check_names": [],
+        },
+        "automerge": {
+            "behavior_class": "C",
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": True,
+        },
+    }
+
+
+def _rotated_observation(state, revision):
+    """Mint the next observation for the SAME head, mirroring the bulk-scan
+    rotation that made card #1584's admitted assessment non-current."""
+    old = state["review_observation"]
+    return rc.target_contracts.make_observation(
+        old["target"]["owner"],
+        old["target"]["repo"],
+        old["target"]["number"],
+        head_sha=revision,
+        base_sha=old["revision"]["base_sha"],
+        expected_head_sha=revision,
+        observed_at="2026-07-28T18:54:25Z",
+        source="bulk-scan",
+        completeness=old["completeness"],
+        facts={**old["facts"], "updated_at": "2026-07-27T09:21:55Z"},
+        changed_paths=old["changed_paths"],
+    )
+
+
+def drift_card(number=1584, target=548, revision=DRIFT_REVISION, rotate=True):
+    """Build card #1584's exact drifted shape through the production writers.
+
+    ``rotate=False`` returns the pre-rotation card (a current admitted
+    assessment with a live Accept control - the shape of the eight already
+    actionable cards), which the drift class must refuse.
+    """
+    item = option_b_fixtures.option_b_item(number=target, head_sha=revision)
+    rendered = rc.render(item)
+    body = rendered["body"]
+    state = rc._unique_state_block(body)
+    body = rc.body_with_triage_result(
+        body,
+        revision,
+        triage=drift_payload(state),
+        owner="owner",
+        base_sha=item["base_sha"],
+        primary_error_code="output.schema_invalid",
+    )
+    state = rc._unique_state_block(body)
+    # Before any rotation the result carries full authority, exactly like the
+    # eight already actionable cards from the nine-card census.
+    assert rc.assessment_current_admitted(state)
+    assert rc.accept_recommendation_available(state)
+    state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": revision,
+        "count": 1,
+    }
+    if rotate:
+        # The same-revision projection refresh: rotate the observation and
+        # context on the unchanged head while every triage field is preserved.
+        new_observation = _rotated_observation(state, revision)
+        assert new_observation["observation_id"] != (
+            state["review_observation"]["observation_id"]
+        )
+        snapshot = rc.context_contracts.repository_snapshot(
+            [
+                {
+                    "owner": "o",
+                    "repo": item["repo"],
+                    "number": int(item["number"]),
+                    "head_sha": revision,
+                    "title": item["title"],
+                    "paths_complete": True,
+                    "paths": ["src/example.py"],
+                    "closing_complete": True,
+                    "closing_issues": [],
+                    "references_complete": True,
+                    "references": [],
+                    "card_issue": 0,
+                    "url": item["url"],
+                    "card_url": "",
+                }
+            ],
+            "2026-07-28T18:57:20Z",
+        )
+        new_context = rc.context_contracts.build_decision_context(
+            new_observation, snapshot
+        )
+        state["review_observation"] = new_observation
+        state["decision_context"] = new_context
+        state["decision_context_id"] = new_context["context_id"]
+    body = rc._replace_state_block(body, state)
+    return {
+        "number": number,
+        "title": rendered["title"],
+        "body": body,
+        "labels": [{"name": name} for name in rendered["labels"]],
+        "state": "OPEN",
+        "updatedAt": "2026-07-28T19:06:09Z",
+        "author": {"login": rc.CARD_AUTOMATION_AUTHOR},
+        "comments": [],
+    }, item
+
+
+def resigned_assessment(state, target=None, **field_changes):
+    """Re-sign a persisted assessment after changes so it still normalizes
+    (the id is tamper-evident, so a raw edit would not)."""
+    value = copy.deepcopy(state[rc.ASSESSMENT_FIELD])
+    value["target"].update(target or {})
+    value.update(field_changes)
+    value.pop("assessment_id")
+    value["assessment_id"] = replay.assessment_admission._identity("sha256:", value)
+    return value
+
+
+def test_observation_drift_refresh_recovers_only_through_the_exact_card_selector():
+    value, item = drift_card()
+    state = rc._unique_state_block(value["body"])
+    # The fixture is card #1584's production shape, proven field by field.
+    assert state["triage_status"] == "succeeded"
+    assert state["triaged_sha"] == DRIFT_REVISION
+    assert state[rc.TRIAGE_PRIMARY_STATUS_FIELD] == "failed"
+    assert state[rc.TRIAGE_PRIMARY_ERROR_FIELD] == "output.schema_invalid"
+    assert state[rc.TRIAGE_CONSUMPTION_FIELD] == "advisory"
+    assessment = state[rc.ASSESSMENT_FIELD]
+    assert assessment["admission"]["status"] == "admitted"
+    assert assessment["target"]["head_sha"] == DRIFT_REVISION
+    assert (
+        assessment["target"]["observation_id"]
+        != state["review_observation"]["observation_id"]
+    )
+    assert not rc.assessment_current_admitted(state)
+    assert not rc.accept_recommendation_available(state)
+    assert state["triage_recommendation"]["action"] == "merge"
+    # Ordinary advisory replay remains unavailable for this authority-present
+    # card: the residual recommendation alone is authority residue.
+    assert replay._advisory_recovery_refusal(state, "pr-review", DRIFT_REVISION) == (
+        "advisory-recovery-authority-present"
+    )
+    # Ordinary reconciliation cannot heal the card: the head-keyed triage
+    # cache is fresh, so no scan ever re-triages this revision, and no
+    # material field changed, so no refresh trigger fires either.
+    assert rc.triage_fresh(item, state)
+    assert not rc.should_auto_triage(item, state, value["labels"], has_token=True)
+
+    run = advisory_plan(value, item, revision=DRIFT_REVISION, wave="drift-wave")
+    assert run["error"] == "", run["output"]
+    assert run["result"] == {
+        "eligible": 1,
+        "planned": 1,
+        "deferred": 0,
+        "written": 0,
+    }
+    assert "clear=observation-drift" in run["output"]
+    assert (
+        "observation-drift basis: assessment=admitted head=current(%s)"
+        % DRIFT_REVISION[:12]
+        in run["output"]
+    )
+    assert "recommendation=residual attempts=1" in run["output"]
+    # The exact preview enumerates every planned card mutation and the model
+    # spend, and remains zero-write.
+    assert "planned card mutations" in run["output"]
+    assert "triage_attempts 1->2" in run["output"]
+    assert "planned model spend" in run["output"]
+    assert "at most 2 model calls" in run["output"]
+    assert "never reset" in run["output"]
+    assert "writes=0" in run["output"]
+    assert run["body"] == value["body"]
+    for channel in ("edits", "queued", "dispatched", "claims"):
+        assert not run["calls"][channel], channel
+
+    # The preview is idempotent: a second dry-run is byte-identical and still
+    # zero-write.
+    again = advisory_plan(value, item, revision=DRIFT_REVISION, wave="drift-wave")
+    assert again["result"] == run["result"]
+    assert again["output"] == run["output"]
+    assert again["body"] == value["body"]
+    for channel in ("edits", "queued", "dispatched", "claims"):
+        assert not again["calls"][channel], channel
+
+    # Generic (non-exact) discovery can never select this class.
+    generic = advisory_plan(
+        value, item, selector="", revision=DRIFT_REVISION, wave="drift-wave"
+    )
+    assert generic["result"] == {
+        "eligible": 0,
+        "planned": 0,
+        "deferred": 0,
+        "written": 0,
+    }
+    assert '{"triage-cache-not-terminal-error":1}' in generic["output"]
+    assert generic["body"] == value["body"]
+
+
+def test_observation_drift_refresh_write_run_clears_drift_residue_and_requeues():
+    value, item = drift_card()
+    before = rc._unique_state_block(value["body"])
+    path = cards_file([value["number"]])
+    try:
+        output = StringIO()
+        with (
+            advisory_environment(value, item, revision=DRIFT_REVISION) as calls,
+            redirect_stdout(output),
+        ):
+            result = replay.run(
+                path,
+                "drift-write-wave",
+                1,
+                exact_cards="v1:%s" % value["number"],
+            )
+    finally:
+        os.unlink(path)
+    assert result == {
+        "eligible": 1,
+        "planned": 1,
+        "deferred": 0,
+        "written": 1,
+        "queued": 1,
+    }
+    state = rc._unique_state_block(value["body"])
+    marker = state[replay.REPLAY_FIELD]
+    assert marker["version"] == replay.REPLAY_VERSION
+    assert marker["cleared"] == replay.OBSERVATION_DRIFT_REFRESH_CLEARED
+    assert marker["revision"] == DRIFT_REVISION
+    # A fresh, spend-guarded attempt is queued for the same exact revision,
+    # consuming exactly one more attempt under the unchanged cap.
+    assert state["triage_status"] == "queued"
+    assert state["triaged_sha"] == DRIFT_REVISION
+    assert state[rc.TRIAGE_ATTEMPTS_FIELD] == {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": DRIFT_REVISION,
+        "count": before["triage_attempts"]["count"] + 1,
+    }
+    # Every drift residue is gone: no stale-observation assessment, no
+    # residual recommendation, no stale verdict, no primary/consumption
+    # telemetry. Nothing promoted the stale assessment into authority.
+    for field in replay.TRIAGE_ADVISORY_CACHE_FIELDS:
+        if field in {"triaged_sha", "triage_status"}:
+            continue
+        assert field not in state, field
+    assert "Adds opt-in forge_profiles routing." not in value["body"]
+    assert "Automatic triage queued for this exact revision." in value["body"]
+    # Deterministic identity, observation, and context are untouched.
+    for field in (
+        "head_sha",
+        "review_observation",
+        "decision_context",
+        "decision_context_id",
+        "repo",
+    ):
+        assert state[field] == before[field]
+    assert len(calls["queued"]) == len(calls["dispatched"]) == 1
+    assert calls["claims"] and calls["claims"][0]["revision"] == DRIFT_REVISION
+    # Exactly the one exact card was read; no unrelated card was touched.
+    assert set(calls["card_reads"]) == {value["number"]}
+    # The recovered card is not replayable again.
+    second = advisory_plan(value, item, revision=DRIFT_REVISION, wave="drift-second-wave")
+    assert second["result"] is None
+    assert "already-replayed" in second["output"]
+
+    # The refreshed attempt restores trustworthy current state: a fresh
+    # result bound to the CURRENT observation re-admits and returns a valid
+    # owner control.
+    queued_state = rc._unique_state_block(value["body"])
+    healed = rc.body_with_triage_result(
+        value["body"],
+        DRIFT_REVISION,
+        triage=drift_payload(queued_state),
+        owner="owner",
+        base_sha=item["base_sha"],
+    )
+    healed_state = rc._unique_state_block(healed)
+    assert rc.assessment_current_admitted(healed_state)
+    assert rc.accept_recommendation_available(healed_state)
+    assert healed_state[rc.ASSESSMENT_FIELD]["target"]["observation_id"] == (
+        queued_state["review_observation"]["observation_id"]
+    )
+    # Or the attempt ends in an explicit trustworthy unavailable state with no
+    # residual misleading recommendation.
+    failed = rc.body_with_triage_result(
+        value["body"],
+        DRIFT_REVISION,
+        error="Auto triage unavailable for this version.",
+        owner="owner",
+    )
+    failed_state = rc._unique_state_block(failed)
+    assert failed_state["triage_status"] == "error"
+    assert "triage_recommendation" not in failed_state
+    assert rc.ASSESSMENT_FIELD not in failed_state
+    assert not rc.accept_recommendation_available(failed_state)
+
+
+def test_observation_drift_refresh_refuses_every_disconfirming_shape():
+    value, item = drift_card()
+    proven = rc._unique_state_block(value["body"])
+    assert (
+        replay._observation_drift_refresh_refusal(proven, "pr-review", DRIFT_REVISION)
+        == ""
+    )
+    # The class is pr-review only and bound to the exact current revision.
+    assert replay._observation_drift_refresh_refusal(
+        dict(proven, kind="issue-triage"), "issue-triage", DRIFT_REVISION
+    ) == "drift-refresh-kind-unsupported"
+    assert replay._observation_drift_refresh_refusal(
+        proven, "pr-review", "deadbee"
+    ) == "drift-refresh-cache-unproven"
+    # The residual recommendation is residue this class clears, not a
+    # requirement: the same drift without it is equally stuck and eligible.
+    without_recommendation = with_state(
+        value, lambda state: state.pop("triage_recommendation")
+    )
+    assert replay._observation_drift_refresh_refusal(
+        rc._unique_state_block(without_recommendation["body"]),
+        "pr-review",
+        DRIFT_REVISION,
+    ) == ""
+
+    mutations = {
+        "drift-refresh-cache-unproven": (
+            lambda state: state.__setitem__("held", True),
+            lambda state: state.__setitem__("triaged_sha", "deadbee"),
+        ),
+        "drift-refresh-assessment-not-admitted": (
+            lambda state: state.pop(rc.ASSESSMENT_FIELD),
+            lambda state: state.__setitem__(rc.ASSESSMENT_FIELD, {"forged": True}),
+            lambda state: state.__setitem__(
+                rc.ASSESSMENT_FIELD,
+                resigned_assessment(
+                    state,
+                    admission={
+                        "schema": "wheelhouse.assessment-admission/v1",
+                        "status": "stale",
+                        "reason": "binding.mismatch",
+                    },
+                ),
+            ),
+        ),
+        "drift-refresh-head-mismatch": (
+            lambda state: state.__setitem__("head_sha", "0" * 40),
+            lambda state: state.__setitem__(
+                rc.ASSESSMENT_FIELD,
+                resigned_assessment(state, target={"head_sha": "0" * 40}),
+            ),
+        ),
+        "drift-refresh-observation-unproven": (
+            lambda state: state.__setitem__("review_observation", {"bogus": True}),
+        ),
+        "drift-refresh-not-observation-drift": (
+            # Non-current for a reason other than observation drift: the
+            # assessment matches the current observation but the decision
+            # context is malformed, which this class does not own.
+            lambda state: state.__setitem__(
+                rc.ASSESSMENT_FIELD,
+                resigned_assessment(
+                    state,
+                    target={
+                        "observation_id": state["review_observation"][
+                            "observation_id"
+                        ]
+                    },
+                ),
+            ),
+        ),
+    }
+    for expected, cases in mutations.items():
+        for index, mutate in enumerate(cases):
+            broken = with_state(value, mutate)
+            if expected == "drift-refresh-not-observation-drift":
+                broken = with_state(
+                    broken,
+                    lambda state: state.__setitem__("decision_context", {"bogus": 1}),
+                )
+            assert (
+                replay._observation_drift_refresh_refusal(
+                    rc._unique_state_block(broken["body"]), "pr-review", DRIFT_REVISION
+                )
+                == expected
+            ), (expected, index)
+
+    # The already-actionable shape (the nine-card census's other eight): a
+    # current admitted assessment means there is nothing to refresh, and the
+    # original advisory refusal is preserved verbatim through the full path.
+    current, current_item = drift_card(number=1735, target=1074, rotate=False)
+    current_state = rc._unique_state_block(current["body"])
+    assert rc.assessment_current_admitted(current_state)
+    assert replay._observation_drift_refresh_refusal(
+        current_state, "pr-review", DRIFT_REVISION
+    ) == "drift-refresh-assessment-current"
+    assert (
+        advisory_refusal(current, current_item, revision=DRIFT_REVISION)
+        == "advisory-recovery-authority-present"
+    )
+
+
+def test_observation_drift_refresh_never_selects_or_mutates_card_1759():
+    drift, drift_item = drift_card()
+    excluded, excluded_item = missing_output_card()
+    excluded = with_state(
+        excluded,
+        lambda state: state.update(
+            {
+                # Card #1759's current production shape: the already-replayed
+                # marker, an exhausted 2/2 attempt record, a succeeded cache
+                # whose failed primary was consumed advisory, and no
+                # assessment or recommendation.
+                "triage_status": "succeeded",
+                rc.TRIAGE_PRIMARY_STATUS_FIELD: "failed",
+                rc.TRIAGE_PRIMARY_ERROR_FIELD: "output.schema_invalid",
+                rc.TRIAGE_CONSUMPTION_FIELD: "advisory",
+                "assessment_admission": {
+                    "status": "unavailable",
+                    "reason": "basis.missing_or_invalid",
+                },
+                rc.TRIAGE_ATTEMPTS_FIELD: {
+                    "version": rc.TRIAGE_ATTEMPTS_VERSION,
+                    "kind": "pr-review",
+                    "revision": MISSING_OUTPUT_REVISION,
+                    "count": 2,
+                },
+                replay.REPLAY_FIELD: {
+                    "version": replay.REPLAY_VERSION,
+                    "wave": "card-1759-missing-triage-f1",
+                    "revision": MISSING_OUTPUT_REVISION,
+                    "cleared": "error",
+                    "at": "2026-07-28T06:58:38Z",
+                    "run_number": 390,
+                },
+            }
+        ),
+    )
+    excluded_state = rc._unique_state_block(excluded["body"])
+    # The drift class can never select it: no admitted assessment exists.
+    assert replay._observation_drift_refresh_refusal(
+        excluded_state, "pr-review", MISSING_OUTPUT_REVISION
+    ) == "drift-refresh-assessment-not-admitted"
+
+    # A wave over ONLY card 1584 reads and mutates exactly card 1584; the
+    # excluded card sitting in the same environment is never even read.
+    cards = {1584: drift, 1759: excluded}
+    sources = {
+        (drift_item["repo"], drift_item["number"], "pr-review"): source(
+            number=drift_item["number"], revision=DRIFT_REVISION
+        ),
+        (excluded_item["repo"], excluded_item["number"], "pr-review"): source(
+            number=excluded_item["number"], revision=MISSING_OUTPUT_REVISION
+        ),
+    }
+    excluded_body = excluded["body"]
+    path = cards_file([1584])
+    try:
+        with replay_environment(cards, sources) as calls:
+            result = replay.run(path, "drift-only-wave", 1, exact_cards="v1:1584")
+            assert result == {
+                "eligible": 1,
+                "planned": 1,
+                "deferred": 0,
+                "written": 1,
+                "queued": 1,
+            }
+            assert 1759 not in calls["card_reads"]
+            assert all(number != 1759 for number, *_ in calls["edits"])
+            assert all(number != 1759 for number, *_ in calls["queued"])
+        assert cards[1759]["body"] == excluded_body
+    finally:
+        os.unlink(path)
+
+    # Exact-selecting the excluded card refuses on its already-replayed
+    # marker; the drift class never substitutes, and the whole wave fails
+    # closed with zero writes when it is selected alongside.
+    refused = advisory_plan(
+        excluded,
+        excluded_item,
+        selector="v1:1759",
+        revision=MISSING_OUTPUT_REVISION,
+        wave="drift-excluded-wave",
+    )
+    assert refused["result"] is None
+    assert "already-replayed" in refused["output"]
+    assert not refused["calls"]["edits"] and not refused["calls"]["queued"]
+
+    cards = {1584: drift, 1759: excluded}
+    path = cards_file([1584, 1759])
+    output = StringIO()
+    try:
+        with (
+            replay_environment(cards, sources) as calls,
+            redirect_stdout(output),
+        ):
+            try:
+                replay.run(
+                    path,
+                    "drift-mixed-wave",
+                    2,
+                    exact_cards="v1:1584,1759",
+                )
+                raise AssertionError("a mixed wave containing 1759 must refuse")
+            except ValueError as error:
+                assert "failed validation" in str(error)
+        assert "refused card #1759: already-replayed" in output.getvalue()
+        assert not calls["edits"] and not calls["queued"] and not calls["claims"]
+        assert cards[1584]["body"] == drift["body"]
+        assert cards[1759]["body"] == excluded_body
+    finally:
+        os.unlink(path)
 
 
 def missing_output_card(number=1759, target=594, revision=MISSING_OUTPUT_REVISION):
@@ -3951,6 +4489,10 @@ TESTS = [
     test_advisory_cache_recovers_only_through_the_exact_card_selector,
     test_advisory_cache_write_run_clears_only_the_dead_advisory_state,
     test_advisory_recovery_refuses_every_disconfirming_shape,
+    test_observation_drift_refresh_recovers_only_through_the_exact_card_selector,
+    test_observation_drift_refresh_write_run_clears_drift_residue_and_requeues,
+    test_observation_drift_refresh_refuses_every_disconfirming_shape,
+    test_observation_drift_refresh_never_selects_or_mutates_card_1759,
     test_missing_output_cache_recovers_through_the_existing_error_path,
     test_missing_output_replay_refuses_a_moved_head_without_writes,
     test_missing_output_replay_refuses_exhausted_attempt_budget,
