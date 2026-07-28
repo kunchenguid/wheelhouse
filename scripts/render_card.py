@@ -3971,12 +3971,7 @@ def current_triage_authority_present(state):
     outcome when this is true.
     """
     state = state if isinstance(state, dict) else {}
-    kind = state.get("kind")
-    if kind == "pr-review":
-        return assessment_current_admitted(state)
-    if kind == "issue-triage":
-        return accept_recommendation_available(state)
-    return False
+    return accept_recommendation_available(state)
 
 
 def contradictory_advisory_telemetry(body, state=None):
@@ -5436,16 +5431,16 @@ def body_with_triage_result(
             assessment_reason = "result.validation_failed"
     status = "succeeded" if normalized else "error"
     primary_error_code = _triage_primary_error_code(primary_error_code)
-    # Owner-facing current authority: pr-review uses the just-computed
-    # admission; issue-triage uses whether this write will persist a usable
-    # recommendation under authority_allowed. Historical primary-failure
-    # telemetry may still be recorded below without presenting as current.
-    if kind == "pr-review":
-        current_authority = bool(
-            assessment and assessment_admission.admitted(assessment)
+    recommendation = (
+        recommendation_for_state(
+            normalized, kind, owner=owner, repo=state.get("repo", "")
         )
-    else:
-        current_authority = bool(authority_allowed and normalized)
+        if normalized
+        and authority_allowed
+        and (kind != "pr-review" or (assessment and assessment_admission.admitted(assessment)))
+        else None
+    )
+    current_authority = bool(recommendation)
     section = triage_section(
         normalized,
         error or TRIAGE_UNAVAILABLE,
@@ -5456,15 +5451,6 @@ def body_with_triage_result(
         current_authority=current_authority,
     )
     updated = _insert_triage_section(body, section)
-    recommendation = (
-        recommendation_for_state(
-            normalized, kind, owner=owner, repo=state.get("repo", "")
-        )
-        if normalized
-        and authority_allowed
-        and (kind != "pr-review" or (assessment and assessment_admission.admitted(assessment)))
-        else None
-    )
     automerge_verdict = (
         (normalized or {}).get("automerge_verdict")
         if kind == "pr-review"
@@ -6167,9 +6153,7 @@ def render(
         lines.extend(_security_review_section(item["security_summary"]))
         lines.append("")
     if triage:
-        current_authority = bool(
-            assessment and assessment_admission.admitted(assessment)
-        )
+        current_authority = accept_recommendation_available(state)
         section = triage_section(
             triage,
             owner=owner,

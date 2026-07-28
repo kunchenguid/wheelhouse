@@ -190,6 +190,44 @@ def test_authority_absent_stays_explicitly_unavailable():
     )
 
 
+def test_admitted_assessment_without_working_accept_stays_unavailable():
+    obs, context, item, base_body = _world()
+    payload = _admitted_payload(obs, context, "close", "")
+    body = rc.body_with_triage_result(
+        base_body,
+        HEAD,
+        triage=payload,
+        owner="kunchenguid",
+        base_sha=item["base_sha"],
+        primary_error_code="output.schema_invalid",
+        consumption="advisory",
+    )
+    state = core.parse_state_block(body)
+    check(
+        "no-working-accept: admission alone does not become display authority",
+        rc.assessment_current_admitted(state)
+        and not rc.accept_recommendation_available(state)
+        and not rc.current_triage_authority_present(state)
+        and "consumed for advisory triage" in body
+        and "<!-- opt:accept-recommendation -->" not in body,
+    )
+
+    item["triage"] = payload
+    item["assessment"] = state.get(rc.ASSESSMENT_FIELD)
+    item["triaged_sha"] = HEAD
+    item[rc.TRIAGE_PRIMARY_ERROR_FIELD] = "output.schema_invalid"
+    item[rc.TRIAGE_CONSUMPTION_FIELD] = "advisory"
+    rendered = rc.render(item, owner="kunchenguid")["body"]
+    rendered_state = core.parse_state_block(rendered)
+    check(
+        "no-working-accept: fresh render preserves the unavailable warning",
+        rc.assessment_current_admitted(rendered_state)
+        and not rc.accept_recommendation_available(rendered_state)
+        and "consumed for advisory triage" in rendered
+        and "<!-- opt:accept-recommendation -->" not in rendered,
+    )
+
+
 def test_corrected_authority_keeps_explicit_correction_copy():
     obs, context, item, base_body = _world()
     body = rc.body_with_triage_result(
@@ -484,6 +522,7 @@ def test_preserve_same_revision_path_strips_contradiction():
 def main():
     test_authority_present_renders_one_coherent_actionable_state()
     test_authority_absent_stays_explicitly_unavailable()
+    test_admitted_assessment_without_working_accept_stays_unavailable()
     test_corrected_authority_keeps_explicit_correction_copy()
     test_projection_refresh_heals_without_changing_authority()
     test_pure_body_heal_and_census_are_bounded_and_idempotent()
