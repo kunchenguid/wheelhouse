@@ -302,7 +302,7 @@ The invariants, all test-enforced:
   `nl-decision-v1` candidate, and the final JSON-packed repair prompt fits
   BOTH repair lanes: the production direct stdin lane and the reviewed
   env-carried action-lane rollback. This is why `answer` is bounded at
-  11264 characters and `free_text` at 6144: every potentially valid
+  12288 characters and `free_text` at 6144: every potentially valid
   candidate is guaranteed to reach the no-tool repair model complete.
   Schema-invalid candidates are truncated with an explicit marker according
   to the final packed prompt size, not only their raw byte size.

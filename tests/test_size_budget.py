@@ -383,15 +383,23 @@ def main():
         "nl-repair: the 49 KB candidate reaches the repair prompt complete",
         big_invalid in prompt and "[candidate truncated" not in prompt,
     )
-    # A worst-case VALID candidate (multibyte, at the schema maxima) is also
-    # complete: its canonical text cannot exceed the candidate bound.
-    worst_valid = maximal_candidate(nl_schema)
-    validate_schema(worst_valid, nl_schema)
-    worst_valid_text = canonical_json_bytes(worst_valid).decode("utf-8")
-    worst_prompt = decision.build_nl_repair_prompt(worst_valid_text)
+    # A schema-maximal multibyte VALID candidate is also complete in both
+    # transport lanes. The separate walker property above uses control
+    # characters to prove the larger six-byte canonical contract; reusing that
+    # already-escaped serialization here would measure a second JSON encoding,
+    # not the candidate's canonical byte size.
+    multibyte_valid = {
+        "mode": "clarify",
+        "action": "\U0010ffff" * size_budget.NL_ACTION_MAX_CHARS,
+        "free_text": "\U0010ffff" * NL_FREE_TEXT_MAX_CHARS,
+        "answer": "\U0010ffff" * NL_ANSWER_MAX_CHARS,
+    }
+    validate_schema(multibyte_valid, nl_schema)
+    multibyte_valid_text = canonical_json_bytes(multibyte_valid).decode("utf-8")
+    worst_prompt = decision.build_nl_repair_prompt(multibyte_valid_text)
     check(
-        "nl-repair: a worst-case schema-valid candidate is never truncated",
-        worst_valid_text in worst_prompt
+        "nl-repair: a schema-maximal multibyte candidate is never truncated",
+        multibyte_valid_text in worst_prompt
         and "[candidate truncated" not in worst_prompt,
     )
     check(

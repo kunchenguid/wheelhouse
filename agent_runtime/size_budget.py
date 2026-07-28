@@ -41,7 +41,7 @@ The deliberate router/schema contract changes recorded here:
 
 - ``nl-decision-v1`` ``answer`` is capped at ``NL_ANSWER_MAX_CHARS`` and
   ``free_text`` at ``NL_FREE_TEXT_MAX_CHARS`` so the worst-case schema-valid
-  candidate (104,985 canonical bytes) always fits the repair prompt COMPLETE
+  candidate (111,129 canonical bytes) always fits the repair prompt COMPLETE
   in both repair lanes. Longer replies were never postable ambitions: both
   fields are conversational text, and the caps stay far above observed use.
 - ``deep-review-text-v1`` ``text`` is capped at ``GITHUB_COMMENT_MAX_CHARS``:
@@ -113,7 +113,7 @@ COMMENT_TRUNCATION_TEMPLATE = "\n\n[truncated to fit GitHub comment limit]"
 # NL router/schema character contract (nl-decision-v1)
 # --------------------------------------------------------------------------- #
 
-NL_ANSWER_MAX_CHARS = 11264
+NL_ANSWER_MAX_CHARS = 12288
 NL_FREE_TEXT_MAX_CHARS = 6144
 NL_ACTION_MAX_CHARS = 80
 
@@ -164,19 +164,19 @@ class ActionSizeBudget:
 # ORIGINAL task with full tools and evidence, so its candidate is advisory
 # context and a compact embed suffices. The NL repair turn is no-tool: the
 # candidate is ALL it sees, so its bound must cover the worst-case schema-valid
-# candidate (104,985 canonical bytes) and still fit the env-carried rollback
+# candidate (111,129 canonical bytes) and still fit the env-carried rollback
 # lane: TRIAGE_REPAIR_CANDIDATE_MAX_BYTES is embedded into the original prompt
 # (~<= 16 KiB by test_triage_prompt_size) and NL_REPAIR_CANDIDATE_MAX_BYTES
 # after action JSON packing stays under ENV_PROMPT_MAX_BYTES.
 TRIAGE_REPAIR_CANDIDATE_MAX_BYTES = 24000
-NL_REPAIR_CANDIDATE_MAX_BYTES = 106496
+NL_REPAIR_CANDIDATE_MAX_BYTES = 122880
 
 # max_final_bytes values are round 4096 multiples chosen as the smallest
 # 65536-multiple at least schema-worst-case + FINAL_HEADROOM_BYTES:
 #   triage-pr-v1       worst 1,626,555 -> 1,638,400
 #   triage-issue-v1    worst   144,113 ->   196,608
 #   deep-review-text   worst   393,227 ->   458,752
-#   nl-decision-v1     worst   104,985 ->   131,072
+#   nl-decision-v1     worst   111,129 ->   131,072
 SIZE_BUDGETS: dict[str, ActionSizeBudget] = {
     "triage.pr.local": ActionSizeBudget(
         "triage-pr-v1.schema.json", 1638400, TRIAGE_REPAIR_CANDIDATE_MAX_BYTES
