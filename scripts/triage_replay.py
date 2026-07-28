@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import assessment_admission  # noqa: E402
+import projection_writer  # noqa: E402
 import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
@@ -45,8 +46,9 @@ EXACT_SELECTOR_MAX_BYTES = 512
 # GraphQL path used by render_card.get_card can lag the REST write. The
 # projection writer's CAS compares consecutive get_card snapshots including
 # updated_at and comments digest, so queueing before that lag settles races the
-# replay against its own tombstone. Poll the same get_card path until the exact
-# tombstone is visible, then queue. Fail closed on timeout - never relax CAS.
+# replay against its own tombstone. Poll the same get_card path until consecutive
+# full snapshots containing the exact tombstone match, then queue. Fail closed
+# on timeout - never relax CAS.
 TOMBSTONE_VISIBILITY_ATTEMPTS = 10
 TOMBSTONE_VISIBILITY_DELAY_SECONDS = 1.0
 _tombstone_sleep = time.sleep
@@ -1237,13 +1239,14 @@ def card_shows_superseded_claim(card, *, comment_id, event_key):
 
 
 def wait_for_claim_tombstone_visibility(number, superseded):
-    """Poll get_card until the supersede result is visible, or fail closed.
+    """Poll get_card until the supersede result has a stable CAS snapshot.
 
     A successful supersede that found no claim (``superseded is False``) needs
     no visibility wait - there is no self-write for get_card to observe. A
-    successful supersede that wrote a tombstone must be visible through the
-    same get_card path the projection CAS uses before any queue/budget write.
-    Timeout or malformed/ambiguous evidence returns False so the wave pauses.
+    successful supersede that wrote a tombstone must appear in two consecutive
+    matching snapshots from the same get_card path the projection CAS uses
+    before any queue/budget write. Timeout or malformed/ambiguous evidence
+    returns False so the wave pauses.
     """
     if not isinstance(superseded, dict):
         return False
@@ -1263,12 +1266,18 @@ def wait_for_claim_tombstone_visibility(number, superseded):
         return False
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         return False
+    prior_snapshot = None
     for attempt in range(TOMBSTONE_VISIBILITY_ATTEMPTS):
         card = render_card.get_card(number)
         if card_shows_superseded_claim(
             card, comment_id=comment_id, event_key=event_key
         ):
-            return True
+            snapshot = projection_writer.card_snapshot(card)
+            if snapshot is not None and snapshot == prior_snapshot:
+                return True
+            prior_snapshot = snapshot
+        else:
+            prior_snapshot = None
         if attempt + 1 < TOMBSTONE_VISIBILITY_ATTEMPTS:
             _tombstone_sleep(TOMBSTONE_VISIBILITY_DELAY_SECONDS)
     return False
@@ -1864,8 +1873,9 @@ def run(
             )
         if superseded["superseded"]:
             print("replay superseded stale triage claim for card #%s" % plan["number"])
-        # Prove the tombstone through get_card before any queue/budget write so
-        # the projection CAS cannot straddle this self-write (card-1759 waves).
+        # Prove a stable tombstone snapshot through get_card before any
+        # queue/budget write so the projection CAS cannot straddle this
+        # self-write (card-1759 waves).
         if not wait_for_claim_tombstone_visibility(plan["number"], superseded):
             print(
                 "::warning::replay deferred card #%s: claim-tombstone-not-visible"

@@ -3185,6 +3185,45 @@ def test_tombstone_visibility_poll_waits_then_queues_without_false_race():
         os.unlink(path)
 
 
+def test_tombstone_visibility_waits_for_updated_at_after_comment_arrives():
+    event_key = "ab" * 32
+    comment_id = 503
+    value = card()
+    value["comments"] = [
+        _get_card_tombstone_comment(value["number"], comment_id, event_key)
+    ]
+    stale_updated_at = value["updatedAt"]
+    settled_updated_at = "2026-07-16T11:00:00Z"
+    reads = []
+    sleeps = []
+
+    def get_card_with_staggered_snapshot(number):
+        row = copy.deepcopy(value)
+        if len(reads) >= 1:
+            row["updatedAt"] = settled_updated_at
+        reads.append(replay.projection_writer.card_snapshot(row))
+        return row
+
+    with (
+        patched(rc, {"get_card": get_card_with_staggered_snapshot}),
+        patched(replay, {"_tombstone_sleep": lambda seconds: sleeps.append(seconds)}),
+    ):
+        assert replay.wait_for_claim_tombstone_visibility(
+            value["number"],
+            {
+                "event_key": event_key,
+                "superseded": True,
+                "comment_id": comment_id,
+            },
+        )
+
+    assert len(reads) == 3
+    assert reads[0]["updated_at"] == stale_updated_at
+    assert reads[1]["updated_at"] == reads[2]["updated_at"] == settled_updated_at
+    assert reads[0]["comments"] == reads[1]["comments"] == reads[2]["comments"]
+    assert len(sleeps) == 2
+
+
 def test_tombstone_visibility_timeout_pauses_with_zero_queue_or_budget_writes():
     cards = {
         42: card(),
@@ -3932,6 +3971,7 @@ TESTS = [
     test_claim_tombstone_failure_refuses_replay_before_attempt_or_reservation,
     test_card_shows_superseded_claim_requires_exact_id_and_marker,
     test_tombstone_visibility_poll_waits_then_queues_without_false_race,
+    test_tombstone_visibility_waits_for_updated_at_after_comment_arrives,
     test_tombstone_visibility_timeout_pauses_with_zero_queue_or_budget_writes,
     test_tombstone_visibility_absent_claim_skips_poll_without_invented_success,
     test_tombstone_visibility_malformed_supersede_pauses_without_queue,
