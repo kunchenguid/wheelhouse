@@ -241,6 +241,8 @@ def reduce_execution(rows: list[dict[str, Any]], action: str) -> list[dict[str, 
             if isinstance(usage, dict):
                 kept["usage"] = {key: usage.get(key) for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
             bounded.append(kept)
+        else:
+            bounded.append({})
     evidence = denied_tool_evidence(rows)
     if evidence:
         terminal_index = next((index for index, row in enumerate(bounded) if row.get("type") == "result"), len(bounded))

@@ -1029,6 +1029,36 @@ def main():
             and trail["proof"]["transcriptVariance"]["accepted"] == ["trailing-non-result-rows"],
         )
 
+        _, reduced_trail_bundle = make_bundle(root / "reduced-trailing-non-result")
+        reduced_trail_execution = root / "reduced-trailing-non-result.json"
+        reduced_trail_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    variance_rows(
+                        trailing=[
+                            {"type": "system", "subtype": "status", "status": "compacted"},
+                            {"type": "future-telemetry", "payload": "must not survive"},
+                        ]
+                    ),
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        reduced_trail, _ = run_bridge(
+            reduced_trail_bundle,
+            reduced_trail_execution,
+            "reduced-trailing-non-result",
+        )
+        check(
+            "bridge: production reduction preserves trailing variance evidence",
+            reduced_trail["status"] == "succeeded"
+            and reduced_trail["final"]["value"]["text"] == hold_text
+            and reduced_trail["proof"]["transcriptVariance"]["accepted"]
+            == ["trailing-non-result-rows"]
+            and "must not survive" not in reduced_trail_execution.read_text(encoding="utf-8"),
+        )
+
         _, two_init_bundle = make_bundle(root / "two-agreeing-inits")
         two_init_execution = root / "two-agreeing-inits.json"
         two_init_execution.write_text(
@@ -1056,6 +1086,47 @@ def main():
             and two_init["selection"]["actualModel"] == IMMUTABLE_MODEL
             and two_init["proof"]["transcriptVariance"]["accepted"] == ["repeated-agreeing-init"],
         )
+
+        for label, malformed_model in (
+            ("missing", None),
+            ("empty", ""),
+            ("non-string", 46),
+        ):
+            _, malformed_init_bundle = make_bundle(root / f"{label}-repeated-init")
+            malformed_init_execution = root / f"{label}-repeated-init.json"
+            malformed_init = {"type": "system", "subtype": "init"}
+            if label != "missing":
+                malformed_init["model"] = malformed_model
+            malformed_init_execution.write_text(
+                json.dumps(
+                    [
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                        malformed_init,
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "duration_ms": 10,
+                            "num_turns": 1,
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            malformed_init_result, _ = run_bridge(
+                malformed_init_bundle,
+                malformed_init_execution,
+                f"{label}-repeated-init",
+            )
+            check(
+                f"bridge: {label} repeated init model identity fails closed",
+                malformed_init_result["status"] == "failed"
+                and malformed_init_result["error"]["code"] == "model.mismatch"
+                and not malformed_init_result["selection"]["actualModel"]
+                and "final" not in malformed_init_result
+                and "transcriptVariance" not in malformed_init_result["proof"],
+            )
 
         _, zero_init_bundle = make_bundle(root / "zero-init")
         zero_init_execution = root / "zero-init.json"

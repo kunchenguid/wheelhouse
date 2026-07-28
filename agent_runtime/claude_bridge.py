@@ -89,21 +89,24 @@ def _observed_model(rows: list[dict[str, Any]]) -> tuple[str, list[str]]:
     model string so the caller fails closed as model.mismatch. Multiple init
     rows are accepted only when every observed identity agrees.
     """
-    models = [
-        row["model"]
+    init_rows = [
+        row
         for row in rows
-        if row.get("type") == "system"
-        and row.get("subtype") == "init"
-        and isinstance(row.get("model"), str)
-        and row.get("model")
+        if row.get("type") == "system" and row.get("subtype") == "init"
     ]
-    if not models:
+    if not init_rows:
         return "", []
+    models: list[str] = []
+    for row in init_rows:
+        model = row.get("model")
+        if not isinstance(model, str) or not model:
+            return "", []
+        models.append(model)
     first = models[0]
     if any(model != first for model in models[1:]):
         return "", []
     variance: list[str] = []
-    if len(models) > 1:
+    if len(init_rows) > 1:
         variance.append(TRANSCRIPT_VARIANCE_REPEATED_AGREEING_INIT)
     return first, variance
 
