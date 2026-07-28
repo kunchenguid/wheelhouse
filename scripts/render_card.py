@@ -317,12 +317,16 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # the rest of the card body. Bumped 13 -> 14 so a projection that suppresses
 # decision controls never keeps the "Tick **Accept recommendation**" framing
 # that references an absent Accept control (confirming/inert cards keep the
-# recommendation analysis and the explicit inert decision copy). These are
-# display-only and zero-spend: no authority, admission, cache-freshness, or
-# gate semantics change. Earlier display-only bumps remain documented in
-# AGENTS.md.
-CARD_RENDER_VERSION = 14
+# recommendation analysis and the explicit inert decision copy). Bumped
+# 14 -> 15 so a current admitted assessment never keeps the historical
+# primary-failed / advisory-consumption warning as the card's current outcome
+# beside a live Accept surface; diagnostic telemetry stays in non-material
+# state. These are display-only and zero-spend: no authority, admission,
+# cache-freshness, or gate semantics change. Earlier display-only bumps remain
+# documented in AGENTS.md.
+CARD_RENDER_VERSION = 15
 CONFIRMING_ACCEPT_COPY_SOURCE_VERSION = 13
+ADVISORY_TELEMETRY_CONSISTENCY_SOURCE_VERSION = 14
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -424,6 +428,17 @@ _ADMISSION_WARNING_RE = re.compile(
     r"> \[!WARNING\]\n> The advisory assessment was not admitted "
     r"\(`[^`\n]{1,120}`\)\. It cannot create \*\*Accept recommendation\*\* "
     r"or satisfy G6\."
+)
+# Historical primary-failure copy retained only when the current outcome is
+# still advisory-only. When a current admitted assessment exists, this block
+# must not present as the card's current result beside Accept.
+_ADVISORY_PRIMARY_FAILURE_WARNING_RE = re.compile(
+    r"\n*> \[!WARNING\]\n"
+    r"> Primary model validation failed \(`[^`\n]{1,120}`\), but the "
+    r"delivered candidate was consumed for advisory triage\.\n"
+    r"> This advisory result is not a primary validation success; existing "
+    r"authority gates still apply\.\n?",
+    re.M,
 )
 _AUTOMERGE_WORKFLOW_HOLD_SECTION_RE = re.compile(
     r"\n?<!--\s*wheelhouse-automerge-workflow-hold:start\s*-->.*?"
@@ -3945,6 +3960,42 @@ def assessment_current_admitted(state):
     )
 
 
+def current_triage_authority_present(state):
+    """Whether the card's current triage outcome is authoritative for display.
+
+    Production authority predicates stay authoritative: a pr-review card is
+    current when `assessment_current_admitted` is true; issue-triage uses the
+    Accept-eligible recommendation shortcut (no assessment object). Historical
+    primary-failure / advisory-consumption telemetry may still exist in
+    non-material state, but must not present as the owner-facing current
+    outcome when this is true.
+    """
+    state = state if isinstance(state, dict) else {}
+    kind = state.get("kind")
+    if kind == "pr-review":
+        return assessment_current_admitted(state)
+    if kind == "issue-triage":
+        return accept_recommendation_available(state)
+    return False
+
+
+def contradictory_advisory_telemetry(body, state=None):
+    """True when body shows advisory primary-failure beside current authority.
+
+    The nine-card residual class: non-material primary-failed +
+    consumption=advisory telemetry coexists with a current admitted assessment
+    and Accept surface, while `### Triage` still warns that the result is only
+    advisory. Pure and read-only - census and migration self-heal checks.
+    """
+    body = body or ""
+    if "consumed for advisory triage" not in body:
+        return False
+    state = state if isinstance(state, dict) else parse_state_block(body)
+    if not state:
+        return False
+    return current_triage_authority_present(state)
+
+
 def accept_recommendation_available(state):
     kind = (state or {}).get("kind")
     if kind not in ACCEPT_ALLOWED_BY_KIND:
@@ -4067,13 +4118,21 @@ def triage_section(
     repo="",
     primary_error_code="",
     consumption="",
+    current_authority=False,
 ):
     """Render the visible `### Triage` block. `owner`+`repo` (the TARGET slug
     from deterministic card state, never from the model) qualify any bare
     `#N` cross-repo reference in the model's triage text so it does not
     autolink to this CARDS repo instead of the target. Known harness
     polling/status transcript lines are preserved and labeled as automated
-    status for display only."""
+    status for display only.
+
+    `current_authority` is the owner-facing current-outcome posture from the
+    production authority predicates. Historical primary-failure telemetry may
+    still be persisted in non-material state, but when current authority is
+    already present the advisory-consumption warning must not render as the
+    card's current result beside an admitted assessment / Accept surface. A
+    corrected result keeps its explicit authority-from-correction copy."""
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
         lines.append(
@@ -4103,23 +4162,29 @@ def triage_section(
         # (card #1746). Analysis above stays; ownership stays unambiguous.
         primary_error_code = _triage_primary_error_code(primary_error_code)
         if primary_error_code:
-            lines.extend(["", "> [!WARNING]"])
             if consumption == "corrected":
                 lines.extend(
                     [
+                        "",
+                        "> [!WARNING]",
                         "> Primary model validation failed (`%s`), and its single correction passed complete trusted validation."
                         % primary_error_code,
                         "> Recommendation authority comes from that corrected result for this exact revision.",
                     ]
                 )
-            else:
+            elif not current_authority:
                 lines.extend(
                     [
+                        "",
+                        "> [!WARNING]",
                         "> Primary model validation failed (`%s`), but the delivered candidate was consumed for advisory triage."
                         % primary_error_code,
                         "> This advisory result is not a primary validation success; existing authority gates still apply.",
                     ]
                 )
+            # else: current admitted/Accept authority - keep diagnostics in
+            # non-material state only; do not present historical advisory
+            # failure as the current outcome.
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
         lines.append("_%s_" % _display_safe_triage_text(note))
@@ -4344,6 +4409,38 @@ def _without_legacy_recommended_next_step(section):
     return _LEGACY_TRIAGE_NEXT_STEP_RE.sub("", section or "")
 
 
+def _without_stale_advisory_primary_failure_warning(section):
+    """Drop advisory primary-failure copy that contradicts current authority.
+
+    Presentation-only: non-material `triage_primary_*` / `triage_consumption`
+    state keys are left untouched so diagnostics remain inspectable."""
+    cleaned = _ADVISORY_PRIMARY_FAILURE_WARNING_RE.sub("\n", section or "")
+    # Collapse the blank line runs a mid-section strip can leave before END.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _without_stale_admission_warning(section):
+    """Drop a leftover not-admitted warning once current authority exists."""
+    cleaned = _ADMISSION_WARNING_RE.sub("", section or "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _triage_section_for_current_authority(section, state):
+    """Align a cached/projected triage section with current authority posture.
+
+    When the production authority predicate says the current outcome is
+    admitted/Accept-eligible, historical advisory primary-failure and stale
+    not-admitted warnings are removed from the visible section. True
+    no-authority cards are left unchanged."""
+    if not section or not current_triage_authority_present(state):
+        return section
+    updated = _without_stale_advisory_primary_failure_warning(section)
+    updated = _without_stale_admission_warning(updated)
+    return updated
+
+
 # Framing for the ONE canonical recommendation surface. When decision
 # controls actually render, the actionable line tells the owner how to apply
 # the admitted recommendation. When the same projection suppresses those
@@ -4511,6 +4608,103 @@ def body_with_controls_aware_recommendation(body, owner="", repo=""):
         )
     new_state = _state_after_v14_recommendation_framing(state)
     return _replace_state_block(updated, new_state)
+
+
+def body_with_coherent_advisory_telemetry(body, owner="", repo=""):
+    """Remove contradictory advisory primary-failure copy under current authority.
+
+    Pure, idempotent body transform for the render-version 14 -> 15 migration
+    and offline census. When production authority predicates say the current
+    outcome is admitted/Accept-eligible, strip the historical "consumed for
+    advisory triage" warning (and any leftover not-admitted warning) from the
+    visible `### Triage` section. Non-material primary/consumption state keys,
+    admission, options, Accept controls, and target-side facts are unchanged.
+    True no-authority cards are left byte-identical aside from an optional
+    render_version stamp when already at the owned source version.
+    """
+    del owner, repo  # signature parity with sibling body heal helpers
+    state = parse_state_block(body)
+    if not state:
+        return body
+    section = _existing_triage_section(body)
+    aligned = _triage_section_for_current_authority(section, state) if section else section
+    updated = body
+    changed = False
+    if section and aligned != section:
+        updated = _insert_triage_section(body, aligned)
+        changed = True
+    version = state.get("render_version")
+    source_version = (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == ADVISORY_TELEMETRY_CONSISTENCY_SOURCE_VERSION
+    )
+    if not changed and not source_version:
+        return body
+    new_state = dict(state)
+    new_state["render_version"] = CARD_RENDER_VERSION
+    return _replace_state_block(updated, new_state)
+
+
+def contradictory_advisory_telemetry_census(cards):
+    """Classify open cards for contradictory advisory vs current-authority copy.
+
+    Read-only. Reports exact affected card numbers, whether the pure body heal
+    clears them, and skips non-refreshable / non-decision rows with reasons.
+    """
+    report = {
+        "total": 0,
+        "affected": [],
+        "clean": 0,
+        "skipped": [],
+        "healed_under_renderer": 0,
+    }
+    for card in cards or []:
+        if not isinstance(card, dict):
+            report["skipped"].append({"number": None, "reason": "malformed card row"})
+            continue
+        report["total"] += 1
+        number = card.get("number")
+        body = card.get("body") or ""
+        state = parse_state_block(body)
+        row = {
+            "number": number,
+            "url": card.get("url") or "",
+            "repo": (state or {}).get("repo", ""),
+            "target": (state or {}).get("number"),
+            "kind": (state or {}).get("kind", ""),
+        }
+        if not state or state.get("kind") not in ("pr-review", "issue-triage"):
+            report["skipped"].append(
+                dict(row, reason="not a pr-review/issue-triage decision card")
+            )
+            continue
+        if not contradictory_advisory_telemetry(body, state):
+            report["clean"] += 1
+            continue
+        row["render_version"] = state.get("render_version", 0)
+        row["primary_status"] = state.get(TRIAGE_PRIMARY_STATUS_FIELD)
+        row["consumption"] = state.get(TRIAGE_CONSUMPTION_FIELD)
+        row["accept_gate"] = accept_recommendation_available(state)
+        row["assessment_current_admitted"] = assessment_current_admitted(state)
+        labels = _label_names(card.get("labels"))
+        if not is_refreshable(card.get("labels")):
+            report["skipped"].append(
+                dict(
+                    row,
+                    reason="not refreshable (%s)"
+                    % ", ".join(sorted(labels & NON_REFRESHABLE_LABELS)),
+                )
+            )
+            continue
+        healed = body_with_coherent_advisory_telemetry(body)
+        heals = not contradictory_advisory_telemetry(healed)
+        row["heals_under_renderer"] = heals
+        row["migrates_on_refresh"] = render_stale(state) or heals
+        if heals:
+            report["healed_under_renderer"] += 1
+        report["affected"].append(row)
+    return report
 
 
 def _replace_state_block(body, state):
@@ -4992,6 +5186,15 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
     if readmitted_reason:
         body = _without_legacy_context_admission_warning(body, readmitted_reason)
         changed = True
+    # Align visible triage copy with current authority after state is restored
+    # (and after any zero-spend re-admission). Historical primary/consumption
+    # keys stay; only the contradictory advisory warning is removed.
+    section = _existing_triage_section(body)
+    if section:
+        aligned = _triage_section_for_current_authority(section, state)
+        if aligned != section:
+            body = _insert_triage_section(body, aligned)
+            changed = True
     if accept_recommendation_available(state):
         # A confirming/inert or held projection must not regain checkboxes from
         # a same-revision triage lift, and must not keep the actionable Accept
@@ -5232,6 +5435,16 @@ def body_with_triage_result(
             assessment_reason = "result.validation_failed"
     status = "succeeded" if normalized else "error"
     primary_error_code = _triage_primary_error_code(primary_error_code)
+    # Owner-facing current authority: pr-review uses the just-computed
+    # admission; issue-triage uses whether this write will persist a usable
+    # recommendation under authority_allowed. Historical primary-failure
+    # telemetry may still be recorded below without presenting as current.
+    if kind == "pr-review":
+        current_authority = bool(
+            assessment and assessment_admission.admitted(assessment)
+        )
+    else:
+        current_authority = bool(authority_allowed and normalized)
     section = triage_section(
         normalized,
         error or TRIAGE_UNAVAILABLE,
@@ -5239,6 +5452,7 @@ def body_with_triage_result(
         repo=state.get("repo", ""),
         primary_error_code=primary_error_code,
         consumption=consumption,
+        current_authority=current_authority,
     )
     updated = _insert_triage_section(body, section)
     recommendation = (
@@ -5952,11 +6166,16 @@ def render(
         lines.extend(_security_review_section(item["security_summary"]))
         lines.append("")
     if triage:
+        current_authority = bool(
+            assessment and assessment_admission.admitted(assessment)
+        )
         section = triage_section(
             triage,
             owner=owner,
             repo=repo,
             primary_error_code=item.get(TRIAGE_PRIMARY_ERROR_FIELD, ""),
+            consumption=item.get(TRIAGE_CONSUMPTION_FIELD, ""),
+            current_authority=current_authority,
         )
         if assessment and not assessment_admission.admitted(assessment):
             # Inside the markers so a same-revision refresh preserves it.
@@ -9520,6 +9739,10 @@ def main():
     # (card #1721 / scan-5). Same open-card list as reconcile; no writes.
     ca_census = sub.add_parser("contradictory-accept-instruction-census")
     ca_census.add_argument("cards_file")
+    # Read-only census for historical advisory primary-failure copy beside a
+    # current admitted assessment / Accept surface. Same open-card list; no writes.
+    at_census = sub.add_parser("contradictory-advisory-telemetry-census")
+    at_census.add_argument("cards_file")
     rd.add_argument("--out-dir", required=True)
 
     vf = sub.add_parser("triage-target-facts")
@@ -9701,6 +9924,12 @@ def main():
         with open(args.cards_file, encoding="utf-8") as handle:
             cards = json.load(handle)
         report = contradictory_accept_instruction_census(cards)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        sys.exit(0 if not report.get("affected") else 1)
+    elif args.cmd == "contradictory-advisory-telemetry-census":
+        with open(args.cards_file, encoding="utf-8") as handle:
+            cards = json.load(handle)
+        report = contradictory_advisory_telemetry_census(cards)
         print(json.dumps(report, indent=2, sort_keys=True))
         sys.exit(0 if not report.get("affected") else 1)
     elif args.cmd == "render":

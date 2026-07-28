@@ -691,7 +691,7 @@ def test_render_version_migration_heals_an_existing_card():
     check(
         "migration: the card is stamped with the current render version",
         healed_state["render_version"] == rc.CARD_RENDER_VERSION
-        and rc.CARD_RENDER_VERSION == 14,
+        and rc.CARD_RENDER_VERSION == 15,
     )
     check(
         "migration: no fresh triage is queued for the same revision (no spend)",
@@ -775,8 +775,13 @@ def test_projection_refresh_migrates_an_admitted_card_without_losing_telemetry()
         healed_state.get(rc.TRIAGE_PRIMARY_STATUS_FIELD) == "failed"
         and healed_state.get(rc.TRIAGE_PRIMARY_ERROR_FIELD)
         == "output.schema_invalid"
-        and healed_state.get(rc.TRIAGE_CONSUMPTION_FIELD) == "advisory"
-        and "Primary model validation failed (`output.schema_invalid`)" in healed,
+        and healed_state.get(rc.TRIAGE_CONSUMPTION_FIELD) == "advisory",
+    )
+    check(
+        "backfill: current admitted authority does not present historical advisory failure",
+        "consumed for advisory triage" not in healed
+        and "Tick **Accept recommendation**" in healed
+        and "<!-- opt:accept-recommendation -->" in healed,
     )
     check(
         "backfill: admitted authority is unchanged by the migration",
