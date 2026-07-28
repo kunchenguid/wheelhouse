@@ -437,6 +437,53 @@ def test_render_version_bump_is_the_migration_owner():
     )
 
 
+def test_absence_reapplication_preserves_version_ownership():
+    published = _published_with_recommendation()
+    confirming = rc.body_with_reconcile_absence(
+        published,
+        1,
+        run_number=46,
+        reason="target is outside the current maintainer worklist",
+    )
+    for source_version, expected_version in (
+        (12, 12),
+        (13, rc.CARD_RENDER_VERSION),
+        (rc.CARD_RENDER_VERSION, rc.CARD_RENDER_VERSION),
+        (None, None),
+        ("malformed", "malformed"),
+        (13.0, 13.0),
+        (True, True),
+    ):
+        state = dict(core.parse_state_block(confirming))
+        if source_version is None:
+            state.pop("render_version", None)
+        else:
+            state["render_version"] = source_version
+        legacy = rc._replace_state_block(confirming, state).replace(
+            rc.RECOMMENDATION_INERT_FRAMING,
+            rc.RECOMMENDATION_ACCEPT_INSTRUCTION,
+        )
+        reapplied = rc.body_with_reconcile_absence(
+            legacy,
+            1,
+            scheduled_epoch=47,
+            reason="target is outside the current maintainer worklist",
+        )
+        reapplied_state = core.parse_state_block(reapplied)
+        actual_version = reapplied_state.get("render_version")
+        check(
+            "absence reapply: %r version ownership" % source_version,
+            actual_version == expected_version
+            and rc.reconcile_absence_epoch(reapplied) == 47
+            and not rc.contradictory_accept_instruction(reapplied),
+        )
+        if expected_version != rc.CARD_RENDER_VERSION:
+            check(
+                "absence reapply: %r remains render-stale" % source_version,
+                rc.render_stale(reapplied_state),
+            )
+
+
 def main():
     test_confirming_card_keeps_analysis_without_tick_instruction()
     test_published_card_keeps_actionable_accept_instruction_and_control()
@@ -445,6 +492,7 @@ def main():
     test_same_revision_lifecycle_exit_restores_actionable_accept()
     test_confirming_lifecycle_copy_stays_coherent()
     test_render_version_bump_is_the_migration_owner()
+    test_absence_reapplication_preserves_version_ownership()
     if FAILURES:
         print("\n%d FAILURE(S)" % len(FAILURES))
         for name in FAILURES:

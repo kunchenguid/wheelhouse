@@ -4454,6 +4454,22 @@ def _set_recommendation_section(
     return body.rstrip() + "\n\n" + section
 
 
+def _v14_recommendation_framing_source(state):
+    version = (state or {}).get("render_version")
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == CONFIRMING_ACCEPT_COPY_SOURCE_VERSION
+    )
+
+
+def _state_after_v14_recommendation_framing(state):
+    updated = dict(state or {})
+    if _v14_recommendation_framing_source(updated):
+        updated["render_version"] = CARD_RENDER_VERSION
+    return updated
+
+
 def body_with_controls_aware_recommendation(body, owner="", repo=""):
     """Align recommendation framing with whether decision controls render.
 
@@ -4462,13 +4478,10 @@ def body_with_controls_aware_recommendation(body, owner="", repo=""):
     admitted recommendation AND decision controls are suppressed, rewrite the
     framing so it no longer says "Tick **Accept recommendation**". When
     controls are available, restore the actionable framing. Does not touch
-    admission, options, labels, or the decision section itself. Stamps the
-    current `render_version` so a healed card exits the migration trigger."""
+    admission, options, labels, or the decision section itself. Advances only
+    the exact source render version owned by this migration."""
     state = parse_state_block(body)
-    if (
-        not state
-        or state.get("render_version") != CONFIRMING_ACCEPT_COPY_SOURCE_VERSION
-    ):
+    if not state or not _v14_recommendation_framing_source(state):
         return body
     updated = body
     if accept_recommendation_available(state):
@@ -4482,8 +4495,7 @@ def body_with_controls_aware_recommendation(body, owner="", repo=""):
             repo=state.get("repo", "") or repo or "",
             controls_available=controls_available,
         )
-    new_state = dict(state)
-    new_state["render_version"] = CARD_RENDER_VERSION
+    new_state = _state_after_v14_recommendation_framing(state)
     return _replace_state_block(updated, new_state)
 
 
@@ -4694,7 +4706,7 @@ def body_with_reconcile_absence(
     # admitted recommendation is still displayed, keep the analysis but drop
     # the "Tick Accept recommendation" instruction that would reference an
     # absent control (card #1721 / scan-5). Display-only; admission unchanged.
-    new_state["render_version"] = CARD_RENDER_VERSION
+    new_state = _state_after_v14_recommendation_framing(new_state)
     if accept_recommendation_available(new_state):
         clean = _set_recommendation_section(
             clean,
@@ -7958,8 +7970,7 @@ def refresh_stale_confirming_card(number, expected):
 
 def confirming_accept_copy_migration_needed(state, body, labels):
     return (
-        (state or {}).get("render_version")
-        == CONFIRMING_ACCEPT_COPY_SOURCE_VERSION
+        _v14_recommendation_framing_source(state)
         and is_refreshable(labels)
         and _normalized_reconcile_absence(body) is not None
     )
