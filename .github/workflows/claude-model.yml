@@ -544,12 +544,13 @@ jobs:
           from pathlib import Path
           from agent_runtime.claude_handoff import workspace_input_observation
           from agent_runtime.contract import ContractError
+          from agent_runtime.size_budget import TRANSCRIPT_MAX_BYTES
           output = Path(os.environ["OUTPUT"])
           execution = output / "execution.json"
           source_name = os.environ.get("EXECUTION_FILE", "")
           source = Path(source_name) if source_name else None
           spent = bool(source and source.is_file() and not source.is_symlink())
-          if spent and source.stat().st_size <= 8388608:
+          if spent and source.stat().st_size <= TRANSCRIPT_MAX_BYTES:
               try:
                   rows = json.loads(source.read_text(encoding="utf-8"))
                   if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows): raise ValueError
@@ -707,9 +708,9 @@ jobs:
             adapter="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["spec"]["selection"]["candidates"][0]["adapter"])' "$task")"
             if [ "$adapter" = "claude-cli" ]; then
               if [ -f "$RAW/result.json" ] && [ ! -L "$RAW/result.json" ] && [ -f "$RAW/events.ndjson" ] && [ ! -L "$RAW/events.ndjson" ]; then
-                result_artifact_max="$(PYTHONPATH="$HANDOFF/runtime" python -c 'from agent_runtime.size_budget import RESULT_ARTIFACT_MAX_BYTES; print(RESULT_ARTIFACT_MAX_BYTES)')"
+                read -r result_artifact_max transcript_max < <(PYTHONPATH="$HANDOFF/runtime" python -c 'from agent_runtime.size_budget import RESULT_ARTIFACT_MAX_BYTES, TRANSCRIPT_MAX_BYTES; print(RESULT_ARTIFACT_MAX_BYTES, TRANSCRIPT_MAX_BYTES)')
                 test "$(wc -c < "$RAW/result.json")" -le "$result_artifact_max"
-                test "$(wc -c < "$RAW/events.ndjson")" -le 8388608
+                test "$(wc -c < "$RAW/events.ndjson")" -le "$transcript_max"
                 cp "$RAW/result.json" "$result"
                 cp "$RAW/events.ndjson" "$events"
               elif [ -f "$ATTEMPT/direct.json" ] && [ ! -L "$ATTEMPT/direct.json" ]; then

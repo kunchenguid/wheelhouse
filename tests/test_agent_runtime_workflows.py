@@ -108,7 +108,7 @@ def main():
     )
     check("production: bounded transcript capture follows every direct action", max(direct) < next(index for index, step in enumerate(model_steps) if step.get("id") == "capture"))
     capture = next(step for step in model_steps if step.get("id") == "capture")
-    check("production: cross-job transcript is bounded and reduced before upload", "8388608" in capture["run"] and "reduce_execution" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
+    check("production: cross-job transcript is bounded and reduced before upload", "TRANSCRIPT_MAX_BYTES" in capture["run"] and "reduce_execution" in capture["run"] and 'cp "$EXECUTION_FILE"' not in capture["run"])
     check("production: immutable inputs are revalidated after every action", "workspace_input_observation" in capture["run"] and "postActionInputObservationSha256" in capture["run"] and "targetInputsReadOnly" in capture["run"])
     check(
         "production: targetInputsReadOnly derives from exact pre/post signed-input observations",

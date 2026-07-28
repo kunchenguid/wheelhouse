@@ -51,6 +51,7 @@ from agent_runtime.size_budget import (  # noqa: E402
     TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
     bounded_candidate_text,
     bounded_github_comment,
+    claude_action_packed_prompt_bytes,
     delivered_retention_canonical_max_bytes,
     schema_worst_case_canonical_bytes,
 )
@@ -265,6 +266,7 @@ def main():
         builder_src.count('adapter == "claude-action-compat"') >= 2
         and builder_src.count("ENV_PROMPT_MAX_BYTES") >= 3
         and builder_src.count("COMPILED_PROMPT_MAX_BYTES") >= 3
+        and builder_src.count("claude_action_packed_prompt_bytes(compiled_prompt)") == 2
         and "bundle, 262144" not in builder_src,
     )
     decision_yaml = read(".github", "workflows", "decision-handler.yml")
@@ -336,6 +338,11 @@ def main():
         "RESULT_ARTIFACT_MAX_BYTES" in claude_model_yaml
         and 'result.json")" -le 2097152' not in claude_model_yaml,
     )
+    check(
+        "consumer: production transcript reads use the authoritative cap",
+        claude_model_yaml.count("TRANSCRIPT_MAX_BYTES") >= 3
+        and "8388608" not in claude_model_yaml,
+    )
 
     # ------------------------------------------------------------------ #
     # D. NL repair capacity: every potentially valid candidate reaches the
@@ -349,14 +356,13 @@ def main():
         % (NL_REPAIR_CANDIDATE_MAX_BYTES, nl_worst),
         NL_REPAIR_CANDIDATE_MAX_BYTES >= nl_worst,
     )
-    repair_overhead = len(
-        decision.build_nl_repair_prompt("").encode("utf-8")
-    )
+    repair_overhead = len(decision.build_nl_repair_prompt("").encode("utf-8"))
     check(
-        "nl-repair: worst-case repair prompt fits the env-carried rollback lane"
-        " (%d + %d <= %d)"
-        % (repair_overhead, NL_REPAIR_CANDIDATE_MAX_BYTES, ENV_PROMPT_MAX_BYTES),
-        repair_overhead + NL_REPAIR_CANDIDATE_MAX_BYTES <= ENV_PROMPT_MAX_BYTES,
+        "nl-repair: retained ASCII candidate fits the env-carried rollback lane",
+        claude_action_packed_prompt_bytes(
+            decision.build_nl_repair_prompt("x" * NL_REPAIR_CANDIDATE_MAX_BYTES)
+        )
+        <= ENV_PROMPT_MAX_BYTES,
     )
     check(
         "nl-repair: worst-case repair prompt fits the compiled stdin lane",
@@ -379,12 +385,7 @@ def main():
     )
     # A worst-case VALID candidate (multibyte, at the schema maxima) is also
     # complete: its canonical text cannot exceed the candidate bound.
-    worst_valid = {
-        "mode": "answer",
-        "action": "\u00e9" * size_budget.NL_ACTION_MAX_CHARS,
-        "free_text": "\u4e16" * NL_FREE_TEXT_MAX_CHARS,
-        "answer": "\U0001f600" * (NL_ANSWER_MAX_CHARS // 2),
-    }
+    worst_valid = maximal_candidate(nl_schema)
     validate_schema(worst_valid, nl_schema)
     worst_valid_text = canonical_json_bytes(worst_valid).decode("utf-8")
     worst_prompt = decision.build_nl_repair_prompt(worst_valid_text)
@@ -392,6 +393,10 @@ def main():
         "nl-repair: a worst-case schema-valid candidate is never truncated",
         worst_valid_text in worst_prompt
         and "[candidate truncated" not in worst_prompt,
+    )
+    check(
+        "nl-repair: the worst schema-valid prompt fits after action JSON packing",
+        claude_action_packed_prompt_bytes(worst_prompt) <= ENV_PROMPT_MAX_BYTES,
     )
     # Junk beyond the bound is truncated with an explicit marker, not dropped.
     junk = "x" * (NL_REPAIR_CANDIDATE_MAX_BYTES + 50000)

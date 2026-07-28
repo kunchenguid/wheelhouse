@@ -302,7 +302,7 @@ The invariants, all test-enforced:
   `nl-decision-v1` candidate, and repair prompt overhead plus that bound
   fits BOTH repair lanes: the production direct stdin lane and the reviewed
   env-carried action-lane rollback. This is why `answer` is bounded at
-  12288 characters and `free_text` at 6144: every potentially valid
+  11264 characters and `free_text` at 6144: every potentially valid
   candidate is guaranteed to reach the no-tool repair model complete.
   Candidates beyond the retention bound are junk-class and arrive truncated
   with an explicit marker.

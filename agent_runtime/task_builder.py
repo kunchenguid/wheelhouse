@@ -21,6 +21,7 @@ from .size_budget import (
     TRANSCRIPT_MAX_BYTES,
     TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
     bounded_candidate_text,
+    claude_action_packed_prompt_bytes,
 )
 
 from . import API_VERSION
@@ -1405,6 +1406,11 @@ def build_task(
         if adapter == "claude-action-compat"
         else COMPILED_PROMPT_MAX_BYTES
     )
+    if (
+        adapter == "claude-action-compat"
+        and claude_action_packed_prompt_bytes(compiled_prompt) > prompt_max_bytes
+    ):
+        raise ArtifactError("compiled prompt exceeds its adapter transport bound")
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
         compiled_path, bundle, prompt_max_bytes
     )
@@ -1967,6 +1973,11 @@ def build_correction_task(
         if adapter == "claude-action-compat"
         else COMPILED_PROMPT_MAX_BYTES
     )
+    if (
+        adapter == "claude-action-compat"
+        and claude_action_packed_prompt_bytes(compiled_prompt) > prompt_max_bytes
+    ):
+        raise ArtifactError("compiled prompt exceeds its adapter transport bound")
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
         compiled_path, bundle, prompt_max_bytes
     )
