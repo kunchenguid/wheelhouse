@@ -4464,16 +4464,20 @@ def body_with_controls_aware_recommendation(body, owner="", repo=""):
     admission, options, labels, or the decision section itself. Stamps the
     current `render_version` so a healed card exits the migration trigger."""
     state = parse_state_block(body)
-    if not state or not accept_recommendation_available(state):
+    if not state:
         return body
-    controls_available = not decision_controls_suppressed(state=state, body=body)
-    updated = _set_recommendation_section(
-        body,
-        state.get("triage_recommendation"),
-        owner=owner or "",
-        repo=state.get("repo", "") or repo or "",
-        controls_available=controls_available,
-    )
+    updated = body
+    if accept_recommendation_available(state):
+        controls_available = not decision_controls_suppressed(
+            state=state, body=body
+        )
+        updated = _set_recommendation_section(
+            body,
+            state.get("triage_recommendation"),
+            owner=owner or "",
+            repo=state.get("repo", "") or repo or "",
+            controls_available=controls_available,
+        )
     new_state = dict(state)
     new_state["render_version"] = CARD_RENDER_VERSION
     return _replace_state_block(updated, new_state)
@@ -4962,9 +4966,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         # A confirming/inert or held projection must not regain checkboxes from
         # a same-revision triage lift, and must not keep the actionable Accept
         # framing while those controls stay suppressed.
-        suppressed = decision_controls_suppressed(
-            state=state, body=existing_body or body
-        ) or decision_controls_suppressed(state=old_state, body=existing_body)
+        suppressed = decision_controls_suppressed(state=state, body=body)
         if not suppressed:
             state["options"] = options_for_state(kind, state.get("options"), state)
             body = _publish_decision_section(body, kind, state["options"])
@@ -7908,6 +7910,47 @@ def clear_reconcile_absence(number, body):
     _edit_issue_body_and_labels(
         number, new_body, remove_labels=[LIFECYCLE_CONFIRM_LABEL]
     )
+    return True
+
+
+def refresh_stale_confirming_card(number, expected):
+    if not isinstance(expected, dict):
+        return False
+    body = expected.get("body", "")
+    state = parse_state_block(body) or {}
+    if (
+        not render_stale(state)
+        or not is_refreshable(expected.get("labels"))
+        or _normalized_reconcile_absence(body) is None
+    ):
+        return False
+    new_body = body_with_controls_aware_recommendation(
+        body,
+        owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+        repo=state.get("repo", "") or "",
+    )
+    if new_body == body:
+        return False
+    card = get_card(number)
+    if not card or not _card_matches_expected(card, expected):
+        return False
+    if state.get(PROJECTION_OWNER_FIELD) == PROJECTION_OWNER:
+        import projection_writer
+
+        outcome = projection_writer.commit_preplanned(
+            number,
+            card,
+            title=card.get("title", ""),
+            body=new_body,
+            managed_labels=_projection_managed_labels(card.get("labels")),
+            cause="lifecycle-transition",
+            observation_id=((state.get(REVIEW_OBSERVATION_FIELD) or {}).get("observation_id", "")),
+            context_id=((state.get(DECISION_CONTEXT_FIELD) or {}).get("context_id", "")),
+        )
+        return outcome == "committed"
+    if state.get("kind") == "pr-review":
+        return False
+    _edit_issue_body(number, new_body)
     return True
 
 

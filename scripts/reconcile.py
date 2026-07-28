@@ -852,6 +852,19 @@ def main():
                 continue
             if not render_card.is_refreshable(current["labels"]):
                 continue
+            if render_card.render_stale(state) and render_card.reconcile_absence_count(
+                current.get("body", "")
+            ):
+                try:
+                    render_card.refresh_stale_confirming_card(
+                        current["number"], current
+                    )
+                except Exception as e:
+                    print(
+                        "::warning::failed to migrate confirming card #%s: %s"
+                        % (current["number"], str(e)[:160])
+                    )
+                continue
             absence_reason = (
                 (r.get("worklist_absence_reasons") or {}).get(str(number))
                 or "target is outside the current maintainer worklist"

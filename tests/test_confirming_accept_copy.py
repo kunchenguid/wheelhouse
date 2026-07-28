@@ -316,6 +316,38 @@ def test_same_revision_preserve_does_not_restore_controls_on_confirming():
     )
 
 
+def test_same_revision_lifecycle_exit_restores_actionable_accept():
+    published, confirming = _confirming_with_recommendation()
+    item = _issue_item()
+    old_state = core.parse_state_block(confirming)
+    fresh = rc.render(item, owner="kunchenguid")["body"]
+    exited = rc._preserve_same_revision_triage(
+        fresh,
+        confirming,
+        item,
+        old_state,
+        owner="kunchenguid",
+    )
+    state = core.parse_state_block(exited)
+    check(
+        "exit: new actionable projection restores Accept control",
+        "<!-- opt:accept-recommendation -->" in exited
+        and "Tick **Accept recommendation**" in exited
+        and rc.RECOMMENDATION_ACCEPT_INSTRUCTION in exited,
+    )
+    check(
+        "exit: old confirming posture does not suppress new projection",
+        not rc.decision_controls_suppressed(state=state, body=exited)
+        and not rc.contradictory_accept_instruction(exited)
+        and rc.accept_recommendation_available(state),
+    )
+    check(
+        "exit: ordinary published baseline remains unchanged",
+        "<!-- opt:accept-recommendation -->" in published
+        and "Tick **Accept recommendation**" in published,
+    )
+
+
 def test_confirming_lifecycle_copy_stays_coherent():
     _published, confirming = _confirming_with_recommendation()
     check(
@@ -368,6 +400,7 @@ def main():
     test_published_card_keeps_actionable_accept_instruction_and_control()
     test_legacy_confirming_body_heals_under_renderer_and_census()
     test_same_revision_preserve_does_not_restore_controls_on_confirming()
+    test_same_revision_lifecycle_exit_restores_actionable_accept()
     test_confirming_lifecycle_copy_stays_coherent()
     test_render_version_bump_is_the_migration_owner()
     if FAILURES:

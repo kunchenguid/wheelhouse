@@ -106,6 +106,7 @@ def run_reconcile(
         "reflect": [],
         "state": [],
         "triage_rows": [],
+        "confirming_refresh": [],
     }
     current_by_number = {
         c["number"]: c for c in (cards if current_cards is None else current_cards)
@@ -213,6 +214,22 @@ def run_reconcile(
         current_by_number[int(number)]["labels"] = labels(*sorted(names))
         return True
 
+    def fake_refresh_stale_confirming(number, expected):
+        new_body = reconcile.render_card.body_with_controls_aware_recommendation(
+            expected.get("body", ""), owner="owner"
+        )
+        calls["confirming_refresh"].append(
+            {
+                "number": number,
+                "expected": expected,
+                "body_after": new_body,
+            }
+        )
+        if new_body == expected.get("body", ""):
+            return False
+        current_by_number[int(number)]["body"] = new_body
+        return True
+
     old_argv = sys.argv[:]
     old_github_actions = os.environ.get("GITHUB_ACTIONS")
     old_event_name = os.environ.get("GITHUB_EVENT_NAME")
@@ -224,6 +241,9 @@ def run_reconcile(
     old_reflect = reconcile.render_card.reflect_activity
     old_update_absence = reconcile.render_card.update_reconcile_absence
     old_clear_absence = reconcile.render_card.clear_reconcile_absence
+    old_refresh_stale_confirming = (
+        reconcile.render_card.refresh_stale_confirming_card
+    )
     old_maybe_queue = reconcile.maybe_queue_auto_triage
     reconcile.render_card.upsert_card = fake_upsert
     reconcile.render_card.close_card = fake_close
@@ -231,6 +251,9 @@ def run_reconcile(
     reconcile.render_card.reflect_activity = fake_reflect
     reconcile.render_card.update_reconcile_absence = fake_update_absence
     reconcile.render_card.clear_reconcile_absence = fake_clear_absence
+    reconcile.render_card.refresh_stale_confirming_card = (
+        fake_refresh_stale_confirming
+    )
     reconcile.maybe_queue_auto_triage = fake_maybe_queue
     try:
         os.environ["GITHUB_ACTIONS"] = "true"
@@ -280,6 +303,9 @@ def run_reconcile(
         reconcile.render_card.reflect_activity = old_reflect
         reconcile.render_card.update_reconcile_absence = old_update_absence
         reconcile.render_card.clear_reconcile_absence = old_clear_absence
+        reconcile.render_card.refresh_stale_confirming_card = (
+            old_refresh_stale_confirming
+        )
         reconcile.maybe_queue_auto_triage = old_maybe_queue
     return calls
 
@@ -760,6 +786,84 @@ def test_open_target_that_left_worklist_records_first_absence():
             calls["state"][0]["body_after"]
         )
         == 1,
+    )
+
+
+def test_render_stale_confirming_card_migrates_without_target_observation():
+    item = work_item(
+        kind="issue-triage",
+        head_sha="",
+        bucket="issue-triage",
+        comp="n/a",
+        tests="n/a",
+        url="https://github.com/kunchenguid/wheelhouse/issues/42",
+    )
+    body = reconcile.render_card.render(item, owner="owner")["body"]
+    revision = reconcile.render_card.triage_revision(item)
+    body = reconcile.render_card.body_with_triage_result(
+        body,
+        revision,
+        triage={
+            "summary": "Current issue analysis.",
+            "product_implications": "Maintainer action remains advisory.",
+            "recommended_action": "investigate",
+            "recommended_reason": "Confirm the reported behavior.",
+            "evidence": "issue body",
+        },
+        owner="owner",
+    )
+    body = reconcile.render_card.body_with_reconcile_absence(
+        body,
+        1,
+        run_number=99,
+        reason="target is outside the current maintainer worklist",
+    )
+    stale = dict(reconcile.core.parse_state_block(body), render_version=13)
+    body = reconcile.render_card._replace_state_block(body, stale).replace(
+        reconcile.render_card.RECOMMENDATION_INERT_FRAMING,
+        reconcile.render_card.RECOMMENDATION_ACCEPT_INSTRUCTION,
+    )
+    confirming = {
+        "number": 7,
+        "body": body,
+        "labels": labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:issue-triage",
+            "priority:med",
+            "target:wheelhouse-42",
+            reconcile.render_card.LIFECYCLE_CONFIRM_LABEL,
+        ),
+        "title": "[wheelhouse#42] Ready PR",
+        "updated_at": "2024-01-02T00:00:00Z",
+    }
+    calls = run_reconcile(
+        scan_payload(
+            items=[],
+            open_pr_numbers=[],
+            open_issue_numbers=[42],
+        ),
+        [confirming],
+    )
+    check(
+        "confirming migration: guarded card-only refresh runs once",
+        len(calls["confirming_refresh"]) == 1
+        and calls["confirming_refresh"][0]["number"] == 7
+        and calls["confirming_refresh"][0]["expected"].get("body") == body,
+    )
+    healed = calls["confirming_refresh"][0]["body_after"]
+    healed_state = reconcile.core.parse_state_block(healed)
+    check(
+        "confirming migration: copy heals without target observation",
+        not reconcile.render_card.contradictory_accept_instruction(healed)
+        and reconcile.render_card.RECOMMENDATION_INERT_FRAMING in healed
+        and reconcile.render_card.reconcile_absence_count(healed) == 1
+        and healed_state.get("render_version")
+        == reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    check(
+        "confirming migration: does not advance or clear lifecycle state",
+        calls["state"] == [] and calls["close"] == [] and calls["upsert"] == [],
     )
 
 
@@ -2107,6 +2211,7 @@ def main():
     test_rejected_nested_refresh_does_not_bypass_triage_snapshot_guard()
     test_refresh_uses_current_labels_before_upsert()
     test_open_target_that_left_worklist_records_first_absence()
+    test_render_stale_confirming_card_migrates_without_target_observation()
     test_reconcile_run_number_requires_trusted_actions_identity()
     test_indeterminate_pr_card_is_frozen()
     test_ci_wait_card_is_frozen_not_consumed()
