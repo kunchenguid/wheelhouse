@@ -82,7 +82,10 @@ _TRANSCRIPT_VARIANCE_FLAGS = (
 )
 
 
-def _observed_model(rows: list[dict[str, Any]]) -> tuple[str, list[str]]:
+def _observed_model(
+    rows: list[dict[str, Any]],
+    result_index: int | None,
+) -> tuple[str, list[str]]:
     """Return the single consistent observed model plus benign variance flags.
 
     Zero init evidence and disagreeing model identities both return an empty
@@ -90,18 +93,20 @@ def _observed_model(rows: list[dict[str, Any]]) -> tuple[str, list[str]]:
     rows are accepted only when every observed identity agrees.
     """
     init_rows = [
-        row
-        for row in rows
+        (index, row)
+        for index, row in enumerate(rows)
         if row.get("type") == "system" and row.get("subtype") == "init"
     ]
-    if not init_rows:
+    if not init_rows or result_index is None:
         return "", []
     models: list[str] = []
-    for row in init_rows:
+    for _, row in init_rows:
         model = row.get("model")
         if not isinstance(model, str) or not model:
             return "", []
         models.append(model)
+    if not any(index < result_index for index, _ in init_rows):
+        return "", []
     first = models[0]
     if any(model != first for model in models[1:]):
         return "", []
@@ -111,7 +116,9 @@ def _observed_model(rows: list[dict[str, Any]]) -> tuple[str, list[str]]:
     return first, variance
 
 
-def _terminal_result(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, list[str]]:
+def _terminal_result(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, int | None, list[str]]:
     """Return the single terminal result when the transcript is unambiguous.
 
     Exactly one type:"result" row is required. It may be followed only by
@@ -120,12 +127,12 @@ def _terminal_result(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None,
     """
     result_indexes = [index for index, row in enumerate(rows) if row.get("type") == "result"]
     if len(result_indexes) != 1:
-        return None, []
+        return None, None, []
     index = result_indexes[0]
     variance: list[str] = []
     if index != len(rows) - 1:
         variance.append(TRANSCRIPT_VARIANCE_TRAILING_NON_RESULT)
-    return rows[index], variance
+    return rows[index], index, variance
 
 
 def _timing_variance(terminal: dict[str, Any] | None, max_duration_ms: int) -> list[str]:
@@ -654,8 +661,8 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
     except (ContractError, OSError, RecursionError, UnicodeError, ValueError):
         rows = []
         transcript_error = True
-    actual_model, model_variance = _observed_model(rows)
-    terminal, result_variance = _terminal_result(rows)
+    terminal, result_index, result_variance = _terminal_result(rows)
+    actual_model, model_variance = _observed_model(rows, result_index)
     enforcement = _enforcement(enforcement_file, task, execution_file, handoff_sha256)
     spend_started = _spend_started(execution_file) or bool(enforcement and enforcement["spendStarted"])
     error = None

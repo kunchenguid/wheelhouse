@@ -1090,6 +1090,66 @@ def main():
             and two_init["proof"]["transcriptVariance"]["accepted"] == ["repeated-agreeing-init"],
         )
 
+        _, late_init_bundle = make_bundle(root / "late-init")
+        late_init_execution = root / "late-init.json"
+        late_init_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    [
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": hold_text,
+                            "duration_ms": 10,
+                            "num_turns": 1,
+                        },
+                        {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL},
+                    ],
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        late_init, _ = run_bridge(late_init_bundle, late_init_execution, "late-init")
+        check(
+            "bridge: model identity first observed after result fails closed",
+            late_init["status"] == "failed"
+            and late_init["error"]["code"] == "model.mismatch"
+            and not late_init["selection"]["actualModel"]
+            and "final" not in late_init
+            and "transcriptVariance" not in late_init["proof"],
+        )
+
+        _, trailing_init_bundle = make_bundle(root / "trailing-agreeing-init")
+        trailing_init_execution = root / "trailing-agreeing-init.json"
+        trailing_init_execution.write_text(
+            json.dumps(
+                reduce_execution(
+                    variance_rows(
+                        trailing=[
+                            {"type": "system", "subtype": "init", "model": IMMUTABLE_MODEL}
+                        ]
+                    ),
+                    "deep-review.local",
+                )
+            ),
+            encoding="utf-8",
+        )
+        trailing_init, _ = run_bridge(
+            trailing_init_bundle,
+            trailing_init_execution,
+            "trailing-agreeing-init",
+        )
+        check(
+            "bridge: later init is accepted only with prior agreeing identity",
+            trailing_init["status"] == "succeeded"
+            and trailing_init["final"]["value"]["text"] == hold_text
+            and trailing_init["selection"]["actualModel"] == IMMUTABLE_MODEL
+            and trailing_init["proof"]["transcriptVariance"]["accepted"]
+            == ["repeated-agreeing-init", "trailing-non-result-rows"],
+        )
+
         for label, malformed_model in (
             ("missing", None),
             ("empty", ""),
