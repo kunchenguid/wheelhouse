@@ -4443,6 +4443,7 @@ def test_workflow_is_inert_and_reuses_existing_queue_and_record_boundaries():
     assert "replay_exact_cards" in runtime_doc
     assert "Advisory-cache recovery for a failed primary" in runtime_doc
     assert "advisory-recovery-authority-present" in runtime_doc
+    assert "drift-refresh-target-mismatch" in runtime_doc
     assert "triage-cache-not-terminal-error" in runtime_doc
     assert "v1:1483,1584,1585,1586,1594,1598" in runtime_doc
     assert "no other card is substituted" in runtime_doc
