@@ -3272,7 +3272,7 @@ def test_tombstone_visibility_timeout_pauses_with_zero_queue_or_budget_writes():
                 rc,
                 {
                     "reserve_triage_budget": reserve,
-                    "_configured_triage_spend_limits": lambda item: (2, 1200),
+                    "_configured_triage_spend_limits": lambda item: (2, 1200, 2),
                 },
             ),
             patched(
@@ -3463,7 +3463,7 @@ def test_post_visibility_foreign_mutation_still_fails_projection_cas():
                 {
                     "get_card": get_card_foreign_race,
                     "reserve_triage_budget": lambda number, item, ceiling: True,
-                    "_configured_triage_spend_limits": lambda item: (2, 1200),
+                    "_configured_triage_spend_limits": lambda item: (2, 1200, 2),
                 },
             ),
             patched(projection_writer, {"commit_preplanned": commit_tracking}),
@@ -3542,6 +3542,7 @@ def test_duplicate_only_replay_retry_survives_post_tombstone_queue_deferral():
                                 "_configured_triage_spend_limits": lambda item: (
                                     2,
                                     1200,
+                                    2,
                                 ),
                                 "reserve_triage_budget": (
                                     lambda number, item, ceiling: False

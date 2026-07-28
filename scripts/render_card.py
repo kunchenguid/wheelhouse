@@ -1123,6 +1123,175 @@ def triage_attempts_exhausted(item, state, cap=None):
     return triage_attempt_count(state, kind, revision, effective_cap) >= effective_cap
 
 
+# Separate small allowance (audit F13) for queued re-triages triggered ONLY by
+# a verified base-SHA or VISION-SHA movement against an UNCHANGED head. Such a
+# refresh is legitimate and required (G6 binds the verdict to the live base
+# SHA), so it must not burn the ordinary per-head retry budget that exists to
+# bound retries of one context. Every use binds the exact (head, base, VISION)
+# identity: repeating an identical context grants nothing, a malformed record
+# denies everything, and the daily UTC reservation ledger plus sealed dispatch
+# permit are consumed exactly as for an ordinary attempt.
+TRIAGE_CONTEXT_FIELD = "triage_context_allowance"
+TRIAGE_CONTEXT_VERSION = 1
+TRIAGE_CONTEXT_REPEAT = "context-identity-repeat"
+TRIAGE_CONTEXT_EXHAUSTED = "context-allowance-exhausted"
+TRIAGE_CONTEXT_UNTRUSTED = "context-record-untrusted"
+
+
+def triage_context_allowance(item):
+    """Return the typed context-refresh allowance carried by a trusted item.
+
+    Queue writers re-read the repository configuration before acting, so this
+    item value is only the cheap preflight gate. Zero disables the allowance;
+    invalid internal item data fails closed to zero and is loud.
+    """
+    value = (item or {}).get(
+        "triage_context_refresh_allowance", core.TRIAGE_CONTEXT_ALLOWANCE_DEFAULT
+    )
+    return core._bounded_config_int(
+        value,
+        "triage_context_refresh_allowance",
+        core.TRIAGE_CONTEXT_ALLOWANCE_MIN,
+        core.TRIAGE_CONTEXT_ALLOWANCE_MAX,
+        0,
+        scope="normalized triage item",
+    )
+
+
+def _triage_context_actual(state):
+    """The base/VISION identity the card's current attempt was bound to,
+    mirroring the fallback order `triage_fresh` uses."""
+    state = state if isinstance(state, dict) else {}
+    verdict = state.get("automerge_verdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    return (
+        str(state.get("triaged_base_sha") or verdict.get("base_sha") or ""),
+        str(state.get("triaged_vision_sha") or verdict.get("vision_sha") or ""),
+    )
+
+
+def triage_context_refresh(item, state):
+    """The NEW verified (base_sha, vision_sha) identity when this card's ONLY
+    staleness is a verified base-SHA or VISION-SHA movement against an
+    unchanged, already-attempted head - else None.
+
+    Verified means the card carries a complete prior identity from a real
+    queued/succeeded attempt write: when any expected (item-supplied) identity
+    component has no recorded counterpart (a legacy card that never stored
+    `triaged_base_sha`, or VISION tracking appearing for the first time), the
+    re-triage stays on the ordinary per-head budget exactly as before. Only
+    pr-review cards carry base/VISION context; issue-triage revisions move via
+    `updatedAt` and keep their own per-revision attempt semantics.
+    """
+    item = item or {}
+    state = state if isinstance(state, dict) else {}
+    if item.get("kind", "pr-review") != "pr-review":
+        return None
+    revision = triage_revision(item)
+    if not revision or state.get("triaged_sha") != revision:
+        return None
+    if state_revision(state, "pr-review") != revision:
+        return None
+    if triage_fresh(item, state):
+        return None
+    actual_base, actual_vision = _triage_context_actual(state)
+    expected_base = str(item.get("base_sha") or "")
+    expected_vision = str(item.get("automerge_vision_sha") or "")
+    # `triage_fresh` already proved at least one expected component mismatches.
+    # Every expected component must also have a recorded prior counterpart,
+    # otherwise the movement is not verified and the ordinary budget owns it.
+    if expected_base and not actual_base:
+        return None
+    if expected_vision and not actual_vision:
+        return None
+    return (expected_base, expected_vision)
+
+
+def _triage_context_uses(state, revision):
+    """Read the bounded context-allowance record for one head revision.
+
+    Returns `(uses, untrusted)`: `uses` is the list of exact {"base_sha",
+    "vision_sha"} identities already consumed for `revision`. A malformed,
+    duplicate-carrying, oversized, head-mismatched, or internally mismatched
+    record is untrusted and denies rather than granting capacity.
+    """
+    state = state if isinstance(state, dict) else {}
+    if TRIAGE_CONTEXT_FIELD not in state:
+        return [], False
+    record = state.get(TRIAGE_CONTEXT_FIELD)
+    if not isinstance(record, dict) or set(record) != {
+        "version",
+        "kind",
+        "revision",
+        "uses",
+    }:
+        return [], True
+    version = record.get("version")
+    uses = record.get("uses")
+    if (
+        isinstance(version, bool)
+        or version != TRIAGE_CONTEXT_VERSION
+        or record.get("kind") != "pr-review"
+        or not isinstance(record.get("revision"), str)
+        or not record.get("revision")
+        or not isinstance(uses, list)
+        or len(uses) > core.TRIAGE_CONTEXT_ALLOWANCE_MAX
+    ):
+        return [], True
+    if record.get("revision") != revision:
+        return [], True
+    seen = set()
+    normalized = []
+    for entry in uses:
+        if not isinstance(entry, dict) or set(entry) != {"base_sha", "vision_sha"}:
+            return [], True
+        base_sha = entry.get("base_sha")
+        vision_sha = entry.get("vision_sha")
+        if not isinstance(base_sha, str) or not isinstance(vision_sha, str):
+            return [], True
+        identity = (base_sha, vision_sha)
+        if identity in seen:
+            return [], True
+        seen.add(identity)
+        normalized.append({"base_sha": base_sha, "vision_sha": vision_sha})
+    if state_revision(state, "pr-review") != revision:
+        return [], True
+    return normalized, False
+
+
+def triage_context_allowance_gate(item, state, allowance=None):
+    """`(ok, reason)` for one verified context-refresh re-triage.
+
+    `reason` is "" when admitted, else one of TRIAGE_CONTEXT_EXHAUSTED /
+    TRIAGE_CONTEXT_REPEAT / TRIAGE_CONTEXT_UNTRUSTED - every denial is
+    explicit and bounded, and nothing here touches the ordinary attempt cap,
+    the daily ledger, or dispatch.
+    """
+    identity = triage_context_refresh(item, state)
+    if identity is None:
+        return False, ""
+    effective = (
+        triage_context_allowance(item)
+        if allowance is None
+        else core._bounded_config_int(
+            allowance,
+            "triage_context_refresh_allowance",
+            core.TRIAGE_CONTEXT_ALLOWANCE_MIN,
+            core.TRIAGE_CONTEXT_ALLOWANCE_MAX,
+            0,
+            scope="triage context allowance gate",
+        )
+    )
+    uses, untrusted = _triage_context_uses(state, triage_revision(item))
+    if untrusted:
+        return False, TRIAGE_CONTEXT_UNTRUSTED
+    if any((entry["base_sha"], entry["vision_sha"]) == identity for entry in uses):
+        return False, TRIAGE_CONTEXT_REPEAT
+    if len(uses) >= effective:
+        return False, TRIAGE_CONTEXT_EXHAUSTED
+    return True, ""
+
+
 def _review_triage_input_problem(item):
     """Return the content-free reason PR advisory triage cannot bind."""
     raw_observation = (item or {}).get("target_observation") or (item or {}).get(
@@ -1338,13 +1507,20 @@ def should_auto_triage(item, state, labels, has_token=True):
         return False
     if triage_fresh(item, state):
         return False
-    if triage_attempts_exhausted(item, state):
+    if triage_context_refresh(item, state) is not None:
+        admitted, _reason = triage_context_allowance_gate(item, state)
+        if not admitted:
+            return False
+    elif triage_attempts_exhausted(item, state):
         return False
     return True
 
 
 def triage_attempt_deferral_needed(item, state, labels, has_token=True):
-    """Whether cap exhaustion is the reason an otherwise eligible queue waits."""
+    """Whether ORDINARY cap exhaustion is the reason an otherwise eligible
+    queue waits. A verified context-refresh deferral is reported separately
+    (`triage_context_deferral_reason`) so the two budgets never share a
+    diagnostic."""
     if not should_hold(item, has_token) or not is_refreshable(labels):
         return False
     kind = item.get("kind", "pr-review")
@@ -1353,7 +1529,27 @@ def triage_attempt_deferral_needed(item, state, labels, has_token=True):
         return False
     if triage_fresh(item, state):
         return False
+    if triage_context_refresh(item, state) is not None:
+        return False
     return triage_attempts_exhausted(item, state)
+
+
+def triage_context_deferral_reason(item, state, labels, has_token=True):
+    """The explicit bounded reason a verified context-refresh re-triage is
+    NOT being queued (TRIAGE_CONTEXT_EXHAUSTED / TRIAGE_CONTEXT_REPEAT /
+    TRIAGE_CONTEXT_UNTRUSTED), or "" when no context deferral applies."""
+    if not should_hold(item, has_token) or not is_refreshable(labels):
+        return ""
+    kind = item.get("kind", "pr-review")
+    revision = triage_revision(item)
+    if kind == "issue-triage" and _issue_revision_is_older(revision, state):
+        return ""
+    if triage_fresh(item, state):
+        return ""
+    if triage_context_refresh(item, state) is None:
+        return ""
+    admitted, reason = triage_context_allowance_gate(item, state)
+    return "" if admitted else reason
 
 
 def auto_triage_has_token():
@@ -5173,6 +5369,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         ASSESSMENT_RESULT_FIELD,
         "assessment_admission",
         TRIAGE_ATTEMPTS_FIELD,
+        TRIAGE_CONTEXT_FIELD,
         "triage_replay",
     ):
         if key in (old_state or {}):
@@ -5310,7 +5507,7 @@ def _state_with_triage(
     return new_state
 
 
-def body_with_triage_queued(body, item, attempt_cap=None):
+def body_with_triage_queued(body, item, attempt_cap=None, context_allowance=None):
     # Spend authorization uses the strict state reader so duplicate markers or
     # duplicate JSON keys can only deny queueing.
     state = _unique_state_block(body)
@@ -5320,21 +5517,52 @@ def body_with_triage_queued(body, item, attempt_cap=None):
         return body
     if not revision:
         return body
-    cap = (
-        triage_attempt_cap(item)
-        if attempt_cap is None
-        else core._bounded_config_int(
-            attempt_cap,
-            "triage_attempt_cap_per_revision",
-            core.TRIAGE_ATTEMPT_CAP_MIN,
-            core.TRIAGE_ATTEMPT_CAP_MAX,
-            1,
-            scope="triage queued write",
-        )
-    )
-    attempt_count = triage_attempt_count(state, kind, revision, cap)
-    if attempt_count >= cap:
+    if triage_fresh(item, state):
+        # The exact (revision, base, VISION) identity is already queued or
+        # attempted. Repeating an identical identity grants nothing on either
+        # budget - callers gate on `should_auto_triage`, and this no-op keeps
+        # the shared checkpoint writer safe even for a raced or replayed call.
         return body
+    context_identity = triage_context_refresh(item, state)
+    context_uses = None
+    if context_identity is not None:
+        allowance = (
+            triage_context_allowance(item)
+            if context_allowance is None
+            else core._bounded_config_int(
+                context_allowance,
+                "triage_context_refresh_allowance",
+                core.TRIAGE_CONTEXT_ALLOWANCE_MIN,
+                core.TRIAGE_CONTEXT_ALLOWANCE_MAX,
+                0,
+                scope="triage queued write",
+            )
+        )
+        uses, untrusted = _triage_context_uses(state, revision)
+        if untrusted or len(uses) >= allowance or any(
+            (entry["base_sha"], entry["vision_sha"]) == context_identity
+            for entry in uses
+        ):
+            return body
+        context_uses = uses + [
+            {"base_sha": context_identity[0], "vision_sha": context_identity[1]}
+        ]
+    else:
+        cap = (
+            triage_attempt_cap(item)
+            if attempt_cap is None
+            else core._bounded_config_int(
+                attempt_cap,
+                "triage_attempt_cap_per_revision",
+                core.TRIAGE_ATTEMPT_CAP_MIN,
+                core.TRIAGE_ATTEMPT_CAP_MAX,
+                1,
+                scope="triage queued write",
+            )
+        )
+        attempt_count = triage_attempt_count(state, kind, revision, cap)
+        if attempt_count >= cap:
+            return body
     if kind == "issue-triage":
         if _issue_revision_is_older(revision, state):
             return body
@@ -5359,12 +5587,24 @@ def body_with_triage_queued(body, item, attempt_cap=None):
         base_sha=item.get("base_sha", ""),
         vision_sha=item.get("automerge_vision_sha", ""),
     )
-    new_state[TRIAGE_ATTEMPTS_FIELD] = {
-        "version": TRIAGE_ATTEMPTS_VERSION,
-        "kind": kind,
-        "revision": revision,
-        "count": attempt_count + 1,
-    }
+    if context_uses is not None:
+        # A verified context refresh consumes ONLY the separate allowance: the
+        # ordinary per-head attempt record (or legacy derivation) is left
+        # untouched, and the exact new (base, VISION) identity is recorded so
+        # a repeat of it grants nothing.
+        new_state[TRIAGE_CONTEXT_FIELD] = {
+            "version": TRIAGE_CONTEXT_VERSION,
+            "kind": kind,
+            "revision": revision,
+            "uses": context_uses,
+        }
+    else:
+        new_state[TRIAGE_ATTEMPTS_FIELD] = {
+            "version": TRIAGE_ATTEMPTS_VERSION,
+            "kind": kind,
+            "revision": revision,
+            "count": attempt_count + 1,
+        }
     # This queued write already proves the target returned to the worklist, so
     # clear stale absence state here instead of issuing a second body edit.
     new_state.pop(RECONCILE_ABSENCE_FIELD, None)
@@ -7743,6 +7983,33 @@ def report_triage_attempt_exhaustion(number, item, ceiling=None):
     )
 
 
+def report_triage_context_deferral(number, item, reason, ceiling=None):
+    """Explicit bounded diagnostic for a denied verified context-refresh.
+
+    No dispatch happens and no card write occurs; the warning plus structured
+    event are the whole surface, mirroring ordinary attempt-cap exhaustion.
+    """
+    reason = reason if isinstance(reason, str) else ""
+    if reason not in (
+        TRIAGE_CONTEXT_REPEAT,
+        TRIAGE_CONTEXT_EXHAUSTED,
+        TRIAGE_CONTEXT_UNTRUSTED,
+    ):
+        reason = TRIAGE_CONTEXT_UNTRUSTED
+    print(
+        "::warning::triage-context-refresh %s for card #%s kind %s rev %s; "
+        "automatic triage deferred (no dispatch)"
+        % (reason, number, item.get("kind", ""), triage_revision(item)[:160])
+    )
+    _triage_budget_event(
+        "context.deferred",
+        number,
+        item,
+        reason,
+        ceiling=ceiling,
+    )
+
+
 def _defer_triage_budget(number, item, code, message, error=False, ceiling=None):
     level = "error" if error else "warning"
     print("::%s::triage-budget %s: %s" % (level, code, message))
@@ -8245,7 +8512,7 @@ def _configured_triage_spend_limits(item):
             "::error::wheelhouse config: could not load triage spend limits; "
             "failing closed (%s)" % str(error)[:160]
         )
-        return 1, 0
+        return 1, 0, 0
     repo_cfg = cfg.get("repos", {}).get((item or {}).get("repo"), {})
     repo = (item or {}).get("repo")
     cap_map = cfg.get("triage_attempt_caps", {})
@@ -8256,7 +8523,15 @@ def _configured_triage_spend_limits(item):
             repo_cfg, cfg.get("triage_attempt_cap_per_revision", 1)
         )
     )
-    return cap, cfg.get("triage_daily_ceiling", 0)
+    allowance_map = cfg.get("triage_context_allowances", {})
+    allowance = (
+        allowance_map[repo]
+        if repo in allowance_map
+        else core._triage_context_allowance(
+            repo_cfg, cfg.get("triage_context_refresh_allowance", 0)
+        )
+    )
+    return cap, cfg.get("triage_daily_ceiling", 0), allowance
 
 
 def _queue_card_snapshot_matches(card, number, item, body):
@@ -8299,19 +8574,30 @@ def mark_triage_queued(
 ):
     """Cache an auto-triage attempt for this revision before dispatching the LLM.
 
-    The global daily reservation lands first. The per-revision attempt count and
-    queued cache then land in one card-body write, which is re-read and verified
-    before this function returns a dispatch permit. Any uncertainty defers.
+    The global daily reservation lands first. The per-revision attempt count
+    (or, for a verified base/VISION movement, the separate bounded context
+    allowance) and queued cache then land in one card-body write, which is
+    re-read and verified before this function returns a dispatch permit. Any
+    uncertainty defers.
     """
-    cap, ceiling = _configured_triage_spend_limits(item)
+    cap, ceiling, context_allowance = _configured_triage_spend_limits(item)
     candidate_body = prepare_body(body) if prepare_body else body
     if prepare_body and candidate_body == body:
         return None
     state = parse_state_block(candidate_body)
-    if triage_attempts_exhausted(item, state, cap=cap):
+    if triage_context_refresh(item, state) is not None:
+        admitted, reason = triage_context_allowance_gate(
+            item, state, allowance=context_allowance
+        )
+        if not admitted:
+            report_triage_context_deferral(number, item, reason, ceiling=ceiling)
+            return None
+    elif triage_attempts_exhausted(item, state, cap=cap):
         report_triage_attempt_exhaustion(number, item, ceiling=ceiling)
         return None
-    new_body = body_with_triage_queued(candidate_body, item, attempt_cap=cap)
+    new_body = body_with_triage_queued(
+        candidate_body, item, attempt_cap=cap, context_allowance=context_allowance
+    )
     if new_body == body or new_body == candidate_body:
         return None
     before = get_card(number)
@@ -10226,6 +10512,14 @@ def main():
                     item, state, current.get("labels"), has_token=True
                 ):
                     report_triage_attempt_exhaustion(current["number"], item)
+                else:
+                    context_reason = triage_context_deferral_reason(
+                        item, state, current.get("labels"), has_token=True
+                    )
+                    if context_reason:
+                        report_triage_context_deferral(
+                            current["number"], item, context_reason
+                        )
                 print("auto triage skipped for card #%s" % current["number"])
                 return
             permit = mark_triage_queued(

@@ -905,6 +905,7 @@ def _scan_context_from_observed(obs, rows):
         "auto_triage_issues": True,
         "triage_attempt_cap_per_revision": 2,
         "triage_daily_ceiling": 1200,
+        "triage_context_refresh_allowance": 2,
         "pending_contributor_cleanup": False,
         "pending_contributor_cleanup_days": 14,
         "pending_contributor_reminder_days": 10,

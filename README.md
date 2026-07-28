@@ -90,6 +90,7 @@ repos:
     # auto_triage: false                  # optional per-repo LLM spend opt-out (pr-review)
     # auto_triage_issues: false           # optional per-repo LLM spend opt-out (issue-triage)
     # triage_attempt_cap_per_revision: 2  # optional per-repo queued-attempt cap (1..5)
+    # triage_context_refresh_allowance: 2 # optional per-repo verified base/VISION refresh allowance (0..5)
     # pending_contributor_cleanup: false  # optional per-repo stale PR cleanup override
     # pending_contributor_cleanup_days: 14
     # pending_contributor_reminder_days: 10
@@ -105,6 +106,7 @@ auto_triage: true         # LLM side-job: quick advisory PR-card triage (DEFAULT
 auto_triage_issues: true  # LLM side-job: quick advisory issue-card triage (DEFAULT ON, independent of auto_triage)
 triage_attempt_cap_per_revision: 2  # queued attempts per card-kind source revision (1..5)
 triage_daily_ceiling: 1200           # fleet-wide auto-triage reservations per UTC day (1..2000)
+triage_context_refresh_allowance: 2  # separate verified base/VISION-move re-triage allowance per PR head (0..5)
 nl_decisions: false       # LLM side-job: reply to a card in plain English (off by default)
 card_issues: true         # also scan un-addressed issues, not just PRs; owner/maintainer/bot authors are skipped
 auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON; see Security notes)
@@ -163,6 +165,9 @@ contract are documented in [Current-body compliance evidence](docs/CURRENT_BODY_
 > The default worst case is therefore 1200 automatic-triage reservations and 2400 model calls per UTC day across scans, ingest runs, and explicitly operator-triggered replay waves.
 > Reservations happen before the card is marked queued, so a crash can waste daily capacity but cannot undercount or authorize extra spend.
 > Owner-triggered deep review and natural-language decisions are outside this ceiling because they require deliberate owner actions and separate durable claims.
+> `triage_context_refresh_allowance` is a separate small budget for re-triages whose only trigger is a verified base-branch SHA or VISION.md SHA movement against an unchanged, already-attempted PR head - the auto-merge verdict binds those SHAs, so such a refresh is legitimate and must not burn the ordinary per-head retry cap.
+> It defaults to 2, accepts integers from 0 through 5 (0 disables it), may be overridden per repository, and fails closed to 0 when invalid.
+> Every use is bound to the exact (head, base, VISION) identity, so repeating an identical context grants nothing; ordinary same-context failure retries stay on `triage_attempt_cap_per_revision`, each context refresh still consumes one daily-ceiling reservation, and an exhausted, repeated, or untrusted allowance emits an explicit bounded diagnostic with no dispatch.
 
 > **Heads-up - `auto_approve_ci` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork auto-approves fork-CI runs that the security gate proves safe (no CI-file changes, the PR targets the repo default branch, no `pull_request_target` workflow, and all safety reads succeed) and only raises a card for risky or uncertain contributor-authored runs.
