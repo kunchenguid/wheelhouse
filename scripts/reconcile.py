@@ -852,8 +852,8 @@ def main():
                 continue
             if not render_card.is_refreshable(current["labels"]):
                 continue
-            if render_card.render_stale(state) and render_card.reconcile_absence_count(
-                current.get("body", "")
+            if render_card.confirming_accept_copy_migration_needed(
+                state, current.get("body", ""), current.get("labels")
             ):
                 try:
                     render_card.refresh_stale_confirming_card(

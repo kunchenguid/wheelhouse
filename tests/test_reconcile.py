@@ -865,6 +865,24 @@ def test_render_stale_confirming_card_migrates_without_target_observation():
         "confirming migration: does not advance or clear lifecycle state",
         calls["state"] == [] and calls["close"] == [] and calls["upsert"] == [],
     )
+    version_12_state = dict(
+        reconcile.core.parse_state_block(body), render_version=12
+    )
+    version_12_body = reconcile.render_card._replace_state_block(
+        body, version_12_state
+    )
+    check(
+        "confirming migration: exact-v13 predicate rejects older cards",
+        not reconcile.render_card.confirming_accept_copy_migration_needed(
+            version_12_state,
+            version_12_body,
+            confirming["labels"],
+        )
+        and reconcile.render_card.body_with_controls_aware_recommendation(
+            version_12_body, owner="owner"
+        )
+        == version_12_body,
+    )
 
 
 def test_reconcile_run_number_requires_trusted_actions_identity():

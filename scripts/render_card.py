@@ -321,6 +321,7 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # gate semantics change. Earlier display-only bumps remain documented in
 # AGENTS.md.
 CARD_RENDER_VERSION = 14
+CONFIRMING_ACCEPT_COPY_SOURCE_VERSION = 13
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -4464,7 +4465,10 @@ def body_with_controls_aware_recommendation(body, owner="", repo=""):
     admission, options, labels, or the decision section itself. Stamps the
     current `render_version` so a healed card exits the migration trigger."""
     state = parse_state_block(body)
-    if not state:
+    if (
+        not state
+        or state.get("render_version") != CONFIRMING_ACCEPT_COPY_SOURCE_VERSION
+    ):
         return body
     updated = body
     if accept_recommendation_available(state):
@@ -7918,10 +7922,8 @@ def refresh_stale_confirming_card(number, expected):
         return False
     body = expected.get("body", "")
     state = parse_state_block(body) or {}
-    if (
-        not render_stale(state)
-        or not is_refreshable(expected.get("labels"))
-        or _normalized_reconcile_absence(body) is None
+    if not confirming_accept_copy_migration_needed(
+        state, body, expected.get("labels")
     ):
         return False
     new_body = body_with_controls_aware_recommendation(
@@ -7952,6 +7954,15 @@ def refresh_stale_confirming_card(number, expected):
         return False
     _edit_issue_body(number, new_body)
     return True
+
+
+def confirming_accept_copy_migration_needed(state, body, labels):
+    return (
+        (state or {}).get("render_version")
+        == CONFIRMING_ACCEPT_COPY_SOURCE_VERSION
+        and is_refreshable(labels)
+        and _normalized_reconcile_absence(body) is not None
+    )
 
 
 _TRIAGE_DISPATCH_SEAL = object()

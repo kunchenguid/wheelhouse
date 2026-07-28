@@ -393,6 +393,48 @@ def test_render_version_bump_is_the_migration_owner():
         rc.render_stale(stale) is True
         and rc.refresh_needed(it, stale, ["needs-decision"]) is True,
     )
+    published = _published_with_recommendation(it)
+    confirming = rc.body_with_reconcile_absence(
+        published,
+        1,
+        run_number=46,
+        reason="target is outside the current maintainer worklist",
+    )
+    version_12_state = dict(core.parse_state_block(confirming), render_version=12)
+    version_12 = rc._replace_state_block(confirming, version_12_state).replace(
+        rc.RECOMMENDATION_INERT_FRAMING,
+        rc.RECOMMENDATION_ACCEPT_INSTRUCTION,
+    )
+    shortcut_result = rc.body_with_controls_aware_recommendation(
+        version_12, owner="kunchenguid"
+    )
+    check(
+        "migration: v12 confirming card bypasses v14-only shortcut",
+        shortcut_result == version_12
+        and core.parse_state_block(shortcut_result).get("render_version") == 12
+        and rc.render_stale(core.parse_state_block(shortcut_result)),
+    )
+    legacy_triage = version_12.replace(
+        rc.TRIAGE_END,
+        "- **Related:** #77\n"
+        "- **Recommended next step:** investigate\n"
+        + rc.TRIAGE_END,
+    )
+    full_render = rc.render(it, owner="kunchenguid")["body"]
+    fully_migrated = rc._preserve_same_revision_triage(
+        full_render,
+        legacy_triage,
+        it,
+        core.parse_state_block(legacy_triage),
+        owner="kunchenguid",
+    )
+    migrated_state = core.parse_state_block(fully_migrated)
+    check(
+        "migration: full renderer owns cumulative migrations",
+        migrated_state.get("render_version") == rc.CARD_RENDER_VERSION
+        and "**Recommended next step:**" not in fully_migrated
+        and "kunchenguid/firstmate#77" in fully_migrated,
+    )
 
 
 def main():
