@@ -65,7 +65,30 @@ def _spend_started(path: str) -> bool:
         return False
 
 
-def _observed_model(rows: list[dict[str, Any]]) -> str:
+# Bounded, content-free flags for accepted benign transcript variance.
+# Kept as a closed enum so protocol drift stays observable without carrying
+# untrusted transcript content into AgentResult proof.
+TRANSCRIPT_VARIANCE_TRAILING_NON_RESULT = "trailing-non-result-rows"
+TRANSCRIPT_VARIANCE_REPEATED_AGREEING_INIT = "repeated-agreeing-init"
+TRANSCRIPT_VARIANCE_TIMING_ABSENT = "optional-timing-absent"
+TRANSCRIPT_VARIANCE_TIMING_NON_INTEGER = "optional-timing-non-integer"
+TRANSCRIPT_VARIANCE_TIMING_OUT_OF_RANGE = "optional-timing-out-of-range"
+_TRANSCRIPT_VARIANCE_FLAGS = (
+    TRANSCRIPT_VARIANCE_TRAILING_NON_RESULT,
+    TRANSCRIPT_VARIANCE_REPEATED_AGREEING_INIT,
+    TRANSCRIPT_VARIANCE_TIMING_ABSENT,
+    TRANSCRIPT_VARIANCE_TIMING_NON_INTEGER,
+    TRANSCRIPT_VARIANCE_TIMING_OUT_OF_RANGE,
+)
+
+
+def _observed_model(rows: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Return the single consistent observed model plus benign variance flags.
+
+    Zero init evidence and disagreeing model identities both return an empty
+    model string so the caller fails closed as model.mismatch. Multiple init
+    rows are accepted only when every observed identity agrees.
+    """
     models = [
         row["model"]
         for row in rows
@@ -74,14 +97,64 @@ def _observed_model(rows: list[dict[str, Any]]) -> str:
         and isinstance(row.get("model"), str)
         and row.get("model")
     ]
-    return models[0] if len(models) == 1 else ""
+    if not models:
+        return "", []
+    first = models[0]
+    if any(model != first for model in models[1:]):
+        return "", []
+    variance: list[str] = []
+    if len(models) > 1:
+        variance.append(TRANSCRIPT_VARIANCE_REPEATED_AGREEING_INIT)
+    return first, variance
 
 
-def _terminal_result(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    results = [row for row in rows if row.get("type") == "result"]
-    if len(results) != 1 or not rows or rows[-1] is not results[0]:
+def _terminal_result(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, list[str]]:
+    """Return the single terminal result when the transcript is unambiguous.
+
+    Exactly one type:"result" row is required. It may be followed only by
+    non-result rows (benign trailing telemetry); any second result is a hard
+    conflict and yields None.
+    """
+    result_indexes = [index for index, row in enumerate(rows) if row.get("type") == "result"]
+    if len(result_indexes) != 1:
+        return None, []
+    index = result_indexes[0]
+    variance: list[str] = []
+    if index != len(rows) - 1:
+        variance.append(TRANSCRIPT_VARIANCE_TRAILING_NON_RESULT)
+    return rows[index], variance
+
+
+def _timing_variance(terminal: dict[str, Any] | None, max_duration_ms: int) -> list[str]:
+    """Classify optional duration_ms as non-authoritative telemetry variance.
+
+    Missing, mistyped, or out-of-range timing never grants or denies result
+    authority; it only surfaces as bounded proof diagnostics when the rest of
+    the transcript is internally consistent.
+    """
+    if terminal is None:
+        return []
+    if "duration_ms" not in terminal:
+        return [TRANSCRIPT_VARIANCE_TIMING_ABSENT]
+    duration = terminal.get("duration_ms")
+    if not isinstance(duration, int) or isinstance(duration, bool):
+        return [TRANSCRIPT_VARIANCE_TIMING_NON_INTEGER]
+    if not 0 <= duration <= max_duration_ms:
+        return [TRANSCRIPT_VARIANCE_TIMING_OUT_OF_RANGE]
+    return []
+
+
+def _transcript_variance_proof(flags: list[str]) -> dict[str, Any] | None:
+    """Build the optional bounded proof extension for accepted variance."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for flag in flags:
+        if flag in _TRANSCRIPT_VARIANCE_FLAGS and flag not in seen:
+            seen.add(flag)
+            ordered.append(flag)
+    if not ordered:
         return None
-    return results[0]
+    return {"version": 1, "accepted": ordered}
 
 
 def _result_text(terminal: dict[str, Any] | None) -> str:
@@ -578,13 +651,14 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
     except (ContractError, OSError, RecursionError, UnicodeError, ValueError):
         rows = []
         transcript_error = True
-    actual_model = _observed_model(rows)
-    terminal = _terminal_result(rows)
+    actual_model, model_variance = _observed_model(rows)
+    terminal, result_variance = _terminal_result(rows)
     enforcement = _enforcement(enforcement_file, task, execution_file, handoff_sha256)
     spend_started = _spend_started(execution_file) or bool(enforcement and enforcement["spendStarted"])
     error = None
     delivered = None
     final = None
+    accepted_variance: list[str] = []
     if transcript_error:
         error = _error("harness.protocol", "Claude action execution data failed bounded protocol validation.", spend_started=spend_started)
     elif enforcement is None:
@@ -600,12 +674,14 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
     elif terminal is None:
         error = _error("harness.protocol", "Claude action execution did not contain exactly one terminal result event.", spend_started=spend_started)
     elif actual_model != candidate["model"]:
+        # Covers zero init evidence, disagreeing identities, and substitution.
         error = _error("model.mismatch", "Observed Claude model did not match the immutable requested model.", spend_started=spend_started)
     elif terminal.get("is_error") is not False or terminal.get("subtype") != "success":
         error = _error("harness.crash", "Claude action reported an unsuccessful execution.", spend_started=spend_started)
-    elif not isinstance(terminal.get("duration_ms"), int) or isinstance(terminal.get("duration_ms"), bool) or not 0 <= terminal["duration_ms"] <= task["spec"]["limits"]["childExecutionTimeoutMs"]:
-        error = _error("harness.protocol", "Claude action terminal result omitted valid attempt timing.", spend_started=spend_started)
     else:
+        # Timing is non-authoritative telemetry once result + identity agree.
+        timing_flags = _timing_variance(terminal, task["spec"]["limits"]["childExecutionTimeoutMs"])
+        accepted_variance = [*model_variance, *result_variance, *timing_flags]
         try:
             value = _delivered(task["metadata"]["action"], terminal, delivered_file)
             encoded = canonical_json_bytes(value)
@@ -739,6 +815,12 @@ def bridge(task_path: str, bundle_dir: str, execution_file: str, delivered_file:
     }
     if denial_evidence is not None:
         result["proof"]["toolDenials"] = denial_evidence
+    # Surface accepted benign variance only on an otherwise-trusted path so a
+    # hard conflict never looks like "accepted with flags".
+    if final is not None or (error is not None and error["code"] in ("output.schema_invalid", "output.evidence_invalid")):
+        variance_proof = _transcript_variance_proof(accepted_variance)
+        if variance_proof is not None:
+            result["proof"]["transcriptVariance"] = variance_proof
     if delivered is not None:
         result["delivered"] = delivered
     if final is not None:
