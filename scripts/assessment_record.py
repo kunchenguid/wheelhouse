@@ -5,7 +5,8 @@ import hashlib
 import json
 import re
 
-SCHEMA = "wheelhouse.assessment-result/v1"
+SCHEMA = "wheelhouse.assessment-result/v2"
+LEGACY_SCHEMA = "wheelhouse.assessment-result/v1"
 MARKER = "wheelhouse-assessment-result"
 PREFIX = "<!-- %s: " % MARKER
 MAX_BODY_BYTES = 60_000
@@ -19,7 +20,16 @@ def _result_id(payload):
     return "sha256:" + hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
-def make_record(state, revision, *, triage=None, error=""):
+def make_record(
+    state,
+    revision,
+    *,
+    triage=None,
+    error="",
+    authority_allowed=True,
+    consumption=None,
+    primary_error_code="",
+):
     payload = {
         "schema": SCHEMA,
         "target": {
@@ -30,6 +40,13 @@ def make_record(state, revision, *, triage=None, error=""):
         },
         "triage": triage if isinstance(triage, dict) else None,
         "error": str(error or "")[:220],
+        "authority_allowed": authority_allowed is True,
+        "consumption": (
+            str(consumption)
+            if consumption in {"primary", "corrected", "advisory"}
+            else None
+        ),
+        "primary_error_code": str(primary_error_code or "")[:120],
     }
     payload["result_id"] = _result_id(payload)
     if normalize_record(payload) is None:
@@ -38,13 +55,19 @@ def make_record(state, revision, *, triage=None, error=""):
 
 
 def normalize_record(value):
-    if not isinstance(value, dict) or set(value) != {
-        "schema", "result_id", "target", "triage", "error"
-    }:
+    if not isinstance(value, dict):
+        return None
+    legacy = value.get("schema") == LEGACY_SCHEMA
+    expected_fields = {"schema", "result_id", "target", "triage", "error"}
+    if not legacy:
+        expected_fields.update(
+            {"authority_allowed", "consumption", "primary_error_code"}
+        )
+    if set(value) != expected_fields:
         return None
     target = value.get("target")
     if (
-        value.get("schema") != SCHEMA
+        value.get("schema") not in {SCHEMA, LEGACY_SCHEMA}
         or not isinstance(target, dict)
         or set(target) != {"repo", "number", "kind", "revision"}
         or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", str(target.get("repo") or ""))
@@ -59,6 +82,32 @@ def normalize_record(value):
         or (value.get("triage") is not None and not isinstance(value.get("triage"), dict))
         or not isinstance(value.get("error"), str)
         or len(value["error"]) > 220
+        or (
+            not legacy
+            and (
+                not isinstance(value.get("authority_allowed"), bool)
+                or value.get("consumption")
+                not in {None, "primary", "corrected", "advisory"}
+                or (
+                    value.get("authority_allowed") is False
+                    and value.get("consumption") != "advisory"
+                )
+                or (
+                    value.get("authority_allowed") is True
+                    and value.get("consumption") == "advisory"
+                )
+                or not isinstance(value.get("primary_error_code"), str)
+                or len(value["primary_error_code"]) > 120
+                or (
+                    value.get("primary_error_code")
+                    not in {
+                        "",
+                        "output.schema_invalid",
+                        "output.evidence_invalid",
+                    }
+                )
+            )
+        )
     ):
         return None
     without = dict(value)

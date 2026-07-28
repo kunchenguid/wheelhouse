@@ -9,7 +9,7 @@
     "product_implications": {"type": "string", "minLength": 1, "maxLength": 4000},
     "recommended_action": {"type": "string", "enum": ["merge", "request-changes", "decline", "close", "hold", "investigate", "comment"]},
     "recommended_reason": {"type": "string", "minLength": 1, "maxLength": 4000},
-    "evidence": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "evidence": {"type": "string", "minLength": 1, "maxLength": 12000},
     "recommendation_basis": {
       "oneOf": [
         {
@@ -65,7 +65,7 @@
             "required": ["id", "quote", "external_source_required"],
             "properties": {
               "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
-              "quote": {"type": "string", "minLength": 8, "maxLength": 500},
+              "quote": {"type": "string", "minLength": 8, "maxLength": 2048},
               "external_source_required": {"type": "boolean"}
             }
           }
@@ -145,7 +145,7 @@
       "required": ["source", "quote"],
       "properties": {
         "source": {"type": "string", "pattern": "^(target\\.txt|target-src/[A-Za-z0-9._/-]{1,900})$"},
-        "quote": {"type": "string", "minLength": 12, "maxLength": 240}
+        "quote": {"type": "string", "minLength": 12, "maxLength": 2048}
       }
     },
     "behaviorEvidenceRef": {
@@ -154,7 +154,7 @@
       "required": ["source", "quote"],
       "properties": {
         "source": {"type": "string", "pattern": "^(target\\.txt|vision\\.md|target-src/[A-Za-z0-9._/-]{1,900})$"},
-        "quote": {"type": "string", "minLength": 12, "maxLength": 240}
+        "quote": {"type": "string", "minLength": 12, "maxLength": 2048}
       }
     }
   }

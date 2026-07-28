@@ -62,7 +62,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   AND issue-triage) adds non-material cache fields such as
   `triaged_sha`, `triage_status`, `triage_recommendation`, and the bounded
   schema-repair telemetry `triage_repair_status`/`triage_repair_reason` (see
-  "Bounded schema repair" in Sharp edges); those are
+  "Context-equivalent single correction turn" in Sharp edges); those are
   deliberately outside `MATERIAL_FIELDS` so a triage result never changes
   classification or forces a card refresh. The auto-inserted
   `accept-recommendation` option is stripped from material option comparisons
@@ -632,41 +632,22 @@ still appears where it's plain English, e.g. "triage the queue".)
   auto-merge re-evaluation because trusted code is unavailable, and visibly
   warns on the card that the checklist may temporarily reflect the prior queued
   state until trusted card maintenance resumes.
-- **Bounded schema repair - one automatic retry for the model-schema-miss triage
-  class (cards #551/#547), never for the excluded classes.** The TRIGGER is
-  narrow and exact: a triage result that was DELIVERED (a non-empty
-  `extract_claude_result`) but fails parse/normalize (`parse_triage_json` returns
-  None). That is the #551 class. It is deliberately distinct from #556
-  (delivered-then-dropped by the transcript cap - fixed separately) and from
-  E2BIG / auth / rate-limit / infra, which all leave NO extractable result and so
-  keep today's fail-open behavior byte-for-byte. An evidence-anchor failure
-  (parse OK but the model's evidence spans do not anchor to `target.txt`) is ALSO
-  excluded - a repair turn cannot conjure real target spans. The pure decision helpers
-  are `render_card.plan_triage_repair` (should a schema-miss get a repair turn,
-  and build its prompt) and `render_card.decide_triage_apply` (route the final
-  apply to `success`/`repaired`/`repair-failed`/`anchor-fail`/`no-result`); both
-  go through `triage_schema_reason`, which returns a purely STRUCTURAL reason
-  (field name + defect type, NEVER a field value) safe to persist and display.
-  Primary validation accepts `evidence` as either one non-empty string or a non-empty list of non-empty strings, flattening the latter with ` | ` before the shared anchor check.
-  `docs/AGENT_RUNTIME.md` owns the shared `target-anchor/v1` delimiter-decoding and verbatim-match contract.
-  A repair failure persists the actual structural failing stage, including a repaired anchor miss or duplicate repair claim, instead of reusing the original candidate reason.
-  `triage.yml` performs EXACTLY ONE repair turn: after `triage-result`,
-  `render_card.py triage-repair-prep` emits `repair_needed`/`reason` and (only on
-  a schema-miss) a `repair_prompt` heredoc to `$GITHUB_OUTPUT`; the conditional
-  `claude_repair` step runs that prompt in the SAME tokenless side-job posture as
-  triage (no `FLEET_TOKEN`, no `READONLY_TOKEN`), bounded to `--max-turns 1` with
-  FAIL-CLOSED zero-tool isolation (an empty `--allowedTools` is NOT a reliable
-  guarantee in `claude-code-action` - upstream allowlist parsing can leak
-  defaults incl. Bash - so a Claude Code `permissions.deny` rule set, which takes
-  precedence over any allowlist, blocks every file/exec/network/subagent tool by
-  name; the candidate is embedded in the prompt, so the turn needs no tools and
-  must NOT re-read the diff or re-analyze). `repair-result` extracts the compact
-  repaired result and the existing `Update the decision card` step passes it to
-  `triage-apply --repair-execution-file`. The repaired output is re-validated
-  through the SAME parse/normalize AND evidence-anchor guards; if it is still
-  invalid the card lands on the existing visible triage-unavailable path, now
-  carrying the structural validation reason.
-  There is at most one repair attempt per admitted triage dispatch, so repair is structurally unable to loop; any separately sanctioned later dispatch must consume another per-revision attempt and daily reservation.
+- **Context-equivalent single correction turn - one automatic retry for any
+  delivered triage candidate that fails trusted validation, never for the
+  excluded classes.** A delivered candidate failing the complete bound action
+  schema, the UTF-8 evidence-quote byte policy, or trusted evidence anchoring
+  gets exactly one correction; missing results and infrastructure failures do
+  not. The correction rebuilds the original AgentTask from its verified
+  handoff, preserves its action, model, tools, search, network boundaries,
+  immutable inputs, schema binding, and limits, and must pass the same complete
+  trusted validation before it has authority. A failed correction can leave
+  an advisory-consumable primary only as explicitly advisory-only: no
+  admission, Accept shortcut, persisted recommendation, or auto-merge verdict.
+  `docs/AGENT_RUNTIME.md` owns the detailed eligibility, exact-binding,
+  correction-task, evidence-byte, anchoring, outcome, and rollback contract.
+  There is at most one correction per admitted triage dispatch; any separately
+  sanctioned later dispatch consumes another per-revision attempt and daily
+  reservation.
   Telemetry lives in NON-MATERIAL state keys
   `triage_repair_status` (`repaired` | `repair-failed`; absent = never attempted),
   `triage_repair_reason` (the structural failure), and `triage_repair_candidate`
@@ -675,7 +656,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   model-chosen key name or value) - like `triaged_sha`, never in
   `MATERIAL_FIELDS`, never affecting classify/material_changed/decision-parsing.
   The persisted diagnostics carry only structural facts, never raw target/comment
-  content. See `tests/test_triage_schema_repair.py`.
+  content. The legacy no-tool repair branch remains as disabled Codex evidence
+  and a deployable rollback surface; the production Claude lane never builds a
+  `triage.schema-repair` task. See `docs/AGENT_RUNTIME.md` and
+  `tests/test_triage_schema_repair.py`.
 - Natural-language decisions accept only owner/maintainer comments and are structured.
   `docs/AGENT_RUNTIME.md` owns the native structured-output and bounded schema-repair contract.
   `apply_decision.py nl-route` is the trust boundary - it validates `action` against the per-kind allowlist and only then
@@ -1267,6 +1251,7 @@ The contract, action schemas, pinned Codex app-server protocol, capability negot
 Claude is the named production primary.
 The two schema-repair actions resolve to the direct `claude-cli-pinned` profile, while the other eight actions remain on `claude-action-current-pinned`.
 `agent_runtime/config.py` guards that exact split, and `temporary_rollback_profile` is the reviewed one-setting rollback for an explicit durable replay.
+In production, `nl-decision.schema-repair` is the only schema-repair TASK still built: the triage correction turn reuses the ORIGINAL triage action (built by `build_correction_task` under the unchanged `triage.schema-repair` claim identity), so `triage.schema-repair` remains configured, guarded, and deployable as the disabled codex inline evidence plus rollback surface without being selected by the claude lane.
 Codex CLI `0.144.0` app-server remains implemented and tested only as disabled non-target adapter evidence because the current ChatGPT Pro plus public-repository topology has no supported secure noninteractive subscription path.
 No Codex secret is requested, no action targets Codex, and current selection cannot reach a Codex workflow installation path.
 Provider environment overrides are rejected; secret presence cannot select a provider, model, effort, billing path, or stronger tool policy.
@@ -1278,7 +1263,7 @@ Existing workflow concurrency serializes same-event claim creation, duplicate de
 AgentTask `idempotencyKey` is the normalized event-key hash.
 Content-free `wheelhouse-agent-stage` records begin at admission and bind action, Wheelhouse source SHA, event-key hash, and execution ID when available; they never carry prompt, comment, target, search, or credential content.
 
-The eight pinned Claude Action steps remain present and deployable behind the unified selection boundary; six serve the non-repair actions and two are the schema-repair rollback path.
+The eight pinned Claude Action steps remain present and deployable behind the unified selection boundary; six serve the non-repair actions (and the triage correction turn, which rides the original action's own step), and two are the schema-repair rollback path.
 One direct supervisor step serves both schema-repair actions because they share the same one-turn, no-tool profile.
 They run only in the separately permissioned `claude-model.yml` reusable workflow after a trusted parent job uploads a bounded content-addressed `AgentTask` handoff.
 Each local reusable-workflow call resolves from the caller's exact commit and also passes that commit as `expected_commit_sha`; the model job must observe the same `GITHUB_SHA` before hydration, checkpointing, or provider execution.
@@ -1321,7 +1306,9 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   `render_card.py triage-apply`/`triage-fail` take a kind-agnostic `--revision` CLI argument (a PR's head SHA or an issue's `updated_at`), replacing the old pr-review-only `--head-sha` flag name.
   Result delivery is independent of transcript retention: `triage-result` extracts the compact final result event before applying the 262144-byte cap solely to the retained debug transcript.
   `tests/test_triage_result_delivery.py` guards this ordering and the uncapped direct extraction in `deep-review.yml`.
-  When a DELIVERED result then fails parse/normalize (the #551/#547 schema-miss class - NOT a missing result), a single bounded, tokenless, no-tool `claude_repair` turn reshapes the candidate to the required schema; the repaired output is re-validated (same parse/normalize + evidence-anchor guards) or the card lands on the visible triage-unavailable error carrying the structural reason - see "Bounded schema repair" in Sharp edges and `tests/test_triage_schema_repair.py`.
+  The single context-equivalent triage correction and its authority rules are
+  owned by `docs/AGENT_RUNTIME.md`; see
+  `tests/test_triage_schema_repair.py` for regression coverage.
 - **`deep-review.yml` - ALWAYS-ON, code-grounded (no enable flag).** Triggered by ticking the **Investigate** box on a card, by the repo owner applying the `needs-deep-review` label, or by the repo owner running `workflow_dispatch` with only `issue=...` for direct verification.
   Bot-dispatched Investigate runs use the immutable target inputs passed by `decision-handler.yml`; owner issue-only runs and manual label runs parse the current card body with `github.token`.
   It checks out the TARGET's code read-only (`FLEET_TOKEN`, `persist-credentials: false`, the PR head for a review card / the default branch for an issue card) and runs Claude restricted to `--allowedTools Read,Grep,Glob` over that checkout when search is disabled - so it traces real code paths, never just the diff, and can NEVER execute the target's code.
@@ -1446,7 +1433,7 @@ The notes below record selected non-obvious regression coverage:
 - `python tests/test_triage_prompt_size.py` - the PASS-BY-REFERENCE prompt architecture (card #517 E2BIG fix), offline static YAML inspection: the load-bearing invariant that neither `triage.yml` nor `deep-review.yml` inlines target content into the Claude `prompt.txt` block (no `cat target.txt`/`cat vision.md`/`gh pr diff`/`gh pr view`/`gh api` there), the prompt stays under a small fixed byte budget and far below `MAX_ARG_STRLEN` raw AND json-escaped, a worst-case synthetic PR (diffs up to 5 MB) never enters the prompt and the prompt size is FLAT regardless of diff size (with a demonstration that the OLD inline design WOULD exceed the limit), the prompt names `target.txt`/`target-src/` and directs Read/Grep/Glob, target.txt is always written and its diff/comments are bounded (deep-review's formerly-UNCAPPED diff is now capped), the untrusted-data framing survives when content is read from files, both the READONLY_TOKEN and no-token Claude steps consume the same by-reference prompt (no-token step is Read/Grep/Glob only), the `DIFF_COMPLETE` fail-closed-on-oversize / complete-on-disk semantics, and the `--target-file` anchor-check wiring.
 - `python tests/test_nl_prompt_size.py` - offline guards for the bounded pass-by-reference NL prompt, tool isolation, explicit target truncation, and marker-keyed failure note.
 - `python tests/test_triage_result_delivery.py` - card #556 delivered-result-drop regression, no network: a >256KiB Claude transcript that ends in a valid successful `result` event still delivers its verdict (`extract_result_to_file` returns a bounded compact file that flows through `extract_claude_result`->`parse_triage_json`->`normalize_triage`->the visible `### Triage` section with `triage_status:succeeded`), the CLI `extract-result` round-trips and exits non-zero when no result exists, and static YAML checks that `triage.yml`'s `triage-result` step extracts via `render_card.py extract-result` BEFORE the 262144 gate (so the size cap bounds only the retained `transcript.json` copy, never `result_path`) plus the audit that `deep-review.yml` never had a size-cap execution-file drop.
-- `python tests/test_triage_schema_repair.py` - cards #551/#547 bounded schema-repair, no network: the TRIGGER discipline (`plan_triage_repair`/`decide_triage_apply` repair a DELIVERED-but-invalid result, but NEVER a missing result - E2BIG/auth/rate-limit/infra - nor an evidence-anchor failure, and a valid result is untouched); success-on-repair (invalid candidate -> valid repair -> the card gets a real `### Triage` section, `triage_status:succeeded`, and `triage_repair_status:repaired`); the repair-failure cap (still-invalid repair, no repair output, or a repair whose evidence no longer anchors all land on the visible triage-unavailable error carrying the STRUCTURAL reason with `triage_repair_status:repair-failed`, exactly one attempt); `triage_schema_reason` being purely structural (field name + defect, never a field value) so no target/comment content leaks into the persisted `triage_error`/`triage_repair_reason` or card body; `build_repair_prompt` naming every required schema field in lockstep with `normalize_triage`, embedding the candidate, byte-bounding a pathological candidate, and forbidding file reads/re-analysis; the NON-MATERIAL telemetry keys (`triage_repair_status`/`triage_repair_reason` absent from `MATERIAL_FIELDS` and a later non-repair write clearing them), plus the direct no-tool PR repair boundary that restores only an already-valid original `recommendation_basis` while source/VISION/auto-merge claims fail closed to unavailable G6; the `triage-repair-prep` CLI emitting `repair_needed`/`reason`/`repair_prompt` to `$GITHUB_OUTPUT`; the `triage-apply --repair-execution-file` CLI end-to-end with mocked card I/O; and static `triage.yml` wiring (repair-prep -> claude_repair -> repair-result ordered after triage-result and before the card update, the repair turn tokenless with `--max-turns 1`, an empty `--allowedTools`, and a fail-closed `permissions.deny` tool set, gated on `repair_needed`, pass-by-reference with no inlined target content).
+- `python tests/test_triage_schema_repair.py` - the context-equivalent single correction turn plus the evidence-quote byte policy, no network: correction eligibility (a DELIVERED candidate failing the bound schema, byte policy, or evidence anchoring is eligible - including advisory-normalizable candidates and anchor failures - while missing results and every infrastructure class refuse via the `CORRECTION_ELIGIBLE_ERROR_CODES` allowlist); exact binding refusals (stale revision, source-SHA mismatch, handoff identity, result/task hash, correction-of-a-correction); full spec parity of the built correction task with the original (selection/capabilities/tools/isolation/limits/inputs/output plus search scope), the `metadata.correction` bindings, the original-prompt-plus-candidate-plus-every-trusted-error correction prompt, and the `retry.repairTask: null` no-recursion policy; `decide_triage_apply` routing (`success`/`repaired`/`advisory`/`repair-failed`/`no-result`, bridge error codes barring the authority path, corrected results validated on their own with no basis restore); authority semantics (valid primary and valid corrected results keep authority with `triage_consumption` `primary`/`corrected`, a failed correction leaves the original explicitly advisory-only with no admission/Accept/recommendation/auto-merge verdict); the byte-policy boundaries (1024/1025/2048 valid, 2049 invalid, multibyte char/byte divergence, the exact 253-byte card #1693 production quote pinned valid, the schema 2048-char bound as secondary defense, and the 1024-byte prompt rule in every branch); `triage_schema_reason` staying purely structural; the NON-MATERIAL telemetry keys; the legacy no-tool planner/prompt helpers kept only for the disabled codex evidence branch; the `triage-apply --repair-execution-file` CLI end-to-end with mocked card I/O; and static `triage.yml` wiring (handoff download -> bind-verified primary result -> `correction-eligible` -> claim-gated `build-correction-task` -> `claude-model-call` with the original search scope, the unchanged `triage.schema-repair` claim identity, and the consume job passing `--primary-error-code`/`--repair-error-code`).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, normalized `AgentResult` verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's automated-status labeling plus `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.

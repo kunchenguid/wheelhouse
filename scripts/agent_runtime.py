@@ -34,7 +34,11 @@ from agent_runtime.contract import (
 )
 from agent_runtime.events import EventError, verify_result_event_binding
 from agent_runtime.supervisor import RuntimeFailure, run
-from agent_runtime.task_builder import build_task
+from agent_runtime.task_builder import (
+    build_correction_task,
+    build_task,
+    correction_eligibility,
+)
 
 
 def output(name: str, value: object) -> None:
@@ -149,6 +153,55 @@ def cmd_build(args: argparse.Namespace) -> int:
     output("bundle", str(Path(args.bundle).resolve()))
     output("execution_id", task["metadata"]["executionId"])
     print("built AgentTask %s" % task["metadata"]["executionId"])
+    return 0
+
+
+def cmd_correction_eligible(args: argparse.Namespace) -> int:
+    eligible, reason, errors = correction_eligibility(
+        args.handoff,
+        args.result_dir,
+        args.expected_revision,
+        args.expected_source_sha,
+        args.handoff_sha256,
+    )
+    output("repair_needed", "true" if eligible else "false")
+    output("reason", reason if not eligible else (errors[0] if errors else ""))
+    if eligible:
+        print(
+            "correction eligible: delivered candidate failed trusted validation "
+            "(%d error(s))" % len(errors)
+        )
+        for error in errors:
+            print("  - %s" % error)
+    else:
+        print("correction not needed: %s" % reason)
+    return 0
+
+
+def cmd_build_correction(args: argparse.Namespace) -> int:
+    task, allowed_repos = build_correction_task(
+        handoff_dir=args.handoff,
+        result_dir=args.result_dir,
+        bundle_dir=args.bundle,
+        output_path=args.out,
+        event_key=args.event_key,
+        expected_revision=args.expected_revision,
+        expected_source_sha=args.expected_source_sha,
+        expected_handoff_sha256=args.handoff_sha256,
+        selection=resolve_selection(args.action, args.repo),
+    )
+    if task["metadata"]["action"] != args.action:
+        raise ContractError(
+            "correction action does not match the admitted original action"
+        )
+    output("task", str(Path(args.out).resolve()))
+    output("bundle", str(Path(args.bundle).resolve()))
+    output("execution_id", task["metadata"]["executionId"])
+    output("allowed_repos", json.dumps(allowed_repos, separators=(",", ":")))
+    print(
+        "built correction AgentTask %s for %s"
+        % (task["metadata"]["executionId"], task["metadata"]["action"])
+    )
     return 0
 
 
@@ -407,6 +460,25 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--require-vision-fields", action="store_true")
     build.add_argument("--repair-kind", choices=("issue", "pr"), default="pr")
     build.set_defaults(func=cmd_build)
+    correction_eligible = commands.add_parser("correction-eligible")
+    correction_eligible.add_argument("--handoff", required=True)
+    correction_eligible.add_argument("--result-dir", required=True)
+    correction_eligible.add_argument("--expected-revision", required=True)
+    correction_eligible.add_argument("--expected-source-sha", required=True)
+    correction_eligible.add_argument("--handoff-sha256", default="")
+    correction_eligible.set_defaults(func=cmd_correction_eligible)
+    build_correction = commands.add_parser("build-correction-task")
+    build_correction.add_argument("--handoff", required=True)
+    build_correction.add_argument("--result-dir", required=True)
+    build_correction.add_argument("--bundle", required=True)
+    build_correction.add_argument("--out", required=True)
+    build_correction.add_argument("--event-key", required=True)
+    build_correction.add_argument("--expected-revision", required=True)
+    build_correction.add_argument("--expected-source-sha", required=True)
+    build_correction.add_argument("--handoff-sha256", default="")
+    build_correction.add_argument("--action", required=True)
+    build_correction.add_argument("--repo", default="")
+    build_correction.set_defaults(func=cmd_build_correction)
     execute = commands.add_parser("run")
     execute.add_argument("--task", required=True)
     execute.add_argument("--bundle", required=True)

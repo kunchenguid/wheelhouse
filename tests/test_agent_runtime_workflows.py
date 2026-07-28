@@ -209,8 +209,24 @@ def main():
     build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-task" in str(step.get("run", ""))]
     claude_build_steps = [step for step in build_steps if "claude" in str(step.get("id", ""))]
     codex_build_steps = [step for step in build_steps if step not in claude_build_steps]
+    correction_build_steps = [step for _, step in all_steps if "scripts/agent_runtime.py build-correction-task" in str(step.get("run", ""))]
     model_calls = [step for _, step in all_steps if step.get("uses") == "./.github/actions/claude-model-call"]
-    check("runtime: every invocation family has trusted immutable task construction", len(claude_build_steps) == 5 and len(codex_build_steps) == 5)
+    # The claude triage correction rebuilds the ORIGINAL task through the
+    # dedicated correction builder (context-equivalent single correction turn);
+    # the codex inline evidence branch keeps its five legacy build-task steps.
+    check(
+        "runtime: every invocation family has trusted immutable task construction",
+        len(claude_build_steps) == 4
+        and len(codex_build_steps) == 5
+        and len(correction_build_steps) == 1
+        and all(
+            "--event-key" in step["run"]
+            and "--expected-revision" in step["run"]
+            and "--expected-source-sha" in step["run"]
+            and "--handoff-sha256" in step["run"]
+            for step in correction_build_steps
+        ),
+    )
     check("runtime: every Claude family uses the bounded read-only workflow call", len(model_calls) == 5)
     model_text = WORKFLOWS["model"].read_text()
     check("runtime: trusted bridge requires observed enforcement proof", "from agent_runtime.claude_bridge import bridge" in model_text and 'proof="$RAW/enforcement.json"' in model_text)

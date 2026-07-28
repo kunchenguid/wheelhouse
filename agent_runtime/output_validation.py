@@ -8,6 +8,18 @@ from typing import Any
 
 _EVIDENCE_SEGMENT_RE = re.compile(r"(?:\r?\n|\s+\|\s+)")
 _EVIDENCE_ELLIPSIS_RE = re.compile(r"(?:\u2026|\.{3})")
+
+# Captain-fixed evidence-quote byte policy: prompts ask for at most 1024 UTF-8
+# bytes per quote, trusted validation accepts through this inclusive hard
+# ceiling, and anything above it is invalid (correction-eligible). JSON Schema
+# `maxLength` counts CHARACTERS, so the schemas keep a 2048-character bound as
+# secondary defense only (a string over 2048 characters is necessarily over
+# 2048 UTF-8 bytes, so the character bound can never reject a byte-valid
+# quote); this explicit byte count is the primary rule.
+EVIDENCE_QUOTE_MAX_UTF8_BYTES = 2048
+# Matching span bound for anchor extraction so a byte-valid long quote can
+# still anchor to the target text.
+EVIDENCE_SPAN_MAX_LEN = EVIDENCE_QUOTE_MAX_UTF8_BYTES
 _EVIDENCE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-+*]\s+|[0-9]+[.)]\s+)")
 _EVIDENCE_PATH_PREFIX_RE = re.compile(
     r"^\s*(?:target\.txt|target-src/[^\s:]+)(?::[0-9]+(?:-[0-9]+)?)?:\s*",
@@ -57,6 +69,132 @@ def flatten_evidence(evidence: Any) -> str | None:
     return " | ".join(flattened)
 
 
+def _quote_byte_violation(path: str, quote: Any, max_bytes: int) -> str | None:
+    if not isinstance(quote, str):
+        return None
+    size = len(quote.encode("utf-8"))
+    if size <= max_bytes:
+        return None
+    return "%s exceeds %d UTF-8 bytes (%d)" % (path, max_bytes, size)
+
+
+def evidence_quote_utf8_byte_violations(
+    value: Any, max_bytes: int = EVIDENCE_QUOTE_MAX_UTF8_BYTES
+) -> list[str]:
+    """Explicit UTF-8 byte policy for every evidence-quote surface.
+
+    Counts bytes, not characters, because JSON Schema ``maxLength`` counts
+    characters and multibyte quotes diverge. Returns purely structural
+    violation strings (field path plus byte count) that are safe to persist
+    and display - never quote content. Non-string or absent fields are the
+    bound schema's job and yield no violation here.
+    """
+
+    violations: list[str] = []
+    if not isinstance(value, dict):
+        return violations
+
+    def check(path: str, quote: Any) -> None:
+        violation = _quote_byte_violation(path, quote, max_bytes)
+        if violation:
+            violations.append(violation)
+
+    evidence = value.get("evidence")
+    if isinstance(evidence, str):
+        quoted, malformed = _scan_quoted_evidence(
+            evidence, max_span_len=max(len(evidence), 1)
+        )
+        if quoted:
+            for index, quote in enumerate(quoted):
+                check("$.evidence quote %d" % index, quote)
+        elif not malformed:
+            _, fallback = evidence_candidates(evidence)
+            for index, quote in enumerate(fallback):
+                check("$.evidence quote %d" % index, quote)
+    elif isinstance(evidence, list):
+        for index, item in enumerate(evidence):
+            check("$.evidence[%d]" % index, item)
+
+    vision = value.get("vision_evidence")
+    if isinstance(vision, dict) and isinstance(vision.get("applicable_criteria"), list):
+        for index, criterion in enumerate(vision["applicable_criteria"]):
+            if isinstance(criterion, dict):
+                check(
+                    "$.vision_evidence.applicable_criteria[%d].quote" % index,
+                    criterion.get("quote"),
+                )
+
+    automerge = value.get("automerge")
+    if isinstance(automerge, dict):
+        if isinstance(automerge.get("behavior_assertions"), list):
+            for index, assertion in enumerate(automerge["behavior_assertions"]):
+                if isinstance(assertion, dict) and isinstance(
+                    assertion.get("evidence"), dict
+                ):
+                    check(
+                        "$.automerge.behavior_assertions[%d].evidence.quote" % index,
+                        assertion["evidence"].get("quote"),
+                    )
+        restoration = automerge.get("class_b_restoration")
+        if isinstance(restoration, dict):
+            for field in (
+                "corrected_defect_evidence",
+                "intended_behavior_restored_evidence",
+            ):
+                if isinstance(restoration.get(field), dict):
+                    check(
+                        "$.automerge.class_b_restoration.%s.quote" % field,
+                        restoration[field].get("quote"),
+                    )
+    return violations
+
+
+def collect_trusted_validation_errors(
+    value: Any, schema: dict[str, Any], target_text: str
+) -> list[str]:
+    """Every trusted-validation error for a delivered triage candidate.
+
+    The bound-schema validator reports its first failure, so after a whole-value
+    failure each present top-level field is revalidated in isolation to surface
+    independent defects (the card #1746 class carried two). Byte-policy and
+    evidence-anchor results are appended so the one correction turn receives the
+    complete trusted error list. Messages are structural (path plus defect),
+    never candidate content.
+    """
+
+    from .contract import ContractError, validate_schema
+
+    errors: list[str] = []
+    try:
+        validate_schema(value, schema)
+    except ContractError as error:
+        errors.append(str(error))
+    if errors and isinstance(value, dict):
+        for name in sorted(schema.get("properties") or {}):
+            if name not in value:
+                continue
+            try:
+                validate_schema(
+                    value[name],
+                    schema["properties"][name],
+                    path="$.%s" % name,
+                    root=schema,
+                )
+            except ContractError as error:
+                if str(error) not in errors:
+                    errors.append(str(error))
+    for violation in evidence_quote_utf8_byte_violations(value):
+        if violation not in errors:
+            errors.append(violation)
+    if (
+        isinstance(value, dict)
+        and target_text
+        and not evidence_anchor_ok(value.get("evidence"), target_text)
+    ):
+        errors.append("$.evidence did not anchor to the immutable target input")
+    return errors
+
+
 def normalize_evidence_text(text: Any) -> str:
     value = re.sub(r"[`*]", "", str(text or ""))
     return re.sub(r"\s+", " ", value).strip().lower()
@@ -78,7 +216,7 @@ def _is_escaped_quote_opener(text: str, index: int) -> bool:
 
 
 def _scan_quoted_evidence(
-    text: str, max_span_len: int = 240
+    text: str, max_span_len: int = EVIDENCE_SPAN_MAX_LEN
 ) -> tuple[list[str], bool]:
     """Extract quote-delimited spans without mistaking an escaped delimiter.
 
@@ -109,8 +247,6 @@ def _scan_quoted_evidence(
         decoded = []
         while cursor < len(text):
             char = text[cursor]
-            if char in "\r\n":
-                break
             if char == "\\":
                 run_end = cursor
                 while run_end < len(text) and text[run_end] == "\\":
@@ -148,7 +284,9 @@ def _scan_quoted_evidence(
     return spans, malformed
 
 
-def _quoted_evidence_spans(text: str, max_span_len: int = 240) -> list[str]:
+def _quoted_evidence_spans(
+    text: str, max_span_len: int = EVIDENCE_SPAN_MAX_LEN
+) -> list[str]:
     return _scan_quoted_evidence(text, max_span_len)[0]
 
 

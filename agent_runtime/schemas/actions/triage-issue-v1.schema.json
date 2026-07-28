@@ -9,6 +9,6 @@
     "product_implications": {"type": "string", "minLength": 1, "maxLength": 4000},
     "recommended_action": {"type": "string", "enum": ["close", "decline", "hold", "investigate", "comment"]},
     "recommended_reason": {"type": "string", "minLength": 1, "maxLength": 4000},
-    "evidence": {"type": "string", "minLength": 1, "maxLength": 8000}
+    "evidence": {"type": "string", "minLength": 1, "maxLength": 12000}
   }
 }
