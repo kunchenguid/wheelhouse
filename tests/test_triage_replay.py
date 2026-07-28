@@ -1067,10 +1067,22 @@ def test_observation_drift_refresh_recovers_only_through_the_exact_card_selector
         assert effect in run["output"], effect
     assert "if the exact prior triage claim comment exists" in run["output"]
     assert "PATCH that existing bot comment" in run["output"]
-    assert "conditional existing-comment PATCH" in run["output"]
     assert "when the exact prior claim exists" in run["output"]
+    for downstream in (
+        "POSTs a new exact-event primary claim comment before model spend",
+        "may PATCH it early if target freshness fails",
+        "POSTs a schema-repair claim comment",
+        "persists the durable assessment-result comment",
+        "succeeded/error/unavailable Triage projection",
+        "outcome-bound assessment, recommendation, options",
+        "PATCHes the durable assessment-result comment as projected",
+        "POSTs or PATCHes the bounded triage-result record comment",
+        "PATCHes the primary claim comment to its final status",
+        "PATCHes the schema-repair claim comment to its final status",
+    ):
+        assert downstream in run["output"], downstream
     assert "No label, comment, title, or target-repository writes." not in run["output"]
-    assert "No label, title, new-comment, or target-repository writes;" in run["output"]
+    assert "No label, title, new-comment" not in run["output"]
     assert "No label, comment, title, option," not in run["output"]
     assert "planned model spend" in run["output"]
     assert "at most 2 model calls" in run["output"]

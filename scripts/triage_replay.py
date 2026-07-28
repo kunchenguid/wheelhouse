@@ -1908,10 +1908,21 @@ def run(
                         "remaining allowed options; removes any Recommended action "
                         "section; (5) the atomic auto-merge projection recomputes and "
                         "replaces the visible Auto-merge criteria checklist and the "
-                        "frozen automerge_criteria_version/automerge_criteria state. "
-                        "No label, title, new-comment, or target-repository writes; "
-                        "the conditional existing-comment PATCH above is the only "
-                        "planned comment mutation."
+                        "frozen automerge_criteria_version/automerge_criteria state; "
+                        "(6) dispatched triage.yml POSTs a new exact-event primary "
+                        "claim comment before model spend and may PATCH it early if "
+                        "target freshness fails; (7) if the bounded correction turn "
+                        "is admitted, it POSTs a schema-repair claim comment; (8) the "
+                        "outcome consumer or recovery path persists the durable "
+                        "assessment-result comment, replaces the queued card body "
+                        "with the succeeded/error/unavailable Triage projection plus "
+                        "its outcome-bound assessment, recommendation, options, "
+                        "Accept control, decision controls, and auto-merge criteria, "
+                        "then PATCHes the durable assessment-result comment as "
+                        "projected; (9) the workflow POSTs or PATCHes the bounded "
+                        "triage-result record comment; (10) it PATCHes the primary "
+                        "claim comment to its final status and, when correction ran, "
+                        "PATCHes the schema-repair claim comment to its final status."
                         % (
                             plan["number"],
                             marker_version,
@@ -1931,8 +1942,9 @@ def run(
                         "checkpoint; the per-revision attempt cap is preserved "
                         "(%s/%s after queue, never reset). Claim identity is checked "
                         "and, when the exact prior claim exists, rebound through the "
-                        "same supersede tombstone described above; dispatch uses only "
-                        "the existing sealed permit."
+                        "same supersede tombstone described above; the sealed "
+                        "dispatch creates the new primary claim described above "
+                        "before spend."
                         % (plan["number"], plan["attempt_count"] + 1, cap)
                     )
             else:
