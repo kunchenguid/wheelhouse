@@ -180,8 +180,8 @@ def test_render_qualifies_only_target_derived_deterministic_surfaces():
     stale_state = core.parse_state_block(warning_body)
     stale_state["render_version"] = rc.CARD_RENDER_VERSION - 1
     check(
-        "render-v13: version-12 cards enter the established migration path",
-        rc.CARD_RENDER_VERSION == 13
+        "render-v14: version-behind cards enter the established migration path",
+        rc.CARD_RENDER_VERSION == 14
         and rc.render_stale(stale_state)
         and rc.refresh_needed(warning_card, stale_state, ["needs-decision"]),
     )
@@ -1618,7 +1618,9 @@ def test_reconcile_absence_schema_is_bounded_and_non_material():
         "absence: first pass is visible and inert",
         "### Target state changed" in first
         and "Confirmation: `1/2` scheduled observations" in first
-        and "<!-- opt:" not in first,
+        and "<!-- opt:" not in first
+        and "Decision controls are disabled until the scheduled confirmation completes."
+        in first,
     )
     check(
         "absence: field is outside material semantics",

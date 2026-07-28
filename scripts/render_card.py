@@ -313,10 +313,14 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # `### Triage` block's action-bearing `Recommended next step` bullet is
 # stripped (card #1746). Bumped 12 -> 13 to qualify bare target references in
 # the deterministic target-title quote and warning surfaces, without changing
-# the rest of the card body. These are display-only and zero-spend: no
-# authority, admission, cache-freshness, or gate semantics change. Earlier
-# display-only bumps remain documented in AGENTS.md.
-CARD_RENDER_VERSION = 13
+# the rest of the card body. Bumped 13 -> 14 so a projection that suppresses
+# decision controls never keeps the "Tick **Accept recommendation**" framing
+# that references an absent Accept control (confirming/inert cards keep the
+# recommendation analysis and the explicit inert decision copy). These are
+# display-only and zero-spend: no authority, admission, cache-freshness, or
+# gate semantics change. Earlier display-only bumps remain documented in
+# AGENTS.md.
+CARD_RENDER_VERSION = 14
 
 AUTOMERGE_CRITERIA_GROUPS = (
     ("Scope", ("scope_",)),
@@ -4213,6 +4217,83 @@ def recommendation_census(cards):
     return report
 
 
+def contradictory_accept_instruction_census(cards):
+    """Classify open cards for the inert-Accept-instruction contradiction.
+
+    `cards` is the same list `reconcile.py` consumes. Read-only: no GitHub
+    call, no write, no target touch. Covers pr-review AND issue-triage (the
+    production #1721 class is issue-triage). Every row lands in exactly one
+    bucket. `heals_under_renderer` proves the current renderer reaches a body
+    with zero contradictions for that card without any target write."""
+    report = {
+        "total": 0,
+        "affected": [],
+        "clean": 0,
+        "skipped": [],
+        "healed_under_renderer": 0,
+    }
+    for card in cards or []:
+        if not isinstance(card, dict):
+            report["skipped"].append({"number": None, "reason": "malformed card row"})
+            continue
+        report["total"] += 1
+        number = card.get("number")
+        body = card.get("body") or ""
+        state = parse_state_block(body)
+        row = {
+            "number": number,
+            "url": card.get("url") or "",
+            "repo": (state or {}).get("repo", ""),
+            "target": (state or {}).get("number"),
+            "kind": (state or {}).get("kind", ""),
+        }
+        if not state or state.get("kind") not in ("pr-review", "issue-triage"):
+            report["skipped"].append(
+                dict(row, reason="not a pr-review/issue-triage decision card")
+            )
+            continue
+        if not contradictory_accept_instruction(body):
+            report["clean"] += 1
+            continue
+        row["render_version"] = state.get("render_version", 0)
+        row["controls_suppressed"] = decision_controls_suppressed(
+            state=state, body=body
+        )
+        row["accept_gate"] = accept_recommendation_available(state)
+        labels = _label_names(card.get("labels"))
+        if not is_refreshable(card.get("labels")):
+            report["skipped"].append(
+                dict(
+                    row,
+                    reason="not refreshable (%s)"
+                    % ", ".join(sorted(labels & NON_REFRESHABLE_LABELS)),
+                )
+            )
+            continue
+        # The owning heal path: controls-aware rewrite, or the confirming
+        # projection rewrite that stamps the same framing.
+        healed = body_with_controls_aware_recommendation(body)
+        if contradictory_accept_instruction(healed) and RECONCILE_ABSENCE_FIELD in state:
+            healed = body_with_reconcile_absence(
+                body,
+                reconcile_absence_count(body) or 1,
+                scheduled_epoch=reconcile_absence_epoch(body) or 1,
+                closed_at=(
+                    ((state.get(RECONCILE_ABSENCE_FIELD) or {}).get("soft_close") or {}).get(
+                        "at"
+                    )
+                    or ""
+                ),
+            )
+        heals = not contradictory_accept_instruction(healed)
+        row["heals_under_renderer"] = heals
+        row["migrates_on_refresh"] = render_stale(state) or heals
+        if heals:
+            report["healed_under_renderer"] += 1
+        report["affected"].append(row)
+    return report
+
+
 def _triage_section_with_warning(section, warning):
     """Place `warning` inside the triage markers, at the end of the section."""
     if not section or not warning or warning in section:
@@ -4248,14 +4329,79 @@ def _without_legacy_recommended_next_step(section):
     return _LEGACY_TRIAGE_NEXT_STEP_RE.sub("", section or "")
 
 
-def _recommendation_section(recommendation, owner="", repo=""):
+# Framing for the ONE canonical recommendation surface. When decision
+# controls actually render, the actionable line tells the owner how to apply
+# the admitted recommendation. When the same projection suppresses those
+# controls (confirming/inert lifecycle, held placeholder), keep the analysis
+# and the advisory disclaimer but never instruct the reader to operate an
+# absent Accept control - the decision section already owns the inert copy.
+RECOMMENDATION_ACCEPT_INSTRUCTION = (
+    "_From the current admitted automatic triage assessment for this "
+    "exact revision. Tick **Accept recommendation** to apply it - it is "
+    "advisory and never an auto-merge authorization._"
+)
+RECOMMENDATION_INERT_FRAMING = (
+    "_From the current admitted automatic triage assessment for this "
+    "exact revision. It is advisory and never an auto-merge authorization._"
+)
+
+
+def decision_controls_suppressed(state=None, body=""):
+    """Whether this card projection renders no decision checkboxes.
+
+    True for a held pending-triage placeholder and for the scheduled
+    confirming/inert lifecycle. Semantic (state + body), not label-hardcoded:
+    the managed confirming label is a consequence of the absence record, not
+    the authority for the copy rule.
+
+    The rendered body is source of truth for what the captain sees: a body that
+    already carries `<!-- opt: -->` checkbox markers is never treated as
+    controls-suppressed, even if a stale `held` key still lingers in state
+    (e.g. `body_with_triage_result` publishes checkboxes before the publish
+    path clears `held`)."""
+    body = body or ""
+    if "<!-- opt:" in body:
+        return False
+    state = state if isinstance(state, dict) else parse_state_block(body) or {}
+    if state.get("held"):
+        return True
+    if state.get("lifecycle_state") == "awaiting-scheduled-confirmation":
+        return True
+    if RECONCILE_ABSENCE_FIELD in state:
+        return True
+    if _normalized_reconcile_absence(body):
+        return True
+    return False
+
+
+def contradictory_accept_instruction(body):
+    """True when body tells the reader to tick Accept but renders no Accept control.
+
+    The scan-5 / card-#1721 class: admitted recommendation framing says
+    "Tick **Accept recommendation**" while the decision section has suppressed
+    every checkbox (no `<!-- opt:accept-recommendation -->` marker). Pure and
+    read-only - used by the census and by migration self-heal checks."""
+    body = body or ""
+    if "Tick **Accept recommendation**" not in body:
+        return False
+    return "<!-- opt:accept-recommendation -->" not in body
+
+
+def _recommendation_section(
+    recommendation, owner="", repo="", controls_available=True
+):
     """The ONE canonical recommendation surface, or no section at all.
 
     Callers must pass only a recommendation backed by a current ADMITTED
     structured agent-triage result (`accept_recommendation_available`). There
     is deliberately no deterministic check-derived fallback: when no valid
     agent recommendation exists the card shows facts and controls, and the
-    owner makes the call."""
+    owner makes the call.
+
+    `controls_available` is the projection's decision-control posture: True
+    when the trusted Accept checkbox is actually rendered; False when the
+    same projection has suppressed decision controls (confirming/inert or
+    held). Admission and recommendation content are unchanged either way."""
     action = normalize_recommendation_action((recommendation or {}).get("action"))
     if not action:
         return []
@@ -4272,24 +4418,31 @@ def _recommendation_section(recommendation, owner="", repo=""):
                 _display_safe_triage_text(qualify_issue_refs(reason, owner, repo))
             )
         )
-    lines.extend(
-        [
-            "",
-            "_From the current admitted automatic triage assessment for this "
-            "exact revision. Tick **Accept recommendation** to apply it - it is "
-            "advisory and never an auto-merge authorization._",
-        ]
+    framing = (
+        RECOMMENDATION_ACCEPT_INSTRUCTION
+        if controls_available
+        else RECOMMENDATION_INERT_FRAMING
     )
+    lines.extend(["", framing])
     return lines
 
 
-def _set_recommendation_section(body, recommendation, owner="", repo=""):
+def _set_recommendation_section(
+    body, recommendation, owner="", repo="", controls_available=True
+):
     """Replace the card's canonical recommendation section in place.
 
     A falsy/unusable `recommendation` removes the section entirely, which is
-    also how a legacy deterministic section disappears on migration."""
+    also how a legacy deterministic section disappears on migration.
+    `controls_available` threads the projection's decision-control posture
+    into the framing line (see `_recommendation_section`)."""
     body = _RECOMMENDATION_SECTION_RE.sub("\n", body or "", count=1).strip() + "\n"
-    lines = _recommendation_section(recommendation, owner=owner, repo=repo)
+    lines = _recommendation_section(
+        recommendation,
+        owner=owner,
+        repo=repo,
+        controls_available=controls_available,
+    )
     if not lines:
         return body
     section = "\n".join(lines) + "\n"
@@ -4298,6 +4451,32 @@ def _set_recommendation_section(body, recommendation, owner="", repo=""):
     if idx >= 0:
         return body[:idx].rstrip() + "\n\n" + section + body[idx:]
     return body.rstrip() + "\n\n" + section
+
+
+def body_with_controls_aware_recommendation(body, owner="", repo=""):
+    """Align recommendation framing with whether decision controls render.
+
+    Pure body transform used by the confirming/inert projection path and by
+    the render-version migration/census. When the card carries a current
+    admitted recommendation AND decision controls are suppressed, rewrite the
+    framing so it no longer says "Tick **Accept recommendation**". When
+    controls are available, restore the actionable framing. Does not touch
+    admission, options, labels, or the decision section itself. Stamps the
+    current `render_version` so a healed card exits the migration trigger."""
+    state = parse_state_block(body)
+    if not state or not accept_recommendation_available(state):
+        return body
+    controls_available = not decision_controls_suppressed(state=state, body=body)
+    updated = _set_recommendation_section(
+        body,
+        state.get("triage_recommendation"),
+        owner=owner or "",
+        repo=state.get("repo", "") or repo or "",
+        controls_available=controls_available,
+    )
+    new_state = dict(state)
+    new_state["render_version"] = CARD_RENDER_VERSION
+    return _replace_state_block(updated, new_state)
 
 
 def _replace_state_block(body, state):
@@ -4503,6 +4682,19 @@ def body_with_reconcile_absence(
         "_Decision controls are disabled until the scheduled confirmation completes._",
     )
     clean = _DECISION_SECTION_RE.sub(decision.replace("\\", "\\\\"), clean, count=1)
+    # Confirming projections suppress every decision checkbox. If a current
+    # admitted recommendation is still displayed, keep the analysis but drop
+    # the "Tick Accept recommendation" instruction that would reference an
+    # absent control (card #1721 / scan-5). Display-only; admission unchanged.
+    new_state["render_version"] = CARD_RENDER_VERSION
+    if accept_recommendation_available(new_state):
+        clean = _set_recommendation_section(
+            clean,
+            new_state.get("triage_recommendation"),
+            owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+            repo=new_state.get("repo", "") or "",
+            controls_available=False,
+        )
     index = -1
     # `### Recommended action` is conditional; fall back to the decision block
     # before the state marker so the section never lands after "Your decision".
@@ -4528,11 +4720,21 @@ def body_without_reconcile_absence(body):
     new_state.pop(RECONCILE_ABSENCE_FIELD, None)
     new_state.pop("lifecycle_state", None)
     clean = _LIFECYCLE_SECTION_RE.sub("\n", body or "").strip()
-    clean = _publish_decision_section(
-        clean,
-        new_state.get("kind", "pr-review"),
-        new_state.get("options", []),
-    )
+    # Restore real decision checkboxes. options_for_state re-adds the Accept
+    # shortcut when the admitted recommendation is still current for this
+    # revision; the recommendation framing switches back to the actionable
+    # Tick line in lockstep so the published card never keeps inert copy.
+    kind = new_state.get("kind", "pr-review")
+    new_state["options"] = options_for_state(kind, new_state.get("options"), new_state)
+    clean = _publish_decision_section(clean, kind, new_state["options"])
+    if accept_recommendation_available(new_state):
+        clean = _set_recommendation_section(
+            clean,
+            new_state.get("triage_recommendation"),
+            owner=os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip(),
+            repo=new_state.get("repo", "") or "",
+            controls_available=True,
+        )
     return _replace_state_block(clean, new_state)
 
 
@@ -4544,16 +4746,38 @@ def _body_preserving_reconcile_absence(body, existing_body):
     run breaks adjacency. None means the source state itself was ambiguous and
     the caller must skip rather than normalize an untrusted duplicate/malformed
     state marker into close permission.
+
+    Re-applies the confirming inert projection (decision placeholder +
+    controls-aware recommendation framing) so a same-revision triage lift
+    cannot restore checkboxes or the actionable Accept instruction while the
+    card remains in scheduled confirmation.
     """
     old_state = _unique_state_block(existing_body)
     new_state = _unique_state_block(body)
     if old_state is None or new_state is None:
         return None
-    if RECONCILE_ABSENCE_FIELD not in old_state:
+    record = _normalized_reconcile_absence(existing_body)
+    if record is None:
+        if RECONCILE_ABSENCE_FIELD in old_state:
+            return None
         return body
-    new_state = dict(new_state)
-    new_state[RECONCILE_ABSENCE_FIELD] = old_state[RECONCILE_ABSENCE_FIELD]
-    return _replace_state_block(body, new_state)
+    closed_at = ""
+    soft_close = record.get("soft_close") if isinstance(record, dict) else None
+    if isinstance(soft_close, dict):
+        closed_at = soft_close.get("at") or ""
+    reason = "target is outside the current maintainer worklist"
+    match = re.search(
+        r"^- Current reason: (.+)$", existing_body or "", flags=re.M
+    )
+    if match:
+        reason = match.group(1).strip()
+    return body_with_reconcile_absence(
+        body,
+        record["count"],
+        scheduled_epoch=record["scheduled_epoch"],
+        closed_at=closed_at,
+        reason=reason,
+    )
 
 
 def _serialize_state(state):
@@ -4735,11 +4959,31 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         body = _without_legacy_context_admission_warning(body, readmitted_reason)
         changed = True
     if accept_recommendation_available(state):
-        state["options"] = options_for_state(kind, state.get("options"), state)
-        body = _publish_decision_section(body, kind, state["options"])
-        body = _set_recommendation_section(
-            body, state.get("triage_recommendation"), owner=owner, repo=repo
-        )
+        # A confirming/inert or held projection must not regain checkboxes from
+        # a same-revision triage lift, and must not keep the actionable Accept
+        # framing while those controls stay suppressed.
+        suppressed = decision_controls_suppressed(
+            state=state, body=existing_body or body
+        ) or decision_controls_suppressed(state=old_state, body=existing_body)
+        if not suppressed:
+            state["options"] = options_for_state(kind, state.get("options"), state)
+            body = _publish_decision_section(body, kind, state["options"])
+            body = _set_recommendation_section(
+                body,
+                state.get("triage_recommendation"),
+                owner=owner,
+                repo=repo,
+                controls_available=True,
+            )
+        else:
+            body = _set_recommendation_section(
+                body,
+                state.get("triage_recommendation"),
+                owner=owner,
+                repo=repo,
+                controls_available=False,
+            )
+            changed = True
     return _replace_state_block(body, state) if changed else body
 
 
@@ -5684,7 +5928,13 @@ def render(
     if accept_recommendation_available(state):
         lines.extend(
             _recommendation_section(
-                state.get("triage_recommendation"), owner=owner, repo=repo
+                state.get("triage_recommendation"),
+                owner=owner,
+                repo=repo,
+                # held=True is the pending-triage placeholder: no checkboxes.
+                # A confirming card reaches this framing via
+                # body_with_reconcile_absence instead of render(held=...).
+                controls_available=not held,
             )
         )
         lines.append("")
@@ -9098,6 +9348,10 @@ def main():
     # call, no card write, and no target access.
     rc_census = sub.add_parser("recommendation-census")
     rc_census.add_argument("cards_file")
+    # Read-only census for the inert-Accept-instruction contradiction
+    # (card #1721 / scan-5). Same open-card list as reconcile; no writes.
+    ca_census = sub.add_parser("contradictory-accept-instruction-census")
+    ca_census.add_argument("cards_file")
     rd.add_argument("--out-dir", required=True)
 
     vf = sub.add_parser("triage-target-facts")
@@ -9266,6 +9520,12 @@ def main():
         report = recommendation_census(cards)
         print(json.dumps(report, indent=2, sort_keys=True))
         sys.exit(0)
+    elif args.cmd == "contradictory-accept-instruction-census":
+        with open(args.cards_file, encoding="utf-8") as handle:
+            cards = json.load(handle)
+        report = contradictory_accept_instruction_census(cards)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        sys.exit(0 if not report.get("affected") else 1)
     elif args.cmd == "render":
         item = load_item(args.item_file)
         card = render(item)
