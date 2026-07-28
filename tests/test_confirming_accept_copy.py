@@ -124,7 +124,7 @@ def test_confirming_card_keeps_analysis_without_tick_instruction():
     check(
         "confirming: render version stamped current for migration exit",
         state.get("render_version") == rc.CARD_RENDER_VERSION
-        and rc.CARD_RENDER_VERSION == 14,
+        and rc.CARD_RENDER_VERSION == 15,
     )
 
 
@@ -378,14 +378,14 @@ def test_confirming_lifecycle_copy_stays_coherent():
 def test_render_version_bump_is_the_migration_owner():
     check(
         "migration: CARD_RENDER_VERSION advanced for the copy fix",
-        rc.CARD_RENDER_VERSION == 14,
+        rc.CARD_RENDER_VERSION == 15,
     )
     it = _issue_item()
     body = rc.render(it, owner="kunchenguid")["body"]
     state = core.parse_state_block(body)
     check(
         "migration: fresh cards stamp the current version",
-        state.get("render_version") == 14,
+        state.get("render_version") == 15,
     )
     stale = dict(state, render_version=13)
     check(

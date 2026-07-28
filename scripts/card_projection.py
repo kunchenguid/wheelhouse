@@ -218,10 +218,12 @@ def plan_card_projection(
         # The assessment branch re-renders `### Triage` from the bound artifact
         # instead of lifting the cached section, so the prior card's honest
         # NON-MATERIAL primary/advisory telemetry must be carried across
-        # explicitly or an ordinary refresh would silently drop the
-        # "primary model validation failed" warning and its state keys. Only a
-        # same-revision prior card is trusted, and these values never bear
-        # authority (see render_card `_state_with_triage`).
+        # explicitly or an ordinary refresh would silently drop the diagnostic
+        # state keys. Only a same-revision prior card is trusted, and these
+        # values never bear authority (see render_card `_state_with_triage`).
+        # Owner-facing copy is separate: when the bound assessment is currently
+        # admitted, render_card suppresses the historical advisory-failure
+        # warning so it cannot contradict Accept (CARD_RENDER_VERSION 15).
         prior_state = render_card.parse_state_block((prior or {}).get("body") or "")
         if (
             isinstance(prior_state, dict)
