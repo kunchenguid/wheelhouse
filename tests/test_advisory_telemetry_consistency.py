@@ -424,6 +424,32 @@ def test_pure_body_heal_and_census_are_bounded_and_idempotent():
     )
 
 
+def test_census_ignores_model_prose_with_warning_phrase():
+    _obs, _context, _item, body = authority_present_body()
+    body = body.replace(
+        "Restores Bash 3.2 parsing of one ship-brief heredoc.",
+        "Explains why an earlier candidate was consumed for advisory triage.",
+        1,
+    )
+    report = rc.contradictory_advisory_telemetry_census(
+        [
+            {
+                "number": 1735,
+                "body": body,
+                "labels": [{"name": "needs-decision"}, {"name": "kind:pr-review"}],
+            }
+        ]
+    )
+    check(
+        "census: model prose cannot impersonate the deterministic warning",
+        rc.current_triage_authority_present(core.parse_state_block(body))
+        and "consumed for advisory triage" in rc._existing_triage_section(body)
+        and not rc.contradictory_advisory_telemetry(body)
+        and report["affected"] == []
+        and report["clean"] == 1,
+    )
+
+
 def test_preserve_same_revision_path_strips_contradiction():
     obs, context, item, body = authority_present_body()
     state = core.parse_state_block(body)
@@ -461,6 +487,7 @@ def main():
     test_corrected_authority_keeps_explicit_correction_copy()
     test_projection_refresh_heals_without_changing_authority()
     test_pure_body_heal_and_census_are_bounded_and_idempotent()
+    test_census_ignores_model_prose_with_warning_phrase()
     test_preserve_same_revision_path_strips_contradiction()
     if FAILURES:
         print("\n%d failure(s):" % len(FAILURES))

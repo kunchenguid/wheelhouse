@@ -3988,7 +3988,8 @@ def contradictory_advisory_telemetry(body, state=None):
     advisory. Pure and read-only - census and migration self-heal checks.
     """
     body = body or ""
-    if "consumed for advisory triage" not in body:
+    section = _existing_triage_section(body)
+    if not section or not _ADVISORY_PRIMARY_FAILURE_WARNING_RE.search(section):
         return False
     state = state if isinstance(state, dict) else parse_state_block(body)
     if not state:
