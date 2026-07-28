@@ -186,6 +186,13 @@ def test_pure_repair_contract():
         < size_budget.NL_REPAIR_CANDIDATE_MAX_BYTES + 4096
         and "[candidate truncated: retained" in bounded,
     )
+    escape_bounded = decision.build_nl_repair_prompt("\\" * 80000)
+    check(
+        "prompt: escape-heavy invalid candidate is packed-byte-bounded",
+        size_budget.claude_action_packed_prompt_bytes(escape_bounded)
+        <= size_budget.ENV_PROMPT_MAX_BYTES
+        and "[candidate truncated: retained" in escape_bounded,
+    )
 
     encoded = canonical_json_bytes(QUOTED_ANSWER)
     check(

@@ -407,6 +407,14 @@ def main():
         and len(junk_prompt.encode("utf-8"))
         <= repair_overhead + NL_REPAIR_CANDIDATE_MAX_BYTES + 128,
     )
+    escape_heavy = "\\" * 80000
+    escape_prompt = decision.build_nl_repair_prompt(escape_heavy)
+    check(
+        "nl-repair: escape-heavy invalid input truncates to the final packed bound",
+        "[candidate truncated: retained" in escape_prompt
+        and claude_action_packed_prompt_bytes(escape_prompt)
+        <= ENV_PROMPT_MAX_BYTES,
+    )
 
     # ------------------------------------------------------------------ #
     # E. An oversized delivered candidate is retained bounded and stays

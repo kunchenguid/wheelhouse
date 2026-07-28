@@ -22,8 +22,9 @@ can be proven coherent against each other instead of drifting apart in copies
   per-string ``execve`` limit ``MAX_ARG_STRLEN``; a compiled prompt artifact
   (the direct stdin lane) must stay under ``COMPILED_PROMPT_MAX_BYTES``. The
   NL repair prompt must fit BOTH lanes so the reviewed action-lane rollback
-  profile keeps working: ``NL repair candidate cap + prompt overhead <=
-  ENV_PROMPT_MAX_BYTES``.
+  profile keeps working: schema-valid candidates remain complete, while
+  schema-invalid candidates are marker-truncated against the final packed
+  prompt size.
 - Inline-context budgets: the NL prompt inlines the card's trusted
   conversation history, so that history is bounded by turn count, per-turn
   bytes, and total bytes with explicit elision markers (the F1 E2BIG class).
@@ -61,7 +62,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 # --------------------------------------------------------------------------- #
 # Platform and transport constants
@@ -254,6 +255,35 @@ def bounded_candidate_text(text: str, max_raw_bytes: int) -> str:
     return retained + (
         CANDIDATE_TRUNCATION_TEMPLATE % (len(retained.encode("utf-8")), len(raw))
     )
+
+
+def bounded_candidate_for_packed_prompt(
+    text: str,
+    max_raw_bytes: int,
+    max_packed_bytes: int,
+    render_prompt: Callable[[str], str],
+) -> str:
+    candidate = bounded_candidate_text(text, max_raw_bytes)
+    if claude_action_packed_prompt_bytes(render_prompt(candidate)) <= max_packed_bytes:
+        return candidate
+    raw = text.encode("utf-8")
+    low = 0
+    high = min(max_raw_bytes, max(0, len(raw) - 1))
+    bounded = None
+    while low <= high:
+        retained_bytes = (low + high) // 2
+        candidate = bounded_candidate_text(text, retained_bytes)
+        if (
+            claude_action_packed_prompt_bytes(render_prompt(candidate))
+            <= max_packed_bytes
+        ):
+            bounded = candidate
+            low = retained_bytes + 1
+        else:
+            high = retained_bytes - 1
+    if bounded is None:
+        raise SizeBudgetError("candidate metadata exceeds packed prompt bound")
+    return bounded
 
 
 def bounded_github_comment(text: str, suffix: str) -> str:

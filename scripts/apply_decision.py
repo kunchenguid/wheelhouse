@@ -108,6 +108,7 @@ from agent_runtime.contract import (  # noqa: E402
     validate_schema,
 )
 from agent_runtime.size_budget import (  # noqa: E402
+    ENV_PROMPT_MAX_BYTES,
     NL_ANSWER_MAX_CHARS,
     NL_FREE_TEXT_MAX_CHARS,
     NL_HISTORY_ELISION_TEMPLATE,
@@ -116,7 +117,8 @@ from agent_runtime.size_budget import (  # noqa: E402
     NL_HISTORY_TURN_MAX_BYTES,
     NL_HISTORY_TURN_TRUNCATION_TEMPLATE,
     NL_REPAIR_CANDIDATE_MAX_BYTES,
-    bounded_candidate_text,
+    bounded_candidate_for_packed_prompt,
+    claude_action_packed_prompt_bytes,
 )
 
 _AUTO_TRIAGE_SECTION_RE = re.compile(
@@ -1827,17 +1829,7 @@ def nl_schema_reason(text):
     return reason
 
 
-def build_nl_repair_prompt(
-    candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDATE_MAX_BYTES
-):
-    """Build the self-contained prompt for the ONE no-tool NL repair turn.
-
-    The candidate bound comes from the one size-budget table and covers the
-    worst-case schema-valid nl-decision-v1 candidate, so every potentially
-    valid delivered candidate reaches the repair model COMPLETE; only junk
-    beyond that bound is truncated, with an explicit marker.
-    """
-    candidate = bounded_candidate_text(candidate_text or "", max_candidate_bytes)
+def _render_nl_repair_prompt(candidate):
     return "\n".join(
         [
             "You previously produced a natural-language decision result whose native",
@@ -1870,6 +1862,25 @@ def build_nl_repair_prompt(
             "</candidate>",
         ]
     )
+
+
+def build_nl_repair_prompt(
+    candidate_text, max_candidate_bytes=NL_REPAIR_CANDIDATE_MAX_BYTES
+):
+    """Build the self-contained prompt for the ONE no-tool NL repair turn."""
+    text = candidate_text or ""
+    if not nl_schema_reason(text):
+        prompt = _render_nl_repair_prompt(text)
+        if claude_action_packed_prompt_bytes(prompt) > ENV_PROMPT_MAX_BYTES:
+            raise ValueError("schema-valid NL repair prompt exceeds packed bound")
+        return prompt
+    candidate = bounded_candidate_for_packed_prompt(
+        text,
+        max_candidate_bytes,
+        ENV_PROMPT_MAX_BYTES,
+        _render_nl_repair_prompt,
+    )
+    return _render_nl_repair_prompt(candidate)
 
 
 def plan_nl_repair(result_text, force_repair=False):

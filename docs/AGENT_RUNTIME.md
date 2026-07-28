@@ -299,13 +299,13 @@ The invariants, all test-enforced:
   the triage correction turn and the NL schema repair stay eligible for
   exactly the oversize class; nothing is silently dropped.
 - The NL repair candidate bound covers the worst-case schema-valid
-  `nl-decision-v1` candidate, and repair prompt overhead plus that bound
-  fits BOTH repair lanes: the production direct stdin lane and the reviewed
+  `nl-decision-v1` candidate, and the final JSON-packed repair prompt fits
+  BOTH repair lanes: the production direct stdin lane and the reviewed
   env-carried action-lane rollback. This is why `answer` is bounded at
   11264 characters and `free_text` at 6144: every potentially valid
   candidate is guaranteed to reach the no-tool repair model complete.
-  Candidates beyond the retention bound are junk-class and arrive truncated
-  with an explicit marker.
+  Schema-invalid candidates are truncated with an explicit marker according
+  to the final packed prompt size, not only their raw byte size.
 - The `deep-review-text-v1` verdict cap equals GitHub's 65536-character
   comment bound (a longer verdict could never post), the final transformed
   body is bounded after qualification and claim metadata are added, and it
