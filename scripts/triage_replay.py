@@ -880,8 +880,14 @@ def _observation_drift_refresh_refusal(state, kind, revision):
     )
     if assessment is None or not assessment_admission.admitted(assessment):
         return "drift-refresh-assessment-not-admitted"
+    assessment_target = assessment["target"]
     if (
-        assessment["target"]["head_sha"] != revision
+        assessment_target["repo"] != state.get("repo")
+        or assessment_target["number"] != state.get("number")
+    ):
+        return "drift-refresh-target-mismatch"
+    if (
+        assessment_target["head_sha"] != revision
         or state.get("head_sha") != revision
     ):
         return "drift-refresh-head-mismatch"
@@ -890,7 +896,18 @@ def _observation_drift_refresh_refusal(state, kind, revision):
     )
     if observation is None:
         return "drift-refresh-observation-unproven"
-    if assessment["target"]["observation_id"] == observation["observation_id"]:
+    observation_target = observation["target"]
+    if (
+        observation_target["owner"] != assessment_target["owner"]
+        or observation_target["repo"] != assessment_target["repo"]
+        or observation_target["number"] != assessment_target["number"]
+        or observation_target["repo"] != state.get("repo")
+        or observation_target["number"] != state.get("number")
+    ):
+        return "drift-refresh-target-mismatch"
+    if observation["revision"]["head_sha"] != revision:
+        return "drift-refresh-head-mismatch"
+    if assessment_target["observation_id"] == observation["observation_id"]:
         # The assessment is non-current for a reason OTHER than observation
         # drift (for example a malformed decision context): a different shape
         # this class deliberately does not own.

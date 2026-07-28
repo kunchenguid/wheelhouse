@@ -894,14 +894,16 @@ def drift_payload(state):
     }
 
 
-def _rotated_observation(state, revision):
+def _rotated_observation(
+    state, revision, *, owner=None, repo=None, number=None
+):
     """Mint the next observation for the SAME head, mirroring the bulk-scan
     rotation that made card #1584's admitted assessment non-current."""
     old = state["review_observation"]
     return rc.target_contracts.make_observation(
-        old["target"]["owner"],
-        old["target"]["repo"],
-        old["target"]["number"],
+        owner or old["target"]["owner"],
+        repo or old["target"]["repo"],
+        number or old["target"]["number"],
         head_sha=revision,
         base_sha=old["revision"]["base_sha"],
         expected_head_sha=revision,
@@ -1230,6 +1232,32 @@ def test_observation_drift_refresh_refuses_every_disconfirming_shape():
             lambda state: state.__setitem__(
                 rc.ASSESSMENT_FIELD,
                 resigned_assessment(state, target={"head_sha": "0" * 40}),
+            ),
+            lambda state: state.__setitem__(
+                "review_observation",
+                _rotated_observation(state, "0" * 40),
+            ),
+        ),
+        "drift-refresh-target-mismatch": (
+            lambda state: state.__setitem__(
+                rc.ASSESSMENT_FIELD,
+                resigned_assessment(state, target={"repo": "foreign-repo"}),
+            ),
+            lambda state: state.__setitem__(
+                rc.ASSESSMENT_FIELD,
+                resigned_assessment(state, target={"number": 999}),
+            ),
+            lambda state: state.__setitem__(
+                "review_observation",
+                _rotated_observation(state, DRIFT_REVISION, owner="foreign-owner"),
+            ),
+            lambda state: state.__setitem__(
+                "review_observation",
+                _rotated_observation(state, DRIFT_REVISION, repo="foreign-repo"),
+            ),
+            lambda state: state.__setitem__(
+                "review_observation",
+                _rotated_observation(state, DRIFT_REVISION, number=999),
             ),
         ),
         "drift-refresh-observation-unproven": (
