@@ -46,19 +46,6 @@ GIT_MODE_SYMLINK = "120000"
 GIT_MODE_GITLINK = "160000"
 GIT_MODE_TREE = "040000"
 
-ACTION_LIMITS = {
-    "triage.issue.local": (240_000, 270_000, 32, 80, 65_536),
-    "triage.issue.search": (240_000, 270_000, 32, 80, 65_536),
-    "triage.pr.local": (300_000, 330_000, 32, 80, 65_536),
-    "triage.pr.search": (300_000, 330_000, 32, 80, 65_536),
-    "triage.schema-repair": (60_000, 75_000, 1, 0, 65_536),
-    "deep-review.local": (540_000, 600_000, 64, 160, 131_072),
-    "deep-review.search": (540_000, 600_000, 64, 160, 131_072),
-    "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
-    "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
-    "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
-}
-
 # Job-level overhead allowance for the claude-action-compat lane. The pinned
 # claude-code-action owns the model process, so the reusable job's GitHub
 # Actions timeout - measured from job start - is the lane's only enforced
@@ -72,6 +59,34 @@ ACTION_LIMITS = {
 # two-minute setup/upload allowance the claude-model-call composite action
 # documents for the claude-cli lane.
 CLAUDE_ACTION_JOB_OVERHEAD_MS = 120_000
+
+# Captain-authorized total wall-clock budget for the pr-review triage lane
+# (the card #1759 missing-triage campaign): a triage.pr.* model job gets 15
+# minutes total, measured from job start, because agents can be slow. The
+# TOTAL is the authoritative number and the job-overhead allowance lives
+# INSIDE it, so the lane's hard model-execution budget is derived as total
+# minus allowance - never the reverse. The derived hard budget is a whole
+# number of minutes, so the shared childExecutionTimeoutMs arithmetic below
+# reproduces this exact total.
+TRIAGE_PR_CHILD_TOTAL_MS = 900_000
+TRIAGE_PR_HARD_MS = TRIAGE_PR_CHILD_TOTAL_MS - CLAUDE_ACTION_JOB_OVERHEAD_MS
+# The soft deadline keeps the fixed 30-second wrap-up window before hard that
+# every 32-turn action family uses; the window is sized by the final-output
+# wrap-up work, not proportional to the budget.
+TRIAGE_PR_SOFT_MS = TRIAGE_PR_HARD_MS - 30_000
+
+ACTION_LIMITS = {
+    "triage.issue.local": (240_000, 270_000, 32, 80, 65_536),
+    "triage.issue.search": (240_000, 270_000, 32, 80, 65_536),
+    "triage.pr.local": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80, 65_536),
+    "triage.pr.search": (TRIAGE_PR_SOFT_MS, TRIAGE_PR_HARD_MS, 32, 80, 65_536),
+    "triage.schema-repair": (60_000, 75_000, 1, 0, 65_536),
+    "deep-review.local": (540_000, 600_000, 64, 160, 131_072),
+    "deep-review.search": (540_000, 600_000, 64, 160, 131_072),
+    "nl-decision.local": (240_000, 270_000, 32, 80, 65_536),
+    "nl-decision.search": (240_000, 270_000, 32, 80, 65_536),
+    "nl-decision.schema-repair": (60_000, 75_000, 1, 0, 65_536),
+}
 
 SCHEMA_REPAIR_ACTIONS = frozenset({"triage.schema-repair", "nl-decision.schema-repair"})
 
