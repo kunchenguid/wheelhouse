@@ -383,28 +383,58 @@ def main():
         "nl-repair: the 49 KB candidate reaches the repair prompt complete",
         big_invalid in prompt and "[candidate truncated" not in prompt,
     )
-    # A schema-maximal multibyte VALID candidate is also complete in both
-    # transport lanes. The separate walker property above uses control
-    # characters to prove the larger six-byte canonical contract; reusing that
-    # already-escaped serialization here would measure a second JSON encoding,
-    # not the candidate's canonical byte size.
-    multibyte_valid = {
+    # The actual six-byte-per-character maximum must survive both transport
+    # lanes. Its canonical \u00XX escapes grow again when the whole prompt is
+    # JSON-packed for the action lane, so the prompt uses the reversible
+    # compact transport notation rather than rejecting or truncating it.
+    worst_valid = {
         "mode": "clarify",
-        "action": "\U0010ffff" * size_budget.NL_ACTION_MAX_CHARS,
-        "free_text": "\U0010ffff" * NL_FREE_TEXT_MAX_CHARS,
-        "answer": "\U0010ffff" * NL_ANSWER_MAX_CHARS,
+        "action": "\x00" * size_budget.NL_ACTION_MAX_CHARS,
+        "free_text": "\x00" * NL_FREE_TEXT_MAX_CHARS,
+        "answer": "\x00" * NL_ANSWER_MAX_CHARS,
     }
-    validate_schema(multibyte_valid, nl_schema)
-    multibyte_valid_text = canonical_json_bytes(multibyte_valid).decode("utf-8")
-    worst_prompt = decision.build_nl_repair_prompt(multibyte_valid_text)
+    validate_schema(worst_valid, nl_schema)
+    worst_valid_text = canonical_json_bytes(worst_valid).decode("utf-8")
+    worst_prompt = decision.build_nl_repair_prompt(worst_valid_text)
     check(
-        "nl-repair: a schema-maximal multibyte candidate is never truncated",
-        multibyte_valid_text in worst_prompt
+        "nl-repair: the six-byte schema maximum is complete and never truncated",
+        "TRANSPORT NOTE:" in worst_prompt
+        and '"answer":"~00~00~00' in worst_prompt
+        and worst_prompt.count("~00")
+        == (
+            size_budget.NL_ACTION_MAX_CHARS
+            + NL_FREE_TEXT_MAX_CHARS
+            + NL_ANSWER_MAX_CHARS
+        )
         and "[candidate truncated" not in worst_prompt,
     )
     check(
         "nl-repair: the worst schema-valid prompt fits after action JSON packing",
         claude_action_packed_prompt_bytes(worst_prompt) <= ENV_PROMPT_MAX_BYTES,
+    )
+    transport_source = "~literal~" + "".join(
+        chr(codepoint) for codepoint in range(0x20)
+    ) + "\x7f"
+    transported = json.loads(
+        decision._compact_valid_nl_candidate(
+            {"mode": "answer", "answer": transport_source}
+        )
+    )["answer"]
+    decoded = []
+    index = 0
+    while index < len(transported):
+        if transported[index : index + 2] == "~~":
+            decoded.append("~")
+            index += 2
+        elif transported[index] == "~":
+            decoded.append(chr(int(transported[index + 1 : index + 3], 16)))
+            index += 3
+        else:
+            decoded.append(transported[index])
+            index += 1
+    check(
+        "nl-repair: compact worst-case transport is reversible without collisions",
+        "".join(decoded) == transport_source,
     )
     # Junk beyond the bound is truncated with an explicit marker, not dropped.
     junk = "x" * (NL_REPAIR_CANDIDATE_MAX_BYTES + 50000)

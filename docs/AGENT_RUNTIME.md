@@ -304,6 +304,10 @@ The invariants, all test-enforced:
   env-carried action-lane rollback. This is why `answer` is bounded at
   12288 characters and `free_text` at 6144: every potentially valid
   candidate is guaranteed to reach the no-tool repair model complete.
+  If canonical `\u00XX` escapes would grow past the action lane's bound when
+  the whole prompt is JSON-packed, the prompt uses a documented reversible
+  `~HH` control-character transport (`~~` for a literal tilde) instead of
+  truncating or rejecting the valid candidate.
   Schema-invalid candidates are truncated with an explicit marker according
   to the final packed prompt size, not only their raw byte size.
 - The `deep-review-text-v1` verdict cap equals GitHub's 65536-character
