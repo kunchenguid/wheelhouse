@@ -922,7 +922,9 @@ def drift_card(number=1584, target=548, revision=DRIFT_REVISION, rotate=True):
     assessment with a live Accept control - the shape of the eight already
     actionable cards), which the drift class must refuse.
     """
-    item = option_b_fixtures.option_b_item(number=target, head_sha=revision)
+    item = option_b_fixtures.option_b_item(
+        repo="no-mistakes", number=target, head_sha=revision
+    )
     rendered = rc.render(item)
     body = rendered["body"]
     state = rc._unique_state_block(body)
@@ -1007,6 +1009,8 @@ def test_observation_drift_refresh_recovers_only_through_the_exact_card_selector
     value, item = drift_card()
     state = rc._unique_state_block(value["body"])
     # The fixture is card #1584's production shape, proven field by field.
+    assert item["repo"] == "no-mistakes"
+    assert item["number"] == 548
     assert state["triage_status"] == "succeeded"
     assert state["triaged_sha"] == DRIFT_REVISION
     assert state[rc.TRIAGE_PRIMARY_STATUS_FIELD] == "failed"
