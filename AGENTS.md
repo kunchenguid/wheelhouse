@@ -634,62 +634,20 @@ still appears where it's plain English, e.g. "triage the queue".)
   state until trusted card maintenance resumes.
 - **Context-equivalent single correction turn - one automatic retry for any
   delivered triage candidate that fails trusted validation, never for the
-  excluded classes.** The TRIGGER is exact: a candidate that was DELIVERED but
-  failed the complete bound action schema, the evidence-quote UTF-8 byte
-  policy, or trusted evidence anchoring (`output.schema_invalid` /
-  `output.evidence_invalid` from the model workflow's trusted bridge) -
-  INCLUDING candidates the looser advisory parser can consume (the card #1693
-  class: a 253-byte quote failing the old 240-char schema bound while the
-  advisory contract passed and the old advisory-keyed trigger never fired).
-  Missing results and authentication, quota, rate-limit, transport, sandbox,
-  timeout, provider, and other infrastructure failures remain ineligible
-  (`CORRECTION_ELIGIBLE_ERROR_CODES` allowlist). Eligibility and the build are
-  owned by `agent_runtime.task_builder.correction_eligibility` /
-  `build_correction_task` (CLI `agent_runtime.py correction-eligible` /
-  `build-correction-task`): the `triage-repair-prepare` job downloads the
-  primary run's verified content-addressed input handoff plus the bind-verified
-  result artifact, refuses on ANY stale or mismatched binding (handoff
-  manifest, primary task/result hash, target revision, Wheelhouse source SHA,
-  runtime-selection drift, correction-of-a-correction), and rebuilds the
-  ORIGINAL AgentTask - same action name, model pin, declared tools, search
-  capability, network boundaries, output-schema binding, limits, and immutable
-  inputs (target.txt, target-src snapshot, vision.md, target-facts), so
-  model/tool/search/network/evidence-access parity holds by construction and
-  `claude-model.yml` needs no correction-specific step. Only the executionId,
-  the `triage.schema-repair` claim identity (unchanged - still one correction
-  per admitted reservation, at most two model calls), the
-  `metadata.correction` binding block (original task sha, execution id,
-  rejected `valueSha256`, error count), the explicit `retry.repairTask: null`
-  no-recursion policy, and the prompt differ: the correction prompt is the
-  byte-exact original prompt plus a trusted appendix carrying EVERY trusted
-  validation error (`collect_trusted_validation_errors` - whole-value plus
-  per-top-level-field bound-schema replay, byte-policy violations, anchor
-  result; structural text only) and the bounded rejected candidate as
-  delimited data. The correction may re-inspect the same evidence and must
-  produce a COMPLETE replacement result; the model workflow's bridge
-  revalidates it against the same bound schema, byte policy, and evidence
-  anchors, and `decide_triage_apply` re-checks locally before authority.
-  Outcomes: `success` (primary passed trusted validation - full authority),
-  `repaired` (correction passed - full authority, `triage_consumption:
-  corrected`), `advisory` (correction failed/unavailable but the primary still
-  normalizes and anchors - consumed EXPLICITLY advisory-only with
-  `authority_allowed=False`: no admission, no Accept, no persisted
-  recommendation, no auto-merge verdict; admission reason
-  `result.validation_failed`), `repair-failed` (not even advisory-consumable -
-  visible triage-unavailable error), `no-result` (unchanged fail-open).
-  **Evidence-quote byte policy:** every triage prompt branch instructs at most
-  1024 UTF-8 bytes per evidence quote; trusted validation
-  (`output_validation.evidence_quote_utf8_byte_violations`, enforced in the
-  bridge and in `decide_triage_apply`) counts UTF-8 bytes explicitly and
-  accepts through 2048 bytes INCLUSIVE (1025-2048 valid, never
-  correction-eligible merely for length; 2049+ invalid and eligible); the
-  schema `maxLength: 2048` character bound is secondary defense only (a
-  string over 2048 chars is necessarily over 2048 bytes, so it can never
-  reject a byte-valid quote, while multibyte quotes under the char bound are
-  caught by the byte count).
-  Primary validation accepts `evidence` as either one non-empty string or a non-empty list of non-empty strings, flattening the latter with ` | ` before the shared anchor check.
-  `docs/AGENT_RUNTIME.md` owns the shared `target-anchor/v1` delimiter-decoding and verbatim-match contract and the detailed correction contract.
-  There is at most one correction per admitted triage dispatch, so repair is structurally unable to loop; any separately sanctioned later dispatch must consume another per-revision attempt and daily reservation.
+  excluded classes.** A delivered candidate failing the complete bound action
+  schema, the UTF-8 evidence-quote byte policy, or trusted evidence anchoring
+  gets exactly one correction; missing results and infrastructure failures do
+  not. The correction rebuilds the original AgentTask from its verified
+  handoff, preserves its action, model, tools, search, network boundaries,
+  immutable inputs, schema binding, and limits, and must pass the same complete
+  trusted validation before it has authority. A failed correction can leave
+  an advisory-consumable primary only as explicitly advisory-only: no
+  admission, Accept shortcut, persisted recommendation, or auto-merge verdict.
+  `docs/AGENT_RUNTIME.md` owns the detailed eligibility, exact-binding,
+  correction-task, evidence-byte, anchoring, outcome, and rollback contract.
+  There is at most one correction per admitted triage dispatch; any separately
+  sanctioned later dispatch consumes another per-revision attempt and daily
+  reservation.
   Telemetry lives in NON-MATERIAL state keys
   `triage_repair_status` (`repaired` | `repair-failed`; absent = never attempted),
   `triage_repair_reason` (the structural failure), and `triage_repair_candidate`
@@ -698,12 +656,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   model-chosen key name or value) - like `triaged_sha`, never in
   `MATERIAL_FIELDS`, never affecting classify/material_changed/decision-parsing.
   The persisted diagnostics carry only structural facts, never raw target/comment
-  content. The legacy no-tool repair helpers (`plan_triage_repair`,
-  `build_repair_prompt`, the `triage-repair-prep` CLI, the `claude-model.yml`
-  `triage_repair` step, and the `triage.schema-repair` direct-profile
-  activation) remain only as the disabled codex inline evidence branch and the
-  deployable rollback surface; the production claude lane never builds a
-  `triage.schema-repair` task. See `tests/test_triage_schema_repair.py`.
+  content. The legacy no-tool repair branch remains as disabled Codex evidence
+  and a deployable rollback surface; the production Claude lane never builds a
+  `triage.schema-repair` task. See `docs/AGENT_RUNTIME.md` and
+  `tests/test_triage_schema_repair.py`.
 - Natural-language decisions accept only owner/maintainer comments and are structured.
   `docs/AGENT_RUNTIME.md` owns the native structured-output and bounded schema-repair contract.
   `apply_decision.py nl-route` is the trust boundary - it validates `action` against the per-kind allowlist and only then
@@ -1350,7 +1306,9 @@ The shared injection model remains unchanged: only trusted workflow prompts and 
   `render_card.py triage-apply`/`triage-fail` take a kind-agnostic `--revision` CLI argument (a PR's head SHA or an issue's `updated_at`), replacing the old pr-review-only `--head-sha` flag name.
   Result delivery is independent of transcript retention: `triage-result` extracts the compact final result event before applying the 262144-byte cap solely to the retained debug transcript.
   `tests/test_triage_result_delivery.py` guards this ordering and the uncapped direct extraction in `deep-review.yml`.
-  When a DELIVERED candidate fails the complete bound action schema, the evidence-quote byte policy, or trusted evidence anchoring (NOT a missing result or an infrastructure failure), the `triage-repair-prepare` job rebuilds the ORIGINAL task from its verified handoff into a single context-equivalent correction turn - same action, model, tools, search, network boundaries, and immutable inputs, with the rejected candidate and every trusted validation error appended to the original prompt; the correction result is revalidated through the same bound schema, byte-policy, and evidence-anchor guards before any authority, a failed correction leaves the advisory-consumable original explicitly advisory-only (no admission, no Accept, no recommendation, no auto-merge verdict), and anything less lands on the visible triage-unavailable error carrying the structural reason - see "Context-equivalent single correction turn" in Sharp edges and `tests/test_triage_schema_repair.py`.
+  The single context-equivalent triage correction and its authority rules are
+  owned by `docs/AGENT_RUNTIME.md`; see
+  `tests/test_triage_schema_repair.py` for regression coverage.
 - **`deep-review.yml` - ALWAYS-ON, code-grounded (no enable flag).** Triggered by ticking the **Investigate** box on a card, by the repo owner applying the `needs-deep-review` label, or by the repo owner running `workflow_dispatch` with only `issue=...` for direct verification.
   Bot-dispatched Investigate runs use the immutable target inputs passed by `decision-handler.yml`; owner issue-only runs and manual label runs parse the current card body with `github.token`.
   It checks out the TARGET's code read-only (`FLEET_TOKEN`, `persist-credentials: false`, the PR head for a review card / the default branch for an issue card) and runs Claude restricted to `--allowedTools Read,Grep,Glob` over that checkout when search is disabled - so it traces real code paths, never just the diff, and can NEVER execute the target's code.

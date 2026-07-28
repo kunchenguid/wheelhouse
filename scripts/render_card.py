@@ -4061,7 +4061,12 @@ def _triage_primary_error_code(value):
 
 
 def triage_section(
-    triage=None, error=None, owner="", repo="", primary_error_code=""
+    triage=None,
+    error=None,
+    owner="",
+    repo="",
+    primary_error_code="",
+    consumption="",
 ):
     """Render the visible `### Triage` block. `owner`+`repo` (the TARGET slug
     from deterministic card state, never from the model) qualify any bare
@@ -4098,15 +4103,23 @@ def triage_section(
         # (card #1746). Analysis above stays; ownership stays unambiguous.
         primary_error_code = _triage_primary_error_code(primary_error_code)
         if primary_error_code:
-            lines.extend(
-                [
-                    "",
-                    "> [!WARNING]",
-                    "> Primary model validation failed (`%s`), but the delivered candidate was consumed for advisory triage."
-                    % primary_error_code,
-                    "> This advisory result is not a primary validation success; existing authority gates still apply.",
-                ]
-            )
+            lines.extend(["", "> [!WARNING]"])
+            if consumption == "corrected":
+                lines.extend(
+                    [
+                        "> Primary model validation failed (`%s`), and its single correction passed complete trusted validation."
+                        % primary_error_code,
+                        "> Recommendation authority comes from that corrected result for this exact revision.",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "> Primary model validation failed (`%s`), but the delivered candidate was consumed for advisory triage."
+                        % primary_error_code,
+                        "> This advisory result is not a primary validation success; existing authority gates still apply.",
+                    ]
+                )
     else:
         note = _clean_triage_text(error or TRIAGE_UNAVAILABLE, limit=220)
         lines.append("_%s_" % _display_safe_triage_text(note))
@@ -5225,6 +5238,7 @@ def body_with_triage_result(
         owner=owner,
         repo=state.get("repo", ""),
         primary_error_code=primary_error_code,
+        consumption=consumption,
     )
     updated = _insert_triage_section(body, section)
     recommendation = (

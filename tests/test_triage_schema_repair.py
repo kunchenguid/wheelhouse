@@ -1890,6 +1890,13 @@ def test_correction_authority_semantics():
             and cstate.get("triage_repair_status") == "repaired",
         )
         check(
+            "authority: corrected card copy names corrected authority, not advisory-only consumption",
+            "single correction passed complete trusted validation" in corrected
+            and "Recommendation authority comes from that corrected result"
+            in corrected
+            and "consumed for advisory triage" not in corrected,
+        )
+        check(
             "authority: a valid primary keeps existing authority semantics",
             pstate.get("triage_status") == "succeeded"
             and pstate.get("triage_consumption") == "primary"
