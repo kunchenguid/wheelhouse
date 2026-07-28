@@ -103,9 +103,9 @@ FINAL_HEADROOM_BYTES = 4096
 # four UTF-8 bytes; quote/backslash escapes cost two).
 JSON_STRING_CHAR_MAX_BYTES = 6
 
-# GitHub issue/PR comment body bound (characters). The consumer-truth cap for
-# model text that posts as a comment.
+# GitHub issue/PR comment body bound (characters).
 GITHUB_COMMENT_MAX_CHARS = 65536
+COMMENT_TRUNCATION_TEMPLATE = "\n\n[truncated to fit GitHub comment limit]"
 
 # --------------------------------------------------------------------------- #
 # NL router/schema character contract (nl-decision-v1)
@@ -115,7 +115,8 @@ NL_ANSWER_MAX_CHARS = 12288
 NL_FREE_TEXT_MAX_CHARS = 6144
 NL_ACTION_MAX_CHARS = 80
 
-# Deep-review verdict character contract (deep-review-text-v1).
+# Deep-review verdict character contract (deep-review-text-v1). Final consumer
+# admission still accounts for qualification, the claim marker, and separators.
 DEEP_REVIEW_TEXT_MAX_CHARS = GITHUB_COMMENT_MAX_CHARS
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +251,22 @@ def bounded_candidate_text(text: str, max_raw_bytes: int) -> str:
     )
 
 
+def bounded_github_comment(text: str, suffix: str) -> str:
+    """Return a final GitHub comment body within the consumer character cap."""
+
+    separator = "\n\n" if suffix else ""
+    tail = separator + suffix
+    if len(tail) > GITHUB_COMMENT_MAX_CHARS:
+        raise SizeBudgetError("GitHub comment suffix exceeds the consumer bound")
+    if len(text) + len(tail) <= GITHUB_COMMENT_MAX_CHARS:
+        return text + tail
+    marker = COMMENT_TRUNCATION_TEMPLATE
+    available = GITHUB_COMMENT_MAX_CHARS - len(tail) - len(marker)
+    if available < 0:
+        raise SizeBudgetError("GitHub comment metadata leaves no verdict capacity")
+    return text[:available] + marker + tail
+
+
 # --------------------------------------------------------------------------- #
 # Schema worst-case walker
 # --------------------------------------------------------------------------- #
@@ -268,8 +285,6 @@ _PATTERN_MAX_CHARS = {
     r"^(target\.txt|vision\.md|target-src/[A-Za-z0-9._/-]{1,900})$": 911,
 }
 
-# Serialized size assumed for an otherwise unbounded integer (int64 digits).
-_INTEGER_MAX_BYTES = 20
 _BOOLEAN_MAX_BYTES = 5
 
 
@@ -323,7 +338,19 @@ def schema_worst_case_canonical_bytes(
             raise SizeBudgetError("string schema without maxLength or pattern")
         return 2 + JSON_STRING_CHAR_MAX_BYTES * schema["maxLength"]
     if node_type == "integer":
-        return _INTEGER_MAX_BYTES
+        if "minimum" not in schema or "maximum" not in schema:
+            raise SizeBudgetError("integer schema without finite minimum and maximum")
+        minimum = schema["minimum"]
+        maximum = schema["maximum"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, int)
+            or not isinstance(maximum, int)
+            or minimum > maximum
+        ):
+            raise SizeBudgetError("integer schema has invalid finite bounds")
+        return max(_canonical_len(minimum), _canonical_len(maximum))
     if node_type == "boolean":
         return _BOOLEAN_MAX_BYTES
     if node_type == "array":

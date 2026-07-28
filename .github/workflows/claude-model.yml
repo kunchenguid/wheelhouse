@@ -707,7 +707,8 @@ jobs:
             adapter="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["spec"]["selection"]["candidates"][0]["adapter"])' "$task")"
             if [ "$adapter" = "claude-cli" ]; then
               if [ -f "$RAW/result.json" ] && [ ! -L "$RAW/result.json" ] && [ -f "$RAW/events.ndjson" ] && [ ! -L "$RAW/events.ndjson" ]; then
-                test "$(wc -c < "$RAW/result.json")" -le 2097152
+                result_artifact_max="$(PYTHONPATH="$HANDOFF/runtime" python -c 'from agent_runtime.size_budget import RESULT_ARTIFACT_MAX_BYTES; print(RESULT_ARTIFACT_MAX_BYTES)')"
+                test "$(wc -c < "$RAW/result.json")" -le "$result_artifact_max"
                 test "$(wc -c < "$RAW/events.ndjson")" -le 8388608
                 cp "$RAW/result.json" "$result"
                 cp "$RAW/events.ndjson" "$events"

@@ -16,6 +16,7 @@ from typing import Any
 from .limits import TARGET_FACTS_MAX_BYTES
 from .size_budget import (
     COMPILED_PROMPT_MAX_BYTES,
+    ENV_PROMPT_MAX_BYTES,
     SIZE_BUDGETS,
     TRANSCRIPT_MAX_BYTES,
     TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
@@ -1399,8 +1400,13 @@ def build_task(
     compiled_path = bundle / ".compiled-prompt"
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
+    prompt_max_bytes = (
+        ENV_PROMPT_MAX_BYTES
+        if adapter == "claude-action-compat"
+        else COMPILED_PROMPT_MAX_BYTES
+    )
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
-        compiled_path, bundle, COMPILED_PROMPT_MAX_BYTES
+        compiled_path, bundle, prompt_max_bytes
     )
     compiled_path.unlink()
     inputs: list[dict[str, Any]] = []
@@ -1955,8 +1961,14 @@ def build_correction_task(
     compiled_path = bundle / ".compiled-correction-prompt"
     compiled_path.write_text(compiled_prompt, encoding="utf-8")
     os.chmod(compiled_path, 0o600)
+    adapter = original["spec"]["selection"]["candidates"][0]["adapter"]
+    prompt_max_bytes = (
+        ENV_PROMPT_MAX_BYTES
+        if adapter == "claude-action-compat"
+        else COMPILED_PROMPT_MAX_BYTES
+    )
     prompt_digest, prompt_bytes, prompt_artifact = _copy_file(
-        compiled_path, bundle, COMPILED_PROMPT_MAX_BYTES
+        compiled_path, bundle, prompt_max_bytes
     )
     compiled_path.unlink()
 

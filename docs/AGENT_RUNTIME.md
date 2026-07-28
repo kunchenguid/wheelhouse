@@ -307,13 +307,17 @@ The invariants, all test-enforced:
   Candidates beyond the retention bound are junk-class and arrive truncated
   with an explicit marker.
 - The `deep-review-text-v1` verdict cap equals GitHub's 65536-character
-  comment bound (a longer verdict could never post), and the verdict body
+  comment bound (a longer verdict could never post), the final transformed
+  body is bounded after qualification and claim metadata are added, and it
   travels to `gh api` over stdin, never as one argv/env string.
 - The NL "Conversation so far" history is bounded by turn count, per-turn
   bytes, and total bytes with explicit elision and truncation markers, so a
   long-lived card can never push the env-carried NL prompt past the
   kernel's per-string `execve` limit again. The trusted-author filter is
-  byte-independent and unchanged.
+  byte-independent and unchanged. The task compiler applies the env cap only
+  to `claude-action-compat`; oversized trusted NL instructions fail before
+  model execution instead of being truncated, while stdin adapters retain the
+  larger compiled-prompt cap.
 - Result-artifact read caps dominate the largest possible envelope
   (`delivered` plus `final` at the largest action cap), and the correction
   path's larger reads dominate the result-artifact cap.

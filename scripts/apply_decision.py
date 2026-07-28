@@ -1602,15 +1602,33 @@ def _bounded_history_turn(speaker, body):
 
     The head of the comment is kept (verdicts and answers lead with their
     conclusion) and the truncation is explicit, never silent."""
+    prefix = "%s: " % speaker
+    rendered = prefix + body
+    if len(rendered.encode("utf-8")) <= NL_HISTORY_TURN_MAX_BYTES:
+        return rendered
     raw = body.encode("utf-8")
-    if len(raw) <= NL_HISTORY_TURN_MAX_BYTES:
-        return "%s: %s" % (speaker, body)
-    retained = raw[:NL_HISTORY_TURN_MAX_BYTES].decode("utf-8", "ignore")
+    marker_reserve = len(
+        (
+            "\n"
+            + NL_HISTORY_TURN_TRUNCATION_TEMPLATE
+            % (NL_HISTORY_TURN_MAX_BYTES, len(raw))
+        ).encode("utf-8")
+    )
+    retained_budget = max(
+        0,
+        NL_HISTORY_TURN_MAX_BYTES
+        - len(prefix.encode("utf-8"))
+        - marker_reserve,
+    )
+    retained = raw[:retained_budget].decode("utf-8", "ignore")
     marker = NL_HISTORY_TURN_TRUNCATION_TEMPLATE % (
         len(retained.encode("utf-8")),
         len(raw),
     )
-    return "%s: %s\n%s" % (speaker, retained, marker)
+    rendered = "%s%s\n%s" % (prefix, retained, marker)
+    if len(rendered.encode("utf-8")) > NL_HISTORY_TURN_MAX_BYTES:
+        raise ValueError("bounded history turn exceeds its byte contract")
+    return rendered
 
 
 def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
@@ -1657,24 +1675,36 @@ def assemble_history(comments, trusted_logins, trigger_id, bot_login=BOT_LOGIN):
     elided = turns[:-NL_HISTORY_MAX_TURNS] if len(turns) > NL_HISTORY_MAX_TURNS else []
     kept = turns[len(elided):]
     rendered = [_bounded_history_turn(speaker, body) for speaker, body in kept]
-    while rendered and sum(len(r.encode("utf-8")) + 2 for r in rendered) > NL_HISTORY_MAX_TOTAL_BYTES:
+
+    def joined_history():
+        rows = list(rendered)
+        if elided:
+            elided_bytes = sum(len(body.encode("utf-8")) for _, body in elided)
+            rows.insert(
+                0,
+                NL_HISTORY_ELISION_TEMPLATE
+                % (len(elided), "" if len(elided) == 1 else "s", elided_bytes),
+            )
+        return "\n\n".join(rows)
+
+    while rendered and len(joined_history().encode("utf-8")) > NL_HISTORY_MAX_TOTAL_BYTES:
         elided.append(kept[0])
         kept = kept[1:]
         rendered = rendered[1:]
-    if elided:
-        elided_bytes = sum(len(body.encode("utf-8")) for _, body in elided)
-        marker = NL_HISTORY_ELISION_TEMPLATE % (
-            len(elided),
-            "" if len(elided) == 1 else "s",
-            elided_bytes,
-        )
-        rendered.insert(0, marker)
-    return "\n\n".join(rendered)
+    result = joined_history()
+    if len(result.encode("utf-8")) > NL_HISTORY_MAX_TOTAL_BYTES:
+        raise ValueError("bounded history exceeds its total byte contract")
+    return result
 
 
 def cmd_nl_prompt():
     card_body = os.environ.get("ISSUE_BODY", "")
     comment = os.environ.get("COMMENT_BODY", "")
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if event_path and (not card_body or not comment):
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        card_body = card_body or str((event.get("issue") or {}).get("body") or "")
+        comment = comment or str((event.get("comment") or {}).get("body") or "")
     state = core.parse_state_block(card_body) or {}
     kind = os.environ.get("KIND", "") or state.get("kind", "pr-review")
     # Pass-by-reference (card #555): only confirm target.txt is on disk and NAME
@@ -1696,20 +1726,21 @@ def cmd_nl_prompt():
     search_repos = []
     if search_enabled:
         search_repos = search_repos_for_prompt(owner, state)
-    set_output(
-        "prompt",
-        build_nl_prompt(
-            card_body,
-            comment,
-            kind,
-            history,
-            search_enabled=search_enabled,
-            search_repos=search_repos,
-            target_slug=target_slug,
-            target_available=target_available,
-            target_file=target_name,
-        ),
+    prompt = build_nl_prompt(
+        card_body,
+        comment,
+        kind,
+        history,
+        search_enabled=search_enabled,
+        search_repos=search_repos,
+        target_slug=target_slug,
+        target_available=target_available,
+        target_file=target_name,
     )
+    prompt_file = os.environ.get("NL_PROMPT_FILE", "")
+    if prompt_file:
+        Path(prompt_file).write_text(prompt, encoding="utf-8")
+    set_output("prompt", prompt)
 
 
 def _load_llm_result(path):

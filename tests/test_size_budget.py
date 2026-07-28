@@ -47,8 +47,10 @@ from agent_runtime.size_budget import (  # noqa: E402
     NL_REPAIR_CANDIDATE_MAX_BYTES,
     RESULT_ARTIFACT_MAX_BYTES,
     SIZE_BUDGETS,
+    SizeBudgetError,
     TRIAGE_REPAIR_CANDIDATE_MAX_BYTES,
     bounded_candidate_text,
+    bounded_github_comment,
     delivered_retention_canonical_max_bytes,
     schema_worst_case_canonical_bytes,
 )
@@ -110,7 +112,10 @@ def maximal_candidate(schema, defs=None, salt=0):
             return _pattern_value(pattern, salt)
         return _FILL * schema["maxLength"]
     if node_type == "integer":
-        return schema.get("minimum", 1)
+        return max(
+            (schema["minimum"], schema["maximum"]),
+            key=lambda value: len(canonical_json_bytes(value)),
+        )
     if node_type == "boolean":
         return True
     if node_type == "array":
@@ -132,6 +137,16 @@ def action_schema(action):
 
 
 def main():
+    try:
+        schema_worst_case_canonical_bytes({"type": "integer", "minimum": 1})
+        rejected_unbounded_integer = False
+    except SizeBudgetError:
+        rejected_unbounded_integer = True
+    check(
+        "walker: an integer without both finite bounds is rejected",
+        rejected_unbounded_integer,
+    )
+
     # ------------------------------------------------------------------ #
     # A. Per-action property: byte-maximal schema-valid candidate fits the
     #    final-byte cap with explicit headroom.
@@ -246,9 +261,18 @@ def main():
     )
     builder_src = read("agent_runtime", "task_builder.py")
     check(
-        "owner: task builder compiled-prompt caps use COMPILED_PROMPT_MAX_BYTES",
-        builder_src.count("compiled_path, bundle, COMPILED_PROMPT_MAX_BYTES") == 2
+        "owner: task builder selects the adapter-specific prompt transport cap",
+        builder_src.count('adapter == "claude-action-compat"') >= 2
+        and builder_src.count("ENV_PROMPT_MAX_BYTES") >= 3
+        and builder_src.count("COMPILED_PROMPT_MAX_BYTES") >= 3
         and "bundle, 262144" not in builder_src,
+    )
+    decision_yaml = read(".github", "workflows", "decision-handler.yml")
+    check(
+        "owner: trusted NL prompts reach task construction by file, not step env",
+        "NL_PROMPT_FILE: nl-prompt.txt" in decision_yaml
+        and "NL_PROMPT: ${{ steps.nl-prompt.outputs.prompt }}" not in decision_yaml
+        and "--prompt nl-prompt.txt" in decision_yaml,
     )
     check(
         "owner: result artifact cap covers delivered plus final at the largest cap",
@@ -288,9 +312,29 @@ def main():
     )
     deep_review_yaml = read(".github", "workflows", "deep-review.yml")
     check(
-        "consumer: the deep-review verdict body travels over stdin, never argv",
+        "consumer: the bounded final deep-review body travels over stdin",
         '"--input", "-"' in deep_review_yaml
         and '"-f", "body=%s" % body' not in deep_review_yaml,
+    )
+    check(
+        "consumer: deep-review bounds the transformed body after qualification",
+        "bounded_github_comment(verdict, os.environ[\"CLAIM_MARKER\"])" in deep_review_yaml,
+    )
+    maximal_comment = bounded_github_comment(
+        "v" * GITHUB_COMMENT_MAX_CHARS,
+        "<!-- wheelhouse-agent-event:v1:claim -->",
+    )
+    check(
+        "consumer: final deep-review rendering includes metadata within GitHub's cap",
+        len(maximal_comment) <= GITHUB_COMMENT_MAX_CHARS
+        and maximal_comment.endswith("<!-- wheelhouse-agent-event:v1:claim -->")
+        and "[truncated to fit GitHub comment limit]" in maximal_comment,
+    )
+    claude_model_yaml = read(".github", "workflows", "claude-model.yml")
+    check(
+        "consumer: direct results use the authoritative artifact read cap",
+        "RESULT_ARTIFACT_MAX_BYTES" in claude_model_yaml
+        and 'result.json")" -le 2097152' not in claude_model_yaml,
     )
 
     # ------------------------------------------------------------------ #

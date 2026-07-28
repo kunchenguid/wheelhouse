@@ -879,6 +879,7 @@ jobs:
           import render_card as cards
           import wheelhouse_core as core
           from agent_runtime.consumer import result_text
+          from agent_runtime.size_budget import bounded_github_comment
 
           verdict = ""
           path = os.environ.get("EXECUTION_FILE", "")
@@ -895,7 +896,7 @@ jobs:
               verdict = "Deep review ran but produced no verdict (see the workflow run logs)."
           verdict = cards.label_automated_status_lines(verdict)
           verdict = core.qualify_issue_refs(verdict, os.environ.get("GITHUB_REPOSITORY_OWNER", ""), os.environ.get("TARGET_REPO", ""))
-          body = "%s\n\n%s" % (verdict, os.environ["CLAIM_MARKER"])
+          body = bounded_github_comment(verdict, os.environ["CLAIM_MARKER"])
           # The verdict may be up to its schema bound (65536 characters), so it
           # is passed over stdin: a single argv/env string is capped by the
           # kernel's MAX_ARG_STRLEN and must never carry model-sized text.
