@@ -1008,6 +1008,37 @@ def test_open_ci_approval_to_pr_review_converts_on_moved_head():
         and summary.get("projection_deferrals_by_reason") == {},
     )
 
+    reset_writer_stats()
+    returning = LifecycleGitHub(item(kind="ci-approval", head=old_head))
+    returning.run_reconcile(scan_payload([]))
+    check(
+        "open CI->PR return: legacy card records first trusted absence",
+        returning.issues[7]["state"] == "OPEN"
+        and rc.reconcile_absence_count(returning.issues[7]["body"]) == 1
+        and core.parse_state_block(returning.issues[7]["body"]).get(
+            rc.PROJECTION_OWNER_FIELD
+        )
+        != rc.PROJECTION_OWNER,
+    )
+    return_out = returning.run_reconcile(
+        scan_payload([item(kind="pr-review", head=new_head)])
+    )
+    return_state = core.parse_state_block(returning.issues[7]["body"])
+    check(
+        "open CI->PR return: migration ownership precedes lifecycle cause",
+        return_state.get("kind") == "pr-review"
+        and return_state.get("head_sha") == new_head
+        and return_state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and not rc.reconcile_absence_needs_clear(returning.issues[7]["body"])
+        and '"cause":"migration-current"' in return_out
+        and '"cause":"lifecycle-transition"' not in return_out
+        and '"reason":"card_not_pr_review"' not in return_out
+        and projection_writer.run_stats()
+        .get("committed_by_cause", {})
+        .get("migration-current")
+        == 1,
+    )
+
     # --- already-owned moved head keeps target-revision --------------------
     reset_writer_stats()
     owned = LifecycleGitHub(item(kind="pr-review", head=old_head))
@@ -1031,6 +1062,27 @@ def test_open_ci_approval_to_pr_review_converts_on_moved_head():
         and projection_writer.run_stats()
         .get("committed_by_cause", {})
         .get("target-revision")
+        == 1,
+    )
+
+    reset_writer_stats()
+    owned_returning = LifecycleGitHub(item(kind="pr-review", head=old_head))
+    owned_returning.run_reconcile(scan_payload([]))
+    reset_writer_stats()
+    owned_return_out = owned_returning.run_reconcile(
+        scan_payload([item(kind="pr-review", head=new_head)])
+    )
+    owned_return_state = core.parse_state_block(owned_returning.issues[7]["body"])
+    check(
+        "owned return control: lifecycle cause remains authoritative",
+        owned_return_state.get("head_sha") == new_head
+        and owned_return_state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and not rc.reconcile_absence_needs_clear(owned_returning.issues[7]["body"])
+        and '"cause":"lifecycle-transition"' in owned_return_out
+        and '"cause":"migration-current"' not in owned_return_out
+        and projection_writer.run_stats()
+        .get("committed_by_cause", {})
+        .get("lifecycle-transition")
         == 1,
     )
 

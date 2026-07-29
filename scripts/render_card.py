@@ -9425,15 +9425,15 @@ def upsert_card(
             item,
             prior=existing,
             cause=(
-                item.get("_projection_cause")
-                if item.get("_projection_cause") in {
-                    "automerge-release", "context-current", "assessment-result",
-                    "lifecycle-transition",
-                }
+                "migration-current"
+                if (old_state or {}).get(PROJECTION_OWNER_FIELD)
+                != PROJECTION_OWNER
                 else (
-                    "migration-current"
-                    if (old_state or {}).get(PROJECTION_OWNER_FIELD)
-                    != PROJECTION_OWNER
+                    item.get("_projection_cause")
+                    if item.get("_projection_cause") in {
+                        "automerge-release", "context-current", "assessment-result",
+                        "lifecycle-transition",
+                    }
                     else (
                         "target-revision"
                         if str((old_state or {}).get("head_sha") or "")
