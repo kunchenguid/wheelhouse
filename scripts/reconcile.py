@@ -783,8 +783,13 @@ def main():
                         item,
                         observation_repo_configs.get(item.get("repo")),
                     )
-                    if not render_card.material_changed(
-                        projection_item, current["state"]
+                    if not (
+                        render_card.material_changed(
+                            projection_item, current["state"]
+                        )
+                        or render_card.automerge_criteria_stale(
+                            projection_item, current["state"]
+                        )
                     ):
                         continue
                     refresh_result = render_card.upsert_card(

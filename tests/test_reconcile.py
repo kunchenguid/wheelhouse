@@ -1078,6 +1078,179 @@ def test_ci_wait_refresh_is_noop_when_card_already_current():
     check("ci-wait-antimasq: already-current card is not closed", calls["close"] == [])
 
 
+def test_ci_wait_refresh_repairs_unknown_criteria_once():
+    head = "same-head"
+    observation = reconcile.target_contracts.incomplete_observation(
+        "owner",
+        "wheelhouse",
+        42,
+        expected_head_sha=head,
+        observed_head_sha=head,
+        observed_at="2024-01-03T00:00:00Z",
+        error="exact observation remains incomplete",
+    )
+    projection_item = ci_wait_refresh_item(
+        head_sha=head, comp="unknown", tests="unknown"
+    )
+    projection_item.update(
+        {
+            "bucket": "ci-state-unknown",
+            "target_observation": observation,
+            "projection_ref": reconcile.target_contracts.make_projection_ref(
+                observation, "unknown", "ci-state-unknown"
+            ),
+        }
+    )
+    positive = reconcile.render_card.criteria_schema.unavailable_criteria(
+        "complete green observation"
+    )
+    positive[0]["status"] = reconcile.render_card.criteria_schema.STATUS_MET
+
+    stale = card(
+        labels(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:low",
+            "target:wheelhouse-42",
+        ),
+        render_version=reconcile.render_card.CARD_RENDER_VERSION,
+    )
+    stale_state = reconcile.core.parse_state_block(stale["body"])
+    stale_state.update(
+        {
+            "head_sha": head,
+            "comp": "unknown",
+            "tests": "unknown",
+            "bucket": "ci-state-unknown",
+            "priority": "low",
+            "options": reconcile.render_card.card_options({"kind": "pr-review"}),
+            "projection_freshness": "unknown",
+            "projection_head_sha": head,
+            "projection_complete": False,
+            reconcile.render_card.AUTOMERGE_CRITERIA_VERSION_FIELD: (
+                reconcile.render_card.criteria_schema.CRITERIA_VERSION
+            ),
+            reconcile.render_card.AUTOMERGE_CRITERIA_FIELD: positive,
+        }
+    )
+    stale["body"] = reconcile.render_card._replace_state_block(
+        stale["body"], stale_state
+    )
+
+    saved_final_projection = reconcile._final_ci_wait_projection
+    reconcile._final_ci_wait_projection = (
+        lambda _owner, _item, _cfg: projection_item
+    )
+    try:
+        repair_calls = run_reconcile(
+            scan_payload(
+                items=[],
+                ci_wait_pr_numbers=[42],
+                ci_wait_refresh_items=[ci_wait_refresh_item(head_sha=head)],
+            ),
+            [stale],
+        )
+
+        healed = copy.deepcopy(stale)
+        healed_state = reconcile.core.parse_state_block(healed["body"])
+        healed_state.pop(reconcile.render_card.AUTOMERGE_CRITERIA_FIELD)
+        healed_state.pop(reconcile.render_card.AUTOMERGE_CRITERIA_VERSION_FIELD)
+        healed["body"] = reconcile.render_card._replace_state_block(
+            healed["body"], healed_state
+        )
+        noop_calls = run_reconcile(
+            scan_payload(
+                items=[],
+                ci_wait_pr_numbers=[42],
+                ci_wait_refresh_items=[ci_wait_refresh_item(head_sha=head)],
+            ),
+            [healed],
+        )
+
+        processing = copy.deepcopy(stale)
+        processing["labels"] += labels("processing")
+        protected_calls = run_reconcile(
+            scan_payload(
+                items=[],
+                ci_wait_pr_numbers=[42],
+                ci_wait_refresh_items=[ci_wait_refresh_item(head_sha=head)],
+            ),
+            [processing],
+        )
+
+        healthy_observation = complete_absence_observation(42, head_sha=head)
+        healthy_item = dict(projection_item)
+        healthy_item.update(
+            {
+                "bucket": healthy_observation["facts"]["bucket"],
+                "comp": healthy_observation["facts"]["comp"],
+                "tests": healthy_observation["facts"]["tests"],
+                "target_observation": healthy_observation,
+                "projection_ref": reconcile.target_contracts.make_projection_ref(
+                    healthy_observation,
+                    "current",
+                    healthy_observation["facts"]["bucket"],
+                ),
+                reconcile.render_card.AUTOMERGE_CRITERIA_FIELD: positive,
+            }
+        )
+        healthy = copy.deepcopy(stale)
+        healthy_state = reconcile.core.parse_state_block(healthy["body"])
+        healthy_state.update(
+            {
+                "bucket": healthy_item["bucket"],
+                "comp": healthy_item["comp"],
+                "tests": healthy_item["tests"],
+                "projection_freshness": "current",
+                "projection_complete": True,
+                reconcile.render_card.AUTOMERGE_CRITERIA_FIELD: positive,
+            }
+        )
+        healthy["body"] = reconcile.render_card._replace_state_block(
+            healthy["body"], healthy_state
+        )
+        reconcile._final_ci_wait_projection = (
+            lambda _owner, _item, _cfg: healthy_item
+        )
+        healthy_calls = run_reconcile(
+            scan_payload(
+                items=[],
+                ci_wait_pr_numbers=[42],
+                ci_wait_refresh_items=[ci_wait_refresh_item(head_sha=head)],
+            ),
+            [healthy],
+        )
+    finally:
+        reconcile._final_ci_wait_projection = saved_final_projection
+
+    check(
+        "ci-wait criteria repair: materially unchanged unknown refreshes once",
+        not reconcile.render_card.material_changed(projection_item, stale_state)
+        and len(repair_calls["upsert"]) == 1
+        and repair_calls["upsert"][0]["item"] is projection_item
+        and repair_calls["triage_rows"] == []
+        and repair_calls["close"] == [],
+    )
+    check(
+        "ci-wait criteria repair: healed unknown projection is idempotent",
+        noop_calls["upsert"] == [] and noop_calls["triage_rows"] == [],
+    )
+    check(
+        "ci-wait criteria repair: non-refreshable card stays protected",
+        protected_calls["upsert"] == [] and protected_calls["triage_rows"] == [],
+    )
+    check(
+        "ci-wait criteria repair: healthy matching criteria stay unchanged",
+        not reconcile.render_card.material_changed(healthy_item, healthy_state)
+        and not reconcile.render_card.automerge_criteria_stale(
+            healthy_item, healthy_state
+        )
+        and healthy_calls["upsert"] == []
+        and healthy_calls["triage_rows"] == [],
+    )
+
+
 def test_ci_wait_freeze_releases_when_checks_terminal():
     # The freeze never wedges a card: once checks are terminal the PR classifies
     # into a real bucket and emits a normal worklist item, so reconcile refreshes
@@ -2236,6 +2409,7 @@ def main():
     test_ci_wait_refresh_kills_stale_head_masquerade()
     test_ci_wait_refresh_never_creates_a_card()
     test_ci_wait_refresh_is_noop_when_card_already_current()
+    test_ci_wait_refresh_repairs_unknown_criteria_once()
     test_ci_wait_freeze_releases_when_checks_terminal()
     test_conclusive_absence_starts_hysteresis_despite_freeze_machinery()
     test_axi96_ci_wait_then_terminal_scan_surfaces_card_with_criteria()
