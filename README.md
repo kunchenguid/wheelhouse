@@ -138,6 +138,7 @@ contract are documented in [Current-body compliance evidence](docs/CURRENT_BODY_
 > **Heads-up - `auto_triage` defaults ON.**
 > When this key is absent it is treated as `true`, so a fresh fork with `CLAUDE_CODE_OAUTH_TOKEN` gets lightweight automatic PR-review summaries without another config edit.
 > The cache is keyed by PR `head_sha`; existing open cards with no fresh `triaged_sha` marker backfill on the next scan, while later unchanged scans do not spend again unless a trusted recovery path clears the cache and the spend guards allow another queued attempt.
+> One automatic recovery handles a complete same-head observation rotation that leaves an older admitted assessment stale: a pure pending card may spend one remaining ordinary attempt through the existing capped queue path, and only a new assessment admitted against the current observation can restore *Accept recommendation*. Incomplete, mismatched, locked, already-current, exhausted, and non-drift cards do not enter this recovery.
 > A brand-new eligible PR-review card is first labeled `pending-triage` and has no decision checkboxes until that first attempt completes.
 > Completion publishes the normal card whether triage succeeds, fails, times out, or cannot be started.
 > If successful triage also returns a fresh structured recommendation with an allowlisted action, Wheelhouse adds an *Accept recommendation* checkbox that still routes through the deterministic handler.
@@ -485,7 +486,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   Contributor comments, reviews, review comments, edits, or head pushes after the ask stop cleanup and clear the active pending label.
   Owner, configured-maintainer, and bot activity does not reset the clock.
 - **Auto triage is advisory, cached, and spend-guarded for PRs and issues alike.** Automatic triage edits only this repo's decision card with the default token, after the scan or ingest path has reserved daily budget and marked `triaged_sha` plus `triage_attempts` for the current revision (a PR's head SHA, or an issue's `updatedAt` - issues have no head SHA).
-  That marker is the queue cache: an unchanged revision is not re-triaged unless a trusted recovery path clears the cache and both the per-revision attempt cap and daily ceiling permit another dispatch.
+  That marker is the queue cache: unchanged-revision retry follows the bounded recovery rule documented with the auto-triage configuration above.
   A brand-new card that is eligible for that attempt is created under an additional `pending-triage` label with no decision checkboxes.
   It keeps `needs-decision` so the triage workflow can still resolve it, but the checkbox, slash-command, and plain-English decision paths ignore it until the attempt completes.
   `triage-apply`, `triage-fail`, dispatch-failure handling, and the recovery step all publish the normal checkboxes fail-open, so a stuck or failed triage run does not permanently hide a card.
@@ -614,7 +615,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   If the dispatch itself could not be started, the scan or ingest run should publish the card immediately with a "could not be started" note.
   If the triage run failed before its update step, the final recovery step should publish it with a "did not finish" note. If trusted source setup is unavailable, the card-only security fallback clears the queued cache for a later retry and visibly warns that auto-merge criteria were not re-evaluated and may temporarily reflect the prior queued state.
 - **A PR-review or issue-triage card has no Triage section.**
-  For PR-review, auto triage is skipped when `auto_triage: false`, `CLAUDE_CODE_OAUTH_TOKEN` is absent, the card is not a pure `needs-decision` PR-review card, or the card already carries `triaged_sha` for the current head.
+  For PR-review, auto triage is skipped when `auto_triage: false`, `CLAUDE_CODE_OAUTH_TOKEN` is absent, the card is not a pure `needs-decision` PR-review card, or its current-head cache has no qualifying bounded recovery.
   For issue-triage, it's skipped the same way but under the INDEPENDENT `auto_triage_issues`, and the cache is the issue's `updatedAt` revision instead of a head SHA.
   A newly created eligible card should queue in the same **scan-backstop** or **ingest** run that created it.
   Check the latest **scan-backstop**, **ingest**, and **triage** workflow logs.
@@ -687,7 +688,7 @@ tests/test_presentation_migration.py
 tests/test_canonical_recommendation.py
                                offline unit test for the one canonical recommendation surface: the card-1746 shape, the PR-triage basis/optin generation contract, and the render-version migration
 tests/test_auto_triage.py      offline unit test for automatic triage config, cache, evidence normalization/anchoring, rendering, structured recommendations, held-card publish/recovery, same-pass new-card dispatch, ref qualification, automated-status labeling, and workflow isolation
-tests/test_triage_replay.py    offline unit test for owner-only replay eligibility, claim tombstones, duplicate-only re-entry, sanctioned attempt reset, dry-run behavior, exact-revision gates, and result records
+tests/test_triage_replay.py    offline unit test for owner-only replay plus ordinary complete-observation drift recovery, claim tombstones, duplicate-only re-entry, sanctioned attempt reset, dry-run behavior, exact-revision gates, and result records
 tests/test_triage_prompt_size.py offline regression test for bounded pass-by-reference triage and deep-review prompts
 tests/test_auto_merge_v1.py    offline unit test for scan-time auto-merge gates, same-closing-issue overlap holds, claims, live rechecks, audit records, and ledger recovery
 tests/test_automerge_card_ui.py offline end-to-end test for authoritative criterion evaluation, fail-closed display states, and real card rendering
