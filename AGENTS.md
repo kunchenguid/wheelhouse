@@ -312,8 +312,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   survive untouched, no re-triage for that revision), and it does NOT drop the
   "target updated" comment (that stays gated strictly on `head_sha` actually
   changing - an issue's `updated_at` alone never triggers that comment, since
-  it is not a material field). `CARD_RENDER_VERSION` is currently `15`: the
-  14 -> 15 bump makes a current admitted assessment the sole owner-facing
+  it is not a material field). `CARD_RENDER_VERSION` is currently `16`: the
+  15 -> 16 bump presents machine `INELIGIBLE` as `MANUAL REVIEW REQUIRED`
+  without changing persisted state or G0-G7 semantics. The 14 -> 15 bump
+  makes a current admitted assessment the sole owner-facing
   current triage outcome - historical primary-failed / advisory-consumption
   telemetry stays in non-material state for diagnostics, but the visible
   "consumed for advisory triage" warning is suppressed whenever production

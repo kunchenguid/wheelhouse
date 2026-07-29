@@ -54,6 +54,25 @@ CRITERIA_IDS = tuple(spec[0] for spec in CRITERIA_SPECS)
 CRITERIA_LABELS = dict(CRITERIA_SPECS)
 CRITERION_ID = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
+# These are presentation-only labels. The evaluator and persisted state keep
+# the machine value (including INELIGIBLE) unchanged.
+G6_MANUAL_REVIEW_LABEL = "MANUAL REVIEW REQUIRED"
+G6_INELIGIBLE_EXPLANATION = (
+    "Existing/default behavior changes do not qualify for automatic-merge "
+    "class A, B, or C."
+)
+
+
+def display_evidence(criterion_id, evidence):
+    """Return maintainer-facing evidence without changing criterion semantics."""
+    text = str(evidence or "").strip()
+    if (
+        str(criterion_id or "") == "g6_behavior_class"
+        and "not an eligible A/B/C class" in text
+    ):
+        return "%s - %s" % (G6_MANUAL_REVIEW_LABEL, G6_INELIGIBLE_EXPLANATION)
+    return text
+
 
 def unavailable_criteria(reason="criterion evidence was not produced"):
     text = str(reason or "criterion evidence was not produced").strip()

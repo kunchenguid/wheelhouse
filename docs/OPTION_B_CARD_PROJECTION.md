@@ -49,7 +49,7 @@ A non-admitted assessment can remain visible with a content-free reason code, bu
 - satisfy the G6 recommendation or behavior gates;
 - trigger a target action.
 
-PR 1631's source-bound class-B restoration evidence and contract-change contradiction checks remain the only class-B admission path. Invalid behavior class has tri-state dependent facts: the class row is UNMET and class-C mode is UNAVAILABLE. Valid A/B make class-C mode not-applicable MET. Valid C is MET only when strictly opt-in and default-off.
+PR 1631's source-bound class-B restoration evidence and contract-change contradiction checks remain the only class-B admission path. Invalid behavior class has tri-state dependent facts: the class row is UNMET and class-C mode is UNAVAILABLE. Valid A/B make class-C mode not-applicable MET. Valid C is MET only when strictly opt-in and default-off. The machine value `INELIGIBLE` remains unchanged in state; the maintainer-facing card renders it as **MANUAL REVIEW REQUIRED**, with the concise explanation that existing/default behavior changes do not qualify for automatic-merge class A, B, or C.
 
 ### CardProjection and writer
 
