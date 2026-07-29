@@ -5,6 +5,7 @@ Run: python tests/test_automerge_card_ui.py
 """
 
 import inspect
+import json
 import os
 import sys
 from contextlib import ExitStack
@@ -1223,6 +1224,96 @@ def test_g6_producer_hierarchy_splits_independent_and_vision_bound_facts():
             for criterion_id in vision_ids
         ),
     )
+
+
+def test_ineligible_behavior_class_is_manual_review_presentation_only():
+    with open(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "fixtures",
+            "g6_manual_review_required.json",
+        ),
+        encoding="utf-8",
+    ) as handle:
+        golden = json.load(handle)
+
+    candidate = independent_verdict(
+        behavior_class=golden["machine_behavior_class"],
+        changes_existing_or_default_behavior=True,
+    )
+    normalized = render_card.normalize_automerge_verdict(candidate)
+    result = evaluate(
+        card_value=card_entry(automerge_verdict=normalized),
+        vision=(False, ""),
+    )
+    body = "\\n".join(render_card._automerge_criteria_section(result["criteria"]))
+
+    check(
+        "ineligible: render-version migration exposes the copy correction",
+        render_card.CARD_RENDER_VERSION == golden["source_render_version"] + 1
+        and render_card.render_stale(
+            {"render_version": golden["source_render_version"]}
+        ),
+    )
+    check(
+        "ineligible: machine value remains INELIGIBLE after normalization",
+        normalized["behavior_class"] == golden["machine_behavior_class"],
+    )
+    check(
+        "ineligible: card uses the manual-review presentation",
+        golden["expected_visible_g6_behavior_line"] in body,
+    )
+    check(
+        "ineligible: no stale RISKY presentation remains",
+        all(label not in body for label in golden["forbidden_visible_labels"]),
+    )
+    check(
+        "ineligible: existing/default behavior explanation is concise and explicit",
+        "Existing/default behavior changes do not qualify for automatic-merge class A, B, or C."
+        in body,
+    )
+
+    facts_before, class_before = am.behavior_verdict_facts(candidate)
+    eligible_before = am.verdict_eligible(candidate)
+    rendered = render_card.render(
+        item(repo="firstmate", number=1873, automerge_criteria=result["criteria"])
+    )
+    _ = rendered["body"]
+    facts_after, class_after = am.behavior_verdict_facts(candidate)
+    eligible_after = am.verdict_eligible(candidate)
+    check(
+        "ineligible: G6 machine facts and auto-merge decision are unchanged",
+        (facts_before, class_before, eligible_before)
+        == (facts_after, class_after, eligible_after)
+        and eligible_after[0] is False,
+    )
+
+    for criterion_id in golden["unchanged_gate_ids"]:
+        check(
+            "ineligible: machine criterion remains present: %s" % criterion_id,
+            any(row["id"] == criterion_id for row in result["criteria"]),
+        )
+
+    for behavior_class, optin_default_off in (("A", False), ("B", False), ("C", True)):
+        control = verdict(
+            behavior_class=behavior_class,
+            optin_default_off=optin_default_off,
+        )
+        control_facts, control_class = am.behavior_verdict_facts(control)
+        control_eligibility = am.verdict_eligible(control)
+        check(
+            "controls: eligible class %s keeps G6 facts and decision" % behavior_class,
+            control_class == behavior_class
+            and all(
+                control_facts[key]["status"] == schema.STATUS_MET
+                for key in (
+                    "g6_behavior_class",
+                    "g6_default_behavior",
+                    "g6_class_c_mode",
+                )
+            )
+            and control_eligibility[0] is True,
+        )
 
 
 def test_unmet_and_unavailable_have_distinct_markers():

@@ -1,0 +1,18 @@
+{
+  "source_render_version": 15,
+  "machine_behavior_class": "INELIGIBLE",
+  "expected_visible_g6_behavior_line": "- ❌ **UNMET** `G6 - eligible behavior class` - MANUAL REVIEW REQUIRED - Existing/default behavior changes do not qualify for automatic-merge class A, B, or C.",
+  "forbidden_visible_labels": [
+    "RISKY"
+  ],
+  "unchanged_gate_ids": [
+    "g6_behavior_class",
+    "g6_default_behavior",
+    "g6_class_c_mode",
+    "g6_vision_alignment",
+    "g6_verdict_merge",
+    "g6_vision_revision",
+    "g6_base_revision",
+    "g7_immediate_recheck"
+  ]
+}

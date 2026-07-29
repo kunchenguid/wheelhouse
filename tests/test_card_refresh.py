@@ -181,7 +181,7 @@ def test_render_qualifies_only_target_derived_deterministic_surfaces():
     stale_state["render_version"] = rc.CARD_RENDER_VERSION - 1
     check(
         "render-v15: version-behind cards enter the established migration path",
-        rc.CARD_RENDER_VERSION == 15
+        rc.CARD_RENDER_VERSION == 16
         and rc.render_stale(stale_state)
         and rc.refresh_needed(warning_card, stale_state, ["needs-decision"]),
     )

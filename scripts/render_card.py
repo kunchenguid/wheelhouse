@@ -325,10 +325,12 @@ CARD_ADMISSION_ROLLBACK = "rollback"
 # 14 -> 15 so a current admitted assessment never keeps the historical
 # primary-failed / advisory-consumption warning as the card's current outcome
 # beside a live Accept surface; diagnostic telemetry stays in non-material
-# state. These are display-only and zero-spend: no authority, admission,
+# state. Bumped 15 -> 16 so an INELIGIBLE behavior class is presented as
+# MANUAL REVIEW REQUIRED with the class A/B/C explanation, rather than stale
+# risk wording. These are display-only and zero-spend: no authority, admission,
 # cache-freshness, or gate semantics change. Earlier display-only bumps remain
 # documented in AGENTS.md.
-CARD_RENDER_VERSION = 15
+CARD_RENDER_VERSION = 16
 CONFIRMING_ACCEPT_COPY_SOURCE_VERSION = 13
 ADVISORY_TELEMETRY_CONSISTENCY_SOURCE_VERSION = 14
 
@@ -6219,11 +6221,14 @@ def _automerge_criterion_family(criterion_id):
 
 def _automerge_criterion_line(row, icons, indent=""):
     label = _automerge_criteria_evidence(row.get("label"))
+    evidence = criteria_schema.display_evidence(
+        row.get("id"), row.get("evidence")
+    )
     return "%s- %s `%s` - %s" % (
         indent,
         icons[row["status"]],
         label,
-        _automerge_criteria_evidence(row.get("evidence")),
+        _automerge_criteria_evidence(evidence),
     )
 
 

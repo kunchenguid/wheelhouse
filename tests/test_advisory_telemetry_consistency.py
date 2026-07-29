@@ -334,7 +334,7 @@ def test_projection_refresh_heals_without_changing_authority():
     check(
         "migration: render version advances and second pass is a noop",
         healed_state.get("render_version") == rc.CARD_RENDER_VERSION
-        and rc.CARD_RENDER_VERSION == 15
+        and rc.CARD_RENDER_VERSION == 16
         and card_projection.plan_card_projection(
             ob.item_for(obs, context, admitted),
             prior=ob.issue_from_projection(
