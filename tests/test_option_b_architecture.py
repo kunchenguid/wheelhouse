@@ -30,6 +30,7 @@ import reconcile  # noqa: E402
 import render_card  # noqa: E402
 import scheduled_epoch  # noqa: E402
 import target_observation  # noqa: E402
+import target_reconcile  # noqa: E402
 import test_auto_merge_v1 as automerge_fixture  # noqa: E402
 import test_reconcile as reconcile_fixture  # noqa: E402
 import wheelhouse_core as core  # noqa: E402
@@ -689,10 +690,30 @@ def test_incomplete_projection_clears_stale_criteria():
         and "`G4 - configured checks green`" in old_projection["body"],
     )
 
-    incomplete = observation(1840, head, complete=False)
-    current_item = item_for(incomplete, context_for(incomplete))
-    current_item["projection_ref"] = target_observation.make_projection_ref(
-        incomplete, "unknown", "ci-state-unknown"
+    initial = observation(
+        1840,
+        head,
+        bucket="needs-ci-approval",
+        observed_at="2026-07-23T12:01:00Z",
+    )
+    contradictory = observation(
+        1840,
+        head,
+        bucket="needs-ci-approval",
+        observed_at="2026-07-23T12:02:00Z",
+    )
+    pre_action_item = item_for(initial, context_for(initial))
+    receipt = target_observation.make_approval_receipt(
+        "owner",
+        "firstmate",
+        1840,
+        expected_head_sha=head,
+        initial_observation_id=initial["observation_id"],
+        status="approved",
+        completed_at="2026-07-23T12:01:30Z",
+    )
+    current_item = target_reconcile.plan_ci_wait_projection(
+        "owner", pre_action_item, contradictory, receipt
     )
     current_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
     current_projection = card_projection.plan_card_projection(
@@ -715,7 +736,7 @@ def test_incomplete_projection_clears_stale_criteria():
         ),
     )
     check(
-        "criteria regression: incomplete projection clamps Situation to unknown",
+        "criteria regression: conservative projection clamps Situation to unknown",
         "Compliance: `unknown`" in current_projection["body"]
         and "Tests: `unknown`" in current_projection["body"]
         and "`ci-state-unknown`" in current_projection["body"],
@@ -733,7 +754,8 @@ def test_incomplete_projection_clears_stale_criteria():
     check(
         "criteria regression: atomic criteria writes also fail closed on unknown",
         "✅ **MET**" not in atomic_body
-        and "not evaluated while the current target observation is incomplete" in atomic_body,
+        and "current target projection is incomplete or ci-state-unknown"
+        in atomic_body,
     )
     check(
         "criteria regression: stale criteria are removed from non-authoritative state",
@@ -744,8 +766,7 @@ def test_incomplete_projection_clears_stale_criteria():
     )
 
     unavailable = criteria.unavailable_criteria("already unavailable")
-    unavailable_item = item_for(incomplete, context_for(incomplete))
-    unavailable_item["projection_ref"] = current_item["projection_ref"]
+    unavailable_item = dict(current_item)
     unavailable_item[render_card.AUTOMERGE_CRITERIA_FIELD] = unavailable
     unavailable_projection = card_projection.plan_card_projection(
         unavailable_item,
@@ -784,13 +805,43 @@ def test_incomplete_projection_clears_stale_criteria():
         == criteria.normalize_criteria(positive),
     )
 
-    # A complete observation with a classifier that cannot support current
-    # criteria is represented by the same conservative projection policy.
+    mismatched_receipt = target_observation.make_approval_receipt(
+        "owner",
+        "firstmate",
+        1840,
+        expected_head_sha=head,
+        initial_observation_id=old_observation["observation_id"],
+        status="approved",
+        completed_at="2026-07-23T12:01:30Z",
+    )
+    mismatch_item = target_reconcile.plan_ci_wait_projection(
+        "owner", pre_action_item, old_observation, mismatched_receipt
+    )
+    mismatch_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
+    mismatch_projection = card_projection.plan_card_projection(
+        mismatch_item, prior=old_projection
+    )
     check(
-        "criteria regression: unknown bucket policy is fail-closed",
-        card_projection.criteria_allowed_for_observation(
-            dict(incomplete, completeness=dict(incomplete["completeness"], complete=True))
-        ) is False,
+        "criteria regression: receipt mismatch also suppresses complete raw green",
+        mismatch_item["bucket"] == "ci-state-unknown"
+        and old_observation["facts"]["bucket"] == "merge-ready"
+        and not card_projection.criteria_allowed_for_projection(
+            old_observation, mismatch_item["bucket"]
+        )
+        and "✅ **MET**" not in mismatch_projection["body"]
+        and "`ci-state-unknown`" in mismatch_projection["body"],
+    )
+
+    incomplete = observation(1840, head, complete=False)
+    incomplete_item = item_for(incomplete, context_for(incomplete))
+    incomplete_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
+    incomplete_projection = card_projection.plan_card_projection(
+        incomplete_item, prior=old_projection
+    )
+    check(
+        "criteria regression: incomplete observation remains fail-closed",
+        "✅ **MET**" not in incomplete_projection["body"]
+        and "`ci-state-unknown`" in incomplete_projection["body"],
     )
     check(
         "criteria regression: non-refreshable cards remain protected",

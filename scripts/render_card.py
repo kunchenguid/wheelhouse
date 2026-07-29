@@ -821,7 +821,10 @@ def automerge_criteria_stale(item, state):
         # Import lazily to keep render_card's projection dependencies acyclic.
         import card_projection
 
-        if not card_projection.criteria_allowed_for_observation(observation):
+        effective_bucket = item.get("bucket") or observation["facts"].get("bucket")
+        if not card_projection.criteria_allowed_for_projection(
+            observation, effective_bucket
+        ):
             return AUTOMERGE_CRITERIA_FIELD in state
     elif state.get("bucket") == "ci-state-unknown":
         return AUTOMERGE_CRITERIA_FIELD in state
@@ -5834,13 +5837,14 @@ def body_with_automerge_criteria(body, rows):
     if current_observation is not None:
         import card_projection
 
-        projection_unknown = not card_projection.criteria_allowed_for_observation(
-            current_observation
+        projection_unknown = not card_projection.criteria_allowed_for_projection(
+            current_observation, state.get("bucket")
         )
     normalized = criteria_schema.normalize_criteria(
         None if projection_unknown else rows,
         missing_reason=(
-            "not evaluated while the current target observation is incomplete"
+            "not evaluated while the current target projection is incomplete "
+            "or ci-state-unknown"
             if projection_unknown
             else "criterion evidence was not produced"
         ),

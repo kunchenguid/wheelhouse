@@ -76,7 +76,7 @@ def _managed_label_names(value):
     ]
 
 
-def criteria_allowed_for_observation(observation):
+def criteria_allowed_for_projection(observation, effective_bucket):
     """Whether this projection may display current auto-merge criteria.
 
     Criteria are a display-only snapshot, but they are still current-tense
@@ -91,8 +91,22 @@ def criteria_allowed_for_observation(observation):
     completeness = observation.get("completeness") or {}
     if completeness.get("complete") is not True:
         return False
-    facts = observation.get("facts") or {}
-    return (facts.get("bucket") or "ci-state-unknown") != "ci-state-unknown"
+    return str(effective_bucket or "ci-state-unknown") != "ci-state-unknown"
+
+
+def _effective_projection_ref(item, observation):
+    ref = target_observation.normalize_projection_ref(item.get("projection_ref"))
+    if ref is None:
+        return None
+    if (
+        ref["observation_id"] != observation["observation_id"]
+        or ref["target"] != observation["target"]
+        or ref["revision"]["head_sha"] != observation["revision"]["head_sha"]
+        or ref["complete"] != observation["completeness"]["complete"]
+        or ref["bucket"] != str(item.get("bucket") or "")
+    ):
+        return None
+    return ref
 
 
 def projection_from_values(
@@ -171,14 +185,24 @@ def plan_card_projection(
     ):
         raise ValueError("projection item and observation do not match")
     facts = observation["facts"]
+    effective_ref = _effective_projection_ref(item, observation)
     if observation["completeness"]["complete"]:
-        bucket = facts.get("bucket") or "ci-state-unknown"
-        comp = facts.get("comp") or "unknown"
-        tests = facts.get("tests") or "unknown"
+        bucket = (
+            effective_ref["bucket"]
+            if effective_ref is not None
+            else facts.get("bucket") or "ci-state-unknown"
+        )
+        projection_unknown = bucket == "ci-state-unknown"
+        comp = "unknown" if projection_unknown else facts.get("comp") or "unknown"
+        tests = "unknown" if projection_unknown else facts.get("tests") or "unknown"
         freshness = (
-            "pending"
-            if bucket == "ci-running" or facts.get("check_phase") == "pending"
-            else "current"
+            effective_ref["freshness"]
+            if effective_ref is not None
+            else (
+                "pending"
+                if bucket == "ci-running" or facts.get("check_phase") == "pending"
+                else "current"
+            )
         )
     else:
         # Partial observations may retain raw diagnostic rows, but they never
@@ -208,7 +232,7 @@ def plan_card_projection(
     # this observation became incomplete. Never let that stale payload survive
     # into the trusted projection; render_card's missing-criteria path produces
     # the explicit all-UNAVAILABLE display instead.
-    if not criteria_allowed_for_observation(observation):
+    if not criteria_allowed_for_projection(observation, bucket):
         projected_item.pop(render_card.AUTOMERGE_CRITERIA_FIELD, None)
     context = decision_context.normalize_decision_context(item.get("decision_context"))
     if context is None:
