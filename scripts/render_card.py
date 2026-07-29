@@ -9415,6 +9415,12 @@ def upsert_card(
         import card_projection
         import projection_writer
 
+        # Cause order is load-bearing for open-card kind conversion: any write
+        # onto a not-yet-v2-owned card is a migration into ownership (the writer's
+        # only path that accepts a kind change). Head drift must not preempt that
+        # - otherwise an open ci-approval card whose live target became pr-review
+        # on a new head permanently defers as card_not_pr_review (card #1817).
+        # Already-owned cards keep target-revision / projection-current as before.
         projection = card_projection.plan_card_projection(
             item,
             prior=existing,
@@ -9425,13 +9431,13 @@ def upsert_card(
                     "lifecycle-transition",
                 }
                 else (
-                    "target-revision"
-                    if str((old_state or {}).get("head_sha") or "")
-                    != str(item.get("head_sha") or "")
+                    "migration-current"
+                    if (old_state or {}).get(PROJECTION_OWNER_FIELD)
+                    != PROJECTION_OWNER
                     else (
-                        "migration-current"
-                        if (old_state or {}).get(PROJECTION_OWNER_FIELD)
-                        != PROJECTION_OWNER
+                        "target-revision"
+                        if str((old_state or {}).get("head_sha") or "")
+                        != str(item.get("head_sha") or "")
                         else "projection-current"
                     )
                 )

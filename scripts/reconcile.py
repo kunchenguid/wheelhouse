@@ -1147,7 +1147,9 @@ def main():
             "committed": 0,
             "verification_failed": 0,
             "committed_by_cause": {},
+            "deferred_by_reason": {},
         }
+    deferred_by_reason = writer_stats.get("deferred_by_reason") or {}
     print(
         "wheelhouse run-summary "
         + json.dumps(
@@ -1157,7 +1159,14 @@ def main():
                 "projection_noops": writer_stats["noop"],
                 "projection_writes_by_cause": writer_stats["committed_by_cause"],
                 "activity_reflections": activity_reflected,
-                "owner_race_deferrals": writer_stats["deferred"],
+                # Only genuine owner/handler races. Kind/ownership conversion
+                # failures and other permanent deferrals live under
+                # projection_deferrals_by_reason so a repeating wedge cannot
+                # hide as an owner_race_deferrals event (card #1817).
+                "owner_race_deferrals": int(
+                    deferred_by_reason.get("owner_or_handler_race") or 0
+                ),
+                "projection_deferrals_by_reason": deferred_by_reason,
                 "projection_verification_failures": writer_stats["verification_failed"],
                 "observations_incomplete": sum(
                     1
