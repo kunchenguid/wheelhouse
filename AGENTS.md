@@ -569,17 +569,6 @@ still appears where it's plain English, e.g. "triage the queue".)
   may remove only the exact Accept recommendation checkbox when the shipped
   `accept_recommendation_available` gate is false; it preserves the hidden state
   and render version and is never a scheduled queue-wide writer.
-- **Open ci-approval -> pr-review conversion selects `migration-current` before
-  head drift (card #1817).** `render_card._refresh_card` cause selection checks
-  v2 ownership first: any write onto a not-yet-owned card is `migration-current`
-  (the writer's only kind-change path), then head drift -> `target-revision`,
-  else `projection-current`. Head-first ordering permanently deferred open
-  ci-approval cards whose live target became pr-review on a new head
-  (`card_not_pr_review`). Run-summary `owner_race_deferrals` counts only
-  `owner_or_handler_race`; other deferrals live under
-  `projection_deferrals_by_reason`. Contract and closed-card path:
-  `docs/OPTION_B_CARD_PROJECTION.md`; open-card regression:
-  `tests/test_card_reuse.py` (`test_open_ci_approval_to_pr_review_converts_on_moved_head`).
 - **Accept recommendation is a deterministic shortcut, not model action.** A
   successful current auto-triage attempt for pr-review or issue-triage may
   prepend an `Accept recommendation` checkbox when the structured
