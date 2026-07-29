@@ -917,6 +917,288 @@ def test_ci_approval_to_pr_review_reuses_issue():
     )
 
 
+def test_open_ci_approval_to_pr_review_converts_on_moved_head():
+    """Card #1817 class: an OPEN, not-yet-v2-owned ci-approval card whose live
+    target moved to a safe pr-review head must convert in one ordinary
+    reconcile pass via migration-current, retaining thread identity.
+
+    The pre-fix cause order selected target-revision on head drift first, so
+    the writer's kind guard deferred forever with card_not_pr_review. Already
+    v2-owned moved-head cards keep target-revision; closed-card migration and
+    race-lost writes stay on their existing paths.
+    """
+    import projection_writer
+
+    def reset_writer_stats():
+        projection_writer._RUN_STATS.clear()
+        projection_writer._RUN_STATS.update(
+            {
+                "planned": 0,
+                "noop": 0,
+                "deferred": 0,
+                "committed": 0,
+                "verification_failed": 0,
+                "committed_by_cause": {},
+                "deferred_by_reason": {},
+            }
+        )
+
+    old_head = "2a4fefe6" + "0" * 32
+    new_head = "4cc3777d" + "0" * 32
+
+    # --- production wedge shape: open ci-approval @ old head ---------------
+    reset_writer_stats()
+    github = LifecycleGitHub(item(kind="ci-approval", head=old_head))
+    prior_body = github.issues[7]["body"]
+    prior_state = core.parse_state_block(prior_body)
+    check(
+        "open CI->PR: fixture starts non-v2-owned ci-approval at old head",
+        prior_state.get("kind") == "ci-approval"
+        and prior_state.get("head_sha") == old_head
+        and prior_state.get(rc.PROJECTION_OWNER_FIELD) != rc.PROJECTION_OWNER
+        and github.issues[7]["state"] == "OPEN",
+    )
+    # Seed a thread comment so conversion must retain the same issue identity.
+    github.issues[7]["comments"].append(
+        {
+            "id": 9001,
+            "author": {"login": "kunchenguid"},
+            "body": "captain note on the hold",
+            "createdAt": "2026-07-28T16:50:00Z",
+        }
+    )
+    current = item(kind="pr-review", head=new_head)
+    out = github.run_reconcile(scan_payload([current]))
+    state = core.parse_state_block(github.issues[7]["body"])
+    names = label_names(github.issues[7])
+    stats = projection_writer.run_stats()
+    check(
+        "open CI->PR: one migration-current commit converts kind and head",
+        github.issues[7]["state"] == "OPEN"
+        and state.get("kind") == "pr-review"
+        and state.get("head_sha") == new_head
+        and state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and github.create_calls == 0
+        and github.patch_calls == 1
+        and '"cause":"migration-current"' in out
+        and '"event":"committed"' in out
+        and '"reason":"card_not_pr_review"' not in out
+        and stats.get("committed_by_cause", {}).get("migration-current") == 1
+        and stats.get("deferred") == 0,
+    )
+    check(
+        "open CI->PR: thread identity and managed labels follow the conversion",
+        len(github.issues[7]["comments"]) == 1
+        and github.issues[7]["comments"][0]["id"] == 9001
+        and "kind:pr-review" in names
+        and "kind:ci-approval" not in names
+        and "opt:merge" in github.issues[7]["body"]
+        and "needs-decision" in names,
+    )
+    # Run-summary must not hide non-race deferrals under owner_race_deferrals.
+    summary_line = next(
+        (line for line in out.splitlines() if "wheelhouse run-summary " in line),
+        "",
+    )
+    summary = json.loads(summary_line.split("wheelhouse run-summary ", 1)[1]) if summary_line else {}
+    check(
+        "open CI->PR: run-summary reports zero owner-race deferrals on success",
+        summary.get("owner_race_deferrals") == 0
+        and summary.get("projection_writes_by_cause", {}).get("migration-current") == 1
+        and summary.get("projection_deferrals_by_reason") == {},
+    )
+
+    reset_writer_stats()
+    returning = LifecycleGitHub(item(kind="ci-approval", head=old_head))
+    returning.run_reconcile(scan_payload([]))
+    check(
+        "open CI->PR return: legacy card records first trusted absence",
+        returning.issues[7]["state"] == "OPEN"
+        and rc.reconcile_absence_count(returning.issues[7]["body"]) == 1
+        and core.parse_state_block(returning.issues[7]["body"]).get(
+            rc.PROJECTION_OWNER_FIELD
+        )
+        != rc.PROJECTION_OWNER,
+    )
+    return_out = returning.run_reconcile(
+        scan_payload([item(kind="pr-review", head=new_head)])
+    )
+    return_state = core.parse_state_block(returning.issues[7]["body"])
+    check(
+        "open CI->PR return: migration ownership precedes lifecycle cause",
+        return_state.get("kind") == "pr-review"
+        and return_state.get("head_sha") == new_head
+        and return_state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and not rc.reconcile_absence_needs_clear(returning.issues[7]["body"])
+        and '"cause":"migration-current"' in return_out
+        and '"cause":"lifecycle-transition"' not in return_out
+        and '"reason":"card_not_pr_review"' not in return_out
+        and projection_writer.run_stats()
+        .get("committed_by_cause", {})
+        .get("migration-current")
+        == 1,
+    )
+
+    # --- already-owned moved head keeps target-revision --------------------
+    reset_writer_stats()
+    owned = LifecycleGitHub(item(kind="pr-review", head=old_head))
+    # Force v2 ownership on the open card (the create path stamps it).
+    owned_state = core.parse_state_block(owned.issues[7]["body"])
+    check(
+        "owned head-move control: fixture is already v2-owned pr-review",
+        owned_state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and owned_state.get("kind") == "pr-review",
+    )
+    moved = item(kind="pr-review", head=new_head)
+    owned_out = owned.run_reconcile(scan_payload([moved]))
+    owned_after = core.parse_state_block(owned.issues[7]["body"])
+    check(
+        "owned head-move control: already-owned card takes target-revision",
+        owned_after.get("head_sha") == new_head
+        and owned_after.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and '"cause":"target-revision"' in owned_out
+        and '"event":"committed"' in owned_out
+        and '"cause":"migration-current"' not in owned_out
+        and projection_writer.run_stats()
+        .get("committed_by_cause", {})
+        .get("target-revision")
+        == 1,
+    )
+
+    reset_writer_stats()
+    owned_returning = LifecycleGitHub(item(kind="pr-review", head=old_head))
+    owned_returning.run_reconcile(scan_payload([]))
+    reset_writer_stats()
+    owned_return_out = owned_returning.run_reconcile(
+        scan_payload([item(kind="pr-review", head=new_head)])
+    )
+    owned_return_state = core.parse_state_block(owned_returning.issues[7]["body"])
+    check(
+        "owned return control: lifecycle cause remains authoritative",
+        owned_return_state.get("head_sha") == new_head
+        and owned_return_state.get(rc.PROJECTION_OWNER_FIELD) == rc.PROJECTION_OWNER
+        and not rc.reconcile_absence_needs_clear(owned_returning.issues[7]["body"])
+        and '"cause":"lifecycle-transition"' in owned_return_out
+        and '"cause":"migration-current"' not in owned_return_out
+        and projection_writer.run_stats()
+        .get("committed_by_cause", {})
+        .get("lifecycle-transition")
+        == 1,
+    )
+
+    # --- writer still refuses kind change under non-migration causes -------
+    reset_writer_stats()
+    import card_projection
+
+    race_github = LifecycleGitHub(item(kind="ci-approval", head=old_head))
+    expected = projection_writer.card_snapshot(
+        {
+            "number": 7,
+            "title": race_github.issues[7]["title"],
+            "body": race_github.issues[7]["body"],
+            "labels": race_github.issues[7]["labels"],
+            "updated_at": race_github.issues[7]["updated_at"],
+            "author": race_github.issues[7]["author"],
+            "state": race_github.issues[7]["state"],
+            "comments": race_github.issues[7]["comments"],
+        }
+    )
+    # Build a pr-review projection with a non-migration cause against the
+    # still-ci-approval card - the writer's kind guard must still defer.
+    pr_item = item(kind="pr-review", head=new_head)
+    bad_projection = card_projection.plan_card_projection(
+        pr_item,
+        prior={
+            "number": 7,
+            "title": race_github.issues[7]["title"],
+            "body": race_github.issues[7]["body"],
+            "labels": race_github.issues[7]["labels"],
+            "updated_at": race_github.issues[7]["updated_at"],
+            "author": {"login": race_github.issues[7]["author"]},
+            "comments": race_github.issues[7]["comments"],
+        },
+        cause="target-revision",
+        held=False,
+        has_token=False,
+    )
+
+    def refuse_kind_change():
+        return projection_writer.commit_projection(7, expected, bad_projection)
+
+    outcome = race_github._with_boundary(refuse_kind_change)
+    refuse_stats = projection_writer.run_stats()
+    refuse_state = core.parse_state_block(race_github.issues[7]["body"])
+    check(
+        "writer guard: non-migration cause still defers card_not_pr_review",
+        outcome == "deferred"
+        and refuse_state.get("kind") == "ci-approval"
+        and race_github.patch_calls == 0
+        and refuse_stats.get("deferred_by_reason", {}).get("card_not_pr_review") == 1
+        and refuse_stats.get("deferred_by_reason", {}).get("owner_or_handler_race", 0)
+        == 0,
+    )
+
+    # Telemetry: owner_race_deferrals must not absorb the kind-guard deferral.
+    # Simulate the run-summary accounting path against the writer stats.
+    deferred_by_reason = refuse_stats.get("deferred_by_reason") or {}
+    owner_race_count = int(deferred_by_reason.get("owner_or_handler_race") or 0)
+    check(
+        "telemetry: card_not_pr_review is not counted as owner_race_deferrals",
+        owner_race_count == 0
+        and deferred_by_reason.get("card_not_pr_review") == 1
+        and refuse_stats.get("deferred") == 1,
+    )
+
+    # --- owner/handler race still defers under migration-current -----------
+    reset_writer_stats()
+    raced = LifecycleGitHub(item(kind="ci-approval", head=old_head))
+    stale_expected = projection_writer.card_snapshot(
+        {
+            "number": 7,
+            "title": raced.issues[7]["title"],
+            "body": raced.issues[7]["body"],
+            "labels": raced.issues[7]["labels"],
+            "updated_at": raced.issues[7]["updated_at"],
+            "author": raced.issues[7]["author"],
+            "state": raced.issues[7]["state"],
+            "comments": raced.issues[7]["comments"],
+        }
+    )
+    # Mutate the live card so expected-snapshot CAS fails.
+    raced.issues[7]["body"] = raced.issues[7]["body"] + "\n<!-- owner edit -->\n"
+    raced.issues[7]["updated_at"] = "2099-01-01T00:00:00Z"
+    good_projection = card_projection.plan_card_projection(
+        item(kind="pr-review", head=new_head),
+        prior={
+            "number": 7,
+            "title": raced.issues[7]["title"],
+            "body": stale_expected["body"] if stale_expected else "",
+            "labels": raced.issues[7]["labels"],
+            "updated_at": stale_expected["updated_at"] if stale_expected else "",
+            "author": {"login": raced.issues[7]["author"]},
+            "comments": raced.issues[7]["comments"],
+        },
+        cause="migration-current",
+        held=False,
+        has_token=False,
+    )
+
+    def race_commit():
+        return projection_writer.commit_projection(
+            7, stale_expected, good_projection
+        )
+
+    race_outcome = raced._with_boundary(race_commit)
+    race_stats = projection_writer.run_stats()
+    check(
+        "writer guard: owner race still defers under migration-current",
+        race_outcome == "deferred"
+        and raced.patch_calls == 0
+        and race_stats.get("deferred_by_reason", {}).get("owner_or_handler_race") == 1
+        and race_stats.get("deferred_by_reason", {}).get("card_not_pr_review", 0) == 0,
+    )
+
+
 def test_production_shaped_resolved_card_reuse_keeps_label_ownership():
     """The chrome-devtools-axi#86 / wheelhouse card #1408 production shape: a
     trusted soft-closed pr-review card carrying `resolved` and
@@ -2085,6 +2367,7 @@ def main():
     test_new_head_reopens_and_drops_stale_analysis()
     test_census_head_mismatch_reuses_after_trusted_post_close_activity_once()
     test_ci_approval_to_pr_review_reuses_issue()
+    test_open_ci_approval_to_pr_review_converts_on_moved_head()
     test_production_shaped_resolved_card_reuse_keeps_label_ownership()
     test_writer_authorship_and_managed_ownership_controls()
     test_reuse_without_current_observation_fails_closed()

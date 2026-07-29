@@ -29,6 +29,7 @@ _RUN_STATS = {
     "committed": 0,
     "verification_failed": 0,
     "committed_by_cause": {},
+    "deferred_by_reason": {},
 }
 
 
@@ -160,6 +161,14 @@ def _event(event, **fields):
         cause = str(fields.get("cause") or "unknown")
         causes = _RUN_STATS["committed_by_cause"]
         causes[cause] = causes.get(cause, 0) + 1
+    if event == "deferred":
+        # Preserve the exact reason string so run-summary can distinguish a
+        # genuine owner/handler race from a permanent conversion failure such
+        # as card_not_pr_review - lumping them under owner_race_deferrals hid
+        # the open ci-approval -> pr-review wedge (card #1817).
+        reason = str(fields.get("reason") or "unknown")
+        reasons = _RUN_STATS["deferred_by_reason"]
+        reasons[reason] = reasons.get(reason, 0) + 1
     payload = {"event": event, "writer": WRITER_NAME}
     payload.update(fields)
     print("wheelhouse projection-event " + _canonical(payload))
