@@ -804,15 +804,37 @@ def automerge_criteria_stale(item, state):
 
     Criterion rows are explicitly NON-MATERIAL and never authorize a merge.
     When the scan supplies a current structured result, however, the visible UI
-    should follow it without waiting for another material target change.
+    should follow it without waiting for another material target change. An
+    incomplete or ``ci-state-unknown`` PR projection also refreshes once when
+    the card still stores criteria, so the projection planner can replace those
+    rows with the explicit all-UNAVAILABLE fallback. The absence of stored rows
+    then makes the next maintenance pass a no-op, even if a stale scan-side
+    criteria payload is still present.
     """
-    if item.get("kind") != "pr-review" or AUTOMERGE_CRITERIA_FIELD not in item:
+    if item.get("kind") != "pr-review":
+        return False
+    state = state or {}
+    observation = target_contracts.normalize_review_observation(
+        item.get("review_observation") or item.get("target_observation")
+    )
+    if observation is not None:
+        # Import lazily to keep render_card's projection dependencies acyclic.
+        import card_projection
+
+        effective_bucket = item.get("bucket") or observation["facts"].get("bucket")
+        if not card_projection.criteria_allowed_for_projection(
+            observation, effective_bucket
+        ):
+            return AUTOMERGE_CRITERIA_FIELD in state
+    elif state.get("bucket") == "ci-state-unknown":
+        return AUTOMERGE_CRITERIA_FIELD in state
+    if AUTOMERGE_CRITERIA_FIELD not in item:
         return False
     expected = criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD))
-    return (state or {}).get(
+    return state.get(
         AUTOMERGE_CRITERIA_VERSION_FIELD
     ) != criteria_schema.CRITERIA_VERSION or criteria_schema.normalize_criteria(
-        (state or {}).get(AUTOMERGE_CRITERIA_FIELD),
+        state.get(AUTOMERGE_CRITERIA_FIELD),
         missing_reason="historical criterion data is unavailable",
     ) != expected
 
@@ -5924,7 +5946,29 @@ def body_with_automerge_criteria(body, rows):
     if criteria_start < 0 or not section_ends:
         raise RuntimeError("card projection is missing criteria section boundary")
     section_end = min(section_ends)
-    normalized = criteria_schema.normalize_criteria(rows)
+    # The atomic triage/result path can be asked to update criteria while the
+    # card is already carrying an incomplete/unknown PR projection. Its
+    # evaluator input is intentionally advisory, so do not let a positive
+    # result from an older or mixed-time source become current-tense card UI.
+    projection_unknown = state.get("bucket") == "ci-state-unknown"
+    current_observation = target_contracts.normalize_review_observation(
+        state.get(REVIEW_OBSERVATION_FIELD)
+    )
+    if current_observation is not None:
+        import card_projection
+
+        projection_unknown = not card_projection.criteria_allowed_for_projection(
+            current_observation, state.get("bucket")
+        )
+    normalized = criteria_schema.normalize_criteria(
+        None if projection_unknown else rows,
+        missing_reason=(
+            "not evaluated while the current target projection is incomplete "
+            "or ci-state-unknown"
+            if projection_unknown
+            else "criterion evidence was not produced"
+        ),
+    )
     updated = (
         body[:criteria_start]
         + "\n".join(_automerge_criteria_section(normalized))
