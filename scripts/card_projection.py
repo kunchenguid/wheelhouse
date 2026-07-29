@@ -76,6 +76,25 @@ def _managed_label_names(value):
     ]
 
 
+def criteria_allowed_for_observation(observation):
+    """Whether this projection may display current auto-merge criteria.
+
+    Criteria are a display-only snapshot, but they are still current-tense
+    claims to the card owner. An incomplete observation, or one whose
+    classifier remains ``ci-state-unknown``, cannot support any of those
+    claims. This is the single policy used by the authoritative PR projection
+    planner; callers render the normal all-UNAVAILABLE fallback when it
+    returns false.
+    """
+    if not isinstance(observation, dict):
+        return False
+    completeness = observation.get("completeness") or {}
+    if completeness.get("complete") is not True:
+        return False
+    facts = observation.get("facts") or {}
+    return (facts.get("bucket") or "ci-state-unknown") != "ci-state-unknown"
+
+
 def projection_from_values(
     *,
     title,
@@ -185,6 +204,12 @@ def plan_card_projection(
             ),
         }
     )
+    # An item can carry a scan-side criteria payload that was computed before
+    # this observation became incomplete. Never let that stale payload survive
+    # into the trusted projection; render_card's missing-criteria path produces
+    # the explicit all-UNAVAILABLE display instead.
+    if not criteria_allowed_for_observation(observation):
+        projected_item.pop(render_card.AUTOMERGE_CRITERIA_FIELD, None)
     context = decision_context.normalize_decision_context(item.get("decision_context"))
     if context is None:
         context = decision_context.unavailable_context(

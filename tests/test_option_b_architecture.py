@@ -666,6 +666,139 @@ def test_scheduled_epoch_contract():
     check("contract: manual run cannot advance the epoch ledger", manual == 0)
 
 
+def test_incomplete_projection_clears_stale_criteria():
+    """Production-shaped card #1840 regression for the stale criteria defect.
+
+    The old card generation had a complete green observation and positive
+    criteria. A later incomplete observation must make the visible Situation
+    unknown without carrying those positives forward as current facts.
+    """
+    head = "42b9b553" + "0" * 32
+    old_observation = observation(1840, head, complete=True)
+    context = context_for(old_observation)
+    assessment = assessment_for(old_observation, context)
+    positive = criteria.unavailable_criteria("complete green observation")
+    for criterion_id in ("scope_candidate", "g4_checks_green", "g6_triage_success"):
+        next(row for row in positive if row["id"] == criterion_id)["status"] = criteria.STATUS_MET
+    old_item = item_for(old_observation, context, assessment)
+    old_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
+    old_projection = card_projection.plan_card_projection(old_item, prior={})
+    check(
+        "criteria regression: prior complete card visibly contains MET rows",
+        "✅ **MET**" in old_projection["body"]
+        and "`G4 - configured checks green`" in old_projection["body"],
+    )
+
+    incomplete = observation(1840, head, complete=False)
+    current_item = item_for(incomplete, context_for(incomplete))
+    current_item["projection_ref"] = target_observation.make_projection_ref(
+        incomplete, "unknown", "ci-state-unknown"
+    )
+    current_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
+    current_projection = card_projection.plan_card_projection(
+        current_item,
+        prior=old_projection,
+    )
+    current_state = core.parse_state_block(current_projection["body"])
+    old_state = core.parse_state_block(old_projection["body"])
+    check(
+        "criteria regression: existing pure card enters criteria repair path",
+        render_card.refresh_needed(
+            current_item,
+            old_state,
+            labels={"needs-decision"},
+        )
+        and not render_card.refresh_needed(
+            current_item,
+            current_state,
+            labels={"needs-decision"},
+        ),
+    )
+    check(
+        "criteria regression: incomplete projection clamps Situation to unknown",
+        "Compliance: `unknown`" in current_projection["body"]
+        and "Tests: `unknown`" in current_projection["body"]
+        and "`ci-state-unknown`" in current_projection["body"],
+    )
+    check(
+        "criteria regression: stale MET scope/G4/G6 rows are unavailable",
+        "✅ **MET**" not in current_projection["body"]
+        and "⚪ **UNAVAILABLE** `Scope - merge-ready PR review`" in current_projection["body"]
+        and "⚪ **UNAVAILABLE** `G4 - configured checks green`" in current_projection["body"]
+        and "⚪ **UNAVAILABLE** `G6 - successful triage for current head`" in current_projection["body"],
+    )
+    atomic_body = render_card.body_with_automerge_criteria(
+        current_projection["body"], positive
+    )
+    check(
+        "criteria regression: atomic criteria writes also fail closed on unknown",
+        "✅ **MET**" not in atomic_body
+        and "not evaluated while the current target observation is incomplete" in atomic_body,
+    )
+    check(
+        "criteria regression: stale criteria are removed from non-authoritative state",
+        render_card.AUTOMERGE_CRITERIA_FIELD not in current_state
+        and current_state.get(render_card.ASSESSMENT_FIELD)
+        == core.parse_state_block(old_projection["body"]).get(render_card.ASSESSMENT_FIELD)
+        and current_state.get("triaged_sha") == head,
+    )
+
+    unavailable = criteria.unavailable_criteria("already unavailable")
+    unavailable_item = item_for(incomplete, context_for(incomplete))
+    unavailable_item["projection_ref"] = current_item["projection_ref"]
+    unavailable_item[render_card.AUTOMERGE_CRITERIA_FIELD] = unavailable
+    unavailable_projection = card_projection.plan_card_projection(
+        unavailable_item,
+        prior=current_projection,
+    )
+    check(
+        "criteria regression: already-unavailable input stays unavailable",
+        "✅ **MET**" not in unavailable_projection["body"]
+        and unavailable_projection["body"] == current_projection["body"],
+    )
+    repeated = card_projection.plan_card_projection(
+        unavailable_item,
+        prior={
+            "body": unavailable_projection["body"],
+            "title": unavailable_projection["title"],
+            "labels": unavailable_projection["managed_labels"],
+        },
+    )
+    check(
+        "criteria regression: repaired projection is idempotent",
+        repeated["body"] == unavailable_projection["body"]
+        and repeated["cause"] == "noop",
+    )
+
+    complete_item = item_for(old_observation, context, assessment)
+    complete_item[render_card.AUTOMERGE_CRITERIA_FIELD] = positive
+    complete_projection = card_projection.plan_card_projection(
+        complete_item,
+        prior=old_projection,
+    )
+    complete_state = core.parse_state_block(complete_projection["body"])
+    check(
+        "criteria regression: complete observation retains current criteria controls",
+        "✅ **MET** `G4 - configured checks green`" in complete_projection["body"]
+        and complete_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+        == criteria.normalize_criteria(positive),
+    )
+
+    # A complete observation with a classifier that cannot support current
+    # criteria is represented by the same conservative projection policy.
+    check(
+        "criteria regression: unknown bucket policy is fail-closed",
+        card_projection.criteria_allowed_for_observation(
+            dict(incomplete, completeness=dict(incomplete["completeness"], complete=True))
+        ) is False,
+    )
+    check(
+        "criteria regression: non-refreshable cards remain protected",
+        not render_card.is_refreshable({"needs-decision", "processing"})
+        and not render_card.is_refreshable({"needs-decision", "blocked"}),
+    )
+
+
 def test_incomplete_v2_context_allows_advisory_spend():
     obs = observation()
     context = decision_context.unavailable_context(obs, "snapshot.unavailable")
@@ -1996,6 +2129,7 @@ def main():
         test_assessment_admission_and_class_tristate,
         test_scheduled_epoch_contract,
         test_incomplete_v2_context_allows_advisory_spend,
+        test_incomplete_projection_clears_stale_criteria,
         test_triage_suppression_is_visible_and_fail_closed,
         test_card_1663_high_volume_context_queues_once,
         test_related_cap_keeps_strongest_and_stays_honest,
