@@ -75,18 +75,18 @@ TRIAGE_NON_SUCCESS_FIELDS = (
 # delivered candidate into authority. Generic discovery, scheduled scans,
 # attempt-reset cohorts, and ordinary reconcile can never select this class.
 ADVISORY_RECOVERY_CLEARED = "advisory"
-# The distinct exact-selector-only class proven by card #1584: a persisted
+# The distinct observation-drift class proven by cards #1584/#1819: a persisted
 # ADMITTED assessment lost currency purely because the card's review
 # observation rotated on an UNCHANGED head (a same-revision projection
-# refresh). Authority surfaces (Accept, G6) are observation-bound, but the
-# triage cache and same-revision triage preservation are head-bound, so the
-# card keeps a stale-observation assessment (and any residual recommendation)
-# while `triage_fresh` blocks every automatic re-triage and the residual
-# authority makes the advisory class refuse. Clearing the drifted cache
-# re-opens exactly one ordinary spend-guarded attempt for the same revision;
-# it never promotes the stale assessment or recommendation into authority.
-# Generic discovery, scheduled scans, attempt-reset cohorts, and ordinary
-# reconcile can never select this class.
+# refresh). Authority surfaces (Accept, G6) are observation-bound, while the
+# triage cache and same-revision triage preservation are head-bound. Ordinary
+# maintenance now treats a COMPLETE current observation drift as a stale cache
+# via `render_card.observation_drift_retriage_needed` / `triage_fresh`, so the
+# existing reservation + queued checkpoint path re-opens exactly one spend-
+# guarded attempt without rebinding the old assessment. The operator exact-
+# selector path remains available and clears the same residue before queueing.
+# Generic discovery and attempt-reset cohorts still cannot select this class;
+# incomplete observations never open ordinary spend.
 OBSERVATION_DRIFT_REFRESH_CLEARED = "observation-drift"
 TRIAGE_ADVISORY_CACHE_FIELDS = TRIAGE_NON_SUCCESS_FIELDS + (
     render_card.TRIAGE_PRIMARY_STATUS_FIELD,
@@ -852,67 +852,12 @@ def _advisory_recovery_refusal(state, kind, revision):
 
 
 def _observation_drift_refresh_refusal(state, kind, revision):
-    """Prove the exact card-bound observation-drift refresh class (card #1584).
+    """Prove the exact card-bound observation-drift class (cards #1584/#1819).
 
-    Returns "" only when a persisted ADMITTED assessment lost currency purely
-    because the card's review observation rotated on an unchanged head, and
-    otherwise the precise refusal. This is the one stuck shape neither the
-    head-keyed automatic cache nor the advisory recovery class can heal:
-    `triage_fresh` is true (so scheduled scans never re-triage the revision),
-    while the renderer's authority predicate is observation-bound (so Accept
-    and G6 stay off) and any residual recommendation keeps advisory replay
-    refused as `authority-present`. A current admitted assessment, a missing
-    or non-admitted assessment, a head mismatch, an unavailable observation,
-    and non-current assessments whose observation did NOT drift all refuse -
-    they are different shapes with their own owners.
+    Authoritative implementation lives on `render_card` so ordinary
+    maintenance and the operator exact-selector path share one predicate.
     """
-    if kind != "pr-review":
-        return "drift-refresh-kind-unsupported"
-    if state.get("held") or state.get("triaged_sha") != revision:
-        return "drift-refresh-cache-unproven"
-    if render_card.assessment_current_admitted(state):
-        return "drift-refresh-assessment-current"
-    stored = state.get(render_card.ASSESSMENT_FIELD)
-    assessment = (
-        assessment_admission.normalize_assessment(stored)
-        if stored is not None
-        else None
-    )
-    if assessment is None or not assessment_admission.admitted(assessment):
-        return "drift-refresh-assessment-not-admitted"
-    assessment_target = assessment["target"]
-    if (
-        assessment_target["repo"] != state.get("repo")
-        or assessment_target["number"] != state.get("number")
-    ):
-        return "drift-refresh-target-mismatch"
-    if (
-        assessment_target["head_sha"] != revision
-        or state.get("head_sha") != revision
-    ):
-        return "drift-refresh-head-mismatch"
-    observation = render_card.target_contracts.normalize_review_observation(
-        state.get(render_card.REVIEW_OBSERVATION_FIELD)
-    )
-    if observation is None:
-        return "drift-refresh-observation-unproven"
-    observation_target = observation["target"]
-    if (
-        observation_target["owner"] != assessment_target["owner"]
-        or observation_target["repo"] != assessment_target["repo"]
-        or observation_target["number"] != assessment_target["number"]
-        or observation_target["repo"] != state.get("repo")
-        or observation_target["number"] != state.get("number")
-    ):
-        return "drift-refresh-target-mismatch"
-    if observation["revision"]["head_sha"] != revision:
-        return "drift-refresh-head-mismatch"
-    if assessment_target["observation_id"] == observation["observation_id"]:
-        # The assessment is non-current for a reason OTHER than observation
-        # drift (for example a malformed decision context): a different shape
-        # this class deliberately does not own.
-        return "drift-refresh-not-observation-drift"
-    return ""
+    return render_card.observation_drift_refresh_refusal(state, kind, revision)
 
 
 def _maintainer_logins(config, owner):

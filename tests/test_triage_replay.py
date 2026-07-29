@@ -1031,9 +1031,22 @@ def test_observation_drift_refresh_recovers_only_through_the_exact_card_selector
     assert replay._advisory_recovery_refusal(state, "pr-review", DRIFT_REVISION) == (
         "advisory-recovery-authority-present"
     )
-    # Ordinary reconciliation cannot heal the card: the head-keyed triage
-    # cache is fresh, so no scan ever re-triages this revision, and no
-    # material field changed, so no refresh trigger fires either.
+    # Production scan items carry the rotated observation. With that alignment,
+    # ordinary maintenance treats the head-keyed cache as stale so the shared
+    # queue path can reopen one spend-guarded attempt (card #1819).
+    aligned_item = dict(item)
+    aligned_item["target_observation"] = state["review_observation"]
+    aligned_item["review_observation"] = state["review_observation"]
+    aligned_item["decision_context"] = state["decision_context"]
+    assert rc.review_card_inputs_current(aligned_item, state)
+    assert rc.observation_drift_retriage_needed(aligned_item, state)
+    assert not rc.triage_fresh(aligned_item, state)
+    assert rc.should_auto_triage(
+        aligned_item, state, value["labels"], has_token=True
+    )
+    # A scan item still bound to the pre-rotation observation must not open
+    # ordinary spend against the rotated card (inputs / identity mismatch).
+    assert not rc.observation_drift_retriage_needed(item, state)
     assert rc.triage_fresh(item, state)
     assert not rc.should_auto_triage(item, state, value["labels"], has_token=True)
 
@@ -1456,6 +1469,185 @@ def test_observation_drift_refresh_never_selects_or_mutates_card_1759():
         assert cards[1759]["body"] == excluded_body
     finally:
         os.unlink(path)
+
+
+def _align_item_to_card_observation(item, state):
+    """Mirror a post-refresh scan item that already carries the card observation."""
+    aligned = dict(item)
+    observation = state.get("review_observation")
+    context = state.get("decision_context")
+    if observation is not None:
+        aligned["target_observation"] = observation
+        aligned["review_observation"] = observation
+        aligned["head_sha"] = observation["revision"]["head_sha"]
+        aligned["base_sha"] = observation["revision"].get("base_sha") or aligned.get(
+            "base_sha", ""
+        )
+    if context is not None:
+        aligned["decision_context"] = context
+    return aligned
+
+
+def test_ordinary_maintenance_self_heals_complete_observation_drift_card_1819():
+    """Card #1819 production shape: complete same-head observation drift.
+
+    Ordinary maintenance must reopen exactly one spend-guarded re-triage through
+    the existing queue writers. Incomplete / mismatched / exhausted / locked
+    shapes must not queue. A successful new admission restores Accept only via
+    the existing authority predicate.
+    """
+    value, item = drift_card(number=1819, target=1187)
+    state = rc._unique_state_block(value["body"])
+    labels = value["labels"]
+    pure = [label["name"] if isinstance(label, dict) else label for label in labels]
+    aligned = _align_item_to_card_observation(item, state)
+
+    # Proven complete drift: old admitted assessment, new complete observation,
+    # triaged_sha already equals the current head.
+    assert state["triage_status"] == "succeeded"
+    assert state["triaged_sha"] == DRIFT_REVISION
+    assert state["head_sha"] == DRIFT_REVISION
+    assert state[rc.ASSESSMENT_FIELD]["admission"]["status"] == "admitted"
+    assert (
+        state[rc.ASSESSMENT_FIELD]["target"]["observation_id"]
+        != state["review_observation"]["observation_id"]
+    )
+    assert state["review_observation"]["completeness"]["complete"] is True
+    assert not rc.assessment_current_admitted(state)
+    assert not rc.accept_recommendation_available(state)
+    assert rc.observation_drift_refresh_refusal(
+        state, "pr-review", DRIFT_REVISION
+    ) == ""
+    assert rc.observation_drift_retriage_needed(aligned, state)
+    assert not rc.triage_fresh(aligned, state)
+    assert rc.should_auto_triage(aligned, state, pure, has_token=True)
+
+    # Shared queue writer clears residue and reserves one attempt without a
+    # second admission path.
+    queued_body = rc.body_with_triage_queued(value["body"], aligned)
+    assert queued_body != value["body"]
+    queued_state = rc._unique_state_block(queued_body)
+    assert queued_state["triage_status"] == "queued"
+    assert queued_state["triaged_sha"] == DRIFT_REVISION
+    assert queued_state[rc.TRIAGE_ATTEMPTS_FIELD]["count"] == 2
+    assert rc.ASSESSMENT_FIELD not in queued_state
+    assert "triage_recommendation" not in queued_state
+    assert "automerge_verdict" not in queued_state
+    assert "### Recommended action" not in queued_body
+    assert "opt:accept-recommendation" not in queued_body
+    assert "Automatic triage queued for this exact revision." in queued_body
+    # Idempotent / race-safe: a second ordinary pass buys no further spend.
+    assert rc.triage_fresh(aligned, queued_state)
+    assert not rc.observation_drift_retriage_needed(aligned, queued_state)
+    assert not rc.should_auto_triage(aligned, queued_state, pure, has_token=True)
+    assert rc.body_with_triage_queued(queued_body, aligned) == queued_body
+
+    # Incomplete current observation never opens ordinary spend.
+    incomplete_state = copy.deepcopy(state)
+    old_obs = state["review_observation"]
+    incomplete_obs = rc.target_contracts.make_observation(
+        old_obs["target"]["owner"],
+        old_obs["target"]["repo"],
+        old_obs["target"]["number"],
+        head_sha=old_obs["revision"]["head_sha"],
+        base_sha=old_obs["revision"]["base_sha"],
+        expected_head_sha=old_obs["revision"]["head_sha"],
+        observed_at=old_obs["observed_at"],
+        source=old_obs["source"],
+        completeness={
+            **old_obs["completeness"],
+            "complete": False,
+            "mergeability": "unknown",
+        },
+        facts=old_obs["facts"],
+        changed_paths=old_obs["changed_paths"],
+    )
+    assert incomplete_obs["completeness"]["complete"] is False
+    assert (
+        incomplete_obs["observation_id"]
+        != state[rc.ASSESSMENT_FIELD]["target"]["observation_id"]
+    )
+    incomplete_state["review_observation"] = incomplete_obs
+    incomplete_item = _align_item_to_card_observation(item, incomplete_state)
+    assert rc.observation_drift_refresh_refusal(
+        incomplete_state, "pr-review", DRIFT_REVISION
+    ) == ""
+    assert not rc.observation_drift_retriage_needed(incomplete_item, incomplete_state)
+    assert rc.triage_fresh(incomplete_item, incomplete_state)
+    assert not rc.should_auto_triage(
+        incomplete_item, incomplete_state, pure, has_token=True
+    )
+
+    # Matching (non-drifted) observation, wrong head, non-refreshable labels,
+    # and exhausted attempts never queue.
+    current_value, current_item = drift_card(
+        number=1819, target=1187, rotate=False
+    )
+    current_state = rc._unique_state_block(current_value["body"])
+    current_aligned = _align_item_to_card_observation(current_item, current_state)
+    assert rc.assessment_current_admitted(current_state)
+    assert not rc.observation_drift_retriage_needed(current_aligned, current_state)
+    assert rc.triage_fresh(current_aligned, current_state)
+    assert not rc.should_auto_triage(
+        current_aligned, current_state, pure, has_token=True
+    )
+
+    wrong_head = dict(aligned)
+    wrong_head["head_sha"] = "deadbeef" + DRIFT_REVISION[8:]
+    assert not rc.observation_drift_retriage_needed(wrong_head, state)
+
+    locked = list(pure) + ["processing"]
+    assert not rc.is_refreshable(locked)
+    assert not rc.should_auto_triage(aligned, state, locked, has_token=True)
+
+    exhausted_state = copy.deepcopy(state)
+    exhausted_state[rc.TRIAGE_ATTEMPTS_FIELD] = {
+        "version": rc.TRIAGE_ATTEMPTS_VERSION,
+        "kind": "pr-review",
+        "revision": DRIFT_REVISION,
+        "count": 2,
+    }
+    assert rc.observation_drift_retriage_needed(aligned, exhausted_state)
+    assert not rc.triage_fresh(aligned, exhausted_state)
+    assert not rc.should_auto_triage(
+        aligned, exhausted_state, pure, has_token=True
+    )
+    assert rc.body_with_triage_queued(
+        rc._replace_state_block(value["body"], exhausted_state), aligned
+    ) == rc._replace_state_block(value["body"], exhausted_state)
+
+    # Successful new admission against the CURRENT observation restores Accept
+    # only through the existing authority predicate - never by rebinding the
+    # old assessment.
+    healed_body = rc.body_with_triage_result(
+        queued_body,
+        DRIFT_REVISION,
+        triage=drift_payload(queued_state),
+        owner="owner",
+        base_sha=aligned.get("base_sha", ""),
+    )
+    healed_state = rc._unique_state_block(healed_body)
+    assert healed_state["triage_status"] == "succeeded"
+    assert rc.assessment_current_admitted(healed_state)
+    assert rc.accept_recommendation_available(healed_state)
+    assert (
+        healed_state[rc.ASSESSMENT_FIELD]["target"]["observation_id"]
+        == healed_state["review_observation"]["observation_id"]
+    )
+    assert "### Recommended action" in healed_body
+    assert "opt:accept-recommendation" in healed_body
+    assert not rc.observation_drift_retriage_needed(
+        _align_item_to_card_observation(aligned, healed_state), healed_state
+    )
+    assert rc.triage_fresh(
+        _align_item_to_card_observation(aligned, healed_state), healed_state
+    )
+    assert not rc.should_auto_triage(
+        _align_item_to_card_observation(aligned, healed_state),
+        healed_state,
+        pure,
+        has_token=True,
+    )
 
 
 def missing_output_card(number=1759, target=594, revision=MISSING_OUTPUT_REVISION):
@@ -4558,6 +4750,7 @@ TESTS = [
     test_observation_drift_refresh_write_run_clears_drift_residue_and_requeues,
     test_observation_drift_refresh_refuses_every_disconfirming_shape,
     test_observation_drift_refresh_never_selects_or_mutates_card_1759,
+    test_ordinary_maintenance_self_heals_complete_observation_drift_card_1819,
     test_missing_output_cache_recovers_through_the_existing_error_path,
     test_missing_output_replay_refuses_a_moved_head_without_writes,
     test_missing_output_replay_refuses_exhausted_attempt_budget,

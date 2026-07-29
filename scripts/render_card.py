@@ -994,6 +994,13 @@ def triage_fresh(item, state):
     before the workflow dispatch so a failed or timed-out workflow does not get
     re-run every hourly scan for the same revision unless a trusted recovery path
     clears it and the spend guards admit another attempt.
+
+    Same-head observation drift is the one exception for pr-review cards: when a
+    complete current ReviewObservation has rotated out from under an admitted
+    assessment, the head-keyed cache looks fresh while Accept/G6 stay off. Ordinary
+    maintenance must treat that cache as stale so the existing queue path can open
+    exactly one spend-guarded re-triage (card #1819 / #1584 class). Incomplete
+    observations stay frozen here and never open spend.
     """
     revision = triage_revision(item)
     state = state or {}
@@ -1001,6 +1008,8 @@ def triage_fresh(item, state):
         return False
     if item.get("kind") != "pr-review":
         return True
+    if observation_drift_retriage_needed(item, state):
+        return False
     verdict = state.get("automerge_verdict")
     verdict = verdict if isinstance(verdict, dict) else {}
     for item_field, state_field, verdict_field in (
@@ -1201,12 +1210,22 @@ def triage_context_refresh(item, state):
     actual_base, actual_vision = _triage_context_actual(state)
     expected_base = str(item.get("base_sha") or "")
     expected_vision = str(item.get("automerge_vision_sha") or "")
-    # `triage_fresh` already proved at least one expected component mismatches.
     # Every expected component must also have a recorded prior counterpart,
     # otherwise the movement is not verified and the ordinary budget owns it.
     if expected_base and not actual_base:
         return None
     if expected_vision and not actual_vision:
+        return None
+    # Require a verified base/VISION component mismatch. `triage_fresh` can now
+    # also be false solely for complete same-head observation drift (card #1819);
+    # that class must stay on the ordinary per-head attempt budget, never the
+    # separate context-refresh allowance.
+    moved = False
+    if expected_base and actual_base and expected_base != actual_base:
+        moved = True
+    if expected_vision and actual_vision and expected_vision != actual_vision:
+        moved = True
+    if not moved:
         return None
     return (expected_base, expected_vision)
 
@@ -4158,6 +4177,107 @@ def assessment_current_admitted(state):
         and assessment["target"]["observation_id"]
         == observation["observation_id"]
     )
+
+
+def observation_drift_refresh_refusal(state, kind, revision):
+    """Prove the exact card-bound observation-drift class (cards #1584/#1819).
+
+    Returns "" only when a persisted ADMITTED assessment lost currency purely
+    because the card's review observation rotated on an unchanged head, and
+    otherwise the precise refusal. Shared by ordinary maintenance
+    (`observation_drift_retriage_needed` / `triage_fresh`) and the operator
+    exact-selector path. Never rebinds an old assessment onto a new observation.
+    """
+    state = state if isinstance(state, dict) else {}
+    if kind != "pr-review":
+        return "drift-refresh-kind-unsupported"
+    if state.get("held") or state.get("triaged_sha") != revision:
+        return "drift-refresh-cache-unproven"
+    if assessment_current_admitted(state):
+        return "drift-refresh-assessment-current"
+    stored = state.get(ASSESSMENT_FIELD)
+    assessment = (
+        assessment_admission.normalize_assessment(stored)
+        if stored is not None
+        else None
+    )
+    if assessment is None or not assessment_admission.admitted(assessment):
+        return "drift-refresh-assessment-not-admitted"
+    assessment_target = assessment["target"]
+    if (
+        assessment_target["repo"] != state.get("repo")
+        or assessment_target["number"] != state.get("number")
+    ):
+        return "drift-refresh-target-mismatch"
+    if (
+        assessment_target["head_sha"] != revision
+        or state.get("head_sha") != revision
+    ):
+        return "drift-refresh-head-mismatch"
+    observation = target_contracts.normalize_review_observation(
+        state.get(REVIEW_OBSERVATION_FIELD)
+    )
+    if observation is None:
+        return "drift-refresh-observation-unproven"
+    observation_target = observation["target"]
+    if (
+        observation_target["owner"] != assessment_target["owner"]
+        or observation_target["repo"] != assessment_target["repo"]
+        or observation_target["number"] != assessment_target["number"]
+        or observation_target["repo"] != state.get("repo")
+        or observation_target["number"] != state.get("number")
+    ):
+        return "drift-refresh-target-mismatch"
+    if observation["revision"]["head_sha"] != revision:
+        return "drift-refresh-head-mismatch"
+    if assessment_target["observation_id"] == observation["observation_id"]:
+        # Non-current for a reason other than observation drift (for example a
+        # malformed decision context): a different shape this class does not own.
+        return "drift-refresh-not-observation-drift"
+    return ""
+
+
+def observation_drift_retriage_needed(item, state):
+    """Whether ordinary maintenance must reopen triage for same-head drift.
+
+    True only for the proven observation-drift class against a COMPLETE current
+    ReviewObservation on the item's current head. Incomplete, malformed, locked,
+    stale-head, already-current, and non-drift shapes stay false so they cannot
+    buy spend. The existing queue writers (`should_auto_triage` ->
+    `mark_triage_queued` -> sealed dispatch) remain the only dispatch path.
+    """
+    item = item if isinstance(item, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    kind = item.get("kind") or state.get("kind") or "pr-review"
+    if kind != "pr-review":
+        return False
+    revision = triage_revision(item) or state_revision(state, kind)
+    if not revision:
+        return False
+    if observation_drift_refresh_refusal(state, kind, revision):
+        return False
+    observation = target_contracts.normalize_review_observation(
+        state.get(REVIEW_OBSERVATION_FIELD)
+    )
+    if observation is None:
+        return False
+    completeness = observation.get("completeness") or {}
+    if not completeness.get("complete"):
+        return False
+    item_observation = target_contracts.normalize_review_observation(
+        item.get("target_observation") or item.get(REVIEW_OBSERVATION_FIELD)
+    )
+    if item_observation is not None:
+        item_complete = (item_observation.get("completeness") or {}).get("complete")
+        if not item_complete:
+            return False
+        # Ordinary path only when the scan item already carries the same current
+        # observation the card projects - never against a mismatched item snapshot.
+        if item_observation.get("observation_id") != observation.get("observation_id"):
+            return False
+        if item_observation["revision"].get("head_sha") != revision:
+            return False
+    return True
 
 
 def current_triage_authority_present(state):
