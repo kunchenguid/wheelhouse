@@ -1132,11 +1132,17 @@ still appears where it's plain English, e.g. "triage the queue".)
   G6 a fresh structured `automerge_verdict` for the CURRENT head SHA
   (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
   alignment, ruling out an ineligible existing/default behavior change, and
-  recommending merge. Class B additionally requires exact-source corrected-defect
-  and restored-behavior evidence admitted by the shared fail-closed semantic
-  boundary; contradictory A/B/C and historical verdicts cannot bypass it. Class C
-  also requires an explicit strictly-opt-in + default-off flag. The detailed
-  schema and normalization contract live in `docs/AGENT_RUNTIME.md`.
+  recommending merge. Class B additionally requires corrected-defect and
+  restored-behavior claims backed by verbatim-verified exact-source evidence;
+  semantic judgment (faithfulness, restoration object, contract change) is the
+  triage model's attested responsibility taught by the prompt, while trusted
+  code validates only mechanics - schema shapes, the shared quote byte policy,
+  verbatim span binding, distinct verified references - and derives the
+  contradiction record solely from the model's own declared assertion enums
+  (captain decision, card #2148: no vocabulary lists or token grammars in
+  trusted admission). Contradictory and historical verdicts cannot bypass it.
+  Class C also requires an explicit strictly-opt-in + default-off flag. The
+  detailed schema and normalization contract live in `docs/AGENT_RUNTIME.md`.
   The complete scan must also prove that no other open PR closes an issue closed by the candidate: `same_closing_issue_overlap` carries the existing `_overlap_note` result into eligibility, and a missing, malformed, or non-empty fact holds before claim or act.
   Before any action-lock mutation, `preclaim_candidates` evaluates complete G0-G6 read-only under the fleet token. Denied or unavailable candidates receive no card write. Only exact preclaim passers can be claimed under the default card token; action mode then rereads the card and reevaluates authoritative gates under claim.
   G7 is an immediate live re-check of head SHA, base SHA, default-branch VISION.md SHA, mergeable, clean state, configured compliance/test contexts, and same-closing-issue overlap right before `do_merge`.
