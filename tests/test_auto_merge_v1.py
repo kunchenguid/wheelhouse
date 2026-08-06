@@ -875,6 +875,42 @@ def test_class_b_semantic_admission_boundary():
         render_card.behavior_admission_status(same_ref)[0] == "unavailable",
     )
 
+    canonical_duplicate_input = candidate()
+    canonical_duplicate_input["automerge"] = dict(
+        canonical_duplicate_input["automerge"]
+    )
+    canonical_duplicate_input["automerge"]["class_b_restoration"] = dict(
+        restoration,
+        intended_behavior_restored_evidence={
+            "source": "target.txt",
+            "quote": "**DAEMON   RESTART LOST AN OPEN MONITORED RUN.**",
+        },
+    )
+    canonical_duplicate = normalize(canonical_duplicate_input)[
+        "automerge_verdict"
+    ]
+    distinct_same_source_input = candidate()
+    distinct_same_source_input["automerge"] = dict(
+        distinct_same_source_input["automerge"]
+    )
+    distinct_same_source_input["automerge"]["class_b_restoration"] = dict(
+        restoration,
+        intended_behavior_restored_evidence={
+            "source": "target.txt",
+            "quote": product_claim,
+        },
+    )
+    distinct_same_source = normalize(distinct_same_source_input)[
+        "automerge_verdict"
+    ]
+    check(
+        "class B admission: canonical duplicate denies but distinct spans admit",
+        render_card.behavior_admission_status(canonical_duplicate)[0]
+        == "unavailable"
+        and render_card.behavior_admission_status(distinct_same_source)[0]
+        == "admitted",
+    )
+
     duplicated_input = candidate()
     duplicated_input["automerge"] = dict(duplicated_input["automerge"])
     duplicated_input["automerge"]["class_b_restoration"] = dict(

@@ -2911,17 +2911,17 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
             evidence_refs[field] = evidence_ref
         defect_ref = evidence_refs["corrected_defect_evidence"]
         restored_ref = evidence_refs["intended_behavior_restored_evidence"]
-        if defect_ref == restored_ref:
+        defect_key = (
+            defect_ref["source"],
+            _normalize_evidence_text(defect_ref["quote"]),
+        )
+        restored_key = (
+            restored_ref["source"],
+            _normalize_evidence_text(restored_ref["quote"]),
+        )
+        if defect_key == restored_key:
             return None
-        if (
-            (defect_ref["source"], _normalize_evidence_text(defect_ref["quote"]))
-            not in verified
-            or (
-                restored_ref["source"],
-                _normalize_evidence_text(restored_ref["quote"]),
-            )
-            not in verified
-        ):
+        if defect_key not in verified or restored_key not in verified:
             return None
     return normalized
 
