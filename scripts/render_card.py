@@ -5815,6 +5815,33 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
                 controls_available=False,
             )
             changed = True
+    if AUTOMERGE_CRITERIA_FIELD in state:
+        normalized = _admission_current_criteria(
+            criteria_schema.normalize_criteria(state[AUTOMERGE_CRITERIA_FIELD]),
+            state,
+        )
+        criteria_start = body.find("### Auto-merge criteria\n")
+        section_ends = [
+            index
+            for index in (
+                body.find(TRIAGE_START, criteria_start),
+                body.find("### Recommended action\n", criteria_start),
+                body.find(DECISION_START, criteria_start),
+            )
+            if index >= 0
+        ]
+        if criteria_start < 0 or not section_ends:
+            raise RuntimeError("card projection is missing criteria section boundary")
+        section_end = min(section_ends)
+        body = (
+            body[:criteria_start]
+            + "\n".join(_automerge_criteria_section(normalized))
+            + "\n\n"
+            + body[section_end:]
+        )
+        state[AUTOMERGE_CRITERIA_VERSION_FIELD] = criteria_schema.CRITERIA_VERSION
+        state[AUTOMERGE_CRITERIA_FIELD] = normalized
+        changed = True
     return _replace_state_block(body, state) if changed else body
 
 

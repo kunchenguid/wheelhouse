@@ -1814,6 +1814,57 @@ def test_healed_admission_overrides_stale_scan_rows_in_one_edit():
     )
 
 
+def test_same_revision_preservation_recomputes_admission_rows():
+    admitted_state = card_entry()["state"]
+    stale_rows = schema.unavailable_criteria("not reached")
+    for criterion_id in ("g6_triage_success", "g6_merge_recommendation"):
+        row = next(r for r in stale_rows if r["id"] == criterion_id)
+        row["status"] = schema.STATUS_UNMET
+        row["evidence"] = "current assessment is not admitted"
+
+    current_item = item(
+        automerge_criteria=stale_rows,
+        review_observation=admitted_state[render_card.REVIEW_OBSERVATION_FIELD],
+        decision_context=admitted_state[render_card.DECISION_CONTEXT_FIELD],
+    )
+    prior = render_card.render(current_item)
+    prior_state = core.parse_state_block(prior["body"])
+    prior_state.update(admitted_state)
+    prior_state[render_card.AUTOMERGE_CRITERIA_VERSION_FIELD] = (
+        schema.CRITERIA_VERSION
+    )
+    prior_state[render_card.AUTOMERGE_CRITERIA_FIELD] = (
+        schema.normalize_criteria(stale_rows)
+    )
+    prior_body = render_card._replace_state_block(prior["body"], prior_state)
+
+    refreshed = render_card.render(current_item)
+    refreshed_body = render_card._preserve_same_revision_triage(
+        refreshed["body"], prior_body, current_item, prior_state
+    )
+    refreshed_state = core.parse_state_block(refreshed_body)
+    refreshed_rows = {
+        row["id"]: row
+        for row in refreshed_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    }
+    check(
+        "same revision: restored admission recomputes stored G6 rows",
+        refreshed_rows["g6_triage_success"]["status"] == schema.STATUS_MET
+        and refreshed_rows["g6_merge_recommendation"]["status"]
+        == schema.STATUS_MET,
+    )
+    check(
+        "same revision: restored admission recomputes visible G6 rows",
+        "✅ **MET** `G6 - successful triage for current head`" in refreshed_body
+        and "✅ **MET** `G6 - top-level recommendation is merge`"
+        in refreshed_body,
+    )
+    check(
+        "same revision: recomputed rows do not trigger a refresh loop",
+        render_card.automerge_criteria_stale(current_item, refreshed_state) is False,
+    )
+
+
 def main():
     for name, function in sorted(globals().items()):
         if name.startswith("test_") and callable(function):
