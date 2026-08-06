@@ -1204,9 +1204,16 @@ def test_ci_wait_refresh_repairs_unknown_criteria_once():
                 "tests": healthy_item["tests"],
                 "projection_freshness": "current",
                 "projection_complete": True,
-                reconcile.render_card.AUTOMERGE_CRITERIA_FIELD: positive,
             }
         )
+        # A healthy no-churn card stores exactly what a current write would
+        # store: the admission-dependent rows recomputed from its own state
+        # (card #2148 display race), so the stale check sees no drift.
+        current_rows = reconcile.render_card._admission_current_criteria(
+            positive, healthy_state
+        )
+        healthy_item[reconcile.render_card.AUTOMERGE_CRITERIA_FIELD] = current_rows
+        healthy_state[reconcile.render_card.AUTOMERGE_CRITERIA_FIELD] = current_rows
         healthy["body"] = reconcile.render_card._replace_state_block(
             healthy["body"], healthy_state
         )

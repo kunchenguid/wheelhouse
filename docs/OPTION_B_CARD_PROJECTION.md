@@ -120,7 +120,7 @@ Relevant history remains useful context: `60bac6e` introduced guarded scan-time 
 
 The production contract is encoded in `tests/test_option_b_architecture.py` and the existing action suites:
 
-1. Situation, checks, context, assessment, behavior facts, and criteria share one revision or say unavailable.
+1. Situation, checks, context, assessment, behavior facts, and criteria share one revision or say unavailable. The two admission-dependent G6 rows (`g6_triage_success`, `g6_merge_recommendation`) are recomputed by every criteria-carrying card write from the exact state that write stores (`render_card.triage_admission_facts`, shared with the scan-time evaluator), so a scan-time snapshot evaluated against the pre-write body can never publish a card that contradicts its own state, and the staleness comparison applies the same recompute so a lagging snapshot cannot spin a refresh loop.
 2. Incomplete, malformed, mismatched, stale, or unknown input never becomes current green or MET authorization.
 3. Displayed criteria and related context never authorize an action.
 4. Manual target actions keep their existing current-head and security gates.

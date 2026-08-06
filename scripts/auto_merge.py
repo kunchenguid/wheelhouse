@@ -243,13 +243,28 @@ def behavior_verdict_facts(verdict):
             "evidence": admission_evidence,
             "reason": admission_reason,
         }
+    changes = verdict.get("changes_existing_or_default_behavior")
+    if changes is True:
+        # The fact is known, not unknown: the verdict affirmatively reports a
+        # change, so the row must not hedge as if nobody knows (card #2148).
+        default_evidence = (
+            "the triage verdict reports an existing/default behavior change"
+        )
+        default_reason = (
+            "verdict reports an ineligible existing/default behavior change"
+        )
+    else:
+        default_evidence = (
+            "existing/default behavior change not ruled out (no usable verdict fact)"
+        )
+        default_reason = (
+            "verdict does not rule out an ineligible existing/default behavior change"
+        )
     fact(
         "g6_default_behavior",
-        verdict.get("changes_existing_or_default_behavior") is False,
-        "no existing/default behavior change"
-        if verdict.get("changes_existing_or_default_behavior") is False
-        else "existing/default behavior change not ruled out",
-        "verdict does not rule out an ineligible existing/default behavior change",
+        changes is False,
+        "no existing/default behavior change" if changes is False else default_evidence,
+        default_reason,
     )
     if not cls:
         facts["g6_class_c_mode"] = {
@@ -685,83 +700,13 @@ def fresh_verdict_facts(state, head_sha):
     """Return every persisted triage/verdict fact for one candidate head.
 
     The ordered first failure is the existing G6 decision. The full fact map is
-    also rendered on cards, but is never read back as authorization.
+    also rendered on cards, but is never read back as authorization. The
+    admission-dependent facts are owned by render_card.triage_admission_facts
+    so a card write can recompute exactly them from the state being written
+    (card #2148 display race).
     """
     state = state if isinstance(state, dict) else {}
-    head_sha = str(head_sha or "")
-    facts = {}
-
-    def fact(key, ok, evidence, reason):
-        facts[key] = {
-            "status": criteria_schema.STATUS_MET
-            if ok
-            else criteria_schema.STATUS_UNMET,
-            "evidence": evidence,
-            "reason": "" if ok else reason,
-        }
-
-    current_head_ok = bool(head_sha)
-    admission_ok = current_head_ok and render_card.assessment_current_admitted(state)
-    triage_ok = (
-        admission_ok and state.get("triage_status") == "succeeded"
-    )
-    revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
-    card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
-    triage_reason = (
-        "current head SHA is unavailable"
-        if not current_head_ok
-        else (
-            (
-                "current assessment is not admitted for its observation/head"
-                if not admission_ok
-                else "no successful auto-triage verdict on the card"
-            )
-            if not triage_ok
-            else (
-                "behavior verdict is stale (not for the current head SHA)"
-                if not revision_ok
-                else ("card head SHA is not current" if not card_head_ok else "")
-            )
-        )
-    )
-    fact(
-        "g6_triage_success",
-        card_head_ok,
-        "successful triage for head %s" % head_sha[:8]
-        if card_head_ok
-        else triage_reason,
-        triage_reason,
-    )
-    recommendation = state.get("triage_recommendation")
-    action = (
-        render_card.normalize_recommendation_action(recommendation.get("action"))
-        if isinstance(recommendation, dict)
-        else ""
-    )
-    recommendation_ok = card_head_ok and action == "merge"
-    if (
-        current_head_ok
-        and state.get("triage_status") == "succeeded"
-        and not admission_ok
-    ):
-        # The model may well have written "merge" in its advisory prose. What
-        # is missing is a VALID recommendation: the assessment backing it was
-        # not admitted, so nothing authority-bearing exists. Say exactly that -
-        # never that the model recommended something else (card #1746).
-        recommendation_reason = (
-            "no valid agent recommendation was established: the advisory "
-            "assessment was not admitted"
-        )
-    else:
-        recommendation_reason = (
-            "top-level triage recommendation is not an explicit merge"
-        )
-    fact(
-        "g6_merge_recommendation",
-        recommendation_ok,
-        "explicit merge recommendation" if recommendation_ok else recommendation_reason,
-        recommendation_reason,
-    )
+    facts = dict(render_card.triage_admission_facts(state, head_sha))
     behavior_facts, behavior_class = behavior_verdict_facts(
         state.get("automerge_verdict")
     )

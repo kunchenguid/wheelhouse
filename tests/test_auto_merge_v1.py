@@ -5749,6 +5749,388 @@ def test_triage_rejects_lfs_and_submodule_diff_markers():
         )
 
 
+def test_default_behavior_gate_uses_three_state_copy():
+    """Card #2148 line 4: known-true must not hedge as if nobody knows."""
+    base = {"behavior_class": "A", "optin_default_off": False}
+    known_false = am.behavior_verdict_facts(
+        dict(base, changes_existing_or_default_behavior=False)
+    )[0]["g6_default_behavior"]
+    check(
+        "default-behavior copy: known-false stays MET with unchanged copy",
+        known_false["status"] == schema.STATUS_MET
+        and known_false["evidence"] == "no existing/default behavior change",
+    )
+    known_true = am.behavior_verdict_facts(
+        dict(base, changes_existing_or_default_behavior=True)
+    )[0]["g6_default_behavior"]
+    check(
+        "default-behavior copy: known-true names the reported change",
+        known_true["status"] == schema.STATUS_UNMET
+        and known_true["evidence"]
+        == "the triage verdict reports an existing/default behavior change"
+        and known_true["reason"]
+        == "verdict reports an ineligible existing/default behavior change",
+    )
+    unknown = am.behavior_verdict_facts(dict(base))[0]["g6_default_behavior"]
+    check(
+        "default-behavior copy: missing fact stays fail-closed not-ruled-out",
+        unknown["status"] == schema.STATUS_UNMET
+        and unknown["evidence"]
+        == "existing/default behavior change not ruled out (no usable verdict fact)",
+    )
+    malformed = am.behavior_verdict_facts(
+        dict(base, changes_existing_or_default_behavior="no")
+    )[0]["g6_default_behavior"]
+    check(
+        "default-behavior copy: malformed fact stays fail-closed not-ruled-out",
+        malformed["status"] == schema.STATUS_UNMET
+        and "not ruled out" in malformed["evidence"],
+    )
+
+
+def test_source_evidence_skips_oversized_files_without_voiding_artifact():
+    """Card #2148 line 3 blocker 1: one 3 MB binary must never disable every
+    other file's target-src semantic evidence for the whole repository."""
+    cited_quote = "The export queue is preserved."
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repository = os.path.join(temp_dir, "repository")
+        bundle = os.path.join(temp_dir, "bundle")
+        os.makedirs(os.path.join(repository, "lib"))
+        os.makedirs(os.path.join(repository, "assets"))
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.name", "fixture"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", repository, "config", "user.email", "f@example.com"],
+            check=True,
+        )
+        with open(
+            os.path.join(repository, "lib", "export.py"), "w", encoding="utf-8"
+        ) as source_file:
+            source_file.write(cited_quote)
+        with open(os.path.join(repository, "assets", "banner.png"), "wb") as blob:
+            blob.write(b"\x89" * (render_card.SOURCE_EVIDENCE_MAX_FILE_BYTES + 1))
+        subprocess.run(["git", "-C", repository, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", repository, "commit", "-qm", "fixture"], check=True
+        )
+        revision = subprocess.run(
+            ["git", "-C", repository, "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        manifest = render_card.build_target_source_evidence(
+            repository, bundle, revision
+        )
+        check(
+            "source evidence: oversized file is excluded per-file, not voiding",
+            manifest["available"] is True
+            and manifest["file_count"] == 1
+            and manifest["excluded_count"] == 1
+            and manifest["excluded"][0]["path"] == "assets/banner.png"
+            and manifest["excluded"][0]["reason"] == "file-too-large",
+        )
+        files_dir = os.path.join(bundle, "files")
+        manifest_file = os.path.join(bundle, "manifest.json")
+        indexed = render_card.verify_target_source_evidence(
+            files_dir, manifest_file, revision
+        )
+        check(
+            "source evidence: cited normal file verifies beside the exclusion",
+            indexed is not None
+            and "lib/export.py" in indexed
+            and "assets/banner.png" not in indexed,
+        )
+        check(
+            "source evidence: cited-but-excluded path still fails closed",
+            render_card._read_declared_evidence_source(
+                "target-src/assets/banner.png",
+                "",
+                files_dir,
+                manifest_file,
+                revision,
+            )
+            == ""
+            and render_card._read_declared_evidence_source(
+                "target-src/lib/export.py",
+                "",
+                files_dir,
+                manifest_file,
+                revision,
+            )
+            == cited_quote,
+        )
+
+
+def test_evidence_ref_accepts_prompt_blessed_quote_lengths():
+    """Card #2148 line 3 blocker 2: the prompt promises 1024 UTF-8 bytes per
+    quote; the semantic-ref validator must share the one captain-fixed byte
+    policy instead of silently rejecting prompt-blessed quotes at 240 chars."""
+    from agent_runtime.output_validation import EVIDENCE_QUOTE_MAX_UTF8_BYTES
+
+    def quote_of(length):
+        return "q" * length
+
+    production_length = quote_of(245)  # 245 chars, the card #2148 quote length
+    check(
+        "evidence ref: the production 245-char quote is accepted",
+        len(production_length) == 245
+        and render_card._normalize_evidence_ref(
+            {"source": "target.txt", "quote": production_length},
+            preserve_handles=True,
+        )
+        is not None,
+    )
+    prompt_bound = quote_of(1024)
+    check(
+        "evidence ref: a 1024-byte prompt-blessed quote is accepted",
+        len(prompt_bound.encode("utf-8")) == 1024
+        and render_card._normalize_evidence_ref(
+            {"source": "target-src/lib/export.py", "quote": prompt_bound}
+        )
+        is not None,
+    )
+    ceiling = quote_of(EVIDENCE_QUOTE_MAX_UTF8_BYTES)
+    over = quote_of(EVIDENCE_QUOTE_MAX_UTF8_BYTES + 1)
+    check(
+        "evidence ref: the shared hard byte ceiling is inclusive",
+        len(ceiling.encode("utf-8")) == EVIDENCE_QUOTE_MAX_UTF8_BYTES
+        and render_card._normalize_evidence_ref(
+            {"source": "target.txt", "quote": ceiling}
+        )
+        is not None
+        and render_card._normalize_evidence_ref(
+            {"source": "target.txt", "quote": over}
+        )
+        is None,
+    )
+    check(
+        "evidence ref: the 12-char minimum still holds",
+        render_card._normalize_evidence_ref(
+            {"source": "target.txt", "quote": "tiny quote"}
+        )
+        is None,
+    )
+
+
+def _class_b_natural_candidate(defect, restored, restored_source):
+    return {
+        "summary": "Fixes an export regression in session cleanup.",
+        "product_implications": "Routine low-risk fix, no owner discussion needed.",
+        "recommended_action": "merge",
+        "recommended_reason": "Narrow fix with regression coverage.",
+        "evidence": "target.txt: '%s'" % defect,
+        "automerge": {
+            "behavior_class": "B",
+            "behavior_assertions": [],
+            "class_b_restoration": {
+                "corrected_defect": defect,
+                "corrected_defect_evidence": {
+                    "source": "target.txt",
+                    "quote": defect,
+                },
+                "intended_behavior_restored": restored,
+                "intended_behavior_restored_evidence": {
+                    "source": restored_source,
+                    "quote": restored,
+                },
+            },
+            "changes_existing_or_default_behavior": False,
+            "optin_default_off": False,
+            "aligns_with_vision": True,
+            "recommend_merge": True,
+        },
+    }
+
+
+def _normalize_with_spans(candidate, verified):
+    bounded = dict(candidate)
+    bounded[render_card._VERIFIED_EVIDENCE_SPANS_FIELD] = tuple(verified)
+    return render_card.normalize_triage(bounded)
+
+
+def test_class_b_natural_prose_golden_corpus_admits():
+    """Card #2148 line 3 blockers 4-5: the linkage grammar must be
+    domain-neutral - taught templates in ANY repository's vocabulary admit,
+    instead of only the historical fixture domains (zero fleet admissions)."""
+    corpus = (
+        (
+            "Session cleanup dropped the export queue.",
+            "The export queue is preserved.",
+            "target-src/lib/export.py",
+        ),
+        (
+            "A race broke saved drafts.",
+            "Saved drafts are preserved.",
+            "target-src/lib/drafts.py",
+        ),
+        (
+            "Config reload lost custom keybindings.",
+            "Custom keybindings are restored.",
+            "target-src/lib/keys.py",
+        ),
+    )
+    for defect, restored, source in corpus:
+        candidate = _class_b_natural_candidate(defect, restored, source)
+        verdict = _normalize_with_spans(
+            candidate,
+            (
+                ("target.txt", render_card._normalize_evidence_text(defect)),
+                (source, render_card._normalize_evidence_text(restored)),
+            ),
+        )["automerge_verdict"]
+        status, evidence, _ = render_card.behavior_admission_status(verdict)
+        check(
+            "class B golden corpus: %r admits" % defect,
+            status == "admitted"
+            and evidence
+            == "class B with bounded corrected-defect and restored-behavior evidence"
+            and am.verdict_eligible(verdict)[0] is True,
+        )
+    unlinked = _class_b_natural_candidate(
+        "Session cleanup dropped the export queue.",
+        "Diagnostic timestamps are preserved.",
+        "target-src/lib/export.py",
+    )
+    unlinked_verdict = _normalize_with_spans(
+        unlinked,
+        (
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Session cleanup dropped the export queue."
+                ),
+            ),
+            (
+                "target-src/lib/export.py",
+                render_card._normalize_evidence_text(
+                    "Diagnostic timestamps are preserved."
+                ),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B golden corpus: an unrelated restoration object stays denied",
+        render_card.behavior_admission_status(unlinked_verdict)[0] == "unavailable"
+        and am.verdict_eligible(unlinked_verdict)[0] is False,
+    )
+    temporal = _class_b_natural_candidate(
+        "Session cleanup dropped the export queue after retries.",
+        "The export queue is preserved.",
+        "target-src/lib/export.py",
+    )
+    temporal_verdict = _normalize_with_spans(
+        temporal,
+        (
+            (
+                "target.txt",
+                render_card._normalize_evidence_text(
+                    "Session cleanup dropped the export queue after retries."
+                ),
+            ),
+            (
+                "target-src/lib/export.py",
+                render_card._normalize_evidence_text(
+                    "The export queue is preserved."
+                ),
+            ),
+        ),
+    )["automerge_verdict"]
+    check(
+        "class B golden corpus: temporal-adjunct roles stay structurally denied",
+        render_card.behavior_admission_status(temporal_verdict)[0] == "unavailable",
+    )
+
+
+def test_protected_clause_harvest_is_model_prose_only():
+    """Card #2148 line 3 blocker 5: verbatim source quotes in the `evidence`
+    string are quoted material, never model claims - a code fragment must not
+    manufacture an unmatchable protected-clause coverage duty."""
+
+    def class_a_candidate(**overrides):
+        value = {
+            "summary": "Fixes an export regression in session cleanup.",
+            "product_implications": "Routine low-risk fix.",
+            "recommended_action": "merge",
+            "recommended_reason": "Narrow fix.",
+            "evidence": (
+                "target-src/lib/export.py: "
+                "'if mode == default: verdict = 1; run default behavior check.'"
+            ),
+            "automerge": {
+                "behavior_class": "A",
+                "behavior_assertions": [],
+                "changes_existing_or_default_behavior": False,
+                "optin_default_off": False,
+            },
+        }
+        value.update(overrides)
+        return value
+
+    junk_verdict = _normalize_with_spans(class_a_candidate(), ())[
+        "automerge_verdict"
+    ]
+    check(
+        "protected harvest: quoted code fragments create no coverage duty",
+        render_card.behavior_admission_status(junk_verdict)[0] == "admitted",
+    )
+    uncovered = class_a_candidate(
+        product_implications="This tightens the default behavior of exports."
+    )
+    uncovered_verdict = _normalize_with_spans(uncovered, ())["automerge_verdict"]
+    check(
+        "protected harvest: an unechoed protected clause in prose still denies",
+        render_card.behavior_admission_status(uncovered_verdict)[0]
+        == "unavailable",
+    )
+    contra_claim = "The default behavior is changed."
+    contradiction = class_a_candidate(product_implications=contra_claim)
+    contradiction["automerge"] = dict(contradiction["automerge"])
+    contradiction["automerge"]["behavior_assertions"] = [
+        {
+            "claim": contra_claim,
+            "subject": "default_behavior",
+            "effect": "changed",
+            "evidence": {"source": "target.txt", "quote": contra_claim},
+        }
+    ]
+    contradiction_verdict = _normalize_with_spans(
+        contradiction,
+        (("target.txt", render_card._normalize_evidence_text(contra_claim)),),
+    )["automerge_verdict"]
+    check(
+        "protected harvest: an echoed contract change still reads contradictory",
+        render_card.behavior_admission_status(contradiction_verdict)[0]
+        == "contradictory",
+    )
+    doc_claim = "Documentation is updated."
+    extra = class_a_candidate(
+        summary="Adds usage notes for the export command.",
+        product_implications="Routine low-risk docs improvement.",
+        evidence="target.txt: '%s'" % doc_claim,
+    )
+    extra["automerge"] = dict(extra["automerge"])
+    extra["automerge"]["behavior_assertions"] = [
+        {
+            "claim": doc_claim,
+            "subject": "documentation_or_tests",
+            "effect": "changed",
+            "evidence": {"source": "target.txt", "quote": doc_claim},
+        }
+    ]
+    extra_verdict = _normalize_with_spans(
+        extra,
+        (("target.txt", render_card._normalize_evidence_text(doc_claim)),),
+    )["automerge_verdict"]
+    check(
+        "protected harvest: an extra fully-validated assertion is accepted",
+        render_card.behavior_admission_status(extra_verdict)[0] == "admitted",
+    )
+
+
 # --------------------------------------------------------------------------- #
 def main():
     for name, fn in sorted(globals().items()):

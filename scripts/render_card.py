@@ -64,6 +64,7 @@ from agent_runtime.size_budget import (  # noqa: E402
     bounded_candidate_text,
 )
 from agent_runtime.output_validation import (  # noqa: E402
+    EVIDENCE_QUOTE_MAX_UTF8_BYTES,
     evidence_anchor_ok as _shared_evidence_anchor_ok,
     evidence_candidates as _shared_evidence_candidates,
     evidence_quote_utf8_byte_violations as _shared_quote_byte_violations,
@@ -379,10 +380,20 @@ CLASS_B_RESTORATION_MIN_CHARS = 12
 CLASS_B_RESTORATION_MAX_CHARS = 500
 _VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
 BEHAVIOR_ASSERTIONS_FIELD = "behavior_assertions"
-SOURCE_EVIDENCE_VERSION = 1
+SOURCE_EVIDENCE_VERSION = 2
 SOURCE_EVIDENCE_MAX_FILES = 1024
 SOURCE_EVIDENCE_MAX_FILE_BYTES = 1_000_000
 SOURCE_EVIDENCE_MAX_TOTAL_BYTES = 32_000_000
+# Files over the per-file cap (or past the count/total budget) are EXCLUDED
+# per-file instead of voiding the whole artifact: one oversized binary must
+# never disable every other file's semantic evidence for the repo. A
+# cited-but-excluded path still fails closed because it is absent from the
+# verified index. The manifest records exclusions for observability, bounded
+# so a huge repo cannot bloat it; excluded_count always carries the true total.
+SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS = 100
+SOURCE_EVIDENCE_EXCLUSION_REASONS = frozenset(
+    {"file-too-large", "file-count-limit", "total-bytes-limit", "read-changed"}
+)
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -832,7 +843,14 @@ def automerge_criteria_stale(item, state):
         return AUTOMERGE_CRITERIA_FIELD in state
     if AUTOMERGE_CRITERIA_FIELD not in item:
         return False
-    expected = criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD))
+    # Compare what a refresh WOULD store: the render path overrides the
+    # admission-dependent rows from the card state, so a scan-side lag on
+    # exactly those rows must not spin a refresh loop, while genuinely stale
+    # stored rows still trigger one healing refresh (card #2148).
+    expected = _admission_current_criteria(
+        criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD)),
+        state,
+    )
     return state.get(
         AUTOMERGE_CRITERIA_VERSION_FIELD
     ) != criteria_schema.CRITERIA_VERSION or criteria_schema.normalize_criteria(
@@ -1910,8 +1928,22 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
         shutil.rmtree(output_dir)
     os.makedirs(files_dir)
     entries = []
+    excluded = []
+    excluded_count = 0
     total = 0
-    available = True
+
+    def exclude(relative, size, reason):
+        nonlocal excluded_count
+        excluded_count += 1
+        if len(excluded) < SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS:
+            excluded.append(
+                {
+                    "path": relative.replace(os.sep, "/"),
+                    "size": size,
+                    "reason": reason,
+                }
+            )
+
     for root, dirs, files in os.walk(repository_dir, followlinks=False):
         dirs[:] = sorted(
             name
@@ -1925,18 +1957,20 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
                 continue
             relative = os.path.relpath(source_path, repository_dir)
             size = os.path.getsize(source_path)
-            if (
-                size > SOURCE_EVIDENCE_MAX_FILE_BYTES
-                or len(entries) >= SOURCE_EVIDENCE_MAX_FILES
-                or total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
-            ):
-                available = False
-                break
+            if size > SOURCE_EVIDENCE_MAX_FILE_BYTES:
+                exclude(relative, size, "file-too-large")
+                continue
+            if len(entries) >= SOURCE_EVIDENCE_MAX_FILES:
+                exclude(relative, size, "file-count-limit")
+                continue
+            if total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES:
+                exclude(relative, size, "total-bytes-limit")
+                continue
             with open(source_path, "rb") as source_file:
                 content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
             if len(content) != size:
-                available = False
-                break
+                exclude(relative, size, "read-changed")
+                continue
             destination = os.path.join(files_dir, relative)
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             with open(destination, "wb") as destination_file:
@@ -1949,20 +1983,15 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
                 }
             )
             total += size
-        if not available:
-            break
-    if not available:
-        shutil.rmtree(files_dir)
-        os.makedirs(files_dir)
-        entries = []
-        total = 0
     manifest = {
         "version": SOURCE_EVIDENCE_VERSION,
         "revision": actual_revision,
-        "available": available,
+        "available": True,
         "file_count": len(entries),
         "total_bytes": total,
         "files": entries,
+        "excluded_count": excluded_count,
+        "excluded": excluded,
     }
     with open(os.path.join(output_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, sort_keys=True, separators=(",", ":"))
@@ -1984,6 +2013,8 @@ def verify_target_source_evidence(
         "file_count",
         "total_bytes",
         "files",
+        "excluded_count",
+        "excluded",
     }
     if (
         not isinstance(manifest, dict)
@@ -1996,8 +2027,27 @@ def verify_target_source_evidence(
         or not isinstance(manifest.get("total_bytes"), int)
         or manifest["file_count"] > SOURCE_EVIDENCE_MAX_FILES
         or manifest["total_bytes"] > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+        or not isinstance(manifest.get("excluded"), list)
+        or len(manifest["excluded"]) > SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS
+        or not isinstance(manifest.get("excluded_count"), int)
+        or isinstance(manifest.get("excluded_count"), bool)
+        or manifest["excluded_count"] < len(manifest["excluded"])
     ):
         return None
+    excluded_paths = set()
+    for entry in manifest["excluded"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size", "reason"}
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("size"), int)
+            or isinstance(entry.get("size"), bool)
+            or entry["size"] < 0
+            or entry.get("reason") not in SOURCE_EVIDENCE_EXCLUSION_REASONS
+            or entry["path"] in excluded_paths
+        ):
+            return None
+        excluded_paths.add(entry["path"])
     root = os.path.realpath(files_dir)
     indexed = {}
     total = 0
@@ -2011,6 +2061,7 @@ def verify_target_source_evidence(
             or entry["size"] > SOURCE_EVIDENCE_MAX_FILE_BYTES
             or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or ""))
             or entry["path"] in indexed
+            or entry["path"] in excluded_paths
             or ".." in entry["path"].split("/")
         ):
             return None
@@ -2894,11 +2945,20 @@ def _normalize_evidence_ref(value, preserve_handles=False):
         or ".." in source.split("/")
     ):
         return None
+    # One evidence-quote byte policy for every quote surface: the prompt asks
+    # for at most 1024 UTF-8 bytes and trusted validation accepts through the
+    # shared inclusive hard ceiling (agent_runtime.output_validation). A
+    # narrower local cap here silently rejected prompt-blessed quotes
+    # (card #2148 line 3, blocker 2).
+    if len(quote.encode("utf-8")) > EVIDENCE_QUOTE_MAX_UTF8_BYTES:
+        return None
     cleaner = (
         _clean_semantic_triage_text if preserve_handles else _clean_triage_text
     )
-    cleaned = cleaner(quote, limit=241, default="")
-    if not 12 <= len(cleaned) <= 240:
+    # Cleaning only shrinks text, so a byte-valid quote can never hit this
+    # truncation limit; it exists to keep the helper total on adversarial input.
+    cleaned = cleaner(quote, limit=EVIDENCE_QUOTE_MAX_UTF8_BYTES + 1, default="")
+    if len(cleaned) < 12:
         return None
     return {"source": source, "quote": cleaned}
 
@@ -2998,6 +3058,17 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
         ):
             return None
     return normalized
+
+
+def _protected_clause_identity(text):
+    """Case- and terminal-punctuation-insensitive clause identity.
+
+    Harvested clauses are split on sentence punctuation, so a VERBATIM echo of
+    a prose clause keeps its trailing period while the harvested form lacks
+    it. Coverage must compare the clause, not its sentence delimiter
+    (card #2148 line 3, blocker 5).
+    """
+    return str(text or "").casefold().rstrip(" .!?;")
 
 
 def _protected_contract_claims(texts, behavior_class=None):
@@ -3143,18 +3214,79 @@ _RESTORATION_PREDICATES = {
 _RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
     {"a", "an", "never", "not", "now", "the"}
 )
-_RESTORATION_ROLE_PATTERNS = frozenset(
+# A restoration role must be one short, relation-free noun phrase. The bound
+# is STRUCTURAL, never a domain vocabulary: an earlier hardcoded allowlist of
+# specific role tuples made class-B linkage unsatisfiable for every repository
+# outside the fixture domains (zero fleet-wide admissions - card #2148 line 3).
+# The linkage security lives in the proposition grammar itself: one known
+# predicate, no subordinate clause, governed polarity, exact role identity
+# between defect and restoration, and verbatim-verified evidence quotes.
+_RESTORATION_ROLE_MAX_WORDS = 6
+_RESTORATION_ROLE_RELATION_WORDS = frozenset(
     {
-        ("archive", "retention"),
-        ("authentication", "sessions"),
-        ("daemon", "restart"),
-        ("lifecycle", "retries"),
-        ("monitored", "runs"),
-        ("normal", "decision", "retention"),
-        ("open", "monitored", "run"),
-        ("open", "monitored", "runs"),
-        ("recoverable",),
-        ("resolved", "decisions"),
+        "about",
+        "above",
+        "across",
+        "after",
+        "against",
+        "along",
+        "amid",
+        "amidst",
+        "among",
+        "and",
+        "around",
+        "at",
+        "atop",
+        "before",
+        "behind",
+        "below",
+        "beneath",
+        "beside",
+        "besides",
+        "between",
+        "beyond",
+        "but",
+        "by",
+        "despite",
+        "down",
+        "during",
+        "for",
+        "from",
+        "in",
+        "inside",
+        "into",
+        "like",
+        "minus",
+        "near",
+        "nor",
+        "of",
+        "off",
+        "on",
+        "onto",
+        "or",
+        "out",
+        "outside",
+        "over",
+        "past",
+        "per",
+        "plus",
+        "regarding",
+        "then",
+        "through",
+        "till",
+        "to",
+        "toward",
+        "towards",
+        "under",
+        "until",
+        "unto",
+        "up",
+        "upon",
+        "via",
+        "with",
+        "within",
+        "without",
+        "yet",
     }
 )
 _RESTORATION_LEXEME_RE = re.compile(
@@ -3198,32 +3330,35 @@ def _restoration_role(words):
     )
 
 
-def _restoration_role_matches_pattern(role):
-    for pattern in _RESTORATION_ROLE_PATTERNS:
-        if role == pattern:
-            return True
+def _restoration_role_is_simple(role):
+    """One short, relation-free noun phrase (domain-neutral, fail-closed).
+
+    A role carrying a preposition, temporal relation, coordinator, auxiliary,
+    or predicate word is a clause fragment, not an object: temporal or
+    relational adjuncts inside a role could smuggle different semantics past
+    the exact defect/restoration role-identity comparison, so they stay
+    rejected exactly as under the old allowlist.
+    """
+    if not 1 <= len(role) <= _RESTORATION_ROLE_MAX_WORDS:
+        return False
+    for index, word in enumerate(role):
         if (
-            len(role) == len(pattern) + 1
-            and role[: len(pattern)] == pattern
-            and _RESTORATION_IDENTIFIER_RE.fullmatch(role[-1])
+            word in _RESTORATION_ROLE_RELATION_WORDS
+            or word in _RESTORATION_AUXILIARIES
+            or word in _RESTORATION_PREDICATES
         ):
-            return True
-        if len(role) == len(pattern) and role[:-1] == pattern[:-1]:
-            final = role[-1]
-            for separator in ("-", "_"):
-                prefix = pattern[-1] + separator
-                if final.startswith(prefix) and re.fullmatch(
-                    r"[a-z0-9]+(?:[._-][a-z0-9]+)*",
-                    final[len(prefix) :],
-                ):
-                    return True
-    return False
+            return False
+        # A handle/reference/number identifier is a discriminator, never a
+        # noun: at most one, and only trailing the phrase it identifies.
+        if _RESTORATION_IDENTIFIER_RE.fullmatch(word) and index != len(role) - 1:
+            return False
+    return True
 
 
 def _restoration_roles_are_bounded(agent, patient):
     return (
-        (not agent or _restoration_role_matches_pattern(agent))
-        and _restoration_role_matches_pattern(patient)
+        (not agent or _restoration_role_is_simple(agent))
+        and _restoration_role_is_simple(patient)
     )
 
 
@@ -3860,7 +3995,13 @@ def _normalize_behavior_assertions(
             not in verified
         ):
             return None
-        if (
+        # An exact echo (claim == verified quote after normalization) is
+        # maximally supported by its own quote; the token-overlap floor exists
+        # for paraphrases and would otherwise reject short protected clauses
+        # made mostly of generic stop words (card #2148 line 3).
+        if _normalize_evidence_text(claim) != _normalize_evidence_text(
+            evidence_ref["quote"]
+        ) and (
             len(
                 _restoration_subject_tokens(claim).intersection(
                     _restoration_subject_tokens(evidence_ref["quote"])
@@ -3900,12 +4041,26 @@ def _normalize_behavior_assertions(
         )
         if semantics is None:
             return None
-        expected.update((claim, subject, effect) for subject, effect in semantics)
+        expected.update(
+            (_protected_clause_identity(claim), subject, effect)
+            for subject, effect in semantics
+        )
     observed = {
-        (item["claim"].casefold(), item["subject"], item["effect"])
+        (
+            _protected_clause_identity(item["claim"]),
+            item["subject"],
+            item["effect"],
+        )
         for item in normalized
     }
-    if observed != expected:
+    # Coverage is one-directional: every protected clause the model wrote must
+    # be echoed by an assertion, while an EXTRA fully-validated assertion is
+    # additional evidence, never grounds for rejection - each extra still
+    # carries a verified verbatim quote with matching semantics, and a
+    # changed/tightened extra flips contradiction toward denial. Requiring
+    # exact set equality made natural, more-explicit output unadmittable
+    # (card #2148 line 3).
+    if not expected.issubset(observed):
         return None
     return normalized
 
@@ -3915,7 +4070,6 @@ def _behavior_admission_record(
 ):
     if not isinstance(triage_data, dict):
         return None
-    evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
     verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
     # Trusted durable assessment records round-trip JSON tuples as lists.
     # The refs are still revalidated by the semantic evidence normalizers; raw
@@ -3928,36 +4082,28 @@ def _behavior_admission_record(
         )
     elif not isinstance(verified_refs, tuple):
         verified_refs = ()
+    # Protected-clause coverage is a SELF-consistency duty on the model's own
+    # statements: summary, implications, restoration claims, and assertion
+    # claims. Verbatim source quotes (the free-form `evidence` string and every
+    # evidence-ref quote) are quoted target material, not model claims -
+    # harvesting them manufactured unmatchable clauses out of code fragments
+    # and made coverage unsatisfiable (card #2148 line 3, blocker 5). An
+    # assertion quote still cannot smuggle semantics: each quote must itself
+    # parse to the assertion's exact (subject, effect) and verify verbatim.
     semantic_text = [
         triage_data.get("summary", ""),
         triage_data.get("product_implications", ""),
-        evidence,
     ]
     if isinstance(restoration, dict):
         semantic_text.extend(
             restoration.get(field, "")
             for field in ("corrected_defect", "intended_behavior_restored")
         )
-        semantic_text.extend(
-            (restoration.get(field) or {}).get("quote", "")
-            if isinstance(restoration.get(field), dict)
-            else ""
-            for field in (
-                "corrected_defect_evidence",
-                "intended_behavior_restored_evidence",
-            )
-        )
     if isinstance(behavior_assertions, list):
         for assertion in behavior_assertions:
             if not isinstance(assertion, dict):
                 continue
             semantic_text.append(assertion.get("claim", ""))
-            assertion_evidence = assertion.get("evidence")
-            semantic_text.append(
-                assertion_evidence.get("quote", "")
-                if isinstance(assertion_evidence, dict)
-                else ""
-            )
     normalized = _normalize_class_b_restoration(
         restoration, verified_evidence_refs=verified_refs
     )
@@ -4108,7 +4254,6 @@ def normalize_automerge_verdict(data, triage_data=None):
             (
                 triage_data.get("summary", ""),
                 triage_data.get("product_implications", ""),
-                _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or "",
             ),
             cls,
         )
@@ -4201,6 +4346,116 @@ def assessment_current_admitted(state):
         and assessment["target"]["observation_id"]
         == observation["observation_id"]
     )
+
+
+def triage_admission_facts(state, head_sha):
+    """Pure G6 admission-dependent facts for one candidate head.
+
+    Single owner of the `g6_triage_success` / `g6_merge_recommendation`
+    computation, shared by auto_merge.fresh_verdict_facts (the scan-time
+    evaluator) and the card-write override (_admission_current_criteria). The
+    scan evaluates the card body as it existed at scan time, while a card
+    write recomputes these facts from the exact state being written, so one
+    edit can never display admission rows that contradict its own state
+    (card #2148 lines 1-2). Rows stay non-authoritative: acting always
+    re-evaluates every gate under claim.
+    """
+    state = state if isinstance(state, dict) else {}
+    head_sha = str(head_sha or "")
+    facts = {}
+
+    def fact(key, ok, evidence, reason):
+        facts[key] = {
+            "status": criteria_schema.STATUS_MET
+            if ok
+            else criteria_schema.STATUS_UNMET,
+            "evidence": evidence,
+            "reason": "" if ok else reason,
+        }
+
+    current_head_ok = bool(head_sha)
+    admission_ok = current_head_ok and assessment_current_admitted(state)
+    triage_ok = admission_ok and state.get("triage_status") == "succeeded"
+    revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
+    card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
+    triage_reason = (
+        "current head SHA is unavailable"
+        if not current_head_ok
+        else (
+            (
+                "current assessment is not admitted for its observation/head"
+                if not admission_ok
+                else "no successful auto-triage verdict on the card"
+            )
+            if not triage_ok
+            else (
+                "behavior verdict is stale (not for the current head SHA)"
+                if not revision_ok
+                else ("card head SHA is not current" if not card_head_ok else "")
+            )
+        )
+    )
+    fact(
+        "g6_triage_success",
+        card_head_ok,
+        "successful triage for head %s" % head_sha[:8]
+        if card_head_ok
+        else triage_reason,
+        triage_reason,
+    )
+    recommendation = state.get("triage_recommendation")
+    action = (
+        normalize_recommendation_action(recommendation.get("action"))
+        if isinstance(recommendation, dict)
+        else ""
+    )
+    recommendation_ok = card_head_ok and action == "merge"
+    if (
+        current_head_ok
+        and state.get("triage_status") == "succeeded"
+        and not admission_ok
+    ):
+        # The model may well have written "merge" in its advisory prose. What
+        # is missing is a VALID recommendation: the assessment backing it was
+        # not admitted, so nothing authority-bearing exists. Say exactly that -
+        # never that the model recommended something else (card #1746).
+        recommendation_reason = (
+            "no valid agent recommendation was established: the advisory "
+            "assessment was not admitted"
+        )
+    else:
+        recommendation_reason = (
+            "top-level triage recommendation is not an explicit merge"
+        )
+    fact(
+        "g6_merge_recommendation",
+        recommendation_ok,
+        "explicit merge recommendation" if recommendation_ok else recommendation_reason,
+        recommendation_reason,
+    )
+    return facts
+
+
+def _admission_current_criteria(rows, state):
+    """Override the admission-dependent G6 rows from the state being written.
+
+    Scan-supplied criteria were evaluated against the card body as it existed
+    BEFORE this write; admission-affecting state (observation identity, triage
+    cache, recommendation) may change in the same edit, which used to leave a
+    self-contradictory card for a full scan cycle (card #2148). Only the two
+    pure state-derived rows are recomputed; every other row keeps the
+    authoritative evaluator's evidence. Display-only and non-authoritative.
+    """
+    facts = triage_admission_facts(state, (state or {}).get("head_sha"))
+    updated = []
+    for row in rows or []:
+        fact = facts.get(row.get("id")) if isinstance(row, dict) else None
+        if fact is not None:
+            row = dict(row)
+            row["status"] = fact["status"]
+            row["evidence"] = str(fact["evidence"] or "evidence unavailable")
+        updated.append(row)
+    return updated
 
 
 def observation_drift_refresh_refusal(state, kind, revision):
@@ -5971,6 +6226,11 @@ def body_with_automerge_criteria(body, rows):
             else "criterion evidence was not produced"
         ),
     )
+    if not projection_unknown:
+        # Defense in depth: the atomic path evaluates against this same body,
+        # so this recompute is normally a no-op; it guarantees the stored rows
+        # match the state written in this exact edit (card #2148).
+        normalized = _admission_current_criteria(normalized, state)
     updated = (
         body[:criteria_start]
         + "\n".join(_automerge_criteria_section(normalized))
@@ -6476,6 +6736,13 @@ def render(
                 state[field] = item[field]
     options = options_for_state(kind, base_options, state)
     state["options"] = options
+    if kind == "pr-review" and AUTOMERGE_CRITERIA_FIELD in state:
+        # The state is fully assembled now; recompute the admission-dependent
+        # G6 rows from it so this one edit cannot contradict itself (the scan
+        # evaluated the pre-write card body - card #2148 display race).
+        state[AUTOMERGE_CRITERIA_FIELD] = _admission_current_criteria(
+            state[AUTOMERGE_CRITERIA_FIELD], state
+        )
 
     issue_title = rendered_card_title(item)
 
@@ -6548,7 +6815,13 @@ def render(
         lines.extend(_automerge_workflow_hold_section(workflow_hold))
         lines.append("")
     if kind == "pr-review":
-        lines.extend(_automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD)))
+        lines.extend(
+            _automerge_criteria_section(
+                state.get(AUTOMERGE_CRITERIA_FIELD)
+                if AUTOMERGE_CRITERIA_FIELD in state
+                else item.get(AUTOMERGE_CRITERIA_FIELD)
+            )
+        )
         lines.append("")
     # A security warning (e.g. a pull_request_target posture on a ci-approval
     # card) is surfaced as a prominent callout so the maintainer decides with
