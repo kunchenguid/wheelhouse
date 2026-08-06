@@ -3115,9 +3115,9 @@ def normalize_automerge_verdict(data, triage_data=None):
     Complete diffs always produce the VISION-independent class, existing/default
     behavior, and class-C mode facts. Class B additionally requires a bounded
     ``class_b_restoration`` object naming both the corrected defect and intended
-    behavior restored. Admission also rejects an affirmative claim in the same
-    triage summary, product implications, or evidence that an existing mode,
-    default, workflow, or delivery contract is tightened or changed.
+    behavior restored. Admission derives its contradiction record only from the
+    model's declared behavior-assertion subject/effect enums; trusted code does
+    not parse the triage summary, product implications, evidence, or claim prose.
 
     Missing or malformed semantic evidence remains persisted only as an
     unavailable, denial-only historical verdict. The executor independently
