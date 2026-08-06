@@ -4743,6 +4743,18 @@ def test_class_b_natural_prose_golden_corpus_admits():
             == "admitted",
         )
 
+        duplicate_claim_decision, duplicate_claim_verdict = apply_candidate(
+            "Session cleanup dropped the export queue.",
+            "**SESSION   CLEANUP DROPPED THE EXPORT QUEUE.**",
+            "target-src/lib/export.py",
+        )
+        check(
+            "class B golden corpus: canonical duplicate claims stay denied",
+            duplicate_claim_decision["outcome"] == "success"
+            and render_card.behavior_admission_status(duplicate_claim_verdict)[0]
+            == "unavailable",
+        )
+
         # The mechanical guarantee that DOES belong to trusted code: a claim
         # whose evidence quote is not verbatim in the cited source never
         # admits, regardless of how plausible the prose reads.

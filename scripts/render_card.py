@@ -2892,8 +2892,8 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
     # A defect claim that IS the restoration claim is a copy-paste artifact,
     # not two attested facts; equality is a mechanical string check.
     if (
-        normalized["corrected_defect"].casefold()
-        == normalized["intended_behavior_restored"].casefold()
+        _normalize_evidence_text(normalized["corrected_defect"])
+        == _normalize_evidence_text(normalized["intended_behavior_restored"])
     ):
         return None
     if verified_evidence_refs is not None:
