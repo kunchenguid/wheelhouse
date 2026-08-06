@@ -1132,11 +1132,17 @@ still appears where it's plain English, e.g. "triage the queue".)
   G6 a fresh structured `automerge_verdict` for the CURRENT head SHA
   (`verdict_eligible`) assigning an eligible A/B/C class, confirming vision
   alignment, ruling out an ineligible existing/default behavior change, and
-  recommending merge. Class B additionally requires exact-source corrected-defect
-  and restored-behavior evidence admitted by the shared fail-closed semantic
-  boundary; contradictory A/B/C and historical verdicts cannot bypass it. Class C
-  also requires an explicit strictly-opt-in + default-off flag. The detailed
-  schema and normalization contract live in `docs/AGENT_RUNTIME.md`.
+  recommending merge. Class B additionally requires corrected-defect and
+  restored-behavior claims backed by verbatim-verified exact-source evidence;
+  semantic judgment (faithfulness, restoration object, contract change) is the
+  triage model's attested responsibility taught by the prompt, while trusted
+  code validates only mechanics - schema shapes, the shared quote byte policy,
+  verbatim span binding, distinct verified references - and derives the
+  contradiction record solely from the model's own declared assertion enums
+  (captain decision, card #2148: no vocabulary lists or token grammars in
+  trusted admission). Contradictory and historical verdicts cannot bypass it.
+  Class C also requires an explicit strictly-opt-in + default-off flag. The
+  detailed schema and normalization contract live in `docs/AGENT_RUNTIME.md`.
   The complete scan must also prove that no other open PR closes an issue closed by the candidate: `same_closing_issue_overlap` carries the existing `_overlap_note` result into eligibility, and a missing, malformed, or non-empty fact holds before claim or act.
   Before any action-lock mutation, `preclaim_candidates` evaluates complete G0-G6 read-only under the fleet token. Denied or unavailable candidates receive no card write. Only exact preclaim passers can be claimed under the default card token; action mode then rereads the card and reevaluates authoritative gates under claim.
   G7 is an immediate live re-check of head SHA, base SHA, default-branch VISION.md SHA, mergeable, clean state, configured compliance/test contexts, and same-closing-issue overlap right before `do_merge`.
@@ -1147,6 +1153,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   Every v2 PR-review triage mutation other than the no-trusted-source security fallback plans one complete result through `render_card._atomic_automerge_card_body` and commits title/body/managed labels through `projection_writer.py`. A terminal result first persists one visible durable exact-revision `assessment_record`; scheduled reconcile retries a missed projection without another reservation or model call. The fallback runs only when the trusted source is unavailable, so it cannot load code or perform fleet reads; it clears the queued cache under the default card token and renders a visible `### Triage` security-fallback warning that any temporarily stale criteria reflect the prior queued state until trusted card maintenance resumes.
   Criterion state is non-material and never read as authorization; action mode reevaluates under an exclusive card claim, and G7 plus the unchanged `do_merge` workflow-touch gate still run immediately before merge.
   Missing historical criterion data renders every row explicitly unavailable, while a changed fresh result triggers only a display refresh through `automerge_criteria_stale`.
+  Every criteria-carrying card write recomputes the two admission-dependent G6 rows (`g6_triage_success`/`g6_merge_recommendation`) from the exact state it stores via the shared `render_card.triage_admission_facts`, and the staleness compare applies the same recompute, so one edit is always self-consistent and a lagging scan snapshot cannot loop (card #2148; contract in `docs/OPTION_B_CARD_PROJECTION.md`).
   A final `apply_decision._workflow_merge_gate` result of exactly `history-only-workflow-touch` after G2's complete clean net diff creates the separate NON-MATERIAL `automerge_workflow_hold` record and `wheelhouse:manual-merge-required` label/section for that head.
   The matching hold makes claim skip before any processing label, displays G7 as `UNMET`, and is preserved by same-head card maintenance and trusted soft-close reuse; a normal authoritative new-head or incompatible-kind refresh drops it with stale triage/verdict state.
   This is denial-only and remains refreshable, never generic `blocked`: `do_merge` still performs the authoritative history read for every actual merge, while unreadable/incomplete or net-diff workflow cases retain their existing generic fail-closed paths and never establish this proven-history hold.

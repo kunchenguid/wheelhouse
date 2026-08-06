@@ -1114,10 +1114,31 @@ def test_true_card_render_path_shows_stable_human_visible_rows():
         "render: every stable criterion gets exactly one visible row",
         all(body.count("`%s`" % label) == 1 for _, label in schema.CRITERIA_SPECS),
     )
+    stored_rows = {
+        row["id"]: row
+        for row in state.get(render_card.AUTOMERGE_CRITERIA_FIELD) or []
+    }
+    evaluator_rows = {
+        row["id"]: row for row in schema.normalize_criteria(result["criteria"])
+    }
+    admission_ids = {"g6_triage_success", "g6_merge_recommendation"}
     check(
         "render: structured rows round-trip in non-material state",
-        state.get(render_card.AUTOMERGE_CRITERIA_FIELD)
-        == schema.normalize_criteria(result["criteria"]),
+        all(
+            stored_rows.get(criterion_id) == row
+            for criterion_id, row in evaluator_rows.items()
+            if criterion_id not in admission_ids
+        ),
+    )
+    check(
+        # The evaluator judged a DIFFERENT card fixture; this rendered card
+        # carries no admitted assessment, so the write recomputes the two
+        # admission rows from its own state (card #2148 display race).
+        "render: admission rows are recomputed from this card's own state",
+        stored_rows["g6_triage_success"]["status"] == schema.STATUS_UNMET
+        and "not admitted" in stored_rows["g6_triage_success"]["evidence"]
+        and stored_rows["g6_merge_recommendation"]["status"]
+        == schema.STATUS_UNMET,
     )
     check(
         "render: criteria never enter material fields",
@@ -1362,9 +1383,12 @@ def test_unknown_prefix_criterion_renders_in_other_without_being_dropped():
     rendered = render_card.render(item(automerge_criteria=criteria))
     state = core.parse_state_block(rendered["body"])
     stored = state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    admission_ids = {"g6_triage_success", "g6_merge_recommendation"}
     check(
         "group: stable future criterion persists in card state",
-        future in stored and stored == normalized,
+        future in stored
+        and [row for row in stored if row["id"] not in admission_ids]
+        == [row for row in normalized if row["id"] not in admission_ids],
     )
     check(
         "group: matching future criterion does not keep refreshing the card",
@@ -1725,6 +1749,119 @@ def test_criteria_changes_refresh_ui_without_becoming_material():
     check(
         "refresh: criterion-only change remains non-material",
         render_card.material_changed(next_item, state) is False,
+    )
+
+
+def test_healed_admission_overrides_stale_scan_rows_in_one_edit():
+    """Card #2148 lines 1-2: the 19:24 contradiction shape.
+
+    The scan evaluated the pre-heal card body (admission broken by an
+    incomplete observation) while the same reconcile pass writes the healed
+    state. The written card must be self-consistent in that ONE edit, and the
+    healed stored rows must not spin a refresh loop against the still-lagging
+    scan snapshot.
+    """
+    healed_state = card_entry()["state"]
+    stale_rows = schema.unavailable_criteria("not reached")
+    for criterion_id, evidence in (
+        (
+            "g6_triage_success",
+            "current assessment is not admitted for its observation/head",
+        ),
+        (
+            "g6_merge_recommendation",
+            "no valid agent recommendation was established: the advisory "
+            "assessment was not admitted",
+        ),
+    ):
+        row = next(r for r in stale_rows if r["id"] == criterion_id)
+        row["status"] = schema.STATUS_UNMET
+        row["evidence"] = evidence
+    healed_rows = {
+        row["id"]: row
+        for row in render_card._admission_current_criteria(
+            schema.normalize_criteria(stale_rows), healed_state
+        )
+    }
+    check(
+        "heal: one edit recomputes admission rows from the healed state",
+        healed_rows["g6_triage_success"]["status"] == schema.STATUS_MET
+        and healed_rows["g6_triage_success"]["evidence"]
+        == "successful triage for head %s" % HEAD[:8]
+        and healed_rows["g6_merge_recommendation"]["status"] == schema.STATUS_MET
+        and healed_rows["g6_merge_recommendation"]["evidence"]
+        == "explicit merge recommendation",
+    )
+    stored_state = dict(healed_state)
+    stored_state[render_card.AUTOMERGE_CRITERIA_VERSION_FIELD] = (
+        schema.CRITERIA_VERSION
+    )
+    stored_state[render_card.AUTOMERGE_CRITERIA_FIELD] = list(
+        healed_rows.values()
+    )
+    lagging_item = item(automerge_criteria=stale_rows)
+    check(
+        "heal: a lagging scan snapshot cannot spin a refresh loop",
+        render_card.automerge_criteria_stale(lagging_item, stored_state) is False,
+    )
+    pre_heal_state = dict(stored_state)
+    pre_heal_state[render_card.AUTOMERGE_CRITERIA_FIELD] = (
+        schema.normalize_criteria(stale_rows)
+    )
+    check(
+        "heal: genuinely stale stored rows still trigger one healing refresh",
+        render_card.automerge_criteria_stale(lagging_item, pre_heal_state) is True,
+    )
+
+
+def test_same_revision_preservation_recomputes_admission_rows():
+    admitted_state = card_entry()["state"]
+    stale_rows = schema.unavailable_criteria("not reached")
+    for criterion_id in ("g6_triage_success", "g6_merge_recommendation"):
+        row = next(r for r in stale_rows if r["id"] == criterion_id)
+        row["status"] = schema.STATUS_UNMET
+        row["evidence"] = "current assessment is not admitted"
+
+    current_item = item(
+        automerge_criteria=stale_rows,
+        review_observation=admitted_state[render_card.REVIEW_OBSERVATION_FIELD],
+        decision_context=admitted_state[render_card.DECISION_CONTEXT_FIELD],
+    )
+    prior = render_card.render(current_item)
+    prior_state = core.parse_state_block(prior["body"])
+    prior_state.update(admitted_state)
+    prior_state[render_card.AUTOMERGE_CRITERIA_VERSION_FIELD] = (
+        schema.CRITERIA_VERSION
+    )
+    prior_state[render_card.AUTOMERGE_CRITERIA_FIELD] = (
+        schema.normalize_criteria(stale_rows)
+    )
+    prior_body = render_card._replace_state_block(prior["body"], prior_state)
+
+    refreshed = render_card.render(current_item)
+    refreshed_body = render_card._preserve_same_revision_triage(
+        refreshed["body"], prior_body, current_item, prior_state
+    )
+    refreshed_state = core.parse_state_block(refreshed_body)
+    refreshed_rows = {
+        row["id"]: row
+        for row in refreshed_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    }
+    check(
+        "same revision: restored admission recomputes stored G6 rows",
+        refreshed_rows["g6_triage_success"]["status"] == schema.STATUS_MET
+        and refreshed_rows["g6_merge_recommendation"]["status"]
+        == schema.STATUS_MET,
+    )
+    check(
+        "same revision: restored admission recomputes visible G6 rows",
+        "✅ **MET** `G6 - successful triage for current head`" in refreshed_body
+        and "✅ **MET** `G6 - top-level recommendation is merge`"
+        in refreshed_body,
+    )
+    check(
+        "same revision: recomputed rows do not trigger a refresh loop",
+        render_card.automerge_criteria_stale(current_item, refreshed_state) is False,
     )
 
 

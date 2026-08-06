@@ -64,6 +64,7 @@ from agent_runtime.size_budget import (  # noqa: E402
     bounded_candidate_text,
 )
 from agent_runtime.output_validation import (  # noqa: E402
+    EVIDENCE_QUOTE_MAX_UTF8_BYTES,
     evidence_anchor_ok as _shared_evidence_anchor_ok,
     evidence_candidates as _shared_evidence_candidates,
     evidence_quote_utf8_byte_violations as _shared_quote_byte_violations,
@@ -379,10 +380,20 @@ CLASS_B_RESTORATION_MIN_CHARS = 12
 CLASS_B_RESTORATION_MAX_CHARS = 500
 _VERIFIED_EVIDENCE_SPANS_FIELD = "_verified_evidence_spans"
 BEHAVIOR_ASSERTIONS_FIELD = "behavior_assertions"
-SOURCE_EVIDENCE_VERSION = 1
+SOURCE_EVIDENCE_VERSION = 2
 SOURCE_EVIDENCE_MAX_FILES = 1024
 SOURCE_EVIDENCE_MAX_FILE_BYTES = 1_000_000
 SOURCE_EVIDENCE_MAX_TOTAL_BYTES = 32_000_000
+# Files over the per-file cap (or past the count/total budget) are EXCLUDED
+# per-file instead of voiding the whole artifact: one oversized binary must
+# never disable every other file's semantic evidence for the repo. A
+# cited-but-excluded path still fails closed because it is absent from the
+# verified index. The manifest records exclusions for observability, bounded
+# so a huge repo cannot bloat it; excluded_count always carries the true total.
+SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS = 100
+SOURCE_EVIDENCE_EXCLUSION_REASONS = frozenset(
+    {"file-too-large", "file-count-limit", "total-bytes-limit", "read-changed"}
+)
 # Required by the pass-by-reference prompt: verbatim quotes the model copied
 # from the on-disk target.txt / target-src it read. Validation-only, never
 # rendered on the card (see normalize_triage / evidence_anchor_ok).
@@ -832,7 +843,14 @@ def automerge_criteria_stale(item, state):
         return AUTOMERGE_CRITERIA_FIELD in state
     if AUTOMERGE_CRITERIA_FIELD not in item:
         return False
-    expected = criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD))
+    # Compare what a refresh WOULD store: the render path overrides the
+    # admission-dependent rows from the card state, so a scan-side lag on
+    # exactly those rows must not spin a refresh loop, while genuinely stale
+    # stored rows still trigger one healing refresh (card #2148).
+    expected = _admission_current_criteria(
+        criteria_schema.normalize_criteria(item.get(AUTOMERGE_CRITERIA_FIELD)),
+        state,
+    )
     return state.get(
         AUTOMERGE_CRITERIA_VERSION_FIELD
     ) != criteria_schema.CRITERIA_VERSION or criteria_schema.normalize_criteria(
@@ -1910,8 +1928,22 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
         shutil.rmtree(output_dir)
     os.makedirs(files_dir)
     entries = []
+    excluded = []
+    excluded_count = 0
     total = 0
-    available = True
+
+    def exclude(relative, size, reason):
+        nonlocal excluded_count
+        excluded_count += 1
+        if len(excluded) < SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS:
+            excluded.append(
+                {
+                    "path": relative.replace(os.sep, "/"),
+                    "size": size,
+                    "reason": reason,
+                }
+            )
+
     for root, dirs, files in os.walk(repository_dir, followlinks=False):
         dirs[:] = sorted(
             name
@@ -1925,18 +1957,20 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
                 continue
             relative = os.path.relpath(source_path, repository_dir)
             size = os.path.getsize(source_path)
-            if (
-                size > SOURCE_EVIDENCE_MAX_FILE_BYTES
-                or len(entries) >= SOURCE_EVIDENCE_MAX_FILES
-                or total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
-            ):
-                available = False
-                break
+            if size > SOURCE_EVIDENCE_MAX_FILE_BYTES:
+                exclude(relative, size, "file-too-large")
+                continue
+            if len(entries) >= SOURCE_EVIDENCE_MAX_FILES:
+                exclude(relative, size, "file-count-limit")
+                continue
+            if total + size > SOURCE_EVIDENCE_MAX_TOTAL_BYTES:
+                exclude(relative, size, "total-bytes-limit")
+                continue
             with open(source_path, "rb") as source_file:
                 content = source_file.read(SOURCE_EVIDENCE_MAX_FILE_BYTES + 1)
             if len(content) != size:
-                available = False
-                break
+                exclude(relative, size, "read-changed")
+                continue
             destination = os.path.join(files_dir, relative)
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             with open(destination, "wb") as destination_file:
@@ -1949,24 +1983,23 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
                 }
             )
             total += size
-        if not available:
-            break
-    if not available:
-        shutil.rmtree(files_dir)
-        os.makedirs(files_dir)
-        entries = []
-        total = 0
     manifest = {
         "version": SOURCE_EVIDENCE_VERSION,
         "revision": actual_revision,
-        "available": available,
+        "available": True,
         "file_count": len(entries),
         "total_bytes": total,
         "files": entries,
+        "excluded_count": excluded_count,
+        "excluded": excluded,
     }
     with open(os.path.join(output_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, sort_keys=True, separators=(",", ":"))
     return manifest
+
+
+def _is_manifest_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def verify_target_source_evidence(
@@ -1984,20 +2017,41 @@ def verify_target_source_evidence(
         "file_count",
         "total_bytes",
         "files",
+        "excluded_count",
+        "excluded",
     }
     if (
         not isinstance(manifest, dict)
         or set(manifest) != required
+        or not _is_manifest_integer(manifest.get("version"))
         or manifest.get("version") != SOURCE_EVIDENCE_VERSION
         or manifest.get("revision") != expected_revision
         or manifest.get("available") is not True
         or not isinstance(manifest.get("files"), list)
+        or not _is_manifest_integer(manifest.get("file_count"))
         or manifest.get("file_count") != len(manifest["files"])
-        or not isinstance(manifest.get("total_bytes"), int)
+        or not _is_manifest_integer(manifest.get("total_bytes"))
         or manifest["file_count"] > SOURCE_EVIDENCE_MAX_FILES
         or manifest["total_bytes"] > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
+        or not isinstance(manifest.get("excluded"), list)
+        or len(manifest["excluded"]) > SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS
+        or not _is_manifest_integer(manifest.get("excluded_count"))
+        or manifest["excluded_count"] < len(manifest["excluded"])
     ):
         return None
+    excluded_paths = set()
+    for entry in manifest["excluded"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size", "reason"}
+            or not isinstance(entry.get("path"), str)
+            or not _is_manifest_integer(entry.get("size"))
+            or entry["size"] < 0
+            or entry.get("reason") not in SOURCE_EVIDENCE_EXCLUSION_REASONS
+            or entry["path"] in excluded_paths
+        ):
+            return None
+        excluded_paths.add(entry["path"])
     root = os.path.realpath(files_dir)
     indexed = {}
     total = 0
@@ -2006,11 +2060,12 @@ def verify_target_source_evidence(
             not isinstance(entry, dict)
             or set(entry) != {"path", "size", "sha256"}
             or not isinstance(entry.get("path"), str)
-            or not isinstance(entry.get("size"), int)
+            or not _is_manifest_integer(entry.get("size"))
             or entry["size"] < 0
             or entry["size"] > SOURCE_EVIDENCE_MAX_FILE_BYTES
             or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or ""))
             or entry["path"] in indexed
+            or entry["path"] in excluded_paths
             or ".." in entry["path"].split("/")
         ):
             return None
@@ -2764,118 +2819,6 @@ def _coerce_verdict_bool(value):
     return None
 
 
-_PROTECTED_SUBJECT_PATTERNS = (
-    (
-        "delivery_contract",
-        r"\b(?:delivery\s+contract|"
-        r"(?:existing|default|existing/default)(?:\s+or\s+default)?"
-        r"(?:\s+[\w./-]+){0,4}\s+contract)\b",
-    ),
-    (
-        "existing_mode",
-        r"\b(?:existing|default|existing/default)(?:\s+or\s+default)?"
-        r"(?:\s+[\w./-]+){0,4}\s+mode\b",
-    ),
-    (
-        "default_behavior",
-        r"\b(?:(?:existing|default|existing/default)"
-        r"(?:\s+or\s+default)?"
-        r"(?:\s+[\w./-]+){0,4}\s+behavio[u]?r"
-        r"|(?:documented\s+)?recovery\s+behavio[u]?r"
-        r"|(?<!or\s)default"
-        r"(?!(?:\s+[\w./-]+){0,4}\s+"
-        r"(?:behavio[u]?r|contract|mode|workflow)\b)"
-        r"(?:\s+(?!(?:and|as|documentation|docs?|examples?|fixtures?|"
-        r"tests?|while|without|change|changes|changed|changing|"
-        r"tighten|tightens|tightened|tightening|update|updates|"
-        r"updated|updating|preserve|preserves|preserved|preserving)\b)"
-        r"[\w./-]+){0,4}"
-        r"|user-facing\s+flag\s+or\s+default)\b",
-    ),
-    ("existing_workflow", r"\bworkflow\b"),
-)
-_BEHAVIOR_PROTECTED_CONTRACT_RE = re.compile(
-    "|".join("(?:%s)" % pattern for _, pattern in _PROTECTED_SUBJECT_PATTERNS),
-    re.I,
-)
-_CLASS_C_DEFAULT_OFF_RE = re.compile(
-    r"(?:"
-    r"(?:adds?|introduces?)\s+(?:a|an)\s+(?:"
-    r"(?:new\s+)?(?:strictly\s+)?opt-in\s+"
-    r"(?:capability|feature|mode|option)"
-    r"|(?:new\s+)?(?:capability|feature|mode|option)\s+"
-    r"that\s+is\s+(?:strictly\s+)?opt-in"
-    r")"
-    r"|(?:a|the)\s+new\s+(?:capability|feature|mode|option)\s+"
-    r"that\s+is\s+(?:strictly\s+)?opt-in"
-    r")"
-    r"(?:\s+(?:and|is|that\s+is))?\s+disabled\s+by\s+default",
-    re.I,
-)
-_RESTORATION_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{2,}", re.I)
-_RESTORATION_GENERIC_WORDS = frozenset(
-    {
-        "affected",
-        "behavior",
-        "bug",
-        "change",
-        "changed",
-        "code",
-        "corrected",
-        "defect",
-        "expected",
-        "feature",
-        "fix",
-        "fixed",
-        "functionality",
-        "intended",
-        "issue",
-        "problem",
-        "relevant",
-        "restore",
-        "restored",
-        "system",
-        "thing",
-        "works",
-    }
-)
-_RESTORATION_STOP_WORDS = _RESTORATION_GENERIC_WORDS | frozenset(
-    {
-        "after",
-        "again",
-        "also",
-        "before",
-        "be",
-        "been",
-        "from",
-        "into",
-        "remains",
-        "that",
-        "their",
-        "then",
-        "there",
-        "these",
-        "this",
-        "through",
-        "when",
-        "where",
-        "which",
-        "while",
-        "with",
-    }
-)
-
-
-def _restoration_subject_tokens(text):
-    tokens = set()
-    for token in _RESTORATION_WORD_RE.findall(str(text or "").casefold()):
-        if token.endswith("ies") and len(token) > 5:
-            token = token[:-3] + "y"
-        elif token.endswith("s") and not token.endswith("ss") and len(token) > 4:
-            token = token[:-1]
-        if token not in _RESTORATION_STOP_WORDS:
-            tokens.add(token)
-    return tokens
 
 
 def _normalize_evidence_ref(value, preserve_handles=False):
@@ -2894,17 +2837,37 @@ def _normalize_evidence_ref(value, preserve_handles=False):
         or ".." in source.split("/")
     ):
         return None
+    # One evidence-quote byte policy for every quote surface: the prompt asks
+    # for at most 1024 UTF-8 bytes and trusted validation accepts through the
+    # shared inclusive hard ceiling (agent_runtime.output_validation). A
+    # narrower local cap here silently rejected prompt-blessed quotes
+    # (card #2148 line 3, blocker 2).
+    if len(quote.encode("utf-8")) > EVIDENCE_QUOTE_MAX_UTF8_BYTES:
+        return None
     cleaner = (
         _clean_semantic_triage_text if preserve_handles else _clean_triage_text
     )
-    cleaned = cleaner(quote, limit=241, default="")
-    if not 12 <= len(cleaned) <= 240:
+    # Cleaning only shrinks text, so a byte-valid quote can never hit this
+    # truncation limit; it exists to keep the helper total on adversarial input.
+    cleaned = cleaner(quote, limit=EVIDENCE_QUOTE_MAX_UTF8_BYTES + 1, default="")
+    if len(cleaned) < 12:
         return None
     return {"source": source, "quote": cleaned}
 
 
 def _normalize_class_b_restoration(value, verified_evidence_refs=None):
-    """Return canonical bounded class-B restoration evidence or None."""
+    """Return canonical bounded class-B restoration evidence or None.
+
+    MECHANICAL validation only (captain decision, card #2148 pivot): exact
+    shape, bounded lengths, distinct claims, distinct evidence references, and
+    membership of both references in the trusted verbatim-verified span set.
+    Whether the two claims describe the SAME restored behavior faithfully is
+    the triage model's attested judgment, taught by the prompt - trusted code
+    deliberately performs no linguistic analysis of the claim text, because
+    vocabulary lists and token grammars can neither enumerate English nor
+    distinguish an unknown adverb from an unknown noun, and the previous
+    grammar made class B unsatisfiable fleet-wide.
+    """
     required = {"corrected_defect", "intended_behavior_restored"}
     if verified_evidence_refs is not None:
         required |= {
@@ -2930,8 +2893,16 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
         ):
             return None
         normalized[field] = text
-    evidence_refs = {}
+    # A defect claim that IS the restoration claim is a copy-paste artifact,
+    # not two attested facts; equality is a mechanical string check.
+    if (
+        _normalize_evidence_text(normalized["corrected_defect"])
+        == _normalize_evidence_text(normalized["intended_behavior_restored"])
+    ):
+        return None
     if verified_evidence_refs is not None:
+        verified = set(verified_evidence_refs)
+        evidence_refs = {}
         for field in (
             "corrected_defect_evidence",
             "intended_behavior_restored_evidence",
@@ -2942,892 +2913,37 @@ def _normalize_class_b_restoration(value, verified_evidence_refs=None):
             if evidence_ref is None:
                 return None
             evidence_refs[field] = evidence_ref
-    if (
-        normalized["corrected_defect"].casefold()
-        == normalized["intended_behavior_restored"].casefold()
-        or not _restoration_pair_linked(
-            normalized["corrected_defect"],
-            normalized["intended_behavior_restored"],
-        )
-    ):
-        return None
-    defect_tokens = _restoration_subject_tokens(normalized["corrected_defect"])
-    restored_tokens = _restoration_subject_tokens(
-        normalized["intended_behavior_restored"]
-    )
-    if (
-        len(defect_tokens) < 2
-        or len(restored_tokens) < 2
-        or len(defect_tokens.intersection(restored_tokens)) < 2
-    ):
-        return None
-    if verified_evidence_refs is not None:
-        verified = set(verified_evidence_refs)
         defect_ref = evidence_refs["corrected_defect_evidence"]
         restored_ref = evidence_refs["intended_behavior_restored_evidence"]
-        if defect_ref == restored_ref:
+        defect_key = (
+            defect_ref["source"],
+            _normalize_evidence_text(defect_ref["quote"]),
+        )
+        restored_key = (
+            restored_ref["source"],
+            _normalize_evidence_text(restored_ref["quote"]),
+        )
+        if defect_key == restored_key:
             return None
-        if (
-            (defect_ref["source"], _normalize_evidence_text(defect_ref["quote"]))
-            not in verified
-            or (
-                restored_ref["source"],
-                _normalize_evidence_text(restored_ref["quote"]),
-            )
-            not in verified
-        ):
-            return None
-        defect_source_tokens = _restoration_subject_tokens(defect_ref["quote"])
-        restored_source_tokens = _restoration_subject_tokens(restored_ref["quote"])
-        if (
-            not defect_tokens.issubset(defect_source_tokens)
-            or not restored_tokens.issubset(restored_source_tokens)
-            or not _restoration_claim_supported(
-                normalized["corrected_defect"], defect_ref["quote"]
-            )
-            or not _restoration_claim_supported(
-                normalized["intended_behavior_restored"],
-                restored_ref["quote"],
-            )
-            or len(
-                defect_tokens.intersection(restored_tokens)
-                .intersection(defect_source_tokens)
-                .intersection(restored_source_tokens)
-            )
-            < 2
-        ):
+        if defect_key not in verified or restored_key not in verified:
             return None
     return normalized
 
 
-def _protected_contract_claims(texts, behavior_class=None):
-    claims = set()
-    for text in texts:
-        for clause in re.split(r"[.!?;]+", str(text or "")):
-            cleaned = _clean_triage_text(clause, limit=700, default="")
-            if (
-                behavior_class == "C"
-                and _CLASS_C_DEFAULT_OFF_RE.fullmatch(cleaned)
-            ):
-                continue
-            if cleaned and _BEHAVIOR_PROTECTED_CONTRACT_RE.search(cleaned):
-                claims.add(cleaned.casefold())
-    return claims
 
 
-_EXPLICIT_NEGATION_RE = re.compile(
-    r"\b(?:never|"
-    r"(?:can|could|do|does|did|will|would|shall|should|must|"
-    r"is|are|was|were|has|have|had)\s+not|"
-    r"(?:is|are|was|were)\s+not\s+\w+ed)\b",
-    re.I,
-)
-_NEGATED_CONTRACT_EFFECT_RE = re.compile(
-    r"\b(?:"
-    r"(?:will|would|must|does|do|did)\s+not\s+"
-    r"(?:change|tighten|alter|modify|require)"
-    r"|(?:is|are|was|were)\s+not\s+"
-    r"(?:changed|changing|tightened|required|mandatory)"
-    r"|without\s+changing"
-    r"|does\s+not\s+change"
-    r"|no(?:\s+\w+){0,7}\s+changes?"
-    r")\b",
-    re.I,
-)
+def _normalize_behavior_assertions(value, verified_evidence_refs):
+    """Return canonical bounded behavior assertions or None.
 
-
-def _normalize_bounded_contractions(text):
-    value = str(text or "")
-    replacements = (
-        (r"\bwon['’]t\b", "will not"),
-        (r"\bcan['’]t\b", "can not"),
-        (r"\bshan['’]t\b", "shall not"),
-        (
-            r"\b(do|does|did|is|are|was|were|has|have|had|"
-            r"would|should|could|must) n['’]t\b",
-            r"\1 not",
-        ),
-        (
-            r"\b(do|does|did|is|are|was|were|has|have|had|"
-            r"would|should|could|must)n['’]t\b",
-            r"\1 not",
-        ),
-    )
-    for pattern, replacement in replacements:
-        value = re.sub(pattern, replacement, value, flags=re.I)
-    return value
-
-
-def _semantic_polarity(text):
-    value = _normalize_bounded_contractions(text)
-    return "negative" if _EXPLICIT_NEGATION_RE.search(value) else "affirmative"
-
-
-_RESTORATION_SUBORDINATORS = frozenset(
-    {
-        "although",
-        "as",
-        "because",
-        "if",
-        "since",
-        "so",
-        "than",
-        "that",
-        "though",
-        "unless",
-        "when",
-        "whenever",
-        "where",
-        "whereas",
-        "whether",
-        "which",
-        "while",
-        "who",
-        "whom",
-        "whose",
-    }
-)
-_RESTORATION_AUXILIARIES = frozenset(
-    {
-        "are",
-        "be",
-        "been",
-        "can",
-        "could",
-        "did",
-        "do",
-        "does",
-        "had",
-        "has",
-        "have",
-        "is",
-        "must",
-        "shall",
-        "should",
-        "was",
-        "were",
-        "will",
-        "would",
-    }
-)
-_RESTORATION_PREDICATES = {
-    word: lemma
-    for lemma, words in {
-        "affect": ("affect", "affects", "affected", "affecting"),
-        "block": ("block", "blocks", "blocked", "blocking"),
-        "break": ("break", "breaks", "broke", "broken", "breaking"),
-        "change": ("change", "changes", "changed", "changing"),
-        "disable": ("disable", "disables", "disabled", "disabling"),
-        "drop": ("drop", "drops", "dropped", "dropping"),
-        "emit": ("emit", "emits", "emitted", "emitting"),
-        "fail": ("fail", "fails", "failed", "failing"),
-        "lose": ("lose", "loses", "lost", "losing"),
-        "persist": ("persist", "persists", "persisted", "persisting"),
-        "preserve": ("preserve", "preserves", "preserved", "preserving"),
-        "recover": ("recover", "recovers", "recovered", "recovering"),
-        "remain": ("remain", "remains", "remained", "remaining"),
-        "reopen": ("reopen", "reopens", "reopened", "reopening"),
-        "require": ("require", "requires", "required", "requiring"),
-        "restore": ("restore", "restores", "restored", "restoring"),
-        "resume": ("resume", "resumes", "resumed", "resuming"),
-        "retain": ("retain", "retains", "retained", "retaining"),
-        "return": ("return", "returns", "returned", "returning"),
-        "route": ("route", "routes", "routed", "routing"),
-        "support": ("support", "supports", "supported", "supporting"),
-        "survive": ("survive", "survives", "survived", "surviving"),
-        "tighten": ("tighten", "tightens", "tightened", "tightening"),
-        "update": ("update", "updates", "updated", "updating"),
-    }.items()
-    for word in words
-}
-_RESTORATION_ROLE_STRUCTURE_WORDS = frozenset(
-    {"a", "an", "never", "not", "now", "the"}
-)
-_RESTORATION_ROLE_PATTERNS = frozenset(
-    {
-        ("archive", "retention"),
-        ("authentication", "sessions"),
-        ("daemon", "restart"),
-        ("lifecycle", "retries"),
-        ("monitored", "runs"),
-        ("normal", "decision", "retention"),
-        ("open", "monitored", "run"),
-        ("open", "monitored", "runs"),
-        ("recoverable",),
-        ("resolved", "decisions"),
-    }
-)
-_RESTORATION_LEXEME_RE = re.compile(
-    r"(?P<space>\s+)"
-    r"|(?P<handle>@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
-    r"|(?P<reference>#[0-9]+)"
-    r"|(?P<number>[0-9]+(?:[._-][A-Za-z0-9]+)*)"
-    r"|(?P<word>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)"
-    r"|(?P<punct>[.])"
-)
-_RESTORATION_IDENTIFIER_RE = re.compile(
-    r"(?:@[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?"
-    r"|#[0-9]+"
-    r"|[0-9]+(?:[._-][a-z0-9]+)*)"
-)
-
-
-def _scan_restoration_lexemes(text):
-    normalized = _normalize_bounded_contractions(text)
-    lexemes = []
-    position = 0
-    while position < len(normalized):
-        match = _RESTORATION_LEXEME_RE.match(normalized, position)
-        if match is None:
-            return None
-        value = match.group(0)
-        if match.lastgroup in {"handle", "reference", "number"} and len(value) > 64:
-            return None
-        lexemes.append(
-            (match.lastgroup, value.casefold(), match.start(), match.end())
-        )
-        position = match.end()
-    return normalized, tuple(lexemes)
-
-
-def _restoration_role(words):
-    return tuple(
-        word
-        for word in words
-        if word not in _RESTORATION_ROLE_STRUCTURE_WORDS
-    )
-
-
-def _restoration_role_matches_pattern(role):
-    for pattern in _RESTORATION_ROLE_PATTERNS:
-        if role == pattern:
-            return True
-        if (
-            len(role) == len(pattern) + 1
-            and role[: len(pattern)] == pattern
-            and _RESTORATION_IDENTIFIER_RE.fullmatch(role[-1])
-        ):
-            return True
-        if len(role) == len(pattern) and role[:-1] == pattern[:-1]:
-            final = role[-1]
-            for separator in ("-", "_"):
-                prefix = pattern[-1] + separator
-                if final.startswith(prefix) and re.fullmatch(
-                    r"[a-z0-9]+(?:[._-][a-z0-9]+)*",
-                    final[len(prefix) :],
-                ):
-                    return True
-    return False
-
-
-def _restoration_roles_are_bounded(agent, patient):
-    return (
-        (not agent or _restoration_role_matches_pattern(agent))
-        and _restoration_role_matches_pattern(patient)
-    )
-
-
-def _restoration_propositions(text):
-    scanned = _scan_restoration_lexemes(text)
-    if scanned is None:
-        return None
-    _, lexemes = scanned
-    punctuation = [
-        (index, value)
-        for index, (kind, value, _, _) in enumerate(lexemes)
-        if kind == "punct"
-    ]
-    if punctuation and (
-        len(punctuation) != 1
-        or punctuation[0][0] != len(lexemes) - 1
-        or punctuation[0][1] != "."
-    ):
-        return None
-    words = [
-        value
-        for kind, value, _, _ in lexemes
-        if kind not in {"space", "punct"}
-    ]
-    if not words or _RESTORATION_SUBORDINATORS.intersection(words):
-        return None
-    predicates = [
-        (index, _RESTORATION_PREDICATES[word])
-        for index, word in enumerate(words)
-        if word in _RESTORATION_PREDICATES
-    ]
-    if len(predicates) != 1:
-        return None
-    predicate_index, predicate = predicates[0]
-    predicate_word = words[predicate_index]
-    auxiliary_index = next(
-        (
-            index
-            for index in range(predicate_index - 1, -1, -1)
-            if words[index] in _RESTORATION_AUXILIARIES
-        ),
-        None,
-    )
-    passive_start = None
-    passive_prefix = " ".join(words[:predicate_index])
-    passive_match = re.search(
-        r"(?:^|\s)("
-        r"(?:is|are|was|were)(?:\s+(?:never|not|now))*"
-        r"|(?:has|have|had)(?:\s+(?:never|not|now))*\s+been"
-        r"(?:\s+(?:never|not|now))*"
-        r"|(?:can|could|will|would|shall|should|must)"
-        r"(?:\s+(?:never|not|now))*\s+be"
-        r"(?:\s+(?:never|not|now))*"
-        r")$",
-        passive_prefix,
-    )
-    if passive_match is not None:
-        passive_start = len(passive_prefix[: passive_match.start(1)].split())
-    passive_morphology = predicate_word.endswith(("ed", "en")) or (
-        predicate_word == "lost"
-    )
-    if passive_start is not None and not passive_morphology:
-        if not predicate_word.endswith("ing"):
-            return None
-        passive_start = None
-    if auxiliary_index is not None and passive_start is None:
-        intervening = words[auxiliary_index + 1 : predicate_index]
-        if any(word not in {"never", "not", "now"} for word in intervening):
-            return None
-    passive = passive_start is not None
-    subject_end = (
-        passive_start
-        if passive
-        else auxiliary_index
-        if auxiliary_index is not None
-        else predicate_index
-    )
-    left_role = _restoration_role(words[:subject_end])
-    trailing = words[predicate_index + 1 :]
-    if passive:
-        if "by" in trailing:
-            by_index = trailing.index("by")
-            agent = _restoration_role(trailing[by_index + 1 :])
-            patient = left_role + _restoration_role(trailing[:by_index])
-        else:
-            agent = ()
-            patient = left_role + _restoration_role(trailing)
-    else:
-        agent = left_role
-        patient = _restoration_role(trailing)
-    if (
-        not patient
-        or (not agent and not passive)
-        or not _restoration_roles_are_bounded(agent, patient)
-    ):
-        return None
-    polarity_start = (
-        passive_start
-        if passive
-        else auxiliary_index
-        if auxiliary_index is not None
-        else max(0, predicate_index - 1)
-    )
-    predicate_negations = {
-        index for index, word in enumerate(words) if word in {"never", "not"}
-    }
-    governed_negations = {
-        index
-        for index in range(polarity_start, predicate_index)
-        if words[index] in {"never", "not"}
-    }
-    if predicate_negations != governed_negations:
-        return None
-    return (
-        (
-            predicate,
-            agent,
-            patient,
-            "negative" if governed_negations else "affirmative",
-        ),
-    )
-
-
-def _restoration_claim_supported(claim, evidence):
-    claim_propositions = _restoration_propositions(claim)
-    evidence_propositions = _restoration_propositions(evidence)
-    if (
-        claim_propositions is None
-        or evidence_propositions is None
-        or len(claim_propositions) != len(evidence_propositions)
-    ):
-        return False
-    return claim_propositions == evidence_propositions
-
-
-_RESTORATION_REPAIR_RELATIONS = {
-    ("affect", "affirmative"): frozenset(
-        {"recover", "remain", "restore", "resume", "return", "support"}
-    ),
-    ("block", "affirmative"): frozenset(
-        {"recover", "reopen", "restore", "resume", "return", "support"}
-    ),
-    ("break", "affirmative"): frozenset(
-        {"persist", "preserve", "recover", "remain", "restore", "support"}
-    ),
-    ("disable", "affirmative"): frozenset(
-        {"recover", "reopen", "restore", "resume", "return", "support"}
-    ),
-    ("drop", "affirmative"): frozenset(
-        {"persist", "preserve", "recover", "restore", "retain", "return"}
-    ),
-    ("emit", "negative"): frozenset({"emit", "restore", "resume"}),
-    ("fail", "affirmative"): frozenset(
-        {"persist", "recover", "remain", "restore", "resume", "return"}
-    ),
-    ("lose", "affirmative"): frozenset(
-        {
-            "persist",
-            "preserve",
-            "recover",
-            "remain",
-            "restore",
-            "retain",
-            "return",
-            "survive",
-        }
-    ),
-    ("persist", "negative"): frozenset(
-        {"persist", "preserve", "remain", "restore", "retain", "survive"}
-    ),
-    ("preserve", "negative"): frozenset(
-        {"persist", "preserve", "remain", "restore", "retain", "survive"}
-    ),
-    ("recover", "negative"): frozenset(
-        {"recover", "remain", "restore", "resume", "return"}
-    ),
-    ("remain", "negative"): frozenset(
-        {"persist", "preserve", "remain", "restore", "retain", "survive"}
-    ),
-    ("reopen", "negative"): frozenset({"reopen", "restore", "resume", "return"}),
-    ("resume", "negative"): frozenset({"recover", "restore", "resume", "return"}),
-    ("retain", "negative"): frozenset(
-        {"persist", "preserve", "remain", "restore", "retain", "survive"}
-    ),
-    ("return", "negative"): frozenset({"recover", "restore", "resume", "return"}),
-    ("support", "negative"): frozenset({"restore", "resume", "support"}),
-    ("survive", "negative"): frozenset(
-        {"persist", "preserve", "remain", "restore", "retain", "survive"}
-    ),
-}
-_RESTORATION_SUBJECT_OBJECT_REPAIRS = frozenset(
-    {"persist", "recover", "remain", "reopen", "resume", "return", "survive"}
-)
-
-
-def _restoration_pair_linked(defect, restored):
-    defect_propositions = _restoration_propositions(defect)
-    restored_propositions = _restoration_propositions(restored)
-    if (
-        defect_propositions is None
-        or restored_propositions is None
-        or len(defect_propositions) != 1
-        or len(restored_propositions) != 1
-    ):
-        return False
-    defect_predicate, _, defect_patient, defect_polarity = defect_propositions[0]
-    restored_predicate, restored_agent, restored_patient, restored_polarity = (
-        restored_propositions[0]
-    )
-    restored_object = (
-        restored_agent
-        if restored_predicate in _RESTORATION_SUBJECT_OBJECT_REPAIRS
-        else restored_patient
-    )
-    repair_predicates = _RESTORATION_REPAIR_RELATIONS.get(
-        (defect_predicate, defect_polarity),
-        frozenset(),
-    )
-    return (
-        restored_polarity == "affirmative"
-        and restored_predicate in repair_predicates
-        and defect_patient == restored_object
-    )
-
-
-_DOCUMENTATION_WORD_RE = re.compile(
-    r"\b(?:documentation|docs?|tests?|fixtures?|examples?)\b", re.I
-)
-_INDEPENDENT_NON_GOVERNANCE_OBJECT_RE = re.compile(
-    r"^\s*(?:(?:a|an|the)\s+)?(?:"
-    r"changelog|comments?|copy|formatting|labels?|metadata|readme|"
-    r"release\s+notes?|spelling"
-    r")\s*(?:only\s*)?(?:while|without)?\s*$",
-    re.I,
-)
-_ATOMIC_COORDINATOR_RE = re.compile(
-    r"\s*(?:,?\s+\b(?:and|as\s+well\s+as|along\s+with)\b\s*)", re.I
-)
-_EFFECT_PATTERNS = (
-    (
-        "unchanged",
-        r"\b(?:"
-        r"(?:can|could|do|does|did|will|would|shall|should|must)\s+not\s+"
-        r"(?:change|tighten|alter|modify|require|"
-        r"be\s+(?:changed|tightened|altered|modified|required|updated))"
-        r"|(?:has|have|had)\s+not\s+been\s+"
-        r"(?:changed|tightened|altered|modified|required|updated)"
-        r"|(?:is|are|was|were)\s+not\s+"
-        r"(?:changed|changing|tightened|required|mandatory)"
-        r"|without\s+changing"
-        r"|no(?:\s+\w+){0,7}\s+changes?"
-        r"|(?:remains?|is|are)\s+unchanged"
-        r"|preserv(?:e|es|ed|ing)"
-        r")\b",
-    ),
-    (
-        "new_requirement",
-        r"\b(?:now\s+requires?|must\s+now|newly\s+requires?|"
-        r"(?:is|are|becomes?)\s+(?:now\s+)?(?:required|mandatory)|"
-        r"can\s+no\s+longer)\b",
-    ),
-    ("tightened", r"\btighten(?:s|ed|ing)?\b"),
-    (
-        "changed",
-        r"\b(?:chang(?:e|es|ed|ing)|alter(?:s|ed|ing)?|"
-        r"modif(?:y|ies|ied|ying)|disabl(?:e|es|ed|ing)|"
-        r"replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|"
-        r"updat(?:e|es|ed|ing))\b",
-    ),
-    ("restored", r"\brestor(?:e|es|ed|ing)\b"),
-)
-
-
-def _documentation_spans(text):
-    spans = []
-    for match in _DOCUMENTATION_WORD_RE.finditer(text):
-        word = match.group(0).casefold()
-        if word in {"test", "tests"}:
-            before = text[: match.start()]
-            after = text[match.end() :]
-            follows_protected = any(
-                re.search(r"(?:%s)\s*$" % pattern, before, re.I) is not None
-                for _, pattern in _PROTECTED_SUBJECT_PATTERNS
-            )
-            next_word = re.match(r"\s+([a-z][\w-]*)", after)
-            if (
-                follows_protected
-                and next_word is not None
-                and next_word.group(1)
-                not in {
-                    "are",
-                    "change",
-                    "changed",
-                    "is",
-                    "remain",
-                    "remains",
-                    "were",
-                }
-            ):
-                continue
-        spans.append((match.start(), match.end()))
-    return spans
-
-
-def _is_documentation_topic(text, protected_span, documentation_spans):
-    protected_start, protected_end = protected_span
-    for documentation_start, documentation_end in documentation_spans:
-        if documentation_end <= protected_start:
-            between = text[documentation_end:protected_start]
-            if re.fullmatch(
-                r"(?:\s+\w+){0,4}\s+(?:for|of)\s+(?:the\s+)?"
-                r"(?:(?:existing|default|direct-pr)\s+)?",
-                between,
-                re.I,
-            ):
-                return True
-        elif documentation_start >= protected_end:
-            between = text[protected_end:documentation_start]
-            if re.fullmatch(r"[\s/-]*", between):
-                return True
-    return False
-
-
-def _coordinated_documentation_topic_semantics(text):
-    documentation = list(_DOCUMENTATION_WORD_RE.finditer(text))
-    protected = sorted(
-        (
-            match.start(),
-            match.end(),
-        )
-        for _, pattern in _PROTECTED_SUBJECT_PATTERNS
-        for match in re.finditer(pattern, text, re.I)
-    )
-    if len(documentation) != 1 or len(protected) < 2:
-        return None
-    documentation_match = documentation[0]
-    first_start, first_end = protected[0]
-    last_start, last_end = protected[-1]
-    coordinated = all(
-        re.search(
-            r"\b(?:and|as\s+well\s+as|along\s+with)\b",
-            text[left_end:right_start],
-            re.I,
-        )
-        is not None
-        for (_, left_end), (right_start, _) in zip(
-            protected, protected[1:]
-        )
-    )
-    forward = (
-        documentation_match.end() <= first_start
-        and re.search(
-            r"\b(?:for|of)\b",
-            text[documentation_match.end() : first_start],
-            re.I,
-        )
-        is not None
-    )
-    reverse = (
-        documentation_match.start() >= last_end
-        and re.fullmatch(
-            r"[\s/-]*",
-            text[last_end : documentation_match.start()],
-        )
-        is not None
-    )
-    if not coordinated or not (forward or reverse):
-        return None
-    effects = []
-    occupied = []
-    for effect, pattern in _EFFECT_PATTERNS:
-        for match in re.finditer(pattern, text, re.I):
-            span = (match.start(), match.end())
-            if any(
-                span[0] < end and span[1] > start
-                for start, end in occupied
-            ):
-                continue
-            occupied.append(span)
-            effects.append((effect, span[0], span[1]))
-    if len(effects) != 1 or effects[0][0] not in {"changed", "unchanged"}:
-        return None
-    effect, effect_start, effect_end = effects[0]
-    if reverse:
-        between = text[documentation_match.end() : effect_start]
-        residual = text[effect_end:]
-        if (
-            effect_start < documentation_match.end()
-            or re.fullmatch(
-                r"[\s,;:.-]*(?:(?:"
-                r"is|are|was|were"
-                r"|(?:has|have|had)\s+been"
-                r"|(?:can|could|will|would|shall|should|must)\s+be"
-                r")\s+)?",
-                between,
-                re.I,
-            )
-            is None
-            or re.fullmatch(
-                r"[\s,;:.!?-]*(?:only[\s,;:.!?-]*)?",
-                residual,
-                re.I,
-            )
-            is None
-        ):
-            return None
-    return {("documentation_or_tests", effect)}
-
-
-def _atomic_semantic_spans(text):
-    documentation_spans = _documentation_spans(text)
-    subjects = [
-        ("documentation_or_tests", start, end)
-        for start, end in documentation_spans
-    ]
-    protected_matches = []
-    for subject, pattern in _PROTECTED_SUBJECT_PATTERNS:
-        for match in re.finditer(pattern, text, re.I):
-            protected_matches.append((subject, match.start(), match.end()))
-    protected_matches.sort(key=lambda item: (item[1], item[2], item[0]))
-    seen_spans = set()
-    documentation_topic = False
-    for subject, start, end in protected_matches:
-        identity = (start, end)
-        if identity in seen_spans:
-            return None
-        seen_spans.add(identity)
-        if _is_documentation_topic(text, (start, end), documentation_spans):
-            documentation_topic = True
-        else:
-            subjects.append((subject, start, end))
-
-    effects = []
-    occupied = []
-    for effect, pattern in _EFFECT_PATTERNS:
-        for match in re.finditer(pattern, text, re.I):
-            span = (match.start(), match.end())
-            if any(span[0] < end and span[1] > start for start, end in occupied):
-                continue
-            occupied.append(span)
-            effects.append(
-                (
-                    effect,
-                    span[0],
-                    span[1],
-                    match.group(0).casefold().startswith("without "),
-                )
-            )
-    effects = sorted(effects, key=lambda value: value[1])
-    for index, item in enumerate(effects):
-        effect, start, end, subordinate_after = item
-        next_start = (
-            effects[index + 1][1]
-            if index + 1 < len(effects)
-            else len(text)
-        )
-        governed_text = text[end:next_start]
-        locally_unprotected = (
-            (
-                subordinate_after
-                or (
-                    subjects
-                    and end <= min(start for _, start, _ in subjects)
-                )
-            )
-            and _INDEPENDENT_NON_GOVERNANCE_OBJECT_RE.fullmatch(
-                governed_text
-            )
-            is not None
-        )
-        if locally_unprotected:
-            subjects.append(("_unprotected", end, end))
-    return subjects, effects, documentation_topic
-
-
-def _bind_atomic_semantics(subjects, effects):
-    semantics = set()
-    consumed_effects = set()
-    for subject, start, end in subjects:
-        ranked = []
-        for index, (
-            effect,
-            effect_start,
-            effect_end,
-            subordinate_after,
-        ) in enumerate(effects):
-            if subordinate_after and effect_start >= end:
-                continue
-            distance = (
-                start - effect_end
-                if effect_end <= start
-                else effect_start - end
-                if effect_start >= end
-                else 0
-            )
-            ranked.append((max(0, distance), effect, index))
-        if not ranked:
-            return None
-        nearest_distance = min(item[0] for item in ranked)
-        nearest = {
-            (effect, index)
-            for distance, effect, index in ranked
-            if distance == nearest_distance
-        }
-        if len(nearest) != 1:
-            return None
-        effect, index = next(iter(nearest))
-        consumed_effects.add(index)
-        if subject != "_unprotected":
-            semantics.add((subject, effect))
-    for index, _ in enumerate(effects):
-        if index not in consumed_effects:
-            return None
-    return semantics
-
-
-def _bind_propagated_semantics(subjects, effects):
-    propagated = {effect for effect, _, _, _ in effects}
-    if len(propagated) != 1:
-        return None
-    effect = next(iter(propagated))
-    return {(subject, effect) for subject, _, _ in subjects}
-
-
-def _derive_behavior_assertion_semantics(claim, behavior_class=None):
-    text = _normalize_bounded_contractions(claim).casefold()
-    if (
-        behavior_class == "C"
-        and _CLASS_C_DEFAULT_OFF_RE.fullmatch(text)
-    ):
-        return None
-    coordinated_topic = _coordinated_documentation_topic_semantics(text)
-    if coordinated_topic is not None:
-        return coordinated_topic
-    atomic = [
-        part.strip()
-        for part in _ATOMIC_COORDINATOR_RE.split(text)
-        if part.strip()
-    ]
-    if not atomic:
-        return None
-    semantics = set()
-    pending_subjects = None
-    prior_effects = None
-    prior_documentation_topic = False
-    for part in atomic:
-        spans = _atomic_semantic_spans(part)
-        if spans is None:
-            return None
-        subjects, effects, documentation_topic = spans
-        if subjects and effects:
-            if pending_subjects is not None:
-                propagated = _bind_propagated_semantics(
-                    pending_subjects, effects
-                )
-                if propagated is None:
-                    return None
-                semantics.update(propagated)
-                pending_subjects = None
-            bound = _bind_atomic_semantics(subjects, effects)
-            if bound is None:
-                return None
-            semantics.update(bound)
-            prior_effects = effects
-            prior_documentation_topic = documentation_topic
-        elif subjects:
-            if prior_documentation_topic and all(
-                subject != "documentation_or_tests"
-                for subject, _, _ in subjects
-            ):
-                pending_subjects = None
-                prior_effects = None
-                prior_documentation_topic = False
-            elif prior_effects is not None:
-                bound = _bind_propagated_semantics(subjects, prior_effects)
-                if bound is None:
-                    return None
-                semantics.update(bound)
-                pending_subjects = None
-                prior_documentation_topic = False
-            else:
-                pending_subjects = (pending_subjects or []) + subjects
-            prior_effects = None
-        elif effects:
-            if pending_subjects is None:
-                return None
-            bound = _bind_propagated_semantics(pending_subjects, effects)
-            if bound is None:
-                return None
-            semantics.update(bound)
-            pending_subjects = None
-            prior_effects = effects
-            prior_documentation_topic = False
-    if not semantics or (pending_subjects is not None and prior_effects is None):
-        return None
-    return semantics
-
-
-def _normalize_behavior_assertions(
-    value,
-    semantic_text,
-    verified_evidence_refs,
-    behavior_class=None,
-):
+    MECHANICAL validation only (captain decision, card #2148 pivot): exact
+    shape, bounded count, enum subject/effect membership, and a verbatim
+    evidence quote present in the trusted verified span set. Whether each
+    claim is faithful to its quote, and whether the model's prose omits a
+    contract-bearing clause, are the triage model's attested judgment taught
+    by the prompt - trusted code performs no linguistic parsing of claims,
+    quotes, or prose, and derives the contradiction record purely from the
+    model's own declared subject/effect enums.
+    """
     if not isinstance(value, list) or len(value) > 12:
         return None
     normalized = []
@@ -3860,28 +2976,6 @@ def _normalize_behavior_assertions(
             not in verified
         ):
             return None
-        if (
-            len(
-                _restoration_subject_tokens(claim).intersection(
-                    _restoration_subject_tokens(evidence_ref["quote"])
-                )
-            )
-            < 2
-        ):
-            return None
-        claim_semantics = _derive_behavior_assertion_semantics(
-            claim, behavior_class
-        )
-        evidence_semantics = _derive_behavior_assertion_semantics(
-            evidence_ref["quote"], behavior_class
-        )
-        if (
-            claim_semantics is None
-            or evidence_semantics is None
-            or (subject, effect) not in claim_semantics
-            or (subject, effect) not in evidence_semantics
-        ):
-            return None
         normalized.append(
             {
                 "claim": claim,
@@ -3890,23 +2984,6 @@ def _normalize_behavior_assertions(
                 "evidence": evidence_ref,
             }
         )
-    protected_claims = _protected_contract_claims(
-        semantic_text, behavior_class
-    )
-    expected = set()
-    for claim in protected_claims:
-        semantics = _derive_behavior_assertion_semantics(
-            claim, behavior_class
-        )
-        if semantics is None:
-            return None
-        expected.update((claim, subject, effect) for subject, effect in semantics)
-    observed = {
-        (item["claim"].casefold(), item["subject"], item["effect"])
-        for item in normalized
-    }
-    if observed != expected:
-        return None
     return normalized
 
 
@@ -3915,7 +2992,6 @@ def _behavior_admission_record(
 ):
     if not isinstance(triage_data, dict):
         return None
-    evidence = _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or ""
     verified_refs = triage_data.get(_VERIFIED_EVIDENCE_SPANS_FIELD)
     # Trusted durable assessment records round-trip JSON tuples as lists.
     # The refs are still revalidated by the semantic evidence normalizers; raw
@@ -3928,47 +3004,16 @@ def _behavior_admission_record(
         )
     elif not isinstance(verified_refs, tuple):
         verified_refs = ()
-    semantic_text = [
-        triage_data.get("summary", ""),
-        triage_data.get("product_implications", ""),
-        evidence,
-    ]
-    if isinstance(restoration, dict):
-        semantic_text.extend(
-            restoration.get(field, "")
-            for field in ("corrected_defect", "intended_behavior_restored")
-        )
-        semantic_text.extend(
-            (restoration.get(field) or {}).get("quote", "")
-            if isinstance(restoration.get(field), dict)
-            else ""
-            for field in (
-                "corrected_defect_evidence",
-                "intended_behavior_restored_evidence",
-            )
-        )
-    if isinstance(behavior_assertions, list):
-        for assertion in behavior_assertions:
-            if not isinstance(assertion, dict):
-                continue
-            semantic_text.append(assertion.get("claim", ""))
-            assertion_evidence = assertion.get("evidence")
-            semantic_text.append(
-                assertion_evidence.get("quote", "")
-                if isinstance(assertion_evidence, dict)
-                else ""
-            )
     normalized = _normalize_class_b_restoration(
         restoration, verified_evidence_refs=verified_refs
     )
-    assertions = _normalize_behavior_assertions(
-        behavior_assertions,
-        semantic_text,
-        verified_refs,
-        behavior_class,
-    )
+    assertions = _normalize_behavior_assertions(behavior_assertions, verified_refs)
     if assertions is None:
         return None
+    # The contradiction record reads ONLY the model's own declared enums: an
+    # assertion that a non-documentation protected contract changed, tightened,
+    # or gained a requirement denies eligibility. This is the model's attested
+    # judgment, mechanically consumed - never re-derived from English text.
     admission = {
         "version": BEHAVIOR_ADMISSION_VERSION,
         "contradicts_existing_contract": any(
@@ -4070,9 +3115,9 @@ def normalize_automerge_verdict(data, triage_data=None):
     Complete diffs always produce the VISION-independent class, existing/default
     behavior, and class-C mode facts. Class B additionally requires a bounded
     ``class_b_restoration`` object naming both the corrected defect and intended
-    behavior restored. Admission also rejects an affirmative claim in the same
-    triage summary, product implications, or evidence that an existing mode,
-    default, workflow, or delivery contract is tightened or changed.
+    behavior restored. Admission derives its contradiction record only from the
+    model's declared behavior-assertion subject/effect enums; trusted code does
+    not parse the triage summary, product implications, evidence, or claim prose.
 
     Missing or malformed semantic evidence remains persisted only as an
     unavailable, denial-only historical verdict. The executor independently
@@ -4104,14 +3149,6 @@ def normalize_automerge_verdict(data, triage_data=None):
         and cls != "B"
         and BEHAVIOR_ASSERTIONS_FIELD not in data
         and isinstance(triage_data, dict)
-        and not _protected_contract_claims(
-            (
-                triage_data.get("summary", ""),
-                triage_data.get("product_implications", ""),
-                _flatten_evidence(triage_data.get(EVIDENCE_FIELD)) or "",
-            ),
-            cls,
-        )
     ):
         persisted = data.get(BEHAVIOR_ADMISSION_FIELD)
         persisted_status = behavior_admission_status(
@@ -4201,6 +3238,116 @@ def assessment_current_admitted(state):
         and assessment["target"]["observation_id"]
         == observation["observation_id"]
     )
+
+
+def triage_admission_facts(state, head_sha):
+    """Pure G6 admission-dependent facts for one candidate head.
+
+    Single owner of the `g6_triage_success` / `g6_merge_recommendation`
+    computation, shared by auto_merge.fresh_verdict_facts (the scan-time
+    evaluator) and the card-write override (_admission_current_criteria). The
+    scan evaluates the card body as it existed at scan time, while a card
+    write recomputes these facts from the exact state being written, so one
+    edit can never display admission rows that contradict its own state
+    (card #2148 lines 1-2). Rows stay non-authoritative: acting always
+    re-evaluates every gate under claim.
+    """
+    state = state if isinstance(state, dict) else {}
+    head_sha = str(head_sha or "")
+    facts = {}
+
+    def fact(key, ok, evidence, reason):
+        facts[key] = {
+            "status": criteria_schema.STATUS_MET
+            if ok
+            else criteria_schema.STATUS_UNMET,
+            "evidence": evidence,
+            "reason": "" if ok else reason,
+        }
+
+    current_head_ok = bool(head_sha)
+    admission_ok = current_head_ok and assessment_current_admitted(state)
+    triage_ok = admission_ok and state.get("triage_status") == "succeeded"
+    revision_ok = triage_ok and str(state.get("triaged_sha") or "") == head_sha
+    card_head_ok = revision_ok and str(state.get("head_sha") or "") == head_sha
+    triage_reason = (
+        "current head SHA is unavailable"
+        if not current_head_ok
+        else (
+            (
+                "current assessment is not admitted for its observation/head"
+                if not admission_ok
+                else "no successful auto-triage verdict on the card"
+            )
+            if not triage_ok
+            else (
+                "behavior verdict is stale (not for the current head SHA)"
+                if not revision_ok
+                else ("card head SHA is not current" if not card_head_ok else "")
+            )
+        )
+    )
+    fact(
+        "g6_triage_success",
+        card_head_ok,
+        "successful triage for head %s" % head_sha[:8]
+        if card_head_ok
+        else triage_reason,
+        triage_reason,
+    )
+    recommendation = state.get("triage_recommendation")
+    action = (
+        normalize_recommendation_action(recommendation.get("action"))
+        if isinstance(recommendation, dict)
+        else ""
+    )
+    recommendation_ok = card_head_ok and action == "merge"
+    if (
+        current_head_ok
+        and state.get("triage_status") == "succeeded"
+        and not admission_ok
+    ):
+        # The model may well have written "merge" in its advisory prose. What
+        # is missing is a VALID recommendation: the assessment backing it was
+        # not admitted, so nothing authority-bearing exists. Say exactly that -
+        # never that the model recommended something else (card #1746).
+        recommendation_reason = (
+            "no valid agent recommendation was established: the advisory "
+            "assessment was not admitted"
+        )
+    else:
+        recommendation_reason = (
+            "top-level triage recommendation is not an explicit merge"
+        )
+    fact(
+        "g6_merge_recommendation",
+        recommendation_ok,
+        "explicit merge recommendation" if recommendation_ok else recommendation_reason,
+        recommendation_reason,
+    )
+    return facts
+
+
+def _admission_current_criteria(rows, state):
+    """Override the admission-dependent G6 rows from the state being written.
+
+    Scan-supplied criteria were evaluated against the card body as it existed
+    BEFORE this write; admission-affecting state (observation identity, triage
+    cache, recommendation) may change in the same edit, which used to leave a
+    self-contradictory card for a full scan cycle (card #2148). Only the two
+    pure state-derived rows are recomputed; every other row keeps the
+    authoritative evaluator's evidence. Display-only and non-authoritative.
+    """
+    facts = triage_admission_facts(state, (state or {}).get("head_sha"))
+    updated = []
+    for row in rows or []:
+        fact = facts.get(row.get("id")) if isinstance(row, dict) else None
+        if fact is not None:
+            row = dict(row)
+            row["status"] = fact["status"]
+            row["evidence"] = str(fact["evidence"] or "evidence unavailable")
+        updated.append(row)
+    return updated
 
 
 def observation_drift_refresh_refusal(state, kind, revision):
@@ -5560,6 +4707,33 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
                 controls_available=False,
             )
             changed = True
+    if AUTOMERGE_CRITERIA_FIELD in state:
+        normalized = _admission_current_criteria(
+            criteria_schema.normalize_criteria(state[AUTOMERGE_CRITERIA_FIELD]),
+            state,
+        )
+        criteria_start = body.find("### Auto-merge criteria\n")
+        section_ends = [
+            index
+            for index in (
+                body.find(TRIAGE_START, criteria_start),
+                body.find("### Recommended action\n", criteria_start),
+                body.find(DECISION_START, criteria_start),
+            )
+            if index >= 0
+        ]
+        if criteria_start < 0 or not section_ends:
+            raise RuntimeError("card projection is missing criteria section boundary")
+        section_end = min(section_ends)
+        body = (
+            body[:criteria_start]
+            + "\n".join(_automerge_criteria_section(normalized))
+            + "\n\n"
+            + body[section_end:]
+        )
+        state[AUTOMERGE_CRITERIA_VERSION_FIELD] = criteria_schema.CRITERIA_VERSION
+        state[AUTOMERGE_CRITERIA_FIELD] = normalized
+        changed = True
     return _replace_state_block(body, state) if changed else body
 
 
@@ -5971,6 +5145,11 @@ def body_with_automerge_criteria(body, rows):
             else "criterion evidence was not produced"
         ),
     )
+    if not projection_unknown:
+        # Defense in depth: the atomic path evaluates against this same body,
+        # so this recompute is normally a no-op; it guarantees the stored rows
+        # match the state written in this exact edit (card #2148).
+        normalized = _admission_current_criteria(normalized, state)
     updated = (
         body[:criteria_start]
         + "\n".join(_automerge_criteria_section(normalized))
@@ -6476,6 +5655,13 @@ def render(
                 state[field] = item[field]
     options = options_for_state(kind, base_options, state)
     state["options"] = options
+    if kind == "pr-review" and AUTOMERGE_CRITERIA_FIELD in state:
+        # The state is fully assembled now; recompute the admission-dependent
+        # G6 rows from it so this one edit cannot contradict itself (the scan
+        # evaluated the pre-write card body - card #2148 display race).
+        state[AUTOMERGE_CRITERIA_FIELD] = _admission_current_criteria(
+            state[AUTOMERGE_CRITERIA_FIELD], state
+        )
 
     issue_title = rendered_card_title(item)
 
@@ -6548,7 +5734,13 @@ def render(
         lines.extend(_automerge_workflow_hold_section(workflow_hold))
         lines.append("")
     if kind == "pr-review":
-        lines.extend(_automerge_criteria_section(item.get(AUTOMERGE_CRITERIA_FIELD)))
+        lines.extend(
+            _automerge_criteria_section(
+                state.get(AUTOMERGE_CRITERIA_FIELD)
+                if AUTOMERGE_CRITERIA_FIELD in state
+                else item.get(AUTOMERGE_CRITERIA_FIELD)
+            )
+        )
         lines.append("")
     # A security warning (e.g. a pull_request_target posture on a ci-approval
     # card) is surfaced as a prominent callout so the maintainer decides with

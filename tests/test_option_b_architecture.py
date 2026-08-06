@@ -798,11 +798,37 @@ def test_incomplete_projection_clears_stale_criteria():
         prior=old_projection,
     )
     complete_state = core.parse_state_block(complete_projection["body"])
+    admission_ids = {"g6_triage_success", "g6_merge_recommendation"}
+    complete_rows = {
+        row["id"]: row
+        for row in complete_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+    }
     check(
         "criteria regression: complete observation retains current criteria controls",
         "✅ **MET** `G4 - configured checks green`" in complete_projection["body"]
-        and complete_state[render_card.AUTOMERGE_CRITERIA_FIELD]
-        == criteria.normalize_criteria(positive),
+        and [
+            row
+            for row in complete_state[render_card.AUTOMERGE_CRITERIA_FIELD]
+            if row["id"] not in admission_ids
+        ]
+        == [
+            row
+            for row in criteria.normalize_criteria(positive)
+            if row["id"] not in admission_ids
+        ],
+    )
+    check(
+        # The projected state carries an admitted current assessment and a
+        # succeeded merge-recommending triage, so the same edit recomputes the
+        # admission rows from that state instead of replaying the scan-time
+        # snapshot (card #2148 display race).
+        "criteria regression: admission rows are recomputed from the written state",
+        complete_rows["g6_triage_success"]["status"] == criteria.STATUS_MET
+        and complete_rows["g6_triage_success"]["evidence"]
+        == "successful triage for head %s" % head[:8]
+        and complete_rows["g6_merge_recommendation"]["status"] == criteria.STATUS_MET
+        and complete_rows["g6_merge_recommendation"]["evidence"]
+        == "explicit merge recommendation",
     )
 
     mismatched_receipt = target_observation.make_approval_receipt(
