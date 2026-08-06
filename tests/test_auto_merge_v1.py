@@ -5973,76 +5973,59 @@ def test_class_b_natural_prose_golden_corpus_admits():
             "target-src/lib/keys.py",
         ),
     )
-    for defect, restored, source in corpus:
-        candidate = _class_b_natural_candidate(defect, restored, source)
-        verdict = _normalize_with_spans(
-            candidate,
-            (
-                ("target.txt", render_card._normalize_evidence_text(defect)),
-                (source, render_card._normalize_evidence_text(restored)),
-            ),
-        )["automerge_verdict"]
-        status, evidence, _ = render_card.behavior_admission_status(verdict)
-        check(
-            "class B golden corpus: %r admits" % defect,
-            status == "admitted"
-            and evidence
-            == "class B with bounded corrected-defect and restored-behavior evidence"
-            and am.verdict_eligible(verdict)[0] is True,
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target_file = os.path.join(temp_dir, "target.txt")
+        target_src = os.path.join(temp_dir, "target-src")
+
+        def apply_candidate(defect, restored, source):
+            source_file = os.path.join(target_src, source[len("target-src/") :])
+            os.makedirs(os.path.dirname(source_file), exist_ok=True)
+            with open(target_file, "w", encoding="utf-8") as output:
+                output.write(defect)
+            with open(source_file, "w", encoding="utf-8") as output:
+                output.write(restored)
+            candidate = _class_b_natural_candidate(defect, restored, source)
+            decision = render_card.decide_triage_apply(
+                json.dumps(candidate), "", target_file, target_src
+            )
+            triage = render_card.normalize_triage(decision.get("triage"))
+            return decision, (triage or {}).get("automerge_verdict")
+
+        for defect, restored, source in corpus:
+            decision, verdict = apply_candidate(defect, restored, source)
+            status, evidence, _ = render_card.behavior_admission_status(verdict)
+            check(
+                "class B golden corpus: %r admits end-to-end" % defect,
+                decision["outcome"] == "success"
+                and verdict.get("behavior_class") == "B"
+                and status == "admitted"
+                and evidence
+                == "class B with bounded corrected-defect and restored-behavior evidence"
+            )
+
+        unlinked_decision, unlinked_verdict = apply_candidate(
+            "Session cleanup dropped the export queue.",
+            "Diagnostic timestamps are preserved.",
+            "target-src/lib/export.py",
         )
-    unlinked = _class_b_natural_candidate(
-        "Session cleanup dropped the export queue.",
-        "Diagnostic timestamps are preserved.",
-        "target-src/lib/export.py",
-    )
-    unlinked_verdict = _normalize_with_spans(
-        unlinked,
-        (
-            (
-                "target.txt",
-                render_card._normalize_evidence_text(
-                    "Session cleanup dropped the export queue."
-                ),
-            ),
-            (
-                "target-src/lib/export.py",
-                render_card._normalize_evidence_text(
-                    "Diagnostic timestamps are preserved."
-                ),
-            ),
-        ),
-    )["automerge_verdict"]
-    check(
-        "class B golden corpus: an unrelated restoration object stays denied",
-        render_card.behavior_admission_status(unlinked_verdict)[0] == "unavailable"
-        and am.verdict_eligible(unlinked_verdict)[0] is False,
-    )
-    temporal = _class_b_natural_candidate(
-        "Session cleanup dropped the export queue after retries.",
-        "The export queue is preserved.",
-        "target-src/lib/export.py",
-    )
-    temporal_verdict = _normalize_with_spans(
-        temporal,
-        (
-            (
-                "target.txt",
-                render_card._normalize_evidence_text(
-                    "Session cleanup dropped the export queue after retries."
-                ),
-            ),
-            (
-                "target-src/lib/export.py",
-                render_card._normalize_evidence_text(
-                    "The export queue is preserved."
-                ),
-            ),
-        ),
-    )["automerge_verdict"]
-    check(
-        "class B golden corpus: temporal-adjunct roles stay structurally denied",
-        render_card.behavior_admission_status(temporal_verdict)[0] == "unavailable",
-    )
+        check(
+            "class B golden corpus: an unrelated restoration object stays denied",
+            unlinked_decision["outcome"] == "success"
+            and render_card.behavior_admission_status(unlinked_verdict)[0]
+            == "unavailable",
+        )
+
+        temporal_decision, temporal_verdict = apply_candidate(
+            "Session cleanup dropped the export queue after retries.",
+            "The export queue is preserved.",
+            "target-src/lib/export.py",
+        )
+        check(
+            "class B golden corpus: temporal-adjunct roles stay structurally denied",
+            temporal_decision["outcome"] == "success"
+            and render_card.behavior_admission_status(temporal_verdict)[0]
+            == "unavailable",
+        )
 
 
 def test_protected_clause_harvest_is_model_prose_only():
