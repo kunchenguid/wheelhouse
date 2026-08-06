@@ -1998,6 +1998,10 @@ def build_target_source_evidence(repository_dir, output_dir, expected_revision):
     return manifest
 
 
+def _is_manifest_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def verify_target_source_evidence(
     files_dir, manifest_file, expected_revision
 ):
@@ -2019,18 +2023,19 @@ def verify_target_source_evidence(
     if (
         not isinstance(manifest, dict)
         or set(manifest) != required
+        or not _is_manifest_integer(manifest.get("version"))
         or manifest.get("version") != SOURCE_EVIDENCE_VERSION
         or manifest.get("revision") != expected_revision
         or manifest.get("available") is not True
         or not isinstance(manifest.get("files"), list)
+        or not _is_manifest_integer(manifest.get("file_count"))
         or manifest.get("file_count") != len(manifest["files"])
-        or not isinstance(manifest.get("total_bytes"), int)
+        or not _is_manifest_integer(manifest.get("total_bytes"))
         or manifest["file_count"] > SOURCE_EVIDENCE_MAX_FILES
         or manifest["total_bytes"] > SOURCE_EVIDENCE_MAX_TOTAL_BYTES
         or not isinstance(manifest.get("excluded"), list)
         or len(manifest["excluded"]) > SOURCE_EVIDENCE_MAX_EXCLUDED_RECORDS
-        or not isinstance(manifest.get("excluded_count"), int)
-        or isinstance(manifest.get("excluded_count"), bool)
+        or not _is_manifest_integer(manifest.get("excluded_count"))
         or manifest["excluded_count"] < len(manifest["excluded"])
     ):
         return None
@@ -2040,8 +2045,7 @@ def verify_target_source_evidence(
             not isinstance(entry, dict)
             or set(entry) != {"path", "size", "reason"}
             or not isinstance(entry.get("path"), str)
-            or not isinstance(entry.get("size"), int)
-            or isinstance(entry.get("size"), bool)
+            or not _is_manifest_integer(entry.get("size"))
             or entry["size"] < 0
             or entry.get("reason") not in SOURCE_EVIDENCE_EXCLUSION_REASONS
             or entry["path"] in excluded_paths
@@ -2056,7 +2060,7 @@ def verify_target_source_evidence(
             not isinstance(entry, dict)
             or set(entry) != {"path", "size", "sha256"}
             or not isinstance(entry.get("path"), str)
-            or not isinstance(entry.get("size"), int)
+            or not _is_manifest_integer(entry.get("size"))
             or entry["size"] < 0
             or entry["size"] > SOURCE_EVIDENCE_MAX_FILE_BYTES
             or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or ""))

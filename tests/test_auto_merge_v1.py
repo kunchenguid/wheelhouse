@@ -36,6 +36,7 @@ input HOLDS for human review. These tests cover, end-to-end through the
     per-contributor / per-scan rate cap (captain override).
 """
 
+import hashlib
 import io
 import json
 import os
@@ -4585,6 +4586,67 @@ def test_source_evidence_skips_oversized_files_without_voiding_artifact():
                 revision,
             )
             == cited_quote,
+        )
+
+
+def test_source_evidence_rejects_boolean_numeric_fields():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        files_dir = os.path.join(temp_dir, "files")
+        manifest_file = os.path.join(temp_dir, "manifest.json")
+        os.makedirs(files_dir)
+        content = b"x"
+        with open(os.path.join(files_dir, "source.txt"), "wb") as source_file:
+            source_file.write(content)
+        manifest = {
+            "version": render_card.SOURCE_EVIDENCE_VERSION,
+            "revision": "revision",
+            "available": True,
+            "file_count": 1,
+            "total_bytes": 1,
+            "files": [
+                {
+                    "path": "source.txt",
+                    "size": 1,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ],
+            "excluded_count": 1,
+            "excluded": [
+                {
+                    "path": "excluded.bin",
+                    "size": 1,
+                    "reason": "file-too-large",
+                }
+            ],
+        }
+        with open(manifest_file, "w", encoding="utf-8") as manifest_stream:
+            json.dump(manifest, manifest_stream)
+        valid_result = render_card.verify_target_source_evidence(
+            files_dir, manifest_file, "revision"
+        )
+        variants = []
+        for field in ("version", "file_count", "total_bytes", "excluded_count"):
+            variant = json.loads(json.dumps(manifest))
+            variant[field] = True
+            variants.append(variant)
+        for collection in ("files", "excluded"):
+            variant = json.loads(json.dumps(manifest))
+            variant[collection][0]["size"] = True
+            variants.append(variant)
+        results = []
+        for variant in variants:
+            with open(manifest_file, "w", encoding="utf-8") as manifest_stream:
+                json.dump(variant, manifest_stream)
+            results.append(
+                render_card.verify_target_source_evidence(
+                    files_dir, manifest_file, "revision"
+                )
+            )
+        check(
+            "source evidence: boolean numeric manifest fields fail closed",
+            valid_result
+            == {"source.txt": os.path.realpath(os.path.join(files_dir, "source.txt"))}
+            and all(result is None for result in results),
         )
 
 
